@@ -20,8 +20,10 @@ from technology.software_infrastructure.dedicated_parser_baseline import (  # no
     parse_iso_date,
 )
 from technology.software_infrastructure.software_arr_census_adjudication import (  # noqa: E402
+    apply_arr_review_overrides,
     build_arr_proposals,
     load_census_arr_evidence,
+    load_arr_review_overrides,
     summarize_arr_proposals,
 )
 from technology.software_infrastructure.software_metric_review import (  # noqa: E402
@@ -34,20 +36,16 @@ from technology.software_infrastructure.software_parser_hydration import (  # no
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-DEFAULT_CENSUS_ROOT = (
-    PROJECT_ROOT
-    / "output"
-    / "technology_reports"
-    / "software_infrastructure"
-    / "disclosure_census"
+DEFAULT_CENSUS_ROOT = PROJECT_ROOT / "output" / "technology_reports" / "software_infrastructure" / "disclosure_census"
+DEFAULT_REVIEW_OVERRIDES = (
+    PACKAGE_ROOT / "software_infrastructure" / "review_policies" / "software_arr_census_review_overrides_v1.yaml"
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a proposal-only, canonical ARR adjudication workbook "
-            "from the completed software disclosure census."
+            "Create a proposal-only, canonical ARR adjudication workbook from the completed software disclosure census."
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -56,6 +54,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--census-root", type=Path, default=DEFAULT_CENSUS_ROOT)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--minimum-cross-section", type=int, default=30)
+    parser.add_argument(
+        "--review-overrides",
+        type=Path,
+        default=DEFAULT_REVIEW_OVERRIDES,
+        help="Versioned human-review corrections applied with source assertions.",
+    )
     return parser.parse_args()
 
 
@@ -82,24 +86,33 @@ def main() -> int:
     with open_read_only_database(db_path, timeout_sec=timeout_sec) as conn:
         evidence = load_census_arr_evidence(conn, accessions=accessions)
     proposals = build_arr_proposals(evidence)
+    review_override_path = args.review_overrides.expanduser().resolve()
+    review_overrides = load_arr_review_overrides(review_override_path)
+    expected_canonical_count = 0
+    if review_override_path.suffix.lower() == ".json":
+        review_policy = json.loads(review_override_path.read_text(encoding="utf-8"))
+        expected_canonical_count = int(review_policy.get("expected_corrected_canonical_count") or 0)
+    proposals, override_summary = apply_arr_review_overrides(
+        proposals,
+        review_overrides,
+    )
     ticker_rows, summary = summarize_arr_proposals(
         proposals,
         minimum_cross_section=max(1, args.minimum_cross_section),
     )
-    output_dir = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir
-        else census_dir / "arr_adjudication"
-    )
+    output_dir = args.output_dir.expanduser().resolve() if args.output_dir else census_dir / "arr_adjudication"
     output_dir.mkdir(parents=True, exist_ok=True)
     workbook_path = output_dir / "software_arr_proposed_adjudication_workbook.csv"
     canonical_path = output_dir / "software_arr_proposed_canonical_review.csv"
     ticker_path = output_dir / "software_arr_proposed_ticker_coverage.csv"
     summary_path = output_dir / "software_arr_proposed_adjudication_summary.json"
+    canonical_rows = [row for row in proposals if int(row["canonical_candidate_flag"]) == 1]
+    if expected_canonical_count and len(canonical_rows) != expected_canonical_count:
+        raise ValueError(
+            "Corrected ARR canonical count does not match reviewed policy: "
+            f"expected={expected_canonical_count}, actual={len(canonical_rows)}"
+        )
     atomic_csv(workbook_path, proposals)
-    canonical_rows = [
-        row for row in proposals if int(row["canonical_candidate_flag"]) == 1
-    ]
     atomic_csv(canonical_path, canonical_rows)
     atomic_csv(ticker_path, ticker_rows)
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -116,6 +129,9 @@ def main() -> int:
         "production_scores_modified_flag": 0,
         "census_accessions_path": str(accession_path),
         "census_accessions_sha256": file_sha256(accession_path),
+        "review_override_policy_path": str(review_override_path),
+        "review_override_policy_sha256": file_sha256(review_override_path),
+        "review_expected_canonical_count": expected_canonical_count,
         "source_evidence_row_count": len(evidence),
         "proposal_row_count": len(proposals),
         "workbook_path": str(workbook_path),
@@ -124,6 +140,7 @@ def main() -> int:
         "canonical_review_sha256": file_sha256(canonical_path),
         "ticker_coverage_path": str(ticker_path),
         "ticker_coverage_sha256": file_sha256(ticker_path),
+        **override_summary,
         **summary,
     }
     atomic_json(summary_path, manifest)

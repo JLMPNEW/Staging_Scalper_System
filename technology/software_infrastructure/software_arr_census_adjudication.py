@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import csv
+import json
 import re
 import sqlite3
 from collections import defaultdict
+from datetime import date
+from pathlib import Path
 from typing import Any
+import yaml
+
 
 
 MODEL_FAMILY = "software_infrastructure"
@@ -37,7 +43,7 @@ _ACTUAL_RE = re.compile(
 )
 _GUIDANCE_RE = re.compile(
     r"\b(?:expect|expects|expected|guidance|outlook|forecast|"
-    r"between|range of|target)\b",
+    r"between|range of|target|goal|ambition|or greater|at least)\b",
     re.IGNORECASE,
 )
 _NONLEVEL_RE = re.compile(
@@ -106,14 +112,205 @@ def _total_arr_amount(text: str) -> float | None:
         return None
     best: tuple[int, float] | None = None
     for amount, start, end in _money_values(text):
-        distance = min(
-            min(abs(start - match.end()), abs(match.start() - end))
-            + (0 if start >= match.end() else 20)
-            for match in total_matches
-        )
-        if distance <= 80 and (best is None or distance < best[0]):
-            best = (distance, amount)
+        for match in total_matches:
+            if start < match.end():
+                continue
+            relation = text[match.end() : start]
+            if len(relation) > 80 or re.search(r"[.;]", relation):
+                continue
+            if _ACTUAL_RE.search(relation) is None:
+                continue
+            distance = start - match.end()
+            if best is None or distance < best[0]:
+                best = (distance, amount)
     return None if best is None else best[1]
+
+
+def load_arr_review_overrides(path: Path) -> list[dict[str, str]]:
+    suffix = path.suffix.lower()
+    if suffix in {".json", ".yaml", ".yml"}:
+        payload = (
+            json.loads(path.read_text(encoding="utf-8"))
+            if suffix == ".json"
+            else yaml.safe_load(path.read_text(encoding="utf-8"))
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("overrides"), list):
+            raise ValueError(f"ARR review policy must contain an overrides list: {path}")
+        raw_rows = payload["overrides"]
+    else:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            raw_rows = list(csv.DictReader(handle))
+    rows = [{str(key): str(value or "").strip() for key, value in row.items()} for row in raw_rows]
+    required = {
+        "action",
+        "ticker",
+        "accession_number",
+        "expected_candidate_value",
+        "corrected_effective_value",
+        "expected_source_period_end",
+        "corrected_effective_period_end",
+        "issue",
+        "detail",
+    }
+    if not rows:
+        raise ValueError(f"ARR review override policy is empty: {path}")
+    missing = required - set(rows[0])
+    if missing:
+        raise ValueError("ARR review override policy missing columns: " + ", ".join(sorted(missing)))
+    allowed_actions = {"REJECT", "FIX_VALUE", "FIX_PERIOD"}
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        action = row["action"].upper()
+        row["action"] = action
+        if action not in allowed_actions:
+            raise ValueError(f"Unsupported ARR review action: {action}")
+        key = (row["ticker"].upper(), row["accession_number"])
+        if key in seen:
+            raise ValueError(f"Duplicate ARR review override: {key}")
+        seen.add(key)
+        if not row["expected_candidate_value"]:
+            raise ValueError(f"Missing expected candidate value for {key}")
+        if action == "FIX_VALUE" and not row["corrected_effective_value"]:
+            raise ValueError(f"Missing corrected value for {key}")
+        if action == "FIX_PERIOD":
+            if not row["expected_source_period_end"]:
+                raise ValueError(f"Missing expected source period for {key}")
+            if not row["corrected_effective_period_end"]:
+                raise ValueError(f"Missing corrected period for {key}")
+            date.fromisoformat(row["corrected_effective_period_end"])
+    return rows
+
+
+def apply_arr_review_overrides(
+    proposals: list[dict[str, Any]],
+    override_rows: list[dict[str, str]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    for row in proposals:
+        row.update(
+            {
+                "human_review_override_flag": 0,
+                "human_review_action": "",
+                "human_review_issue": "",
+                "human_review_detail": "",
+            }
+        )
+
+    by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in proposals:
+        by_key[
+            (
+                str(row["ticker"]).upper(),
+                str(row["accession_number"]),
+            )
+        ].append(row)
+
+    action_counts: dict[str, int] = defaultdict(int)
+    suppressed_reselection_count = 0
+    for override in override_rows:
+        key = (
+            override["ticker"].upper(),
+            override["accession_number"],
+        )
+        expected_value = float(override["expected_candidate_value"])
+        expected_period = override["expected_source_period_end"]
+        matches = [
+            row
+            for row in by_key.get(key, [])
+            if _approximately_equal(
+                float(row["candidate_value"]),
+                expected_value,
+            )
+            and (not expected_period or str(row.get("period_end") or "") == expected_period)
+        ]
+        if len(matches) > 1:
+            canonical_matches = [row for row in matches if int(row["canonical_candidate_flag"]) == 1]
+            if len(canonical_matches) == 1:
+                matches = canonical_matches
+        if len(matches) != 1:
+            raise ValueError(
+                "ARR review override must match exactly one source row: "
+                f"key={key}, expected_candidate_value={expected_value}, "
+                f"expected_source_period_end={expected_period}, "
+                f"matches={len(matches)}"
+            )
+        row = matches[0]
+
+        action = override["action"]
+        row.update(
+            {
+                "human_review_override_flag": 1,
+                "human_review_action": action,
+                "human_review_issue": override["issue"],
+                "human_review_detail": override["detail"],
+            }
+        )
+        if action == "REJECT":
+            row.update(
+                {
+                    "proposal_decision": "REJECTED_POLICY",
+                    "proposal_reason": ("human_review_rejected_" + override["issue"]),
+                    "calibration_eligible_flag": 0,
+                    "proposal_confidence": 1.0,
+                    "canonical_candidate_flag": 0,
+                }
+            )
+            suppress_reselection = override.get("suppress_accession_reselection_flag", "0").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            if suppress_reselection:
+                for sibling in by_key[key]:
+                    if sibling is row or int(sibling["canonical_candidate_flag"]) == 0:
+                        continue
+                    sibling.update(
+                        {
+                            "proposal_decision": "REJECTED_POLICY",
+                            "proposal_reason": ("human_review_unreviewed_replacement_candidate"),
+                            "calibration_eligible_flag": 0,
+                            "proposal_confidence": 1.0,
+                            "canonical_candidate_flag": 0,
+                        }
+                    )
+                    suppressed_reselection_count += 1
+        elif action == "FIX_VALUE":
+            corrected_value = float(override["corrected_effective_value"])
+            if corrected_value <= 0:
+                raise ValueError(f"Invalid corrected ARR value for {key}")
+            row.update(
+                {
+                    "proposal_decision": "CORRECTED",
+                    "proposal_reason": ("human_review_corrected_" + override["issue"]),
+                    "effective_value": corrected_value,
+                    "effective_scope": "consolidated",
+                    "calibration_eligible_flag": 1,
+                    "proposal_confidence": 1.0,
+                    "canonical_candidate_flag": 1,
+                }
+            )
+        elif action == "FIX_PERIOD":
+            corrected_period = override["corrected_effective_period_end"]
+            date.fromisoformat(corrected_period)
+            row.update(
+                {
+                    "proposal_decision": "CORRECTED",
+                    "proposal_reason": ("human_review_corrected_" + override["issue"]),
+                    "effective_period_end": corrected_period,
+                    "effective_scope": "consolidated",
+                    "calibration_eligible_flag": 1,
+                    "proposal_confidence": 1.0,
+                    "canonical_candidate_flag": 1,
+                }
+            )
+        action_counts[action] += 1
+
+    return proposals, {
+        "human_review_override_count": sum(action_counts.values()),
+        "human_review_reject_count": action_counts["REJECT"],
+        "human_review_value_fix_count": action_counts["FIX_VALUE"],
+        "human_review_period_fix_count": action_counts["FIX_PERIOD"],
+        "human_review_suppressed_reselection_count": (suppressed_reselection_count),
+    }
 
 
 def propose_arr_candidate(row: dict[str, Any]) -> dict[str, Any]:
@@ -155,9 +352,7 @@ def propose_arr_candidate(row: dict[str, Any]) -> dict[str, Any]:
             "proposal_reason": "nonlevel_arr_flow_threshold_or_customer_metric",
             "proposal_confidence": 0.99,
         }
-    if total_arr_amount is not None and not _approximately_equal(
-        total_arr_amount, value
-    ):
+    if total_arr_amount is not None and not _approximately_equal(total_arr_amount, value):
         return {
             **base,
             "proposal_decision": "CORRECTED",
@@ -184,9 +379,7 @@ def propose_arr_candidate(row: dict[str, Any]) -> dict[str, Any]:
         }
 
     matching_mentions = [
-        (start, end)
-        for amount, start, end in _money_values(text)
-        if _approximately_equal(amount, value)
+        (start, end) for amount, start, end in _money_values(text) if _approximately_equal(amount, value)
     ]
     if not matching_mentions:
         return base
@@ -205,12 +398,8 @@ def propose_arr_candidate(row: dict[str, Any]) -> dict[str, Any]:
                 window_start = max(0, min(start, arr_match.start()) - 100)
                 window_end = min(len(text), max(end, arr_match.end()) + 100)
                 best_window = text[window_start:window_end]
-                relation_start = max(
-                    0, min(start, arr_match.start()) - 30
-                )
-                relation_end = min(
-                    len(text), max(end, arr_match.end()) + 15
-                )
+                relation_start = max(0, min(start, arr_match.start()) - 30)
+                relation_end = min(len(text), max(end, arr_match.end()) + 15)
                 best_relation_window = text[relation_start:relation_end]
     if not best_window or best_distance > 120:
         return base
@@ -236,10 +425,7 @@ def propose_arr_candidate(row: dict[str, Any]) -> dict[str, Any]:
             "proposal_confidence": 0.99,
         }
     total_match = _TOTAL_RE.search(best_window)
-    if (
-        _SUBSET_CONTEXT_RE.search(best_relation_window)
-        and total_match is None
-    ):
+    if _SUBSET_CONTEXT_RE.search(best_relation_window) and total_match is None:
         return {
             **base,
             "proposal_decision": "REJECTED_POLICY",
@@ -247,10 +433,7 @@ def propose_arr_candidate(row: dict[str, Any]) -> dict[str, Any]:
             "effective_scope": "subset",
             "proposal_confidence": 0.98,
         }
-    if total_match is None and (
-        _ARR_RE.search(best_window) is None
-        or _ACTUAL_RE.search(best_window) is None
-    ):
+    if total_match is None and (_ARR_RE.search(best_window) is None or _ACTUAL_RE.search(best_window) is None):
         return base
 
     source_scope = str(row.get("scope") or "unknown")
@@ -260,9 +443,7 @@ def propose_arr_candidate(row: dict[str, Any]) -> dict[str, Any]:
         **base,
         "proposal_decision": decision,
         "proposal_reason": (
-            "explicit_total_arr_level"
-            if total_match is not None
-            else "direct_company_arr_level_scope_corrected"
+            "explicit_total_arr_level" if total_match is not None else "direct_company_arr_level_scope_corrected"
         ),
         "effective_scope": "consolidated",
         "calibration_eligible_flag": 1,
@@ -308,25 +489,17 @@ def build_arr_proposals(
             _clean(row.get("evidence_text")).lower(),
         )
         existing = deduplicated.get(key)
-        if existing is None or str(row["source_document"]) < str(
-            existing["source_document"]
-        ):
+        if existing is None or str(row["source_document"]) < str(existing["source_document"]):
             deduplicated[key] = row
 
     proposals = [propose_arr_candidate(row) for row in deduplicated.values()]
     by_accession: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for proposal in proposals:
-        by_accession[
-            (str(proposal["ticker"]), str(proposal["accession_number"]))
-        ].append(proposal)
+        by_accession[(str(proposal["ticker"]), str(proposal["accession_number"]))].append(proposal)
 
     output: list[dict[str, Any]] = []
     for candidates in by_accession.values():
-        eligible = [
-            row
-            for row in candidates
-            if row["proposal_decision"] in ELIGIBLE_DECISIONS
-        ]
+        eligible = [row for row in candidates if row["proposal_decision"] in ELIGIBLE_DECISIONS]
         if eligible:
             selected = max(
                 eligible,
@@ -334,9 +507,7 @@ def build_arr_proposals(
                     float(row["proposal_confidence"]),
                     int(str(row.get("scope") or "") == "consolidated"),
                     float(row["effective_value"]),
-                    str(row["source_evidence_key"])
-                    if "source_evidence_key" in row
-                    else str(row["evidence_key"]),
+                    str(row["source_evidence_key"]) if "source_evidence_key" in row else str(row["evidence_key"]),
                 ),
             )
             selected["canonical_candidate_flag"] = 1
@@ -347,9 +518,7 @@ def build_arr_proposals(
                 if row["proposal_decision"] == "REJECTED_POLICY":
                     continue
                 row["proposal_decision"] = "REJECTED_POLICY"
-                row["proposal_reason"] = (
-                    "noncanonical_duplicate_or_comparative_in_accession"
-                )
+                row["proposal_reason"] = "noncanonical_duplicate_or_comparative_in_accession"
                 row["calibration_eligible_flag"] = 0
                 row["proposal_confidence"] = 0.98
         output.extend(candidates)
@@ -378,13 +547,10 @@ def summarize_arr_proposals(
         accepted_accessions = {
             str(row["accession_number"])
             for row in candidates
-            if int(row["canonical_candidate_flag"]) == 1
-            and row["proposal_decision"] in ELIGIBLE_DECISIONS
+            if int(row["canonical_candidate_flag"]) == 1 and row["proposal_decision"] in ELIGIBLE_DECISIONS
         }
         review_accessions = {
-            str(row["accession_number"])
-            for row in candidates
-            if row["proposal_decision"] == "REVIEW_REQUIRED"
+            str(row["accession_number"]) for row in candidates if row["proposal_decision"] == "REVIEW_REQUIRED"
         }
         ticker_rows.append(
             {
@@ -392,35 +558,19 @@ def summarize_arr_proposals(
                 "proposed_accepted_event_count": len(accepted_accessions),
                 "unresolved_review_event_count": len(review_accessions),
                 "strict_level_candidate_flag": int(bool(accepted_accessions)),
-                "strict_longitudinal_candidate_flag": int(
-                    len(accepted_accessions) >= 2
-                ),
-                "upper_bound_level_candidate_flag": int(
-                    bool(accepted_accessions | review_accessions)
-                ),
-                "upper_bound_longitudinal_candidate_flag": int(
-                    len(accepted_accessions | review_accessions) >= 2
-                ),
+                "strict_longitudinal_candidate_flag": int(len(accepted_accessions) >= 2),
+                "upper_bound_level_candidate_flag": int(bool(accepted_accessions | review_accessions)),
+                "upper_bound_longitudinal_candidate_flag": int(len(accepted_accessions | review_accessions) >= 2),
             }
         )
     strict_level = sum(row["strict_level_candidate_flag"] for row in ticker_rows)
-    strict_longitudinal = sum(
-        row["strict_longitudinal_candidate_flag"] for row in ticker_rows
-    )
-    upper_level = sum(
-        row["upper_bound_level_candidate_flag"] for row in ticker_rows
-    )
-    upper_longitudinal = sum(
-        row["upper_bound_longitudinal_candidate_flag"] for row in ticker_rows
-    )
-    unresolved = sum(
-        int(row["proposal_decision"] == "REVIEW_REQUIRED") for row in rows
-    )
+    strict_longitudinal = sum(row["strict_longitudinal_candidate_flag"] for row in ticker_rows)
+    upper_level = sum(row["upper_bound_level_candidate_flag"] for row in ticker_rows)
+    upper_longitudinal = sum(row["upper_bound_longitudinal_candidate_flag"] for row in ticker_rows)
+    unresolved = sum(int(row["proposal_decision"] == "REVIEW_REQUIRED") for row in rows)
     summary = {
         "minimum_cross_section_required": minimum_cross_section,
-        "canonical_proposed_fact_count": sum(
-            int(row["canonical_candidate_flag"]) for row in rows
-        ),
+        "canonical_proposed_fact_count": sum(int(row["canonical_candidate_flag"]) for row in rows),
         "strict_level_ticker_count": strict_level,
         "strict_longitudinal_ticker_count": strict_longitudinal,
         "upper_bound_level_ticker_count": upper_level,
@@ -431,8 +581,7 @@ def summarize_arr_proposals(
         "historical_hydration_authorized_flag": 0,
         "branch_recommendation": (
             "CLOSE_AFTER_PROPOSAL_UPPER_BOUND_BELOW_GATE"
-            if upper_level < minimum_cross_section
-            and upper_longitudinal < minimum_cross_section
+            if upper_level < minimum_cross_section and upper_longitudinal < minimum_cross_section
             else "RESOLVE_EXCEPTIONS_AND_HUMAN_APPROVE"
             if unresolved
             else "HUMAN_APPROVAL_REQUIRED_BEFORE_HISTORICAL_HYDRATION"

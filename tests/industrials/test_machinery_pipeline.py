@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import runpy
 import sqlite3
@@ -767,6 +768,15 @@ def test_historical_reuse_requires_current_build_signature(
         policy_lock_date="2026-07-09",
         required_metrics=required_metric_names(),
     )
+    builder_path = (
+        PROJECT_ROOT
+        / 'industrials'
+        / 'scripts'
+        / '08_build_industrials_financial_features.py'
+    )
+    assert metadata['semantic_source_sha256'][
+        '08_build_industrials_financial_features.py'
+    ] == hashlib.sha256(builder_path.read_bytes()).hexdigest()
     output_dir = tmp_path / "2026-07-21"
     output_dir.mkdir()
 
