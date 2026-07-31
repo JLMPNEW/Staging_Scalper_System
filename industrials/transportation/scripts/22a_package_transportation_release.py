@@ -80,7 +80,13 @@ def _release_inventory(asof: str) -> list[tuple[Path, Path, bool]]:
         )
         inventory.append((source, target_parent / source.name, False))
 
-    legacy = root / "historical_features" / "v3_conflict_resolved"
+    legacy = (
+        root
+        / "releases"
+        / asof
+        / "code_aligned_zero_overlay_v2"
+        / "calibration"
+    )
     for source in sorted(legacy.glob("transportation_walk_forward_calibration*")):
         if source.is_file():
             inventory.append((source.resolve(), Path("calibration") / source.name, False))
