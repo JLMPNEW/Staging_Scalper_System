@@ -114,7 +114,8 @@ def recursive_artifact_audit(
         except (OSError, ValueError, json.JSONDecodeError) as error:
             errors.append(f"invalid JSON root={path}: {error}")
             continue
-        if "acceptance" in payload and payload.get("acceptance") != "PASS":
+        acceptance = str(payload.get("acceptance") or "")
+        if "acceptance" in payload and not acceptance.startswith("PASS"):
             errors.append(f"non-passing JSON artifact={path}")
         for reference in iter_artifact_references(payload):
             result = verify_reference(reference, repair_aliases=repair_aliases)
@@ -252,6 +253,8 @@ def main() -> int:
         "prior_completion": completion,
         "repair_manifest": repair_manifest_path,
         "recovered_residual_manifest": recovered_manifest_path,
+        "recovered_semantic_manifest": parser_dir
+        / "transportation_pre_financial_semantic_fixture_freeze_manifest.json",
         "calibration_manifest": calibration_dir
         / "transportation_walk_forward_calibration_manifest.json",
         "calibration_validation": calibration_dir
@@ -310,6 +313,50 @@ def main() -> int:
     recursive_roots = [
         path for label, path in roots.items() if label != "prior_completion"
     ]
+    semantic_lineage: dict[str, Any] = {}
+    recovered_semantic_path = roots["recovered_semantic_manifest"]
+    if recovered_semantic_path.is_file():
+        recovered_semantic = read_json(recovered_semantic_path)
+        semantic_alias_paths = {
+            "semantic_metric_contract": parser_dir
+            / "transportation_pre_financial_semantic_metric_contract.csv",
+            "semantic_fixture_pair_contract": parser_dir
+            / "transportation_pre_financial_semantic_fixture_pair_contract.csv",
+            "semantic_fixture_evidence": parser_dir
+            / "transportation_pre_financial_semantic_fixture_evidence.csv",
+        }
+        semantic_hash = sha256(recovered_semantic_path)
+        repair_aliases[semantic_hash] = recovered_semantic_path
+        semantic_errors: list[str] = []
+        semantic_artifacts = recovered_semantic.get("artifacts") or {}
+        for label, alias_path in semantic_alias_paths.items():
+            expected_hash = str(
+                (semantic_artifacts.get(label) or {}).get("sha256") or ""
+            )
+            actual_hash = sha256(alias_path) if alias_path.is_file() else ""
+            if not expected_hash or expected_hash != actual_hash:
+                semantic_errors.append(
+                    f"{label}: expected={expected_hash} actual={actual_hash}"
+                )
+            else:
+                repair_aliases[expected_hash] = alias_path
+        if semantic_errors:
+            errors.append(
+                "reconstructed pre-financial semantic lineage does not match="
+                f"{semantic_errors}"
+            )
+        semantic_lineage = {
+            "status": "FAIL" if semantic_errors else "PASS",
+            "adjudication_prefix": recovered_semantic.get(
+                "adjudication_prefix"
+            ),
+            "recovered_manifest_path": str(recovered_semantic_path),
+            "recovered_manifest_sha256": semantic_hash,
+            "recovered_artifact_count": len(semantic_alias_paths),
+            "errors": semantic_errors,
+        }
+    else:
+        errors.append("reconstructed pre-financial semantic manifest is missing")
     reference_results, reference_errors = recursive_artifact_audit(
         recursive_roots,
         repair_aliases=repair_aliases,
@@ -394,6 +441,7 @@ def main() -> int:
         "release_dir": str(release_dir),
         "source_control": source_control,
         "repair_lineage": repair_lineage,
+        "semantic_fixture_lineage": semantic_lineage,
         "superseded_predecessor_completion": {
             "acceptance": prior_completion.get("acceptance"),
             "production_model_promoted": prior_completion.get(

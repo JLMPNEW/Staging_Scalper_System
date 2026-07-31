@@ -89,3 +89,25 @@ def test_recursive_audit_fails_unattested_hash_mismatch(tmp_path: Path) -> None:
     assert results[0]["status"] == "FAIL"
     assert len(errors) == 1
     assert "artifact hash mismatch" in errors[0]
+
+def test_recursive_audit_accepts_explicit_pass_with_limitations(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    root = tmp_path / "bounded_execution.json"
+    root.write_text(
+        json.dumps(
+            {
+                "acceptance": "PASS_WITH_EXPLICIT_LIMITATIONS",
+                "errors": [],
+                "limitations": ["local OCR engine unavailable"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    results, errors = module.recursive_artifact_audit(
+        [root],
+        repair_aliases={},
+    )
+    assert results == []
+    assert errors == []
