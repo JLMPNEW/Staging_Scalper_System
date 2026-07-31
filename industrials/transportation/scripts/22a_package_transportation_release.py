@@ -70,11 +70,15 @@ def _release_inventory(asof: str) -> list[tuple[Path, Path, bool]]:
 
     add_tree(root / "generic_oos", Path("generic_oos"), recurse=True)
     add_tree(root / "score_history", Path("score_history"), recurse=True)
-    add_tree(
-        root / "required_metric_repair" / asof,
-        Path("required_metric_repair") / asof,
-        recurse=False,
-    )
+    required_metric_root = root / "required_metric_repair" / asof
+    for source in iter_existing_files([required_metric_root]):
+        relative = source.relative_to(required_metric_root)
+        target_parent = (
+            Path("required_metric_repair") / "parser"
+            if "required_metric_parser_run" in relative.parts
+            else Path("required_metric_repair")
+        )
+        inventory.append((source, target_parent / source.name, False))
 
     legacy = root / "historical_features" / "v3_conflict_resolved"
     for source in sorted(legacy.glob("transportation_walk_forward_calibration*")):
@@ -268,7 +272,12 @@ def main() -> int:
             staged_target = staging_dir / relative_target
             final_target = release_dir / relative_target
             staged_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, staged_target)
+            try:
+                shutil.copy2(source, staged_target)
+            except OSError as error:
+                raise OSError(
+                    f"release copy failed source={source} target={staged_target}"
+                ) from error
             artifact_refs[relative_target.as_posix()] = _reference(
                 final_target,
                 staged_target,
