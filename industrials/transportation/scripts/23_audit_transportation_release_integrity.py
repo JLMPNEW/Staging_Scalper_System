@@ -300,8 +300,18 @@ def main() -> int:
     else:
         errors.append("repair lineage manifests are missing")
 
+    prior_completion = (
+        read_json(roots["prior_completion"])
+        if roots["prior_completion"].is_file()
+        else {}
+    )
+    if prior_completion.get("acceptance") != "PASS":
+        errors.append("superseded predecessor completion is not passing")
+    recursive_roots = [
+        path for label, path in roots.items() if label != "prior_completion"
+    ]
     reference_results, reference_errors = recursive_artifact_audit(
-        roots.values(),
+        recursive_roots,
         repair_aliases=repair_aliases,
     )
     errors.extend(reference_errors)
@@ -384,6 +394,17 @@ def main() -> int:
         "release_dir": str(release_dir),
         "source_control": source_control,
         "repair_lineage": repair_lineage,
+        "superseded_predecessor_completion": {
+            "acceptance": prior_completion.get("acceptance"),
+            "production_model_promoted": prior_completion.get(
+                "production_model_promoted"
+            ),
+            "artifact": (
+                artifact_reference(roots["prior_completion"])
+                if roots["prior_completion"].is_file()
+                else {}
+            ),
+        },
         "calibration_final_weights": calibration_weights,
         "serving_overlay_weights": serving_weights,
         "recursive_reference_count": len(reference_results),
