@@ -8,7 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from industrials.core.oos_research import weighted_score
 from industrials.core.policy_loader import load_eligibility_policy, resolve_policy
+from industrials.core.production_lock import ProductionLock
+from industrials.core.score_history import (
+    build_shadow_survivorship_sidecar,
+    validate_shadow_survivorship_sidecar,
+)
 from industrials.transportation.contracts import (
     FINAL_RANK_FIELDS,
     SCORING_FEATURE_FIELDS,
@@ -65,28 +71,79 @@ def load_members(
     *,
     asof: str,
     active_source_id: str,
+    membership_mode: str = "current",
+    historical_source_id: str = "",
+    delisted_source_id: str = "",
 ) -> list[dict[str, Any]]:
-    return [
-        dict(row)
-        for row in conn.execute(
-            """
-            SELECT m.ticker, c.company_name, t.sector, t.industry, t.subsector,
-                   t.calibration_cohort_id, t.calibration_cohort, t.calibration_use,
-                   t.development_stage, m.membership_source_id, m.membership_basis,
-                   m.start_date, m.end_date, m.membership_status, m.confidence
-            FROM dim_universe_membership AS m
-            JOIN dim_company AS c ON c.company_id=m.company_id
-            JOIN dim_industrials_taxonomy AS t
-              ON t.ticker=m.ticker AND t.model_family=m.model_family
-            WHERE m.model_family=? AND m.membership_source_id=?
-              AND m.membership_status='active'
-              AND m.start_date<=? AND COALESCE(m.end_date,'9999-12-31')>=?
-            ORDER BY m.ticker
+    if membership_mode not in {"current", "pit"}:
+        raise ValueError(f"unsupported membership_mode={membership_mode!r}")
+    select_fields = """
+        SELECT m.ticker, c.company_name, t.sector, t.industry, t.subsector,
+               t.calibration_cohort_id, t.calibration_cohort, t.calibration_use,
+               t.development_stage, m.membership_source_id, m.membership_basis,
+               m.start_date, m.end_date, m.membership_status, m.confidence
+        FROM {membership_relation} AS m
+        JOIN dim_company AS c ON c.company_id=m.company_id
+        JOIN dim_industrials_taxonomy AS t
+          ON t.ticker=m.ticker AND t.model_family=m.model_family
+        {where_clause}
+        ORDER BY m.ticker
+    """
+    if membership_mode == "current":
+        query = select_fields.format(
+            membership_relation="dim_universe_membership",
+            where_clause="""
+                WHERE m.model_family=? AND m.membership_source_id=?
+                  AND m.membership_status='active'
+                  AND m.start_date<=?
+                  AND COALESCE(m.end_date,'9999-12-31')>=?
             """,
-            (MODEL_FAMILY, active_source_id, asof, asof),
-        ).fetchall()
-    ]
-
+        )
+        params: tuple[Any, ...] = (
+            MODEL_FAMILY,
+            active_source_id,
+            asof,
+            asof,
+        )
+    else:
+        # Every effective membership source is eligible in historical research.
+        # Prefer the curated historical row, then the current seed, then the
+        # delisted seed, and retain exactly one deterministic row per ticker.
+        query = select_fields.format(
+            membership_relation="""(
+                SELECT ranked.*
+                FROM (
+                    SELECT membership.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY membership.ticker
+                               ORDER BY
+                                 CASE membership.membership_source_id
+                                   WHEN ? THEN 0
+                                   WHEN ? THEN 1
+                                   WHEN ? THEN 2
+                                   ELSE 3
+                                 END,
+                                 membership.confidence DESC,
+                                 membership.membership_source_id
+                           ) AS membership_row_number
+                    FROM dim_universe_membership AS membership
+                    WHERE membership.model_family=?
+                      AND membership.start_date<=?
+                      AND COALESCE(membership.end_date,'9999-12-31')>=?
+                ) AS ranked
+                WHERE ranked.membership_row_number=1
+            )""",
+            where_clause="",
+        )
+        params = (
+            historical_source_id,
+            active_source_id,
+            delisted_source_id,
+            MODEL_FAMILY,
+            asof,
+            asof,
+        )
+    return [dict(row) for row in conn.execute(query, params).fetchall()]
 
 def latest_feature(
     conn: sqlite3.Connection,
@@ -125,19 +182,46 @@ def latest_profile(conn: sqlite3.Connection, *, ticker: str, asof: str) -> dict[
     return dict(row) if row is not None else {}
 
 
-def load_metric_rows(conn: sqlite3.Connection, *, asof: str) -> dict[str, dict[str, dict[str, Any]]]:
-    result: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    for row in conn.execute(
+def load_metric_rows(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+    snapshot_mode: str = "exact",
+) -> dict[str, dict[str, dict[str, Any]]]:
+    if snapshot_mode == "exact":
+        query = """
+            SELECT * FROM feature_financial_metric_availability
+            WHERE model_family=? AND asof_date=?
+            ORDER BY ticker, metric_name
         """
-        SELECT * FROM feature_financial_metric_availability
-        WHERE model_family=? AND asof_date=? ORDER BY ticker, metric_name
-        """,
-        (MODEL_FAMILY, asof),
-    ).fetchall():
-        item = dict(row)
+        params: tuple[Any, ...] = (MODEL_FAMILY, asof)
+    elif snapshot_mode == "latest":
+        snapshot = conn.execute(
+            """
+            SELECT MAX(asof_date)
+            FROM feature_financial_metric_availability
+            WHERE model_family=? AND asof_date<=?
+            """,
+            (MODEL_FAMILY, asof),
+        ).fetchone()
+        snapshot_date = str(snapshot[0] or "") if snapshot is not None else ""
+        query = """
+            SELECT * FROM feature_financial_metric_availability
+            WHERE model_family=? AND asof_date=?
+            ORDER BY ticker, metric_name
+        """
+        params = (MODEL_FAMILY, snapshot_date)
+    else:
+        raise ValueError(f"unsupported metric snapshot_mode={snapshot_mode!r}")
+    result: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in conn.execute(query, params).fetchall():
+        item = {
+            key: row[key]
+            for key in row.keys()
+            if key != "metric_row_number"
+        }
         result[str(item["ticker"])][str(item["metric_name"])] = item
     return result
-
 
 def _quantile(sorted_values: list[float], fraction: float) -> float:
     if len(sorted_values) == 1:
@@ -196,6 +280,11 @@ def build_scoring_rows(
     asof: str,
     active_source_id: str,
     definitions: list[MetricDefinition],
+    membership_mode: str = "current",
+    historical_source_id: str = "",
+    delisted_source_id: str = "",
+    metric_snapshot_mode: str = "exact",
+    policy_asof: str = "",
     registry_version: str,
     policy_path: Path,
     component_weights: dict[str, float],
@@ -205,9 +294,18 @@ def build_scoring_rows(
     minimum_specialized_coverage: float,
     specialized_overlay_weights: dict[str, float] | None = None,
 ) -> list[dict[str, str]]:
-    members = load_members(conn, asof=asof, active_source_id=active_source_id)
+    members = load_members(
+        conn,
+        asof=asof,
+        active_source_id=active_source_id,
+        membership_mode=membership_mode,
+        historical_source_id=historical_source_id,
+        delisted_source_id=delisted_source_id,
+    )
     if not members:
-        raise ValueError(f"No active transportation members at {asof}")
+        raise ValueError(
+            f"No transportation members at {asof} for mode={membership_mode}"
+        )
     if set(component_weights) != set(COMPONENT_FIELD):
         raise ValueError(f"component_weights must define exactly {sorted(COMPONENT_FIELD)}")
     if any(weight < 0 for weight in component_weights.values()) or not math.isclose(
@@ -240,8 +338,15 @@ def build_scoring_rows(
     if not generic_definitions:
         raise ValueError("generic scoring definition set is empty")
     overlay_active = any(weight > 0.0 for weight in overlay_weights.values())
-    policies = load_eligibility_policy(policy_path, asof=asof)
-    metric_rows = load_metric_rows(conn, asof=asof)
+    policies = load_eligibility_policy(
+        policy_path,
+        asof=policy_asof or asof,
+    )
+    metric_rows = load_metric_rows(
+        conn,
+        asof=asof,
+        snapshot_mode=metric_snapshot_mode,
+    )
     # Use the same direction-adjusted percentile engine for the frozen generic
     # baseline and any explicitly activated bounded overlay. Optional
     # specialized metrics with zero weights never enter component averages.
@@ -479,11 +584,29 @@ def finalize_rank_rows(
     score_model_version: str,
     model_version: str,
     scoring_contract_version: str,
+    production_lock: ProductionLock | None = None,
 ) -> list[dict[str, str]]:
     if not rows:
         raise ValueError("Cannot finalize an empty transportation score contract")
+    prepared = [dict(row) for row in rows]
+    active_score_model_version = score_model_version
+    active_model_version = model_version
+    active_contract_version = scoring_contract_version
+    if production_lock is not None:
+        if set(production_lock.weights) != set(COMPONENT_FIELD.values()):
+            raise ValueError(
+                "Production lock weights do not match transportation components"
+            )
+        active_score_model_version = production_lock.score_model_version
+        active_model_version = production_lock.score_model_version
+        active_contract_version = "transportation_final_rank_table_v1_production"
+        for source in prepared:
+            score = weighted_score(source, production_lock.weights)
+            if score is None:
+                raise ValueError(f"{source.get('ticker')}: locked score is unavailable")
+            source["final_score"] = _fmt(max(0.0, min(100.0, score)))
     ordered = sorted(
-        rows,
+        prepared,
         key=lambda row: (
             -int(str(row.get("rank_ready_flag") or "0")),
             -float(str(row.get("final_score") or "0")),
@@ -503,29 +626,39 @@ def finalize_rank_rows(
         ticker = str(source["ticker"])
         rank_ready = str(source.get("rank_ready_flag") or "0") == "1"
         row = {field: str(source.get(field) or "") for field in SCORING_FEATURE_FIELDS}
+        production = production_lock is not None
+        candidate_reason = (
+            "ok" if rank_ready else str(source.get("rank_ready_reason") or "not_rank_ready")
+        )
         row.update(
             {
                 "final_rank": str(rank),
                 "cohort_rank": str(cohort_rank[ticker]),
-                "score_model_version": score_model_version,
-                "model_version": model_version,
-                "scoring_contract_version": scoring_contract_version,
-                "portfolio_candidate_gate": "0",
+                "score_model_version": active_score_model_version,
+                "model_version": active_model_version,
+                "scoring_contract_version": active_contract_version,
+                "portfolio_candidate_gate": "1" if production and rank_ready else "0",
                 "portfolio_candidate_score": str(source.get("final_score") or ""),
-                "portfolio_candidate_status": "shadow_only",
-                "portfolio_candidate_reason": "shadow_only_oos_calibration_not_available",
+                "portfolio_candidate_status": (
+                    "eligible" if production and rank_ready else
+                    "not_eligible" if production else "shadow_only"
+                ),
+                "portfolio_candidate_reason": (
+                    candidate_reason if production else
+                    "shadow_only_oos_calibration_not_available"
+                ),
                 "calibration_eligible_flag": "1" if rank_ready else "0",
                 "research_calibration_input_eligible_flag": "0",
                 "research_calibration_reason": "current_snapshot_not_survivorship_corrected",
-                "calibration_sample_role": "excluded",
+                "calibration_sample_role": "strict_oos" if production else "excluded",
                 "stage11_calibration_panel_source": "current_transportation_dashboard_snapshot",
                 "stage11_calibration_input_eligible_flag": "0",
                 "stage11_calibration_input_reason": "current_snapshot_not_survivorship_corrected",
                 "survivorship_corrected_panel_flag": "0",
-                "oos_score_valid_flag": "0",
-                "oos_score_asof_date": "",
-                "oos_invalid_reason": "shadow_pre_oos_calibration",
-                "calibration_lock_date": "",
+                "oos_score_valid_flag": "1" if production else "0",
+                "oos_score_asof_date": str(source.get("asof_date") or "") if production else "",
+                "oos_invalid_reason": "" if production else "shadow_pre_oos_calibration",
+                "calibration_lock_date": production_lock.lock_date.isoformat() if production_lock else "",
             }
         )
         final.append({field: row.get(field, "") for field in FINAL_RANK_FIELDS})
@@ -544,27 +677,62 @@ def publish_dashboard(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rank_path = output_dir / "transportation_final_rank_table.csv"
+    sidecar_path = output_dir / "transportation_stage11_survivorship_calibration_panel.csv"
     manifest_path = output_dir / "transportation_final_rank_table_manifest.json"
-    existing = [path for path in (rank_path, manifest_path) if path.exists()]
+    existing = [
+        path
+        for path in (rank_path, sidecar_path, manifest_path)
+        if path.exists()
+    ]
     if existing and not allow_overwrite:
-        raise FileExistsError(f"Refusing to overwrite immutable transportation dashboard artifacts: {existing}")
+        raise FileExistsError(
+            "Refusing to overwrite immutable transportation dashboard artifacts: "
+            f"{existing}"
+        )
     errors = validate_rank_rows(rows, asof=asof)
     if errors:
         raise ValueError("; ".join(errors[:20]))
+    sidecar_rows = build_shadow_survivorship_sidecar(
+        rows,
+        fieldnames=FINAL_RANK_FIELDS,
+    )
+    sidecar_errors = validate_shadow_survivorship_sidecar(
+        sidecar_rows,
+        asof_date=asof,
+        expected_tickers={row["ticker"] for row in rows},
+    )
+    if sidecar_errors:
+        raise ValueError("; ".join(sidecar_errors[:20]))
     write_rank_rows(rank_path, rows)
+    write_rank_rows(sidecar_path, sidecar_rows)
     manifest = {
         "acceptance": "PASS",
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
         "rank_table": str(rank_path),
         "rank_table_sha256": file_sha256(rank_path),
+        "stage11_survivorship_calibration_panel": str(sidecar_path),
+        "stage11_survivorship_calibration_panel_sha256": file_sha256(sidecar_path),
+        "stage11_survivorship_calibration_panel_row_count": len(sidecar_rows),
+        "stage11_calibration_input_eligible_count": sum(
+            row["stage11_calibration_input_eligible_flag"] == "1"
+            for row in sidecar_rows
+        ),
         "row_count": len(rows),
         "rank_ready_count": sum(row["rank_ready_flag"] == "1" for row in rows),
-        "portfolio_candidate_count": 0,
-        "oos_score_valid_count": 0,
+        "portfolio_candidate_count": sum(
+            row["portfolio_candidate_gate"] == "1" for row in rows
+        ),
+        "oos_score_valid_count": sum(
+            row["oos_score_valid_flag"] == "1" for row in rows
+        ),
         "contract_fields": FINAL_RANK_FIELDS,
-        "scoring_contract_versions": sorted({row["scoring_contract_version"] for row in rows}),
-        "published_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "scoring_contract_versions": sorted(
+            {row["scoring_contract_version"] for row in rows}
+        ),
+        "published_at_utc": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
     }
     write_manifest(manifest_path, manifest)
     return manifest

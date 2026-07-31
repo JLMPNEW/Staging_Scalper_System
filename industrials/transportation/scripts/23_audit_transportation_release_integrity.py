@@ -15,13 +15,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.reports import write_text_atomic  # noqa: E402
+from industrials.transportation.release_contract import (  # noqa: E402
+    DEFAULT_RELEASE_NAME,
+    git_source_state,
+)
 from industrials.transportation.selected_feature_history import (  # noqa: E402
     read_json,
     sha256,
 )
 
 MODEL_FAMILY = "transportation"
-RELEASE_NAME = "code_aligned_zero_overlay_v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +35,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--asof", required=True)
+    parser.add_argument("--release-name", default=DEFAULT_RELEASE_NAME)
     parser.add_argument("--release-dir", type=Path, default=None)
     parser.add_argument("--completion-manifest", type=Path, default=None)
     parser.add_argument("--repair-manifest", type=Path, default=None)
@@ -129,75 +133,35 @@ def recursive_artifact_audit(
                 )
                 continue
             resolved = Path(result["resolved_path"])
-            if resolved.suffix.lower() == ".json":
+            if (
+                resolved.suffix.lower() == ".json"
+                and reference.get("recurse") is not False
+            ):
                 queue.append(resolved)
     return results, errors
 
 
-def git_release_state() -> tuple[dict[str, Any], list[str]]:
-    errors: list[str] = []
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    tracked_output = subprocess.run(
-        ["git", "ls-files", "industrials/transportation", "tests/industrials"],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    tracked = {path.replace("\\", "/") for path in tracked_output}
-    source_files = sorted(
-        path
-        for path in (PROJECT_ROOT / "industrials" / "transportation").rglob("*.py")
+def git_release_state(
+    source_manifest: Mapping[str, Any],
+) -> tuple[dict[str, object], list[str]]:
+    dependencies = source_manifest.get("dependencies") or {}
+    if not isinstance(dependencies, Mapping) or not dependencies:
+        return {}, ["release source dependency manifest is empty"]
+    required_paths = sorted(str(path) for path in dependencies)
+    expected_commit = str(source_manifest.get("git_commit_sha") or "")
+    if not expected_commit:
+        return {}, ["release source dependency manifest has no git commit"]
+    return git_source_state(
+        PROJECT_ROOT,
+        required_paths,
+        expected_commit=expected_commit,
     )
-    test_files = sorted(
-        (PROJECT_ROOT / "tests" / "industrials").glob("test_transportation*.py")
-    )
-    required_paths = [
-        "industrials/config.yaml",
-        *[
-            path.relative_to(PROJECT_ROOT).as_posix()
-            for path in (*source_files, *test_files)
-        ],
-    ]
-    untracked = sorted(path for path in required_paths if path not in tracked and path != "industrials/config.yaml")
-    if "industrials/config.yaml" not in subprocess.run(
-        ["git", "ls-files", "industrials/config.yaml"],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines():
-        untracked.append("industrials/config.yaml")
-    if untracked:
-        errors.append(f"untracked release source paths={untracked}")
-    dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--", *required_paths],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    if dirty:
-        errors.append(f"uncommitted release source paths={dirty}")
-    return {
-        "git_commit_sha": head,
-        "required_path_count": len(required_paths),
-        "tracked_path_count": len(required_paths) - len(untracked),
-        "untracked_paths": untracked,
-        "dirty_entries": dirty,
-        "release_sources_committed": not untracked and not dirty,
-    }, errors
 
 
 def main() -> int:
     args = parse_args()
     asof = str(args.asof)[:10]
+    release_name = str(args.release_name).strip()
     release_dir = (
         args.release_dir.expanduser().resolve()
         if args.release_dir
@@ -207,7 +171,12 @@ def main() -> int:
         / MODEL_FAMILY
         / "releases"
         / asof
-        / RELEASE_NAME
+        / release_name
+    )
+    release_manifest_path = release_dir / "transportation_release_manifest.json"
+    source_manifest_path = release_dir / "source_dependencies.json"
+    source_manifest = (
+        read_json(source_manifest_path) if source_manifest_path.is_file() else {}
     )
     completion = (
         args.completion_manifest.expanduser().resolve()
@@ -241,15 +210,12 @@ def main() -> int:
     )
     calibration_dir = release_dir / "calibration"
     current_dir = release_dir / "current"
-    dashboard_dir = (
-        release_dir
-        / "s"
-        / "industrials"
-        / MODEL_FAMILY
-        / "dashboard"
-        / asof
-    )
+    dashboard_dir = current_dir / "dashboard"
+    generic_dir = release_dir / "generic_oos"
+    score_history_dir = release_dir / "score_history"
     roots = {
+        "release_manifest": release_manifest_path,
+        "source_dependencies": source_manifest_path,
         "prior_completion": completion,
         "repair_manifest": repair_manifest_path,
         "recovered_residual_manifest": recovered_manifest_path,
@@ -269,6 +235,14 @@ def main() -> int:
         / "transportation_final_rank_table_validation.json",
         "portfolio_validation": dashboard_dir
         / "transportation_portfolio_adapter_validation.json",
+        "daily_history_validation": score_history_dir
+        / "transportation_daily_rank_history_validation.json",
+        "generic_panel_validation": generic_dir
+        / "transportation_generic_oos_panel_validation.json",
+        "generic_calibration_manifest": generic_dir
+        / "transportation_generic_oos_calibration_manifest.json",
+        "generic_readiness_audit": generic_dir
+        / "transportation_production_readiness_audit.json",
     }
     errors: list[str] = []
     repair_aliases: dict[str, Path] = {}
@@ -311,7 +285,10 @@ def main() -> int:
     if prior_completion.get("acceptance") != "PASS":
         errors.append("superseded predecessor completion is not passing")
     recursive_roots = [
-        path for label, path in roots.items() if label != "prior_completion"
+        roots["release_manifest"],
+        roots["repair_manifest"],
+        roots["recovered_residual_manifest"],
+        roots["recovered_semantic_manifest"],
     ]
     semantic_lineage: dict[str, Any] = {}
     recovered_semantic_path = roots["recovered_semantic_manifest"]
@@ -362,7 +339,7 @@ def main() -> int:
         repair_aliases=repair_aliases,
     )
     errors.extend(reference_errors)
-    source_control, source_errors = git_release_state()
+    source_control, source_errors = git_release_state(source_manifest)
     errors.extend(source_errors)
 
     calibration = read_json(roots["calibration_manifest"]) if roots["calibration_manifest"].is_file() else {}
@@ -371,7 +348,26 @@ def main() -> int:
         if roots["calibration_validation"].is_file()
         else {}
     )
-    scoring = read_json(roots["scoring_manifest"]) if roots["scoring_manifest"].is_file() else {}
+    scoring = (
+        read_json(roots["scoring_manifest"])
+        if roots["scoring_manifest"].is_file()
+        else {}
+    )
+    generic_panel = (
+        read_json(roots["generic_panel_validation"])
+        if roots["generic_panel_validation"].is_file()
+        else {}
+    )
+    generic_calibration = (
+        read_json(roots["generic_calibration_manifest"])
+        if roots["generic_calibration_manifest"].is_file()
+        else {}
+    )
+    generic_readiness = (
+        read_json(roots["generic_readiness_audit"])
+        if roots["generic_readiness_audit"].is_file()
+        else {}
+    )
     calibration_weights = {
         metric: float((decision or {}).get("final_research_weight") or 0.0)
         for metric, decision in (calibration.get("candidate_decisions") or {}).items()
@@ -396,6 +392,19 @@ def main() -> int:
         or any(weight != 0.0 for weight in serving_weights.values())
     ):
         errors.append("serving score is not the explicit generic zero-overlay model")
+    if generic_panel.get("acceptance") != "PASS":
+        errors.append("generic OOS panel validation is not passing")
+    if (
+        generic_calibration.get("artifact_acceptance") != "PASS"
+        or generic_calibration.get("promotion_eligible") is not False
+    ):
+        errors.append("generic OOS calibration is not a valid failed-promotion artifact")
+    if (
+        generic_readiness.get("audit_acceptance") != "PASS"
+        or generic_readiness.get("promotion_readiness") != "FAIL"
+    ):
+        errors.append("generic production-readiness audit is not fail-closed")
+
     calibration_commit = str(
         (calibration.get("source_control") or {}).get("git_commit_sha") or ""
     )
@@ -405,7 +414,7 @@ def main() -> int:
             "merge-base",
             "--is-ancestor",
             calibration_commit,
-            source_control["git_commit_sha"],
+            str(source_control["git_commit_sha"]),
         ],
         cwd=PROJECT_ROOT,
         capture_output=True,
@@ -437,7 +446,7 @@ def main() -> int:
         "gate": "TRANSPORTATION_CODE_ALIGNED_RELEASE_INTEGRITY",
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
-        "release_name": RELEASE_NAME,
+        "release_name": release_name,
         "release_dir": str(release_dir),
         "source_control": source_control,
         "repair_lineage": repair_lineage,
@@ -455,6 +464,13 @@ def main() -> int:
         },
         "calibration_final_weights": calibration_weights,
         "serving_overlay_weights": serving_weights,
+        "generic_oos_state": {
+            "panel_acceptance": generic_panel.get("acceptance"),
+            "artifact_acceptance": generic_calibration.get("artifact_acceptance"),
+            "promotion_eligible": generic_calibration.get("promotion_eligible"),
+            "readiness_audit_acceptance": generic_readiness.get("audit_acceptance"),
+            "promotion_readiness": generic_readiness.get("promotion_readiness"),
+        },
         "recursive_reference_count": len(reference_results),
         "recursive_reference_status_counts": dict(sorted(status_counts.items())),
         "recursive_reference_results": reference_results,

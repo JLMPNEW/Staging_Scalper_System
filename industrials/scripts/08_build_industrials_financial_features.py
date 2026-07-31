@@ -4123,9 +4123,23 @@ def main() -> None:
         configured_model_family,
     )
     source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
+    family_supplemental_source_ids = cfg_get(
+        config,
+        (
+            f"model_families.{model_family}.financial."
+            "supplemental_disclosure_source_ids"
+        ),
+        None,
+    )
     supplemental_disclosure_source_ids = tuple(
-        parse_source_list(
-            cfg_get(config, "sec_fundamentals.supplemental_disclosure_source_ids", [])
+        parse_source_list(family_supplemental_source_ids)
+        if family_supplemental_source_ids is not None
+        else parse_source_list(
+            cfg_get(
+                config,
+                "sec_fundamentals.supplemental_disclosure_source_ids",
+                [],
+            )
         )
         if model_family in AVAILABILITY_MODEL_FAMILIES
         else ()

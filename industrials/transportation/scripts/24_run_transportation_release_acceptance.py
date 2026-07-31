@@ -14,13 +14,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.reports import write_text_atomic  # noqa: E402
+from industrials.transportation.release_contract import (  # noqa: E402
+    DEFAULT_RELEASE_NAME,
+)
 from industrials.transportation.selected_feature_history import (  # noqa: E402
     read_json,
     sha256,
 )
 
 MODEL_FAMILY = "transportation"
-RELEASE_NAME = "code_aligned_zero_overlay_v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +34,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--asof", required=True)
+    parser.add_argument("--release-name", default=DEFAULT_RELEASE_NAME)
     parser.add_argument("--release-dir", type=Path, default=None)
     return parser.parse_args()
 
@@ -115,6 +118,7 @@ def artifact(path: Path) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     asof = str(args.asof)[:10]
+    release_name = str(args.release_name).strip()
     release_dir = (
         args.release_dir.expanduser().resolve()
         if args.release_dir
@@ -124,7 +128,7 @@ def main() -> int:
         / MODEL_FAMILY
         / "releases"
         / asof
-        / RELEASE_NAME
+        / release_name
     )
     acceptance_dir = release_dir / "acceptance"
     integrity_path = release_dir / "transportation_release_integrity_audit.json"
@@ -133,6 +137,8 @@ def main() -> int:
         "industrials/transportation/scripts/23_audit_transportation_release_integrity.py",
         "--asof",
         asof,
+        "--release-name",
+        release_name,
         "--release-dir",
         str(release_dir),
     ]
@@ -185,7 +191,7 @@ def main() -> int:
         "gate": "TRANSPORTATION_FINAL_RELEASE_ACCEPTANCE",
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
-        "release_name": RELEASE_NAME,
+        "release_name": release_name,
         "release_dir": str(release_dir),
         "git_commit_sha": head,
         "gate_count": len(results),

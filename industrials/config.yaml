@@ -96,6 +96,9 @@ model_families:
     financial:
       metric_registry: "transportation/data/transportation_metric_registry.yaml"
       concept_aliases_csv: "transportation/system_csvs/transportation_xbrl_concept_aliases.csv"
+      supplemental_disclosure_source_ids:
+        - "dedicated_parser_transportation_required_metric_repair_v1"
+        - "transportation_reviewed_required_metric_operand_v1"
       sec_sync_output_csv: "../output/industrials/transportation/stage4/sec_fundamentals_sync.csv"
       feature_output_csv: "../output/industrials/transportation/stage4/financial_feature_coverage.csv"
       metric_availability_output_csv: "../output/industrials/transportation/stage4/transportation_metric_availability.csv"
@@ -194,6 +197,20 @@ model_families:
       build_report_csv: "../output/industrials/transportation/historical_features/transportation_pit_feature_history_build.csv"
       build_manifest_json: "../output/industrials/transportation/historical_features/transportation_pit_feature_history_build.json"
       validation_output_json: "../output/industrials/transportation/historical_features/transportation_pit_feature_history_validation.json"
+    historical_scores:
+      # Daily rank snapshots follow the benchmark trading calendar. Financial
+      # and specialized values reuse the latest sealed month-end PIT snapshot
+      # at or before each date; this avoids repeated parsing and remains
+      # outcome-blind. Market and positioning features are exact-date builds.
+      start_date: "2019-01-02"
+      benchmark_ticker: IYT
+      benchmark_source_id: yahoo_finance_adjusted
+      # Freeze the policy used for retrospective score recomputation. Feature,
+      # filing, market, and membership dates remain their original PIT asofs.
+      policy_lock_date: "2026-07-30"
+      output_root: "../output/industrials/transportation/dashboard"
+      build_report_csv: "../output/industrials/transportation/score_history/transportation_daily_score_history_build.csv"
+      build_manifest_json: "../output/industrials/transportation/score_history/transportation_daily_score_history_build.json"
     scoring:
       feature_output_csv: "../output/industrials/transportation/stage6/transportation_scoring_features.csv"
       validation_output_json: "../output/industrials/transportation/stage6/transportation_scoring_validation.json"
@@ -610,5 +627,38 @@ oos_calibration_standards:
       robustness_benchmark_ticker: "ITA"
       snapshot_history_root: "../output/industrials/defense/dashboard"
       min_shadow_snapshots_for_promotion: 60
+      require_manifest_hash: true
+      require_portfolio_adapter_shadow_validation: true
+    transportation:
+      calibration_provenance_version: "transportation_generic_oos_v1"
+      calibration_validation_method: "weekly_pit_panel_validation_ic_holdout_backtest"
+      production_lock_registry_csv: "transportation/system_csvs/transportation_production_model_locks.csv"
+      primary_benchmark_ticker: "IYT"
+      robustness_benchmark_ticker: "XTN"
+      snapshot_history_root: "../output/industrials/transportation/dashboard"
+      research_output_root: "../output/industrials/transportation/generic_oos"
+      promotion_output_root: "../output/industrials/transportation/production_promotion"
+      development_start_date: "2019-01-02"
+      development_end_date: "2026-07-30"
+      weekly_anchor_date: "2018-12-30"
+      weekly_selection: "last"
+      horizons_sessions: [21, 63]
+      return_basis: "next_session_open_execution_excess"
+      train_fraction: 0.60
+      validation_fraction: 0.20
+      purge_calendar_days: 91
+      production_universe_policy: "operating_core_only"
+      transaction_cost_bps: 20.0
+      top_fraction: 0.20
+      minimum_cross_section: 5
+      min_shadow_snapshots_for_promotion: 60
+      absolute_gates:
+        minimum_snapshot_count: 12
+        minimum_outcome_coverage: 0.90
+        minimum_mean_ic: 0.00
+        minimum_mean_top_excess_net: 0.00
+        minimum_top_excess_hit_rate: 0.50
+        minimum_max_drawdown: -0.35
+        maximum_average_turnover: 0.90
       require_manifest_hash: true
       require_portfolio_adapter_shadow_validation: true

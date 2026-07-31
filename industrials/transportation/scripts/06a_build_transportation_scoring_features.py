@@ -30,6 +30,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", required=True)
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--membership-mode",
+        choices=("current", "pit"),
+        default="current",
+        help=(
+            "Use the current active seed or every deduplicated membership "
+            "effective at --asof. Historical score production must use pit."
+        ),
+    )
+    parser.add_argument(
+        "--metric-snapshot-mode",
+        choices=("exact", "latest"),
+        default="exact",
+        help=(
+            "Historical daily scoring may reuse the latest sealed metric "
+            "snapshot at or before --asof; current refresh stays exact."
+        ),
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -73,6 +91,12 @@ def main() -> int:
             conn,
             asof=asof,
             active_source_id=str(universe["seed_source_id"]),
+            membership_mode=args.membership_mode,
+            historical_source_id=str(
+                universe.get("historical_membership_source_id") or ""
+            ),
+            delisted_source_id=str(universe.get("delisted_source_id") or ""),
+            metric_snapshot_mode=args.metric_snapshot_mode,
             definitions=definitions,
             registry_version=registry_version,
             policy_path=policy_path,
@@ -88,6 +112,8 @@ def main() -> int:
         "acceptance": "PASS",
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
+        "membership_mode": args.membership_mode,
+        "metric_snapshot_mode": args.metric_snapshot_mode,
         "row_count": len(rows),
         "rank_ready_count": sum(row["rank_ready_flag"] == "1" for row in rows),
         "blocked_count": sum(row["rank_ready_flag"] == "0" for row in rows),

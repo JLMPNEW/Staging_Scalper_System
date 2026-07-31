@@ -207,12 +207,24 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
             )
         except ValueError:
             errors.append(f"{ticker}: invalid global/cohort rank")
-        if str(row.get("portfolio_candidate_gate") or "") != "0":
-            errors.append(f"{ticker}: shadow rank must have portfolio_candidate_gate=0")
-        if str(row.get("portfolio_candidate_status") or "") != "shadow_only":
-            errors.append(f"{ticker}: shadow rank must have portfolio_candidate_status=shadow_only")
-        if str(row.get("oos_score_valid_flag") or "") != "0":
-            errors.append(f"{ticker}: shadow rank must have oos_score_valid_flag=0")
+        oos_valid = str(row.get("oos_score_valid_flag") or "")
+        if oos_valid == "0":
+            if str(row.get("portfolio_candidate_gate") or "") != "0":
+                errors.append(f"{ticker}: shadow candidate gate must be 0")
+            if str(row.get("portfolio_candidate_status") or "") != "shadow_only":
+                errors.append(f"{ticker}: shadow status must be shadow_only")
+        elif oos_valid == "1":
+            ready = str(row.get("rank_ready_flag") or "") == "1"
+            expected = ("1", "eligible") if ready else ("0", "not_eligible")
+            if (
+                str(row.get("portfolio_candidate_gate") or "") != expected[0]
+                or str(row.get("portfolio_candidate_status") or "") != expected[1]
+            ):
+                errors.append(f"{ticker}: invalid locked-production candidate state")
+            if not row.get("oos_score_asof_date") or not row.get("calibration_lock_date"):
+                errors.append(f"{ticker}: locked production row lacks OOS/lock dates")
+        else:
+            errors.append(f"{ticker}: oos_score_valid_flag must be 0 or 1")
         if str(row.get("survivorship_corrected_panel_flag") or "") != "0":
             errors.append(f"{ticker}: current dashboard cannot claim survivorship correction")
     if sorted(ranks) != list(range(1, len(rows) + 1)):

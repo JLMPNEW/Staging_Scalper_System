@@ -1,0 +1,1 @@
+lock_id,effective_from,effective_to,lock_date,train_start_date,train_end_date,scoring_mode,score_model_version,validation_method,decision_manifest_path,decision_manifest_sha256,enabled,created_at_utc

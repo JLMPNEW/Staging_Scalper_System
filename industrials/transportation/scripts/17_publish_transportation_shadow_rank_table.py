@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import family_config, load_yaml, resolve_path  # noqa: E402
+from industrials.core.production_lock import load_effective_production_lock  # noqa: E402
 from industrials.transportation.contracts import read_rows  # noqa: E402
 from industrials.transportation.scoring import finalize_rank_rows, publish_dashboard  # noqa: E402
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG, MODEL_FAMILY  # noqa: E402
@@ -35,6 +36,12 @@ def main() -> int:
     config = load_yaml(config_path)
     scoring = family_config(config, MODEL_FAMILY)["scoring"]
     base_dir = config_path.parent
+    production_lock = load_effective_production_lock(
+        config,
+        model_family=MODEL_FAMILY,
+        base_dir=base_dir,
+        asof=asof,
+    )
     input_path = args.input_csv.expanduser().resolve() if args.input_csv else resolve_path(
         scoring["feature_output_csv"], base_dir=base_dir
     )
@@ -49,6 +56,7 @@ def main() -> int:
         score_model_version=str(scoring["score_model_version"]),
         model_version=str(scoring["model_version"]),
         scoring_contract_version=str(scoring["scoring_contract_version"]),
+        production_lock=production_lock,
     )
     manifest = publish_dashboard(
         output_dir=output_dir,

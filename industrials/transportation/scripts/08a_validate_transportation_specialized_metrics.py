@@ -166,11 +166,20 @@ def main() -> int:
             cohort=str(member["calibration_cohort_id"]), industry=str(member["industry"])
         ) and (not definition.birthdate or args.asof >= definition.birthdate)
         cash_burn = cash_burn_by_ticker.get(ticker)
+        extraction_method = str(row.get("extraction_method") or "")
+        reviewed_inapplicable = (
+            status == "NOT_APPLICABLE"
+            and extraction_method
+            in {
+                "reviewed_metric_availability_override",
+                "reviewed_aligned_annual_formula",
+            }
+        )
         conditionally_inapplicable = (
             metric_name == "cash_runway_years"
             and cash_burn is not None
             and cash_burn <= 0
-        )
+        ) or reviewed_inapplicable
         applies = registry_applies and not conditionally_inapplicable
         if not applies and status != "NOT_APPLICABLE":
             errors.append(f"{ticker}:{metric_name}: non-applicable metric status={status}")

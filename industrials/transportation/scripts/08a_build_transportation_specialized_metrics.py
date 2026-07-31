@@ -23,6 +23,14 @@ from industrials.transportation.financial_contract import (  # noqa: E402
     registry_summary,
 )
 from industrials.transportation.disclosure_candidates import EXTRACTION_METHOD  # noqa: E402
+from industrials.transportation.reviewed_annual_metrics import (  # noqa: E402
+    AnnualMetricResolution,
+    load_reviewed_annual_resolutions,
+    load_scope_pairs,
+)
+from industrials.transportation.reviewed_operand_repair import (  # noqa: E402
+    SOURCE_ID as REVIEWED_OPERAND_SOURCE_ID,
+)
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG, MODEL_FAMILY  # noqa: E402
 
 
@@ -162,6 +170,38 @@ def latest_row(conn: Any, *, table: str, ticker: str, asof: str) -> dict[str, An
     return dict(row) if row is not None else {}
 
 
+def load_reviewed_metric_overrides(
+    conn: Any,
+    *,
+    asof: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    exists = conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type='table'
+          AND name='sec_parser_production_metric_override'
+        """
+    ).fetchone()
+    if exists is None:
+        return {}
+    output: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in conn.execute(
+        """
+        SELECT ticker, metric_name, availability_status, status_reason,
+               evidence_key, valid_from
+        FROM sec_parser_production_metric_override
+        WHERE model_family=? AND active=1
+          AND valid_from<=?
+          AND COALESCE(valid_to, '9999-12-31')>=?
+        ORDER BY ticker, metric_name, valid_from, evidence_key
+        """,
+        (MODEL_FAMILY, asof, asof),
+    ).fetchall():
+        output[(str(row["ticker"]), str(row["metric_name"]))] = dict(row)
+    return output
+
+
 def candidate_row(
     conn: Any,
     *,
@@ -214,6 +254,10 @@ def classify_metric(
     member: dict[str, Any],
     market: dict[str, Any],
     financial: dict[str, Any],
+    reviewed_overrides: dict[tuple[str, str], dict[str, Any]],
+    reviewed_annual_resolutions: dict[
+        tuple[str, str], AnnualMetricResolution
+    ],
     asof: str,
     max_candidate_staleness_days: int,
 ) -> dict[str, Any]:
@@ -255,6 +299,53 @@ def classify_metric(
             "extraction_method": "feature_birthdate_gate",
             "confidence": 1.0,
             "status_reason": f"metric_birthdate={metric.birthdate}",
+        }
+    reviewed_override = reviewed_overrides.get((ticker, metric.metric_id))
+    if reviewed_override is not None:
+        status = str(reviewed_override["availability_status"])
+        if status != "NOT_APPLICABLE":
+            raise ValueError(
+                f"Unsupported transportation reviewed override status={status}"
+            )
+        return {
+            **base,
+            "availability_status": status,
+            "extraction_method": "reviewed_metric_availability_override",
+            "confidence": 1.0,
+            "status_reason": str(reviewed_override["status_reason"]),
+            "provenance_json": json.dumps(
+                {
+                    "evidence_key": reviewed_override["evidence_key"],
+                    "valid_from": reviewed_override["valid_from"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+    reviewed_annual = reviewed_annual_resolutions.get(
+        (ticker, metric.metric_id)
+    )
+    if reviewed_annual is not None:
+        return {
+            **base,
+            "availability_status": reviewed_annual.availability_status,
+            "metric_value": (
+                reviewed_annual.metric_value
+                if reviewed_annual.metric_value is not None
+                else ""
+            ),
+            "unit": reviewed_annual.unit,
+            "source_id": REVIEWED_OPERAND_SOURCE_ID,
+            "accession_number": reviewed_annual.accession_number,
+            "filing_date": reviewed_annual.filing_date,
+            "period_start": reviewed_annual.period_start,
+            "period_end": reviewed_annual.period_end,
+            "taxonomy": reviewed_annual.taxonomy,
+            "concept_name": reviewed_annual.concept_name,
+            "extraction_method": "reviewed_aligned_annual_formula",
+            "confidence": reviewed_annual.confidence,
+            "status_reason": reviewed_annual.status_reason,
+            "provenance_json": reviewed_annual.provenance_json,
         }
     cash_burn = number(financial.get("cash_burn_ttm_usd"))
     if (
@@ -406,6 +497,16 @@ def main() -> int:
         )
         if not members:
             raise ValueError(f"No active transportation members at {asof}")
+        reviewed_overrides = load_reviewed_metric_overrides(
+            conn,
+            asof=asof,
+        )
+        repair_scope_pairs = load_scope_pairs()
+        reviewed_annual_resolutions = load_reviewed_annual_resolutions(
+            conn,
+            asof=asof,
+            scope_pairs=repair_scope_pairs,
+        )
         report: list[dict[str, Any]] = []
         for member in members:
             ticker = str(member["ticker"])
@@ -419,6 +520,8 @@ def main() -> int:
                         member=member,
                         market=market,
                         financial=financial,
+                        reviewed_overrides=reviewed_overrides,
+                        reviewed_annual_resolutions=reviewed_annual_resolutions,
                         asof=asof,
                         max_candidate_staleness_days=max_candidate_staleness_days,
                     )
