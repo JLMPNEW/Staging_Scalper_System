@@ -1,8 +1,13 @@
 # Live Expectations & Risk Monitor — Taxonomy, Scoring, Schema (v1 spec)
 
+> **Normative amendment (2026-07-28):**
+> `EXPECTATIONS_MONITOR_AMENDMENT_2026-07-28.md` overrides conflicting universe, provider,
+> phasing, and levels-engine language in this document.
+>
+> **Authoritative implementation sequence:** `portfolio_layer/MONITOR_LEVELS_IMPLEMENTATION_PLAN.md`.
+
 Status: DESIGN — no code yet. Home: `portfolio_layer/expectations_monitor/`.
-Scope: **investable_eligible names only** (currently 327), refreshed from each sealed Stage 1
-`stocks_scores.csv`. Free/low-cost sources only; Gemini strictly free-tier, rules-first.
+Scope: **superseded by the normative amendment above**. The effective universe is all sealed Stage 1 names UNION open broker holdings UNION current final-target names; priority affects cadence, not holdings coverage.
 
 Core equation (posterior = prior + evidence):
 

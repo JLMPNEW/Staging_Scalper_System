@@ -10,21 +10,24 @@ CERS,Cerus,biotech,
 CNMD,CONMED,med_devices,
 CVRX,CVRx,med_devices,
 DCTH,Delcath Systems,biotech,drug/device hybrid; US-approved as a drug
+DDD,3D Systems Corporation,technology_hardware,dual-scored with machinery; technology hardware is the canonical economic sleeve
 DXCM,DexCom,med_devices,
 ENOV,Enovis,med_devices,
 EW,Edwards Lifesciences,med_devices,
+FTAI,FTAI Aviation Ltd.,defense,dual-scored with transportation; defense owns the aerospace engine and MRO exposure
 GKOS,Glaukos,med_devices,
 IART,Integra LifeSciences,med_devices,
 IQV,IQVIA,biotech,
 LIVN,LivaNova,med_devices,
 MDT,Medtronic,med_devices,
-NTAP,NetApp,technology_hardware,storage hardware vendor
 MYGN,Myriad Genetics,biotech,
 NEO,NeoGenomics,biotech,
 NPCE,NeuroPace,med_devices,
+NTAP,NetApp,technology_hardware,storage hardware vendor
 OPK,OPKO Health,biotech,
-OSIS,OSI Systems,technology_hardware,dual-scored with defense sleeve; hardware owns until defense OOS promotion
-PLTR,Palantir Technologies,software_infrastructure,dual-scored with defense sleeve; software owns until defense OOS promotion
+OSIS,OSI Systems,technology_hardware,dual-scored with defense; technology hardware remains canonical after defense promotion
+OUST,"Ouster, Inc.",technology_hardware,dual-scored with machinery; technology hardware owns the lidar sensor exposure
+PLTR,Palantir Technologies,software_infrastructure,dual-scored with defense; software infrastructure remains canonical after defense promotion
 PODD,Insulet,med_devices,
 PRCT,PROCEPT BioRobotics,med_devices,
 PSNL,Personalis,biotech,

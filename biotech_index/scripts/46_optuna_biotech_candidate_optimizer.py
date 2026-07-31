@@ -39,6 +39,7 @@ REQUIRED_IC_FILES = (
     "feature_ic_summary.csv",
 )
 PROMOTABLE_IC_CLASSES = frozenset({"promote_candidate", "cohort_specific_only"})
+AUTHORIZED_FACTOR_VALIDATION_CONTRACT = "factor_validation_v1"
 SUCCESS_MANIFEST_STATUSES = frozenset({"success", "completed", "complete"})
 WEIGHT_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "w_lcb": (0.50, 2.00),
@@ -149,6 +150,27 @@ def as_bool(raw: object, default: bool = False) -> bool:
     if text in {"0", "false", "f", "no", "n", "fail", "failed", "disabled", "off"}:
         return False
     return default
+
+
+def authorization_output_fields(authorization: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "factor_validation_authorization_status": str(
+            authorization.get("authorization_status") or "research_only"
+        ),
+        "production_promotion_authorized": int(
+            bool(authorization.get("production_promotion_authorized"))
+        ),
+        "factor_validation_contracts": "|".join(
+            str(value) for value in authorization.get("contract_versions", []) if str(value)
+        ),
+        "factor_validation_evidence_statuses": "|".join(
+            str(value) for value in authorization.get("evidence_statuses", []) if str(value)
+        ),
+        "authorized_factor_count": int(authorization.get("authorized_factor_count") or 0),
+        "research_candidate_factor_count": int(
+            authorization.get("research_candidate_factor_count") or 0
+        ),
+    }
 
 
 def to_float(raw: object, default: float | None = None) -> float | None:
@@ -378,18 +400,48 @@ def validate_clean_qa(sequence_dir: Path, *, min_panel_dates: int, allow_missing
     ]
 
 
-def validate_ic(feature_ic_dir: Path, *, min_promotable: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def validate_ic(
+    feature_ic_dir: Path,
+    *,
+    min_promotable: int,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
     rows = read_csv(feature_ic_dir / "feature_ic_classification.csv")
     class_counts: dict[str, int] = {}
-    promotable: set[str] = set()
+    research_candidates: set[str] = set()
+    authorized_candidates: set[str] = set()
+    contract_versions: set[str] = set()
+    evidence_statuses: set[str] = set()
     for row in rows:
         classification = str(row.get("classification") or "").strip()
         factor = str(row.get("factor") or "").strip()
+        contract = str(row.get("factor_validation_contract") or "").strip()
+        evidence_status = str(row.get("evidence_status") or "").strip()
+        if contract:
+            contract_versions.add(contract)
+        if evidence_status:
+            evidence_statuses.add(evidence_status)
         if not classification:
             continue
         class_counts[classification] = class_counts.get(classification, 0) + 1
         if factor and classification in PROMOTABLE_IC_CLASSES:
-            promotable.add(factor)
+            research_candidates.add(factor)
+            if (
+                contract == AUTHORIZED_FACTOR_VALIDATION_CONTRACT
+                and as_bool(row.get("promotion_eligible"), False)
+            ):
+                authorized_candidates.add(factor)
+    minimum_research_candidates = max(0, int(min_promotable))
+    minimum_authorized_candidates = max(1, int(min_promotable))
+    production_authorized = len(authorized_candidates) >= minimum_authorized_candidates
+    authorization = {
+        "authorization_status": "authorized" if production_authorized else "research_only",
+        "production_promotion_authorized": production_authorized,
+        "authorized_factor_count": len(authorized_candidates),
+        "research_candidate_factor_count": len(research_candidates),
+        "contract_versions": sorted(contract_versions),
+        "evidence_statuses": sorted(evidence_statuses),
+        "required_contract": AUTHORIZED_FACTOR_VALIDATION_CONTRACT,
+    }
     gate_rows = [
         {
             "gate": "feature_ic_classification_rows",
@@ -399,12 +451,25 @@ def validate_ic(feature_ic_dir: Path, *, min_promotable: int) -> tuple[list[dict
         },
         {
             "gate": "feature_ic_promote_or_cohort_specific_factor_count",
-            "status": "PASS" if len(promotable) >= min_promotable else "FAIL",
-            "value": len(promotable),
-            "details": f"min_promote_or_cohort_factors={min_promotable}",
+            "status": "PASS" if len(research_candidates) >= minimum_research_candidates else "FAIL",
+            "value": len(research_candidates),
+            "details": (
+                f"research_only_candidates; min_promote_or_cohort_factors="
+                f"{minimum_research_candidates}"
+            ),
+        },
+        {
+            "gate": "feature_ic_production_promotion_authorization",
+            "status": "PASS" if production_authorized else "WARN",
+            "value": len(authorized_candidates),
+            "details": (
+                f"required_contract={AUTHORIZED_FACTOR_VALIDATION_CONTRACT}; "
+                f"authorization_status={authorization['authorization_status']}; "
+                f"contracts={','.join(sorted(contract_versions)) or 'missing'}"
+            ),
         },
     ]
-    return gate_rows, class_counts
+    return gate_rows, class_counts, authorization
 
 
 def candidate_key(row: dict[str, str]) -> str:
@@ -772,8 +837,17 @@ def main() -> None:
             }
         )
     ic_file_gates = [row for row in gate_rows if str(row.get("gate") or "").startswith("feature_ic_file:")]
+    ic_authorization: dict[str, Any] = {
+        "authorization_status": "research_only",
+        "production_promotion_authorized": False,
+        "authorized_factor_count": 0,
+        "research_candidate_factor_count": 0,
+        "contract_versions": [],
+        "evidence_statuses": ["missing_or_unreadable"],
+        "required_contract": AUTHORIZED_FACTOR_VALIDATION_CONTRACT,
+    }
     if ic_file_gates and all(row["status"] == "PASS" for row in ic_file_gates):
-        ic_gates, ic_class_counts = validate_ic(
+        ic_gates, ic_class_counts, ic_authorization = validate_ic(
             feature_ic_dir,
             min_promotable=max(0, int(args.min_promote_or_cohort_factors)),
         )
@@ -781,6 +855,15 @@ def main() -> None:
     else:
         ic_class_counts = {}
 
+    authorization_fields = authorization_output_fields(ic_authorization)
+    write_json(
+        output_dir / "factor_validation_authorization.json",
+        {
+            **ic_authorization,
+            **authorization_fields,
+            "feature_ic_dir": str(feature_ic_dir),
+        },
+    )
     write_csv(output_dir / "optuna_gate_report.csv", gate_rows)
     gate_failures = [row for row in gate_rows if row["status"] == "FAIL"]
     if gate_failures:
@@ -810,8 +893,14 @@ def main() -> None:
         max_loss40=float(args.max_loss40_rate_pct),
         max_top3=float(args.max_top3_gain_contribution_pct),
     )
-    write_csv(output_dir / "optuna_survivor_candidates.csv", survivors)
-    write_csv(output_dir / "optuna_rejected_candidates.csv", rejected)
+    write_csv(
+        output_dir / "optuna_survivor_candidates.csv",
+        [{**row, **authorization_fields} for row in survivors],
+    )
+    write_csv(
+        output_dir / "optuna_rejected_candidates.csv",
+        [{**row, **authorization_fields} for row in rejected],
+    )
     if not survivors:
         write_json(
             output_dir / "optuna_optimizer_manifest.json",
@@ -850,6 +939,7 @@ def main() -> None:
                 "top_k_survivors": max(1, int(args.top_k_survivors)),
                 "weight_bounds": weight_bounds,
                 "elapsed_sec": round(time.perf_counter() - start, 3),
+                **authorization_fields,
             },
         )
         LOGGER.info("Optuna candidate optimizer %s: survivors=%d output_dir=%s", status, len(survivors), output_dir)
@@ -858,7 +948,7 @@ def main() -> None:
     if len(survivors) < 2:
         # With a single survivor every z-scored metric is 0, so every trial objective is 0
         # and the "best" Optuna trial would be arbitrary. Emit the survivor deterministically.
-        best = {"selection_method": "single_survivor_short_circuit", **survivors[0]}
+        best = {"selection_method": "single_survivor_short_circuit", **survivors[0], **authorization_fields}
         write_csv(output_dir / "optuna_trial_results.csv", [])
         write_csv(output_dir / "optuna_best_candidate.csv", [best])
         write_json(
@@ -878,6 +968,7 @@ def main() -> None:
                 "best": best,
                 "ic_class_counts": ic_class_counts,
                 "elapsed_sec": round(time.perf_counter() - start, 3),
+                **authorization_fields,
                 "notes": [
                     "Only one candidate structure survived calibration constraints; Optuna trials were skipped.",
                     "Weight search over a single survivor is degenerate (all normalized objectives are 0).",
@@ -902,8 +993,11 @@ def main() -> None:
         log_every=int(args.optuna_log_every),
         weight_bounds=weight_bounds,
     )
-    write_csv(output_dir / "optuna_trial_results.csv", trial_rows)
-    write_csv(output_dir / "optuna_best_candidate.csv", [best])
+    write_csv(
+        output_dir / "optuna_trial_results.csv",
+        [{**row, **authorization_fields} for row in trial_rows],
+    )
+    write_csv(output_dir / "optuna_best_candidate.csv", [{**best, **authorization_fields}])
     write_json(
         output_dir / "optuna_optimizer_manifest.json",
         {
@@ -925,6 +1019,7 @@ def main() -> None:
             "best": best,
             "ic_class_counts": ic_class_counts,
             "elapsed_sec": round(time.perf_counter() - start, 3),
+            **authorization_fields,
             "notes": [
                 "This optimizer selects among candidate structures that already survived calibration constraints.",
                 "It does not discover factor structure from scratch.",

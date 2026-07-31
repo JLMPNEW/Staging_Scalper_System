@@ -18,6 +18,8 @@ from industrials.core.db import connect  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
 from industrials.machinery.recoverable_coverage import (  # noqa: E402
     LEDGER_FIELDS,
+    ISSUER_IR_REQUEST_FIELDS,
+    build_issuer_ir_recovery_requests,
     build_recovery_evidence,
     recovery_summary,
     replace_recovery_evidence,
@@ -60,6 +62,8 @@ def main() -> int:
         rows = build_recovery_evidence(conn, asof=asof)
         replace_recovery_evidence(conn, asof=asof, rows=rows)
     summary = recovery_summary(rows, asof=asof)
+    issuer_ir_requests = build_issuer_ir_recovery_requests(rows)
+    summary["issuer_ir_request_count"] = len(issuer_ir_requests)
     queue: list[dict[str, Any]] = []
     for rank, row in enumerate(
         (item for item in rows if item["recoverability"] in {"HIGH", "MEDIUM"}),
@@ -69,6 +73,11 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     write_csv_atomic(output_dir / "machinery_metric_recovery_evidence.csv", LEDGER_FIELDS, rows)
     write_csv_atomic(output_dir / "machinery_metric_recovery_queue.csv", QUEUE_FIELDS, queue)
+    write_csv_atomic(
+        output_dir / "machinery_issuer_ir_recovery_requests.csv",
+        ISSUER_IR_REQUEST_FIELDS,
+        issuer_ir_requests,
+    )
     write_text_atomic(
         output_dir / "machinery_metric_recovery_summary.json",
         json.dumps(summary, indent=2, sort_keys=True) + "\n",

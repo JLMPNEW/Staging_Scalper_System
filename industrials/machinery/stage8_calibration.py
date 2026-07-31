@@ -16,6 +16,10 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from industrials.core.config import cfg_get, resolve_path
 from industrials.core.reports import write_csv_atomic
+from industrials.machinery.production_universe import (
+    configured_universe_policy,
+    production_universe_eligible,
+)
 from industrials.machinery.scoring import (
     COMPONENT_FIELDS as SCORING_COMPONENT_FIELDS,
 )
@@ -46,6 +50,8 @@ PANEL_BASE_FIELDS = (
     "calibration_use",
     "development_stage",
     "membership_status",
+    "membership_start_date",
+    "membership_end_date",
     "rank_ready_flag",
     "model_status",
     "score_confidence",
@@ -54,7 +60,6 @@ PANEL_BASE_FIELDS = (
     "latest_adj_close",
     "avg_dollar_volume_60d",
     "market_cap",
-    "latest_borrow_fee_rate",
     "market_cap_source",
     "liquidity_capacity_reason",
     "market_feature_asof_date",
@@ -69,6 +74,10 @@ PANEL_BASE_FIELDS = (
     "source_sidecar_path",
     "base_panel_eligible_flag",
     "base_panel_eligible_reason",
+    "core_model_eligible_flag",
+    "core_model_eligible_reason",
+    "execution_universe_eligible_flag",
+    "execution_universe_eligible_reason",
     "split_name",
 )
 SOURCE_INDEX_FIELDS = (
@@ -103,6 +112,9 @@ DIAGNOSTIC_FIELDS = (
 )
 TRIAL_FIELDS = (
     "trial_number",
+    "candidate_id",
+    "pre_registered_flag",
+    "candidate_registry_sha256",
     "search_method",
     "train_objective",
     "train_avg_top_turnover",
@@ -111,6 +123,7 @@ TRIAL_FIELDS = (
 )
 WALK_FORWARD_FIELDS = (
     "block",
+    "candidate_id",
     "train_start",
     "train_end",
     "test_start",
@@ -122,9 +135,124 @@ WALK_FORWARD_FIELDS = (
     "objective_improvement",
     "candidate_wins",
     "candidate_gate_pass",
+    "candidate_fold_product_pass",
     "candidate_avg_top_turnover",
     "candidate_avg_top_cohort_share",
     "weights_json",
+)
+RETURN_RECONCILIATION_FIELDS = (
+    "split_name",
+    "horizon_days",
+    "core_observation_count",
+    "close_available_count",
+    "execution_available_count",
+    "both_available_count",
+    "execution_coverage",
+    "terminal_outcome_count",
+    "unresolved_terminal_count",
+    "mean_close_excess_return",
+    "mean_execution_excess_return",
+    "mean_execution_minus_close",
+    "close_execution_correlation",
+)
+MODEL_DATE_DIAGNOSTIC_FIELDS = (
+    "model",
+    "split_name",
+    "asof_date",
+    "calendar_year",
+    "horizon_days",
+    "ranked_cross_section",
+    "outcome_coverage",
+    "ic",
+    "top_excess",
+    "top_excess_net",
+    "spread",
+    "spread_net",
+    "top_turnover",
+    "top_transaction_cost",
+    "bottom_transaction_cost",
+)
+QUANTILE_DIAGNOSTIC_FIELDS = (
+    "model",
+    "split_name",
+    "horizon_days",
+    "universe_policy",
+    "rank_direction",
+    "bucket_count",
+    "quantile",
+    "date_count",
+    "observation_count",
+    "missing_outcome_count",
+    "mean_execution_excess_return",
+    "hit_rate",
+)
+COMPONENT_ABLATION_FIELDS = (
+    "model",
+    "split_name",
+    "component",
+    "ablation_method",
+    "baseline_objective",
+    "ablated_objective",
+    "objective_contribution",
+    "standalone_objective",
+)
+SLEEVE_MEMBERSHIP_FIELDS = (
+    "model",
+    "split_name",
+    "asof_date",
+    "calendar_year",
+    "horizon_days",
+    "universe_policy",
+    "rank_direction",
+    "ticker",
+    "calibration_cohort",
+    "score",
+    "rank",
+    "ranked_cross_section",
+    "quantile",
+    "configured_sleeve",
+    "sleeve_weight",
+    "outcome_available_flag",
+    "execution_excess_return",
+    "gross_return_contribution",
+)
+CANDIDATE_FOLD_FIELDS = (
+    "candidate_id",
+    "candidate_role",
+    "block",
+    "test_start",
+    "test_end",
+    "test_date_count",
+    "objective",
+    "product_gate_pass",
+    "gate_reasons",
+    "weights_json",
+)
+REGIME_DIAGNOSTIC_FIELDS = (
+    "model",
+    "split_name",
+    "regime_type",
+    "regime_value",
+    "horizon_days",
+    "date_count",
+    "mean_top_excess_net",
+    "median_top_excess_net",
+    "top_excess_net_hit_rate",
+    "top_excess_net_newey_west_t",
+    "top_excess_net_lower_confidence_bound",
+    "mean_ic",
+    "mean_spread_net",
+)
+TICKER_ATTRIBUTION_FIELDS = (
+    "model",
+    "split_name",
+    "horizon_days",
+    "configured_sleeve",
+    "ticker",
+    "membership_dates",
+    "mean_execution_excess_return",
+    "mean_gross_return_contribution",
+    "total_mean_sleeve_contribution",
 )
 
 
@@ -148,6 +276,13 @@ class SnapshotArtifact:
 
 
 @dataclass(frozen=True)
+class RankedEvaluationPopulation:
+    ordered: tuple[tuple[Mapping[str, str], float], ...]
+    top: tuple[tuple[Mapping[str, str], float], ...]
+    bottom: tuple[tuple[Mapping[str, str], float], ...]
+
+
+@dataclass(frozen=True)
 class Stage8Paths:
     root: Path
     panel_csv: Path
@@ -155,6 +290,15 @@ class Stage8Paths:
     splits_csv: Path
     panel_manifest_json: Path
     diagnostics_csv: Path
+    return_reconciliation_csv: Path
+    model_date_diagnostics_csv: Path
+    quantile_diagnostics_csv: Path
+    component_ablation_csv: Path
+    sleeve_membership_csv: Path
+    candidate_registry_json: Path
+    candidate_fold_comparison_csv: Path
+    regime_diagnostics_csv: Path
+    ticker_attribution_csv: Path
     trials_csv: Path
     static_summary_json: Path
     walk_forward_csv: Path
@@ -173,6 +317,33 @@ def stage8_paths(root: Path) -> Stage8Paths:
         splits_csv=root / "machinery_stage8_splits.csv",
         panel_manifest_json=root / "machinery_stage8_panel_manifest.json",
         diagnostics_csv=root / "machinery_stage8_signal_diagnostics.csv",
+        return_reconciliation_csv=(
+            root / "machinery_stage8_return_reconciliation.csv"
+        ),
+        model_date_diagnostics_csv=(
+            root / "machinery_stage8_model_date_diagnostics.csv"
+        ),
+        quantile_diagnostics_csv=(
+            root / "machinery_stage8_quantile_diagnostics.csv"
+        ),
+        component_ablation_csv=(
+            root / "machinery_stage8_component_ablation.csv"
+        ),
+        sleeve_membership_csv=(
+            root / "machinery_stage8_sleeve_membership.csv"
+        ),
+        candidate_registry_json=(
+            root / "machinery_stage8_candidate_registry.json"
+        ),
+        candidate_fold_comparison_csv=(
+            root / "machinery_stage8_candidate_fold_comparison.csv"
+        ),
+        regime_diagnostics_csv=(
+            root / "machinery_stage8_regime_diagnostics.csv"
+        ),
+        ticker_attribution_csv=(
+            root / "machinery_stage8_ticker_attribution.csv"
+        ),
         trials_csv=root / "machinery_stage8_calibration_trials.csv",
         static_summary_json=root / "machinery_stage8_static_summary.json",
         walk_forward_csv=root / "machinery_stage8_walk_forward_blocks.csv",
@@ -249,9 +420,13 @@ def fmt(raw: object, digits: int = 10) -> str:
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = list(reader.fieldnames or [])
+        if len(fields) != len(set(fields)):
+            raise ValueError(f"CSV contains duplicate columns: {path}")
         return [
             {str(key): str(value or "") for key, value in row.items()}
-            for row in csv.DictReader(handle)
+            for row in reader
         ]
 
 
@@ -305,7 +480,20 @@ def stdev(values: Sequence[float]) -> float | None:
     )
 
 
-def newey_west_t(values: Sequence[float], lags: int) -> float | None:
+def median(values: Sequence[float]) -> float | None:
+    clean = sorted(value for value in values if math.isfinite(value))
+    if not clean:
+        return None
+    midpoint = len(clean) // 2
+    if len(clean) % 2:
+        return clean[midpoint]
+    return (clean[midpoint - 1] + clean[midpoint]) / 2.0
+
+
+def newey_west_mean_standard_error(
+    values: Sequence[float],
+    lags: int,
+) -> float | None:
     if len(values) < 3:
         return None
     average = sum(values) / len(values)
@@ -323,8 +511,37 @@ def newey_west_t(values: Sequence[float], lags: int) -> float | None:
         )
     if long_run_variance <= 0:
         return None
-    standard_error = math.sqrt(long_run_variance / len(values))
+    return math.sqrt(long_run_variance / len(values))
+
+
+def newey_west_t(values: Sequence[float], lags: int) -> float | None:
+    if len(values) < 3:
+        return None
+    average = sum(values) / len(values)
+    standard_error = newey_west_mean_standard_error(values, lags)
+    if standard_error is None:
+        return None
     return average / standard_error if standard_error > 0 else None
+
+
+def _bootstrap_mean_lower_bound(
+    values: Sequence[float],
+    *,
+    confidence: float,
+    simulations: int,
+    seed: int,
+) -> float | None:
+    if len(values) < 2 or simulations < 1 or not 0.5 < confidence < 1.0:
+        return None
+    rng = random.Random(seed)
+    sample_size = len(values)
+    means = sorted(
+        sum(values[rng.randrange(sample_size)] for _ in range(sample_size))
+        / sample_size
+        for _ in range(simulations)
+    )
+    index = max(0, math.floor((1.0 - confidence) * simulations) - 1)
+    return means[index]
 
 
 def quintile_spread(
@@ -469,7 +686,10 @@ def _load_prices(
         close = as_float(row["close"])
         open_price = as_float(row["open"])
         value = adjusted if adjusted is not None else close
-        if value is None or value <= 0:
+        # Preserve an explicit zero terminal quote so a reviewed bankruptcy
+        # can realize a -100% outcome. Entry and ordinary exit prices still
+        # require strictly positive values below.
+        if value is None or value < 0:
             continue
         adjusted_open = open_price
         if (
@@ -512,6 +732,8 @@ def _return_window(
         if anchor_index < 0:
             continue
         anchor = series[anchor_index]
+        if anchor.value <= 0:
+            continue
         if (asof_date - anchor.bar_date).days > 10:
             continue
         forward_index = anchor_index + horizon
@@ -529,9 +751,18 @@ def _execution_window(
     asof: str,
     horizon: int,
     source_order: Sequence[str],
-) -> tuple[PricePoint | None, PricePoint | None, str]:
+    terminal_date: date | None = None,
+    horizon_end: date | None = None,
+    max_terminal_staleness_days: int = 10,
+) -> tuple[PricePoint | None, PricePoint | None, str, str]:
     asof_date = parse_date(asof, field="asof_date")
     partial = False
+    terminal_expected = bool(
+        terminal_date is not None
+        and horizon_end is not None
+        and asof_date < terminal_date <= horizon_end
+    )
+    terminal_candidate: tuple[PricePoint, PricePoint] | None = None
     for source in source_order:
         series = list(series_by_source.get(source, ()))
         if not series:
@@ -545,22 +776,46 @@ def _execution_window(
             continue
         entry_index = signal_index + 1
         exit_index = entry_index + horizon
-        if entry_index >= len(series) or exit_index >= len(series):
+        if entry_index >= len(series):
             partial = True
             continue
         entry = series[entry_index]
-        exit_point = series[exit_index]
-        if (
-            entry.open_value is None
-            or entry.open_value <= 0
-            or exit_point.open_value is None
-            or exit_point.open_value <= 0
-        ):
+        if entry.open_value is None or entry.open_value <= 0:
             continue
-        return entry, exit_point, ""
+        if exit_index < len(series) and not terminal_expected:
+            exit_point = series[exit_index]
+            if exit_point.open_value is not None and exit_point.open_value > 0:
+                return entry, exit_point, "", "scheduled_horizon"
+        partial = True
+        if terminal_expected and terminal_date is not None:
+            eligible_terminal_points = [
+                point
+                for point in series[entry_index:]
+                if point.bar_date <= terminal_date
+            ]
+            if eligible_terminal_points:
+                terminal_exit = eligible_terminal_points[-1]
+                if (
+                    0 <= (terminal_date - terminal_exit.bar_date).days
+                    <= max_terminal_staleness_days
+                    and terminal_exit.value >= 0
+                ):
+                    terminal_candidate = terminal_candidate or (
+                        entry,
+                        terminal_exit,
+                    )
+    if terminal_candidate is not None:
+        return (
+            terminal_candidate[0],
+            terminal_candidate[1],
+            "",
+            "terminal_membership_exit",
+        )
+    if terminal_expected:
+        return None, None, "missing_terminal_outcome", ""
     if partial:
-        return None, None, "execution_window_crosses_development_end"
-    return None, None, "missing_d1_open_execution_price"
+        return None, None, "execution_window_crosses_development_end", ""
+    return None, None, "missing_d1_open_execution_price", ""
 
 
 def _split_map(
@@ -675,7 +930,9 @@ def _horizon_fields(horizons: Sequence[int]) -> tuple[str, ...]:
                 f"execution_exit_date_{prefix}",
                 f"execution_entry_price_{prefix}",
                 f"execution_exit_price_{prefix}",
+                f"execution_exit_price_basis_{prefix}",
                 f"execution_return_{prefix}",
+                f"execution_outcome_type_{prefix}",
                 f"benchmark_execution_price_source_id_{prefix}",
                 f"benchmark_execution_entry_date_{prefix}",
                 f"benchmark_execution_exit_date_{prefix}",
@@ -704,6 +961,10 @@ def build_panel(
     )
     if end >= sealed_start:
         raise ValueError("Stage 8 development window overlaps the sealed window")
+    core_universe_policy = configured_universe_policy(
+        config,
+        config_key=CONFIG_KEY,
+    )
     snapshot_root = resolve_path(
         cfg_get(config, f"{CONFIG_KEY}.snapshot_root"),
         base_dir=config_path.parent,
@@ -734,6 +995,23 @@ def build_panel(
     ]
     if not horizons or any(item <= 0 for item in horizons):
         raise ValueError("Stage 8 horizons must be positive")
+    calibration_return_basis = str(
+        cfg_get(config, f"{CONFIG_KEY}.calibration_return_basis", "")
+    )
+    if calibration_return_basis != "next_session_open_execution_excess":
+        raise ValueError(
+            "Stage 8 calibration_return_basis must be "
+            "next_session_open_execution_excess"
+        )
+    terminal_staleness_days = int(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.terminal_price_max_staleness_days",
+            10,
+        )
+    )
+    if terminal_staleness_days < 0:
+        raise ValueError("terminal_price_max_staleness_days cannot be negative")
     embargo_days = int(
         cfg_get(config, f"{CONFIG_KEY}.embargo_trading_days", 21)
     )
@@ -808,6 +1086,17 @@ def build_panel(
         }
         for source_row in snapshot.rows:
             ticker = str(source_row.get("ticker") or "").upper()
+            membership_end_raw = str(
+                source_row.get("membership_end_date") or ""
+            ).strip()
+            membership_end = (
+                parse_date(
+                    membership_end_raw,
+                    field="membership_end_date",
+                )
+                if membership_end_raw
+                else None
+            )
             source_violation = _source_date_violation(
                 source_row,
                 snapshot.asof_date,
@@ -846,6 +1135,14 @@ def build_panel(
             if source_violation:
                 reasons.append(source_violation)
             base_eligible = not reasons
+            core_eligible = base_eligible and production_universe_eligible(
+                source_row,
+                policy=core_universe_policy,
+            )
+            next_open_eligible = core_eligible and (
+                membership_end is None
+                or membership_end > parse_date(snapshot.asof_date)
+            )
             record = {
                 field: str(source_row.get(field) or "")
                 for field in PANEL_BASE_FIELDS
@@ -856,6 +1153,10 @@ def build_panel(
                     "source_sidecar_path",
                     "base_panel_eligible_flag",
                     "base_panel_eligible_reason",
+                    "core_model_eligible_flag",
+                    "core_model_eligible_reason",
+                    "execution_universe_eligible_flag",
+                    "execution_universe_eligible_reason",
                     "split_name",
                 }
             }
@@ -871,6 +1172,28 @@ def build_panel(
                         if base_eligible
                         else ";".join(dict.fromkeys(reasons))
                     ),
+                    "core_model_eligible_flag": (
+                        "1" if core_eligible else "0"
+                    ),
+                    "core_model_eligible_reason": (
+                        "eligible"
+                        if core_eligible
+                        else "base_panel_ineligible"
+                        if not base_eligible
+                        else "development_stage_core_sleeve_excluded"
+                    ),
+                    "execution_universe_eligible_flag": (
+                        "1" if next_open_eligible else "0"
+                    ),
+                    "execution_universe_eligible_reason": (
+                        "eligible"
+                        if next_open_eligible
+                        else "base_panel_ineligible"
+                        if not base_eligible
+                        else "core_model_ineligible"
+                        if not core_eligible
+                        else "membership_ends_before_next_open"
+                    ),
                     "split_name": splits[snapshot.asof_date],
                 }
             )
@@ -885,18 +1208,32 @@ def build_panel(
                 bench_anchor, bench_forward, bench_reason = (
                     benchmark_windows[horizon]
                 )
-                execution_entry, execution_exit, execution_reason = (
-                    _execution_window(
-                        prices.get(ticker, {}),
-                        asof=snapshot.asof_date,
-                        horizon=horizon,
-                        source_order=sources,
-                    )
+                benchmark_horizon_exit = benchmark_execution_windows[
+                    horizon
+                ][1]
+                (
+                    execution_entry,
+                    execution_exit,
+                    execution_reason,
+                    execution_outcome_type,
+                ) = _execution_window(
+                    prices.get(ticker, {}),
+                    asof=snapshot.asof_date,
+                    horizon=horizon,
+                    source_order=sources,
+                    terminal_date=membership_end,
+                    horizon_end=(
+                        benchmark_horizon_exit.bar_date
+                        if benchmark_horizon_exit is not None
+                        else None
+                    ),
+                    max_terminal_staleness_days=terminal_staleness_days,
                 )
                 (
                     benchmark_execution_entry,
                     benchmark_execution_exit,
                     benchmark_execution_reason,
+                    _,
                 ) = benchmark_execution_windows[horizon]
                 security_return = (
                     price_forward.value / price_anchor.value - 1.0
@@ -914,14 +1251,20 @@ def build_panel(
                     and benchmark_return is not None
                     else None
                 )
+                execution_exit_value = (
+                    execution_exit.value
+                    if execution_outcome_type == "terminal_membership_exit"
+                    and execution_exit is not None
+                    else execution_exit.open_value
+                    if execution_exit is not None
+                    else None
+                )
                 execution_return = (
-                    execution_exit.open_value
-                    / execution_entry.open_value
-                    - 1.0
+                    execution_exit_value / execution_entry.open_value - 1.0
                     if execution_entry is not None
                     and execution_exit is not None
                     and execution_entry.open_value is not None
-                    and execution_exit.open_value is not None
+                    and execution_exit_value is not None
                     else None
                 )
                 benchmark_execution_return = (
@@ -944,7 +1287,9 @@ def build_panel(
                 execution_unavailable_reason = (
                     execution_reason or benchmark_execution_reason
                 )
-                eligible = base_eligible and excess is not None
+                eligible = (
+                    next_open_eligible and execution_excess is not None
+                )
                 record.update(
                     {
                         f"price_source_id_{prefix}": (
@@ -1025,14 +1370,26 @@ def build_panel(
                             12,
                         ),
                         f"execution_exit_price_{prefix}": fmt(
-                            execution_exit.open_value
-                            if execution_exit
-                            else None,
+                            execution_exit_value,
                             12,
+                        ),
+                        f"execution_exit_price_basis_{prefix}": (
+                            "adjusted_close"
+                            if execution_outcome_type
+                            == "terminal_membership_exit"
+                            else "adjusted_open"
+                            if execution_exit
+                            and execution_exit.price_basis == "adj_close"
+                            else "open"
+                            if execution_exit
+                            else ""
                         ),
                         f"execution_return_{prefix}": fmt(
                             execution_return,
                             12,
+                        ),
+                        f"execution_outcome_type_{prefix}": (
+                            execution_outcome_type
                         ),
                         f"benchmark_execution_price_source_id_{prefix}": (
                             benchmark_execution_entry.source_id
@@ -1069,6 +1426,8 @@ def build_panel(
                 )
             panel_rows.append(record)
     panel_fields = (*PANEL_BASE_FIELDS, *_horizon_fields(horizons))
+    if len(panel_fields) != len(set(panel_fields)):
+        raise ValueError("Stage 8 panel fields contain duplicate columns")
     write_csv_atomic(paths.panel_csv, panel_fields, panel_rows)
     write_csv_atomic(paths.source_index_csv, SOURCE_INDEX_FIELDS, source_rows)
     write_csv_atomic(paths.splits_csv, SPLIT_FIELDS, _split_rows(splits))
@@ -1088,12 +1447,31 @@ def build_panel(
         "snapshot_end_date": snapshots[-1].asof_date,
         "panel_rows": len(panel_rows),
         "horizons_trading_days": horizons,
+        "calibration_return_basis": calibration_return_basis,
+        "terminal_price_max_staleness_days": terminal_staleness_days,
+        "terminal_outcomes_by_horizon": {
+            str(horizon): sum(
+                row.get(f"execution_outcome_type_{horizon}d")
+                == "terminal_membership_exit"
+                for row in panel_rows
+            )
+            for horizon in horizons
+        },
         "embargo_trading_days": embargo_days,
         "purge_calendar_days": purge_calendar_days,
         "benchmark_ticker": benchmark,
         "price_source_order": sources,
         "source_mode": PANEL_SOURCE,
         "survivorship_corrected": True,
+        "production_universe_policy": core_universe_policy,
+        "core_model_eligible_rows": sum(
+            row["core_model_eligible_flag"] == "1"
+            for row in panel_rows
+        ),
+        "execution_universe_eligible_rows": sum(
+            row["execution_universe_eligible_flag"] == "1"
+            for row in panel_rows
+        ),
         "report_only": True,
         "files": {
             paths.panel_csv.name: {
@@ -1142,7 +1520,7 @@ def _date_pairs(
             is not None
             and (
                 outcome := as_float(
-                    row.get(f"forward_excess_return_{horizon}d")
+                    row.get(f"execution_excess_return_{horizon}d")
                 )
             )
             is not None
@@ -1184,7 +1562,12 @@ def build_diagnostics(
         "train": {"train"},
         "validation": {"validation"},
         "holdout": {"holdout"},
-        "all_development": {"train", "validation", "holdout"},
+        "all_development": {
+            "train",
+            "validation",
+            "holdout",
+            "embargo",
+        },
     }
     for signal in SIGNAL_FIELDS:
         direction = 1 if signal in COMPONENT_FIELDS else METRIC_DIRECTIONS[signal]
@@ -1234,6 +1617,139 @@ def build_diagnostics(
                     }
                 )
     write_csv_atomic(paths.diagnostics_csv, DIAGNOSTIC_FIELDS, output)
+    return output
+
+
+def build_return_reconciliation(
+    *,
+    rows: Sequence[Mapping[str, str]],
+    horizons: Sequence[int],
+    paths: Stage8Paths,
+) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    split_sets = {
+        "train": {"train"},
+        "validation": {"validation"},
+        "holdout": {"holdout"},
+        "all_development": {"train", "validation", "holdout"},
+    }
+    for split_name, allowed in split_sets.items():
+        split_rows = [
+            row
+            for row in rows
+            if str(row.get("split_name") or "") in allowed
+            and str(
+                row.get("execution_universe_eligible_flag") or ""
+            )
+            == "1"
+        ]
+        for horizon in horizons:
+            evaluable = [
+                row
+                for row in split_rows
+                if as_float(
+                    row.get(
+                        f"benchmark_execution_return_{horizon}d"
+                    )
+                )
+                is not None
+            ]
+            close_values = [
+                value
+                for row in evaluable
+                if (
+                    value := as_float(
+                        row.get(f"forward_excess_return_{horizon}d")
+                    )
+                )
+                is not None
+            ]
+            execution_values = [
+                value
+                for row in evaluable
+                if (
+                    value := as_float(
+                        row.get(f"execution_excess_return_{horizon}d")
+                    )
+                )
+                is not None
+            ]
+            paired = [
+                (close_value, execution_value)
+                for row in evaluable
+                if (
+                    close_value := as_float(
+                        row.get(f"forward_excess_return_{horizon}d")
+                    )
+                )
+                is not None
+                and (
+                    execution_value := as_float(
+                        row.get(f"execution_excess_return_{horizon}d")
+                    )
+                )
+                is not None
+            ]
+            output.append(
+                {
+                    "split_name": split_name,
+                    "horizon_days": horizon,
+                    "core_observation_count": len(evaluable),
+                    "close_available_count": len(close_values),
+                    "execution_available_count": len(execution_values),
+                    "both_available_count": len(paired),
+                    "execution_coverage": fmt(
+                        len(execution_values) / len(evaluable)
+                        if evaluable
+                        else None,
+                        10,
+                    ),
+                    "terminal_outcome_count": sum(
+                        str(
+                            row.get(
+                                f"execution_outcome_type_{horizon}d"
+                            )
+                            or ""
+                        )
+                        == "terminal_membership_exit"
+                        for row in evaluable
+                    ),
+                    "unresolved_terminal_count": sum(
+                        str(
+                            row.get(
+                                f"execution_unavailable_reason_{horizon}d"
+                            )
+                            or ""
+                        )
+                        == "missing_terminal_outcome"
+                        for row in evaluable
+                    ),
+                    "mean_close_excess_return": fmt(mean(close_values), 12),
+                    "mean_execution_excess_return": fmt(
+                        mean(execution_values),
+                        12,
+                    ),
+                    "mean_execution_minus_close": fmt(
+                        mean(
+                            execution - close
+                            for close, execution in paired
+                        ),
+                        12,
+                    ),
+                    "close_execution_correlation": fmt(
+                        pearson(
+                            [close for close, _ in paired],
+                            [execution for _, execution in paired],
+                        ),
+                        10,
+                    ),
+                }
+            )
+    write_csv_atomic(
+        paths.return_reconciliation_csv,
+        RETURN_RECONCILIATION_FIELDS,
+        output,
+    )
     return output
 
 
@@ -1349,6 +1865,116 @@ def _score_row(
     return weighted / available if available > 0 else None
 
 
+def _ranked_sleeves(
+    scored: Sequence[tuple[Mapping[str, str], float]],
+    *,
+    quantile: float,
+    minimum_positions: int,
+) -> tuple[
+    list[tuple[Mapping[str, str], float]],
+    list[tuple[Mapping[str, str], float]],
+]:
+    ordered = sorted(
+        scored,
+        key=lambda item: (
+            -float(item[1]),
+            str(item[0].get("ticker") or ""),
+        ),
+    )
+    count = min(
+        len(ordered),
+        max(minimum_positions, math.ceil(len(ordered) * quantile)),
+    )
+    return ordered[:count], ordered[-count:]
+
+
+def _ranked_evaluation_population(
+    config: dict[str, Any],
+    *,
+    date_rows: Sequence[Mapping[str, str]],
+    weights: Mapping[str, float],
+) -> RankedEvaluationPopulation | None:
+    minimum = int(
+        cfg_get(config, f"{CONFIG_KEY}.minimum_cross_section", 30)
+    )
+    scored = [
+        (row, score)
+        for row in date_rows
+        if str(row.get("execution_universe_eligible_flag") or "") == "1"
+        and (score := _score_row(row, weights)) is not None
+    ]
+    if len(scored) < minimum:
+        return None
+    top, bottom = _ranked_sleeves(
+        scored,
+        quantile=float(
+            cfg_get(config, f"{CONFIG_KEY}.top_quantile", 0.20)
+        ),
+        minimum_positions=int(
+            cfg_get(config, f"{CONFIG_KEY}.minimum_positions", 10)
+        ),
+    )
+    ordered = sorted(
+        scored,
+        key=lambda item: (
+            -float(item[1]),
+            str(item[0].get("ticker") or ""),
+        ),
+    )
+    return RankedEvaluationPopulation(
+        ordered=tuple(ordered),
+        top=tuple(top),
+        bottom=tuple(bottom),
+    )
+
+
+def _non_overlapping_values(
+    observations: Sequence[tuple[str, str, float]],
+) -> list[float]:
+    selected: list[float] = []
+    last_exit: date | None = None
+    for asof_raw, exit_raw, value in sorted(observations):
+        asof = parse_date(asof_raw, field="non-overlapping asof")
+        if last_exit is not None and asof <= last_exit:
+            continue
+        selected.append(value)
+        last_exit = parse_date(exit_raw, field="non-overlapping exit")
+    return selected
+
+
+def _equal_weights(
+    sleeve: Sequence[tuple[Mapping[str, str], float]],
+) -> dict[str, float]:
+    if not sleeve:
+        return {}
+    weight = 1.0 / len(sleeve)
+    return {
+        str(row.get("ticker") or ""): weight
+        for row, _ in sleeve
+    }
+
+
+def _turnover_and_cost(
+    current: Mapping[str, float],
+    previous: Mapping[str, float] | None,
+    *,
+    transaction_cost_rate: float,
+) -> tuple[float, float, float]:
+    previous_weights = previous or {}
+    traded_notional = sum(
+        abs(current.get(ticker, 0.0) - previous_weights.get(ticker, 0.0))
+        for ticker in set(current) | set(previous_weights)
+    )
+    one_way_turnover = (
+        traded_notional if previous is None else traded_notional / 2.0
+    )
+    return (
+        one_way_turnover,
+        traded_notional,
+        traded_notional * transaction_cost_rate,
+    )
+
+
 def _stats(values: Sequence[float]) -> dict[str, Any]:
     average = mean(values)
     deviation = stdev(values)
@@ -1372,6 +1998,86 @@ def _stats(values: Sequence[float]) -> dict[str, Any]:
     }
 
 
+def _horizon_objective_setting(
+    config: dict[str, Any],
+    *,
+    name: str,
+    horizon: int,
+    default: float,
+) -> float:
+    raw = cfg_get(config, f"{CONFIG_KEY}.objective.{name}", {})
+    if isinstance(raw, Mapping):
+        value = raw.get(str(horizon), raw.get(horizon, default))
+        return float(value)
+    return default
+
+
+def _product_aligned_objective(
+    config: dict[str, Any],
+    metrics: Mapping[str, Any],
+    horizons: Sequence[int],
+) -> float:
+    objective = 0.0
+    uncertainty = 0.0
+    for horizon in horizons:
+        return_scale = _horizon_objective_setting(
+            config,
+            name="return_scales",
+            horizon=horizon,
+            default=0.02 if horizon <= 21 else 0.05,
+        )
+        spread_scale = _horizon_objective_setting(
+            config,
+            name="spread_scales",
+            horizon=horizon,
+            default=return_scale,
+        )
+        if return_scale <= 0 or spread_scale <= 0:
+            raise ValueError("Stage 8 objective scales must be positive")
+        objective += _horizon_objective_setting(
+            config,
+            name="top_excess_net_weights",
+            horizon=horizon,
+            default=0.30,
+        ) * float(metrics.get(f"mean_top_excess_net_{horizon}d") or 0.0) / return_scale
+        objective += _horizon_objective_setting(
+            config,
+            name="non_overlapping_top_excess_net_weights",
+            horizon=horizon,
+            default=0.10,
+        ) * float(
+            metrics.get(
+                f"mean_non_overlapping_top_excess_net_{horizon}d"
+            )
+            or 0.0
+        ) / return_scale
+        objective += _horizon_objective_setting(
+            config,
+            name="mean_ic_weights",
+            horizon=horizon,
+            default=0.075,
+        ) * float(metrics.get(f"mean_ic_{horizon}d") or 0.0) / float(
+            cfg_get(config, f"{CONFIG_KEY}.objective.ic_scale", 0.05)
+        )
+        objective += _horizon_objective_setting(
+            config,
+            name="spread_diagnostic_weights",
+            horizon=horizon,
+            default=0.025,
+        ) * float(metrics.get(f"mean_spread_net_{horizon}d") or 0.0) / spread_scale
+        uncertainty += float(
+            metrics.get(f"top_excess_net_newey_west_se_{horizon}d") or 0.0
+        ) / return_scale
+    objective -= float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.objective.uncertainty_penalty_weight",
+            0.10,
+        )
+    ) * uncertainty
+    return objective
+
+
 def evaluate_weights(
     config: dict[str, Any],
     *,
@@ -1383,14 +2089,11 @@ def evaluate_weights(
     minimum = int(
         cfg_get(config, f"{CONFIG_KEY}.minimum_cross_section", 30)
     )
-    top_quantile = float(
-        cfg_get(config, f"{CONFIG_KEY}.top_quantile", 0.20)
-    )
-    min_positions = int(
-        cfg_get(config, f"{CONFIG_KEY}.minimum_positions", 10)
-    )
-    turnover_cost_bps = float(
+    transaction_cost_rate = float(
         cfg_get(config, f"{CONFIG_KEY}.turnover_cost_bps", 20.0)
+    ) / 10000.0
+    minimum_outcome_coverage = float(
+        cfg_get(config, f"{CONFIG_KEY}.minimum_outcome_coverage", 0.95)
     )
     date_set = set(dates)
     grouped: dict[str, list[Mapping[str, str]]] = defaultdict(list)
@@ -1403,93 +2106,193 @@ def evaluate_weights(
     spread_values: dict[int, list[float]] = {
         horizon: [] for horizon in horizons
     }
+    spread_net_values: dict[int, list[float]] = {
+        horizon: [] for horizon in horizons
+    }
+    top_excess_values: dict[int, list[float]] = {
+        horizon: [] for horizon in horizons
+    }
+    top_excess_net_values: dict[int, list[float]] = {
+        horizon: [] for horizon in horizons
+    }
+    top_excess_net_observations: dict[
+        int, list[tuple[str, str, float]]
+    ] = {horizon: [] for horizon in horizons}
     coverage_values: dict[int, list[float]] = {
         horizon: [] for horizon in horizons
     }
+    outcome_coverage_values: dict[int, list[float]] = {
+        horizon: [] for horizon in horizons
+    }
+    top_missing_dates: dict[int, int] = {
+        horizon: 0 for horizon in horizons
+    }
+    bottom_missing_dates: dict[int, int] = {
+        horizon: 0 for horizon in horizons
+    }
     turnovers: list[float] = []
+    transaction_costs: list[float] = []
     cohort_shares: list[float] = []
-    previous_top: set[str] | None = None
-    primary = horizons[0]
+    previous_top: dict[str, float] | None = None
+    previous_bottom: dict[str, float] | None = None
     date_rows: list[dict[str, object]] = []
     for asof in sorted(grouped):
-        scored = [
-            (row, score)
-            for row in grouped[asof]
-            if str(row.get("base_panel_eligible_flag") or "") == "1"
-            and (score := _score_row(row, weights)) is not None
-        ]
-        primary_rows = [
-            (row, score)
-            for row, score in scored
-            if str(
-                row.get(f"panel_row_eligible_flag_{primary}d") or ""
-            )
-            == "1"
-        ]
-        if len(primary_rows) >= minimum:
-            primary_rows.sort(
-                key=lambda item: (
-                    -float(item[1]),
-                    str(item[0].get("ticker") or ""),
-                )
-            )
-            top_count = min(
-                len(primary_rows),
-                max(
-                    min_positions,
-                    math.ceil(len(primary_rows) * top_quantile),
-                ),
-            )
-            top_rows = primary_rows[:top_count]
-            top = {str(row.get("ticker")) for row, _ in top_rows}
-            if previous_top is not None and top:
-                turnovers.append(1.0 - len(top & previous_top) / len(top))
-            previous_top = top
-            cohorts: dict[str, int] = defaultdict(int)
-            for row, _ in top_rows:
-                cohorts[str(row.get("calibration_cohort") or "")] += 1
-            if cohorts:
-                cohort_shares.append(max(cohorts.values()) / len(top_rows))
-        per_date: dict[str, object] = {"asof_date": asof}
+        population = _ranked_evaluation_population(
+            config,
+            date_rows=grouped[asof],
+            weights=weights,
+        )
+        if population is None:
+            continue
+        scored = population.ordered
+        top_rows = population.top
+        bottom_rows = population.bottom
+        top_weights = _equal_weights(top_rows)
+        bottom_weights = _equal_weights(bottom_rows)
+        top_turnover, _, top_cost = _turnover_and_cost(
+            top_weights,
+            previous_top,
+            transaction_cost_rate=transaction_cost_rate,
+        )
+        _, _, bottom_cost = _turnover_and_cost(
+            bottom_weights,
+            previous_bottom,
+            transaction_cost_rate=transaction_cost_rate,
+        )
+        previous_top = top_weights
+        previous_bottom = bottom_weights
+        turnovers.append(top_turnover)
+        transaction_costs.append(top_cost)
+        cohorts: dict[str, int] = defaultdict(int)
+        for row, _ in top_rows:
+            cohorts[str(row.get("calibration_cohort") or "")] += 1
+        if cohorts:
+            cohort_shares.append(max(cohorts.values()) / len(top_rows))
+        per_date: dict[str, object] = {
+            "asof_date": asof,
+            "ranked_cross_section": len(scored),
+            "top_turnover": top_turnover,
+            "top_transaction_cost": top_cost,
+            "bottom_transaction_cost": bottom_cost,
+        }
         for horizon in horizons:
+            benchmark_available = any(
+                as_float(
+                    row.get(
+                        f"benchmark_execution_return_{horizon}d"
+                    )
+                )
+                is not None
+                for row, _ in scored
+            )
+            if not benchmark_available:
+                continue
             pairs = [
                 (
+                    row,
                     float(score),
                     float(outcome),
                 )
                 for row, score in scored
-                if str(
-                    row.get(f"panel_row_eligible_flag_{horizon}d") or ""
-                )
-                == "1"
-                and (
+                if (
                     outcome := as_float(
-                        row.get(f"forward_excess_return_{horizon}d")
+                        row.get(f"execution_excess_return_{horizon}d")
                     )
                 )
                 is not None
             ]
-            if len(pairs) < minimum:
+            outcome_by_ticker = {
+                str(row.get("ticker") or ""): outcome
+                for row, _, outcome in pairs
+            }
+            outcome_coverage = len(pairs) / len(scored)
+            outcome_coverage_values[horizon].append(outcome_coverage)
+            per_date[f"outcome_coverage_{horizon}d"] = outcome_coverage
+            top_outcomes = [
+                outcome_by_ticker.get(ticker) for ticker in top_weights
+            ]
+            bottom_outcomes = [
+                outcome_by_ticker.get(ticker) for ticker in bottom_weights
+            ]
+            top_outcome_missing = any(
+                value is None for value in top_outcomes
+            )
+            bottom_outcome_missing = any(
+                value is None for value in bottom_outcomes
+            )
+            if top_outcome_missing:
+                top_missing_dates[horizon] += 1
+            if bottom_outcome_missing:
+                bottom_missing_dates[horizon] += 1
+            if (
+                len(pairs) < minimum
+                or outcome_coverage < minimum_outcome_coverage
+            ):
                 continue
             ic = spearman(
-                [pair[0] for pair in pairs],
                 [pair[1] for pair in pairs],
-            )
-            spread = quintile_spread(
-                [pair[0] for pair in pairs],
-                [pair[1] for pair in pairs],
+                [pair[2] for pair in pairs],
             )
             if ic is not None:
                 ic_values[horizon].append(ic)
                 coverage_values[horizon].append(float(len(pairs)))
                 per_date[f"ic_{horizon}d"] = ic
-            if spread is not None:
-                spread_values[horizon].append(spread)
-                per_date[f"spread_{horizon}d"] = spread
+            if top_outcome_missing:
+                continue
+            top_mean = mean(
+                float(value) for value in top_outcomes if value is not None
+            )
+            if top_mean is None:
+                continue
+            top_net = top_mean - top_cost
+            top_excess_values[horizon].append(top_mean)
+            top_excess_net_values[horizon].append(top_net)
+            benchmark_exit = next(
+                (
+                    str(
+                        row.get(
+                            f"benchmark_execution_exit_date_{horizon}d"
+                        )
+                        or ""
+                    )
+                    for row, _ in scored
+                    if str(
+                        row.get(
+                            f"benchmark_execution_exit_date_{horizon}d"
+                        )
+                        or ""
+                    )
+                ),
+                "",
+            )
+            if benchmark_exit:
+                top_excess_net_observations[horizon].append(
+                    (asof, benchmark_exit, top_net)
+                )
+                per_date[f"benchmark_execution_exit_date_{horizon}d"] = (
+                    benchmark_exit
+                )
+            per_date[f"top_excess_{horizon}d"] = top_mean
+            per_date[f"top_excess_net_{horizon}d"] = top_net
+            if bottom_outcome_missing:
+                continue
+            bottom_mean = mean(
+                float(value)
+                for value in bottom_outcomes
+                if value is not None
+            )
+            if bottom_mean is None:
+                continue
+            spread = top_mean - bottom_mean
+            spread_net = spread - top_cost - bottom_cost
+            spread_values[horizon].append(spread)
+            spread_net_values[horizon].append(spread_net)
+            per_date[f"spread_{horizon}d"] = spread
+            per_date[f"spread_net_{horizon}d"] = spread_net
         if len(per_date) > 1:
             date_rows.append(per_date)
     average_turnover = mean(turnovers) or 0.0
-    cost_drag = average_turnover * 2.0 * turnover_cost_bps / 10000.0
+    cost_drag = mean(transaction_costs) or 0.0
     result: dict[str, Any] = {
         "avg_top_turnover": average_turnover,
         "avg_top_cohort_share": mean(cohort_shares) or 0.0,
@@ -1499,32 +2302,93 @@ def evaluate_weights(
     for horizon in horizons:
         ic_stats = _stats(ic_values[horizon])
         spread_stats = _stats(spread_values[horizon])
+        spread_net_stats = _stats(spread_net_values[horizon])
+        top_stats = _stats(top_excess_values[horizon])
+        top_net_stats = _stats(top_excess_net_values[horizon])
+        overlap_lags = max(
+            0,
+            math.ceil(
+                horizon
+                / int(
+                    cfg_get(
+                        config,
+                        f"{CONFIG_KEY}.cadence_trading_days",
+                        5,
+                    )
+                )
+            )
+            - 1,
+        )
+        top_nw_se = newey_west_mean_standard_error(
+            top_excess_net_values[horizon],
+            overlap_lags,
+        )
+        top_nw_t = newey_west_t(
+            top_excess_net_values[horizon],
+            overlap_lags,
+        )
+        confidence_z = float(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.gates.top_excess_one_sided_confidence_z",
+                1.281552,
+            )
+        )
+        top_lcb = (
+            float(top_net_stats["mean"]) - confidence_z * top_nw_se
+            if top_nw_se is not None
+            else None
+        )
+        non_overlapping = _non_overlapping_values(
+            top_excess_net_observations[horizon]
+        )
+        non_overlapping_stats = _stats(non_overlapping)
         result[f"n_dates_{horizon}d"] = ic_stats["count"]
+        result[f"n_spread_dates_{horizon}d"] = spread_net_stats["count"]
+        result[f"n_top_dates_{horizon}d"] = top_net_stats["count"]
         result[f"mean_ic_{horizon}d"] = ic_stats["mean"]
         result[f"std_ic_{horizon}d"] = ic_stats["std"]
         result[f"ic_hit_rate_{horizon}d"] = ic_stats["hit_rate"]
         result[f"ic_t_stat_{horizon}d"] = ic_stats["t_stat"]
         result[f"mean_spread_{horizon}d"] = spread_stats["mean"]
-        result[f"mean_spread_net_{horizon}d"] = (
-            float(spread_stats["mean"]) - cost_drag
+        result[f"mean_spread_net_{horizon}d"] = spread_net_stats["mean"]
+        result[f"mean_top_excess_{horizon}d"] = top_stats["mean"]
+        result[f"mean_top_excess_net_{horizon}d"] = top_net_stats["mean"]
+        result[f"median_top_excess_net_{horizon}d"] = (
+            median(top_excess_net_values[horizon]) or 0.0
+        )
+        result[f"top_excess_net_newey_west_lags_{horizon}d"] = overlap_lags
+        result[f"top_excess_net_newey_west_se_{horizon}d"] = top_nw_se
+        result[f"top_excess_net_newey_west_t_{horizon}d"] = top_nw_t
+        result[f"top_excess_net_lower_confidence_bound_{horizon}d"] = top_lcb
+        result[f"n_non_overlapping_top_dates_{horizon}d"] = (
+            non_overlapping_stats["count"]
+        )
+        result[f"mean_non_overlapping_top_excess_net_{horizon}d"] = (
+            non_overlapping_stats["mean"]
+        )
+        result[f"non_overlapping_top_excess_hit_rate_{horizon}d"] = (
+            non_overlapping_stats["hit_rate"]
+        )
+        result[f"top_excess_hit_rate_{horizon}d"] = top_net_stats[
+            "hit_rate"
+        ]
+        result[f"mean_outcome_coverage_{horizon}d"] = (
+            mean(outcome_coverage_values[horizon]) or 0.0
+        )
+        result[f"top_missing_outcome_dates_{horizon}d"] = (
+            top_missing_dates[horizon]
+        )
+        result[f"bottom_missing_outcome_dates_{horizon}d"] = (
+            bottom_missing_dates[horizon]
         )
         result[f"mean_cross_section_{horizon}d"] = (
             mean(coverage_values[horizon]) or 0.0
         )
-    secondary = horizons[1] if len(horizons) > 1 else primary
-    stability = float(
-        cfg_get(config, f"{CONFIG_KEY}.stability_penalty", 0.10)
-    )
-    result["objective"] = (
-        0.48 * float(result[f"mean_ic_{primary}d"])
-        + 0.34 * float(result[f"mean_ic_{secondary}d"])
-        + 0.06
-        * (float(result[f"ic_hit_rate_{primary}d"]) - 0.50)
-        + 0.04
-        * (float(result[f"ic_hit_rate_{secondary}d"]) - 0.50)
-        + 0.05 * float(result[f"mean_spread_net_{primary}d"])
-        + 0.03 * float(result[f"mean_spread_net_{secondary}d"])
-        - stability * float(result[f"std_ic_{primary}d"])
+    result["objective"] = _product_aligned_objective(
+        config,
+        result,
+        horizons,
     )
     max_turnover = float(
         cfg_get(config, f"{CONFIG_KEY}.maximum_turnover", 0.75)
@@ -1544,6 +2408,636 @@ def evaluate_weights(
     return result
 
 
+def _write_model_date_diagnostics(
+    *,
+    model_metrics: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    horizons: Sequence[int],
+    paths: Stage8Paths,
+) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for model, split_metrics in model_metrics.items():
+        for split_name, metrics in split_metrics.items():
+            for date_row in metrics.get("date_rows", []):
+                asof = str(date_row.get("asof_date") or "")
+                for horizon in horizons:
+                    if not any(
+                        key in date_row
+                        for key in (
+                            f"ic_{horizon}d",
+                            f"top_excess_{horizon}d",
+                            f"spread_{horizon}d",
+                        )
+                    ):
+                        continue
+                    output.append(
+                        {
+                            "model": model,
+                            "split_name": split_name,
+                            "asof_date": asof,
+                            "calendar_year": asof[:4],
+                            "horizon_days": horizon,
+                            "ranked_cross_section": date_row.get(
+                                "ranked_cross_section",
+                                "",
+                            ),
+                            "outcome_coverage": fmt(
+                                date_row.get(
+                                    f"outcome_coverage_{horizon}d"
+                                ),
+                                10,
+                            ),
+                            "ic": fmt(date_row.get(f"ic_{horizon}d"), 10),
+                            "top_excess": fmt(
+                                date_row.get(f"top_excess_{horizon}d"),
+                                12,
+                            ),
+                            "top_excess_net": fmt(
+                                date_row.get(
+                                    f"top_excess_net_{horizon}d"
+                                ),
+                                12,
+                            ),
+                            "spread": fmt(
+                                date_row.get(f"spread_{horizon}d"),
+                                12,
+                            ),
+                            "spread_net": fmt(
+                                date_row.get(f"spread_net_{horizon}d"),
+                                12,
+                            ),
+                            "top_turnover": fmt(
+                                date_row.get("top_turnover"),
+                                10,
+                            ),
+                            "top_transaction_cost": fmt(
+                                date_row.get("top_transaction_cost"),
+                                12,
+                            ),
+                            "bottom_transaction_cost": fmt(
+                                date_row.get("bottom_transaction_cost"),
+                                12,
+                            ),
+                        }
+                    )
+    write_csv_atomic(
+        paths.model_date_diagnostics_csv,
+        MODEL_DATE_DIAGNOSTIC_FIELDS,
+        output,
+    )
+    return output
+
+
+def _write_sleeve_membership(
+    config: dict[str, Any],
+    *,
+    rows: Sequence[Mapping[str, str]],
+    models: Mapping[str, Mapping[str, float]],
+    horizons: Sequence[int],
+    paths: Stage8Paths,
+) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    split_sets = {
+        "train": {"train"},
+        "validation": {"validation"},
+        "holdout": {"holdout"},
+        "all_development": {"train", "validation", "holdout"},
+    }
+    universe_policy = configured_universe_policy(
+        config,
+        config_key=CONFIG_KEY,
+    )
+    bucket_count = int(
+        cfg_get(config, f"{CONFIG_KEY}.diagnostics.quantile_buckets", 10)
+    )
+    if bucket_count < 2:
+        raise ValueError("Stage 8 quantile bucket count must be at least two")
+    for model, weights in models.items():
+        for split_name, allowed in split_sets.items():
+            grouped: dict[str, list[Mapping[str, str]]] = defaultdict(list)
+            for row in rows:
+                if str(row.get("split_name") or "") in allowed:
+                    grouped[str(row.get("asof_date") or "")].append(row)
+            for asof, date_rows in sorted(grouped.items()):
+                population = _ranked_evaluation_population(
+                    config,
+                    date_rows=date_rows,
+                    weights=weights,
+                )
+                if population is None:
+                    continue
+                top_tickers = {
+                    str(row.get("ticker") or "")
+                    for row, _ in population.top
+                }
+                bottom_tickers = {
+                    str(row.get("ticker") or "")
+                    for row, _ in population.bottom
+                }
+                top_weight = 1.0 / len(population.top)
+                bottom_weight = 1.0 / len(population.bottom)
+                cross_section = len(population.ordered)
+                for rank, (row, score) in enumerate(
+                    population.ordered,
+                    start=1,
+                ):
+                    ticker = str(row.get("ticker") or "")
+                    bucket = min(
+                        bucket_count,
+                        math.floor((rank - 1) * bucket_count / cross_section)
+                        + 1,
+                    )
+                    sleeve = (
+                        "top"
+                        if ticker in top_tickers
+                        else "bottom"
+                        if ticker in bottom_tickers
+                        else "middle"
+                    )
+                    sleeve_weight = (
+                        top_weight
+                        if sleeve == "top"
+                        else bottom_weight
+                        if sleeve == "bottom"
+                        else 0.0
+                    )
+                    for horizon in horizons:
+                        outcome = as_float(
+                            row.get(
+                                f"execution_excess_return_{horizon}d"
+                            )
+                        )
+                        output.append(
+                            {
+                                "model": model,
+                                "split_name": split_name,
+                                "asof_date": asof,
+                                "calendar_year": asof[:4],
+                                "horizon_days": horizon,
+                                "universe_policy": universe_policy,
+                                "rank_direction": "1_is_highest_score",
+                                "ticker": ticker,
+                                "calibration_cohort": str(
+                                    row.get("calibration_cohort") or ""
+                                ),
+                                "score": fmt(score, 12),
+                                "rank": rank,
+                                "ranked_cross_section": cross_section,
+                                "quantile": bucket,
+                                "configured_sleeve": sleeve,
+                                "sleeve_weight": fmt(sleeve_weight, 12),
+                                "outcome_available_flag": int(
+                                    outcome is not None
+                                ),
+                                "execution_excess_return": fmt(outcome, 12),
+                                "gross_return_contribution": fmt(
+                                    (
+                                        sleeve_weight * outcome
+                                        if outcome is not None
+                                        and sleeve != "middle"
+                                        else None
+                                    ),
+                                    12,
+                                ),
+                            }
+                        )
+    write_csv_atomic(
+        paths.sleeve_membership_csv,
+        SLEEVE_MEMBERSHIP_FIELDS,
+        output,
+    )
+    return output
+
+
+def _write_quantile_diagnostics(
+    config: dict[str, Any],
+    *,
+    membership_rows: Sequence[Mapping[str, object]],
+    paths: Stage8Paths,
+) -> list[dict[str, object]]:
+    bucket_count = int(
+        cfg_get(config, f"{CONFIG_KEY}.diagnostics.quantile_buckets", 10)
+    )
+    by_bucket_date: dict[
+        tuple[str, str, int, int, str], list[float]
+    ] = defaultdict(list)
+    observations: dict[tuple[str, str, int, int], int] = defaultdict(int)
+    missing: dict[tuple[str, str, int, int], int] = defaultdict(int)
+    universe_policy = configured_universe_policy(
+        config,
+        config_key=CONFIG_KEY,
+    )
+    for row in membership_rows:
+        key = (
+            str(row["model"]),
+            str(row["split_name"]),
+            int(str(row["horizon_days"])),
+            int(str(row["quantile"])),
+        )
+        outcome = as_float(row.get("execution_excess_return"))
+        if outcome is None:
+            missing[key] += 1
+            continue
+        observations[key] += 1
+        by_bucket_date[(*key, str(row["asof_date"]))].append(outcome)
+    bucket_means: dict[tuple[str, str, int, int], list[float]] = defaultdict(list)
+    for compound_key, values in by_bucket_date.items():
+        bucket_mean = mean(values)
+        if bucket_mean is not None:
+            bucket_means[compound_key[:4]].append(bucket_mean)
+    output: list[dict[str, object]] = []
+    model_splits = sorted(
+        {
+            (str(row["model"]), str(row["split_name"]))
+            for row in membership_rows
+        }
+    )
+    horizons = sorted(
+        {int(str(row["horizon_days"])) for row in membership_rows}
+    )
+    for model, split_name in model_splits:
+        for horizon in horizons:
+            for bucket in range(1, bucket_count + 1):
+                key = (model, split_name, horizon, bucket)
+                values = bucket_means[key]
+                output.append(
+                    {
+                        "model": model,
+                        "split_name": split_name,
+                        "horizon_days": horizon,
+                        "universe_policy": universe_policy,
+                        "rank_direction": "1_is_highest_score",
+                        "bucket_count": bucket_count,
+                        "quantile": bucket,
+                        "date_count": len(values),
+                        "observation_count": observations[key],
+                        "missing_outcome_count": missing[key],
+                        "mean_execution_excess_return": fmt(
+                            mean(values),
+                            12,
+                        ),
+                        "hit_rate": fmt(
+                            mean(
+                                1.0 if value > 0 else 0.0
+                                for value in values
+                            ),
+                            10,
+                        ),
+                    }
+                )
+    write_csv_atomic(
+        paths.quantile_diagnostics_csv,
+        QUANTILE_DIAGNOSTIC_FIELDS,
+        output,
+    )
+    return output
+
+
+def _write_regime_diagnostics(
+    config: dict[str, Any],
+    *,
+    model_metrics: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    horizons: Sequence[int],
+    paths: Stage8Paths,
+) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    confidence_z = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.gates.top_excess_one_sided_confidence_z",
+            1.281552,
+        )
+    )
+    cadence = int(
+        cfg_get(config, f"{CONFIG_KEY}.cadence_trading_days", 5)
+    )
+    for model, splits in model_metrics.items():
+        for split_name, metrics in splits.items():
+            by_year: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+            for row in metrics.get("date_rows", []):
+                if isinstance(row, Mapping):
+                    by_year[str(row.get("asof_date") or "")[:4]].append(row)
+            for year, date_rows in sorted(by_year.items()):
+                for horizon in horizons:
+                    top_values = [
+                        value
+                        for row in date_rows
+                        if (
+                            value := as_float(
+                                row.get(f"top_excess_net_{horizon}d")
+                            )
+                        )
+                        is not None
+                    ]
+                    ic_values = [
+                        value
+                        for row in date_rows
+                        if (
+                            value := as_float(row.get(f"ic_{horizon}d"))
+                        )
+                        is not None
+                    ]
+                    spread_values = [
+                        value
+                        for row in date_rows
+                        if (
+                            value := as_float(
+                                row.get(f"spread_net_{horizon}d")
+                            )
+                        )
+                        is not None
+                    ]
+                    lags = max(0, math.ceil(horizon / cadence) - 1)
+                    standard_error = newey_west_mean_standard_error(
+                        top_values,
+                        lags,
+                    )
+                    top_mean = mean(top_values)
+                    lower_bound = (
+                        top_mean - confidence_z * standard_error
+                        if top_mean is not None and standard_error is not None
+                        else None
+                    )
+                    output.append(
+                        {
+                            "model": model,
+                            "split_name": split_name,
+                            "regime_type": "calendar_year_asof",
+                            "regime_value": year,
+                            "horizon_days": horizon,
+                            "date_count": len(top_values),
+                            "mean_top_excess_net": fmt(top_mean, 12),
+                            "median_top_excess_net": fmt(
+                                median(top_values),
+                                12,
+                            ),
+                            "top_excess_net_hit_rate": fmt(
+                                mean(
+                                    1.0 if value > 0 else 0.0
+                                    for value in top_values
+                                ),
+                                10,
+                            ),
+                            "top_excess_net_newey_west_t": fmt(
+                                newey_west_t(top_values, lags),
+                                10,
+                            ),
+                            "top_excess_net_lower_confidence_bound": fmt(
+                                lower_bound,
+                                12,
+                            ),
+                            "mean_ic": fmt(mean(ic_values), 12),
+                            "mean_spread_net": fmt(
+                                mean(spread_values),
+                                12,
+                            ),
+                        }
+                    )
+    write_csv_atomic(
+        paths.regime_diagnostics_csv,
+        REGIME_DIAGNOSTIC_FIELDS,
+        output,
+    )
+    return output
+
+
+def _write_ticker_attribution(
+    *,
+    membership_rows: Sequence[Mapping[str, object]],
+    paths: Stage8Paths,
+) -> list[dict[str, object]]:
+    values: dict[
+        tuple[str, str, int, str, str], list[tuple[float, float]]
+    ] = defaultdict(list)
+    sleeve_by_date: dict[
+        tuple[str, str, int, str, str], list[float]
+    ] = defaultdict(list)
+    for row in membership_rows:
+        sleeve = str(row.get("configured_sleeve") or "")
+        if sleeve not in {"top", "bottom"}:
+            continue
+        outcome = as_float(row.get("execution_excess_return"))
+        contribution = as_float(row.get("gross_return_contribution"))
+        if outcome is None or contribution is None:
+            continue
+        model = str(row["model"])
+        split_name = str(row["split_name"])
+        horizon = int(str(row["horizon_days"]))
+        ticker = str(row["ticker"])
+        asof = str(row["asof_date"])
+        values[(model, split_name, horizon, sleeve, ticker)].append(
+            (outcome, contribution)
+        )
+        sleeve_by_date[(model, split_name, horizon, sleeve, asof)].append(
+            contribution
+        )
+    sleeve_means: dict[tuple[str, str, int, str], float] = {}
+    date_totals: dict[tuple[str, str, int, str], list[float]] = defaultdict(list)
+    for key, contributions in sleeve_by_date.items():
+        date_totals[key[:4]].append(sum(contributions))
+    for key, totals in date_totals.items():
+        sleeve_means[key] = mean(totals) or 0.0
+    output: list[dict[str, object]] = []
+    for key, observations in sorted(values.items()):
+        model, split_name, horizon, sleeve, ticker = key
+        output.append(
+            {
+                "model": model,
+                "split_name": split_name,
+                "horizon_days": horizon,
+                "configured_sleeve": sleeve,
+                "ticker": ticker,
+                "membership_dates": len(observations),
+                "mean_execution_excess_return": fmt(
+                    mean(value for value, _ in observations),
+                    12,
+                ),
+                "mean_gross_return_contribution": fmt(
+                    mean(value for _, value in observations),
+                    12,
+                ),
+                "total_mean_sleeve_contribution": fmt(
+                    sleeve_means[(model, split_name, horizon, sleeve)],
+                    12,
+                ),
+            }
+        )
+    write_csv_atomic(
+        paths.ticker_attribution_csv,
+        TICKER_ATTRIBUTION_FIELDS,
+        output,
+    )
+    return output
+
+
+def _write_component_ablations(
+    config: dict[str, Any],
+    *,
+    rows: Sequence[Mapping[str, str]],
+    split_dates: Mapping[str, Sequence[str]],
+    horizons: Sequence[int],
+    models: Mapping[str, Mapping[str, float]],
+    model_metrics: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    bounds: Mapping[str, tuple[float, float]],
+    paths: Stage8Paths,
+) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for model, weights in models.items():
+        for component in COMPONENT_FIELDS:
+            ablated_raw = dict(weights)
+            ablated_raw[component] = bounds[component][0]
+            ablated = _normalized_weights(ablated_raw, bounds)
+            standalone = {component: 1.0}
+            for split_name, dates in split_dates.items():
+                baseline_objective = float(
+                    model_metrics[model][split_name]["objective"]
+                )
+                ablated_metrics = evaluate_weights(
+                    config,
+                    rows=rows,
+                    dates=dates,
+                    horizons=horizons,
+                    weights=ablated,
+                )
+                standalone_metrics = evaluate_weights(
+                    config,
+                    rows=rows,
+                    dates=dates,
+                    horizons=horizons,
+                    weights=standalone,
+                )
+                ablated_objective = float(ablated_metrics["objective"])
+                output.append(
+                    {
+                        "model": model,
+                        "split_name": split_name,
+                        "component": component,
+                        "ablation_method": (
+                            "reduce_to_configured_lower_bound_and_reproject"
+                        ),
+                        "baseline_objective": fmt(
+                            baseline_objective,
+                            12,
+                        ),
+                        "ablated_objective": fmt(
+                            ablated_objective,
+                            12,
+                        ),
+                        "objective_contribution": fmt(
+                            baseline_objective - ablated_objective,
+                            12,
+                        ),
+                        "standalone_objective": fmt(
+                            standalone_metrics["objective"],
+                            12,
+                        ),
+                    }
+                )
+    write_csv_atomic(
+        paths.component_ablation_csv,
+        COMPONENT_ABLATION_FIELDS,
+        output,
+    )
+    return output
+
+
+def _candidate_registry(
+    config: dict[str, Any],
+    bounds: Mapping[str, tuple[float, float]],
+) -> tuple[dict[str, dict[str, float]], dict[str, Any], str]:
+    raw_candidates = cfg_get(
+        config,
+        f"{CONFIG_KEY}.candidate_registry.candidates",
+        {},
+    )
+    if not isinstance(raw_candidates, Mapping) or not raw_candidates:
+        raise ValueError("Stage 8 candidate registry is empty")
+    maximum = int(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.candidate_registry.maximum_specifications",
+            6,
+        )
+    )
+    if len(raw_candidates) + 1 > maximum:
+        raise ValueError(
+            "Stage 8 candidate registry exceeds maximum_specifications"
+        )
+    candidates = {
+        "configured_baseline": _baseline_weights(config, bounds)
+    }
+    for candidate_id, raw_weights in raw_candidates.items():
+        identifier = str(candidate_id).strip()
+        if not identifier or identifier == "configured_baseline":
+            raise ValueError(f"Invalid Stage 8 candidate id: {candidate_id!r}")
+        if not isinstance(raw_weights, Mapping):
+            raise ValueError(
+                f"Stage 8 candidate {identifier} weights must be a mapping"
+            )
+        missing = set(COMPONENT_FIELDS) - {
+            str(field) for field in raw_weights
+        }
+        extra = {str(field) for field in raw_weights} - set(COMPONENT_FIELDS)
+        if missing or extra:
+            raise ValueError(
+                f"Stage 8 candidate {identifier} field mismatch: "
+                f"missing={sorted(missing)} extra={sorted(extra)}"
+            )
+        candidates[identifier] = _normalized_weights(
+            {
+                field: float(raw_weights[field])
+                for field in COMPONENT_FIELDS
+            },
+            bounds,
+        )
+    payload = {
+        "artifact_family": "machinery_stage8_candidate_registry",
+        "research_protocol_version": str(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.research_protocol_version",
+                "",
+            )
+        ),
+        "evaluation_policy_version": str(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.evaluation_policy_version",
+                "",
+            )
+        ),
+        "search_policy": str(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.candidate_registry.search_policy",
+                "preregistered_only",
+            )
+        ),
+        "maximum_specifications": maximum,
+        "prior_same_panel_static_trials": int(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.candidate_registry.prior_same_panel_static_trials",
+                0,
+            )
+        ),
+        "prior_same_panel_walk_forward_trials": int(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.candidate_registry.prior_same_panel_walk_forward_trials",
+                0,
+            )
+        ),
+        "candidates": candidates,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    registry_hash = hashlib.sha256(encoded).hexdigest()
+    return candidates, payload, registry_hash
+
+
 def _optimize(
     config: dict[str, Any],
     *,
@@ -1553,14 +3047,25 @@ def _optimize(
     bounds: Mapping[str, tuple[float, float]],
     trials: int,
     seed: int,
-) -> tuple[dict[str, float], list[dict[str, Any]], str]:
+) -> tuple[dict[str, float], list[dict[str, Any]], str, str]:
     baseline = _baseline_weights(config, bounds)
     records: list[dict[str, Any]] = []
+    registry, _, registry_hash = _candidate_registry(config, bounds)
+    search_policy = str(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.candidate_registry.search_policy",
+            "preregistered_only",
+        )
+    )
 
     def evaluate(
         trial_number: int,
+        candidate_id: str,
         method: str,
         raw: Mapping[str, float],
+        *,
+        pre_registered: bool,
     ) -> float:
         weights = _normalized_weights(raw, bounds)
         metrics = evaluate_weights(
@@ -1573,6 +3078,9 @@ def _optimize(
         records.append(
             {
                 "trial_number": trial_number,
+                "candidate_id": candidate_id,
+                "pre_registered_flag": int(pre_registered),
+                "candidate_registry_sha256": registry_hash,
                 "search_method": method,
                 "train_objective": metrics["objective"],
                 "train_avg_top_turnover": metrics["avg_top_turnover"],
@@ -1584,8 +3092,41 @@ def _optimize(
         )
         return float(metrics["objective"])
 
-    evaluate(0, "configured_baseline", baseline)
+    if search_policy == "preregistered_only":
+        maximum = int(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.candidate_registry.maximum_specifications",
+                len(registry),
+            )
+        )
+        if trials > maximum or trials > len(registry):
+            raise ValueError(
+                "Requested Stage 8 trials exceed the pre-registered "
+                "candidate budget"
+            )
+        for trial_number, (candidate_id, weights) in enumerate(
+            list(registry.items())[:trials]
+        ):
+            evaluate(
+                trial_number,
+                candidate_id,
+                "preregistered_grid",
+                weights,
+                pre_registered=True,
+            )
+        method = "preregistered_grid"
+    else:
+        evaluate(
+            0,
+            "configured_baseline",
+            "configured_baseline",
+            baseline,
+            pre_registered=True,
+        )
     try:
+        if search_policy == "preregistered_only":
+            raise ImportError
         import optuna
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1603,7 +3144,13 @@ def _optimize(
                 )
                 for field in COMPONENT_FIELDS
             }
-            return evaluate(trial.number + 1, "optuna_tpe", raw)
+            return evaluate(
+                trial.number + 1,
+                f"optuna_trial_{trial.number + 1}",
+                "optuna_tpe",
+                raw,
+                pre_registered=False,
+            )
 
         study.optimize(
             objective,
@@ -1612,14 +3159,23 @@ def _optimize(
         )
         method = "optuna_tpe"
     except ImportError:
-        rng = random.Random(seed)
-        for trial_number in range(1, trials):
-            evaluate(
-                trial_number,
-                "deterministic_random_search",
-                {field: rng.random() for field in COMPONENT_FIELDS},
+        if search_policy == "preregistered_only":
+            pass
+        elif search_policy != "deterministic_random_search":
+            raise ValueError(
+                f"Unsupported Stage 8 search policy: {search_policy!r}"
             )
-        method = "deterministic_random_search"
+        else:
+            rng = random.Random(seed)
+            for trial_number in range(1, trials):
+                evaluate(
+                    trial_number,
+                    f"random_trial_{trial_number}",
+                    "deterministic_random_search",
+                    {field: rng.random() for field in COMPONENT_FIELDS},
+                    pre_registered=False,
+                )
+            method = "deterministic_random_search"
     best = max(
         records,
         key=lambda row: (
@@ -1636,6 +3192,7 @@ def _optimize(
         },
         records,
         method,
+        str(best["candidate_id"]),
     )
 
 
@@ -1656,34 +3213,203 @@ def _metric_gate(
     minimum_hit = float(
         cfg_get(config, f"{CONFIG_KEY}.gates.minimum_ic_hit_rate", 0.50)
     )
-    minimum_spread = float(
+    spread_gate_mode = str(
         cfg_get(
             config,
-            f"{CONFIG_KEY}.gates.minimum_mean_spread_net",
+            f"{CONFIG_KEY}.gates.spread_gate_mode",
+            "diagnostic_only",
+        )
+    )
+    if spread_gate_mode != "diagnostic_only":
+        raise ValueError(
+            "Stage 8 v1.3 requires spread_gate_mode=diagnostic_only"
+        )
+    minimum_top_excess = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.gates.minimum_mean_top_excess_net",
+            0.0,
+        )
+    )
+    minimum_outcome_coverage = float(
+        cfg_get(config, f"{CONFIG_KEY}.minimum_outcome_coverage", 0.95)
+    )
+    minimum_lcb = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.gates.minimum_top_excess_net_lcb",
+            0.0,
+        )
+    )
+    minimum_non_overlapping_dates = int(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.gates.minimum_non_overlapping_top_dates",
+            4,
+        )
+    )
+    minimum_non_overlapping_top = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.gates.minimum_non_overlapping_top_excess_net",
             0.0,
         )
     )
     for horizon in (primary, secondary):
         if int(metrics.get(f"n_dates_{horizon}d") or 0) < minimum_dates:
             reasons.append(f"{horizon}d_insufficient_dates")
+        if int(metrics.get(f"n_top_dates_{horizon}d") or 0) < minimum_dates:
+            reasons.append(f"{horizon}d_insufficient_top_dates")
         if float(metrics.get(f"mean_ic_{horizon}d") or 0.0) < minimum_ic:
             reasons.append(f"{horizon}d_mean_ic_below_gate")
         if (
-            float(metrics.get(f"mean_spread_net_{horizon}d") or 0.0)
-            < minimum_spread
+            float(metrics.get(f"mean_top_excess_net_{horizon}d") or 0.0)
+            < minimum_top_excess
         ):
-            reasons.append(f"{horizon}d_spread_below_gate")
+            reasons.append(f"{horizon}d_top_excess_below_gate")
+        lcb = as_float(
+            metrics.get(
+                f"top_excess_net_lower_confidence_bound_{horizon}d"
+            )
+        )
+        if lcb is None or lcb < minimum_lcb:
+            reasons.append(f"{horizon}d_top_excess_lcb_below_gate")
+        if (
+            int(
+                metrics.get(
+                    f"n_non_overlapping_top_dates_{horizon}d"
+                )
+                or 0
+            )
+            < minimum_non_overlapping_dates
+        ):
+            reasons.append(
+                f"{horizon}d_insufficient_non_overlapping_top_dates"
+            )
+        if (
+            float(
+                metrics.get(
+                    f"mean_non_overlapping_top_excess_net_{horizon}d"
+                )
+                or 0.0
+            )
+            < minimum_non_overlapping_top
+        ):
+            reasons.append(
+                f"{horizon}d_non_overlapping_top_excess_below_gate"
+            )
+        if (
+            float(metrics.get(f"mean_outcome_coverage_{horizon}d") or 0.0)
+            < minimum_outcome_coverage
+        ):
+            reasons.append(f"{horizon}d_outcome_coverage_below_gate")
     if float(metrics.get(f"ic_hit_rate_{primary}d") or 0.0) < minimum_hit:
         reasons.append(f"{primary}d_hit_rate_below_gate")
-    if float(metrics.get("avg_top_turnover") or 1.0) > float(
+    average_turnover = as_float(metrics.get("avg_top_turnover"))
+    if average_turnover is None or average_turnover > float(
         cfg_get(config, f"{CONFIG_KEY}.maximum_turnover", 0.75)
     ):
         reasons.append("turnover_above_gate")
-    if float(metrics.get("avg_top_cohort_share") or 1.0) > float(
+    average_cohort_share = as_float(metrics.get("avg_top_cohort_share"))
+    if average_cohort_share is None or average_cohort_share > float(
         cfg_get(config, f"{CONFIG_KEY}.maximum_cohort_share", 0.50)
     ):
         reasons.append("cohort_concentration_above_gate")
     return not reasons, reasons
+
+
+def _fold_product_gate(
+    config: dict[str, Any],
+    metrics: Mapping[str, Any],
+    horizons: Sequence[int],
+) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    minimum_outcome_coverage = float(
+        cfg_get(config, f"{CONFIG_KEY}.minimum_outcome_coverage", 0.95)
+    )
+    for horizon in horizons:
+        if float(
+            metrics.get(f"mean_top_excess_net_{horizon}d") or 0.0
+        ) <= 0:
+            reasons.append(f"{horizon}d_top_excess_not_positive")
+        if float(
+            metrics.get(f"mean_outcome_coverage_{horizon}d") or 0.0
+        ) < minimum_outcome_coverage:
+            reasons.append(f"{horizon}d_outcome_coverage_below_gate")
+    average_turnover = as_float(metrics.get("avg_top_turnover"))
+    if average_turnover is None or average_turnover > float(
+        cfg_get(config, f"{CONFIG_KEY}.maximum_turnover", 0.75)
+    ):
+        reasons.append("turnover_above_gate")
+    cohort_share = as_float(metrics.get("avg_top_cohort_share"))
+    if cohort_share is None or cohort_share > float(
+        cfg_get(config, f"{CONFIG_KEY}.maximum_cohort_share", 0.50)
+    ):
+        reasons.append("cohort_concentration_above_gate")
+    return not reasons, reasons
+
+
+def _fold_protocol_summary(
+    config: dict[str, Any],
+    metrics_by_block: Sequence[Mapping[str, Any]],
+    horizons: Sequence[int],
+) -> dict[str, Any]:
+    minimum_blocks = int(
+        cfg_get(config, f"{CONFIG_KEY}.walk_forward.minimum_blocks", 4)
+    )
+    minimum_pass_rate = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.walk_forward.minimum_fold_product_pass_rate",
+            0.70,
+        )
+    )
+    minimum_positive_rate = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.walk_forward.minimum_positive_top_block_rate",
+            0.70,
+        )
+    )
+    passes = [
+        _fold_product_gate(config, metrics, horizons)[0]
+        for metrics in metrics_by_block
+    ]
+    summary: dict[str, Any] = {
+        "block_count": len(metrics_by_block),
+        "objective_mean": mean(
+            float(metrics.get("objective") or 0.0)
+            for metrics in metrics_by_block
+        )
+        or 0.0,
+        "fold_product_pass_rate": (
+            sum(passes) / len(passes) if passes else 0.0
+        ),
+    }
+    protocol_pass = (
+        len(metrics_by_block) >= minimum_blocks
+        and float(summary["fold_product_pass_rate"]) >= minimum_pass_rate
+    )
+    for horizon in horizons:
+        values = [
+            float(metrics.get(f"mean_top_excess_net_{horizon}d") or 0.0)
+            for metrics in metrics_by_block
+        ]
+        positive_rate = (
+            sum(value > 0 for value in values) / len(values)
+            if values
+            else 0.0
+        )
+        middle = median(values) or 0.0
+        summary[f"median_block_top_excess_net_{horizon}d"] = middle
+        summary[f"positive_top_block_rate_{horizon}d"] = positive_rate
+        protocol_pass = (
+            protocol_pass
+            and middle > 0
+            and positive_rate >= minimum_positive_rate
+        )
+    summary["protocol_pass"] = protocol_pass
+    return summary
 
 
 def run_calibration(
@@ -1696,6 +3422,37 @@ def run_calibration(
     walk_forward_trials: int,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     bounds = _component_bounds(config)
+    registry, registry_payload, registry_hash = _candidate_registry(
+        config,
+        bounds,
+    )
+    if (
+        str(registry_payload["search_policy"]) == "preregistered_only"
+        and trials != walk_forward_trials
+    ):
+        raise ValueError(
+            "Pre-registered Stage 8 static and walk-forward candidate "
+            "budgets must match"
+        )
+    minimum_cross_section = int(
+        cfg_get(config, f"{CONFIG_KEY}.minimum_cross_section", 30)
+    )
+    eligible_by_date: dict[str, int] = defaultdict(int)
+    benchmark_available_by_date: dict[str, bool] = defaultdict(bool)
+    for row in rows:
+        asof = str(row["asof_date"])
+        if str(row.get("execution_universe_eligible_flag") or "") == "1":
+            eligible_by_date[asof] += 1
+        if as_float(
+            row.get(f"benchmark_execution_return_{horizons[0]}d")
+        ) is not None:
+            benchmark_available_by_date[asof] = True
+    coverage_dates = sorted(
+        asof
+        for asof, count in eligible_by_date.items()
+        if count >= minimum_cross_section
+        and benchmark_available_by_date[asof]
+    )
     split_dates = {
         split: sorted(
             {
@@ -1706,16 +3463,37 @@ def run_calibration(
         )
         for split in ("train", "validation", "holdout")
     }
+    evaluation_dates = {
+        **split_dates,
+        "all_development": coverage_dates,
+    }
     baseline = _baseline_weights(config, bounds)
-    candidate, trial_rows, search_method = _optimize(
+    candidate, trial_rows, search_method, candidate_id = _optimize(
         config,
         rows=rows,
-        train_dates=split_dates["train"],
+        train_dates=coverage_dates,
         horizons=horizons,
         bounds=bounds,
         trials=trials,
         seed=int(cfg_get(config, f"{CONFIG_KEY}.random_seed", 357)),
     )
+    evaluated_candidate_ids = [
+        str(row["candidate_id"]) for row in trial_rows
+    ]
+    registry_artifact = {
+        **registry_payload,
+        "created_at_utc": utc_now(),
+        "candidate_registry_sha256": registry_hash,
+        "requested_static_evaluations": trials,
+        "requested_evaluations_per_outer_fold": walk_forward_trials,
+        "evaluated_candidate_ids": evaluated_candidate_ids,
+        "prior_same_panel_total_trials": int(
+            registry_payload["prior_same_panel_static_trials"]
+        )
+        + int(registry_payload["prior_same_panel_walk_forward_trials"]),
+        "lockbox_outcomes_accessed": False,
+    }
+    write_json_atomic(paths.candidate_registry_json, registry_artifact)
     write_csv_atomic(paths.trials_csv, TRIAL_FIELDS, trial_rows)
     models = {
         "configured_baseline": baseline,
@@ -1731,8 +3509,45 @@ def run_calibration(
                 horizons=horizons,
                 weights=weights,
             )
-            for split, dates in split_dates.items()
+            for split, dates in evaluation_dates.items()
         }
+    model_date_diagnostics = _write_model_date_diagnostics(
+        model_metrics=model_metrics,
+        horizons=horizons,
+        paths=paths,
+    )
+    membership_rows = _write_sleeve_membership(
+        config,
+        rows=rows,
+        models=models,
+        horizons=horizons,
+        paths=paths,
+    )
+    quantile_diagnostics = _write_quantile_diagnostics(
+        config,
+        membership_rows=membership_rows,
+        paths=paths,
+    )
+    regime_diagnostics = _write_regime_diagnostics(
+        config,
+        model_metrics=model_metrics,
+        horizons=horizons,
+        paths=paths,
+    )
+    ticker_attribution = _write_ticker_attribution(
+        membership_rows=membership_rows,
+        paths=paths,
+    )
+    component_ablations = _write_component_ablations(
+        config,
+        rows=rows,
+        split_dates=evaluation_dates,
+        horizons=horizons,
+        models=models,
+        model_metrics=model_metrics,
+        bounds=bounds,
+        paths=paths,
+    )
     baseline_validation_gate, baseline_validation_reasons = _metric_gate(
         config,
         model_metrics["configured_baseline"]["validation"],
@@ -1751,6 +3566,16 @@ def run_calibration(
     candidate_holdout_gate, candidate_holdout_reasons = _metric_gate(
         config,
         model_metrics["stage8_candidate"]["holdout"],
+        horizons,
+    )
+    baseline_development_gate, baseline_development_reasons = _metric_gate(
+        config,
+        model_metrics["configured_baseline"]["all_development"],
+        horizons,
+    )
+    candidate_development_gate, candidate_development_reasons = _metric_gate(
+        config,
+        model_metrics["stage8_candidate"]["all_development"],
         horizons,
     )
     improvement = (
@@ -1773,6 +3598,15 @@ def run_calibration(
         "created_at_utc": utc_now(),
         "report_only": True,
         "search_method": search_method,
+        "research_protocol_version": registry_payload[
+            "research_protocol_version"
+        ],
+        "evaluation_policy_version": registry_payload[
+            "evaluation_policy_version"
+        ],
+        "candidate_registry_sha256": registry_hash,
+        "selected_candidate_id": candidate_id,
+        "static_split_gates_diagnostic_only": True,
         "trial_count": len(trial_rows),
         "horizons_trading_days": list(horizons),
         "component_bounds": {
@@ -1791,6 +3625,10 @@ def run_calibration(
         "candidate_holdout_gate": candidate_holdout_gate,
         "candidate_holdout_gate_reasons": candidate_holdout_reasons,
         "candidate_improves_validation": improvement >= minimum_improvement,
+        "baseline_development_gate": baseline_development_gate,
+        "baseline_development_gate_reasons": baseline_development_reasons,
+        "candidate_development_gate": candidate_development_gate,
+        "candidate_development_gate_reasons": candidate_development_reasons,
         "metrics": {
             model: {
                 split: {
@@ -1802,29 +3640,15 @@ def run_calibration(
             }
             for model, splits in model_metrics.items()
         },
+        "model_date_diagnostic_rows": len(model_date_diagnostics),
+        "quantile_diagnostic_rows": len(quantile_diagnostics),
+        "component_ablation_rows": len(component_ablations),
+        "sleeve_membership_rows": len(membership_rows),
+        "regime_diagnostic_rows": len(regime_diagnostics),
+        "ticker_attribution_rows": len(ticker_attribution),
     }
     write_json_atomic(paths.static_summary_json, static)
 
-    minimum_cross_section = int(
-        cfg_get(config, f"{CONFIG_KEY}.minimum_cross_section", 30)
-    )
-    eligible_by_date: dict[str, int] = defaultdict(int)
-    for row in rows:
-        if (
-            str(
-                row.get(
-                    f"panel_row_eligible_flag_{horizons[0]}d"
-                )
-                or ""
-            )
-            == "1"
-        ):
-            eligible_by_date[str(row["asof_date"])] += 1
-    coverage_dates = sorted(
-        asof
-        for asof, count in eligible_by_date.items()
-        if count >= minimum_cross_section
-    )
     initial_train = int(
         cfg_get(
             config,
@@ -1856,6 +3680,9 @@ def run_calibration(
         / step_days
     )
     blocks: list[dict[str, Any]] = []
+    candidate_fold_rows: list[dict[str, Any]] = []
+    fixed_candidate_metrics: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    selected_procedure_metrics: list[dict[str, Any]] = []
     improvements: list[float] = []
     wins = 0
     gate_passes = 0
@@ -1867,7 +3694,7 @@ def run_calibration(
         test_dates = coverage_dates[test_start : test_start + block_size]
         if len(train_dates) < initial_train or len(test_dates) < 4:
             break
-        block_candidate, _, _ = _optimize(
+        block_candidate, _, _, block_candidate_id = _optimize(
             config,
             rows=rows,
             train_dates=train_dates,
@@ -1894,12 +3721,19 @@ def run_calibration(
             baseline_metrics["objective"]
         )
         gate_pass, _ = _metric_gate(config, candidate_metrics, horizons)
+        fold_product_pass, _ = _fold_product_gate(
+            config,
+            candidate_metrics,
+            horizons,
+        )
         win = block_improvement > 0
         wins += int(win)
-        gate_passes += int(gate_pass)
+        gate_passes += int(fold_product_pass)
         improvements.append(block_improvement)
+        selected_procedure_metrics.append(candidate_metrics)
         record: dict[str, object] = {
             "block": block,
+            "candidate_id": block_candidate_id,
             "train_start": train_dates[0],
             "train_end": train_dates[-1],
             "test_start": test_dates[0],
@@ -1911,6 +3745,7 @@ def run_calibration(
             "objective_improvement": block_improvement,
             "candidate_wins": int(win),
             "candidate_gate_pass": int(gate_pass),
+            "candidate_fold_product_pass": int(fold_product_pass),
             "candidate_avg_top_turnover": candidate_metrics[
                 "avg_top_turnover"
             ],
@@ -1929,7 +3764,65 @@ def run_calibration(
             record[f"candidate_mean_spread_net_{horizon}d"] = (
                 candidate_metrics[f"mean_spread_net_{horizon}d"]
             )
+            record[f"candidate_mean_top_excess_net_{horizon}d"] = (
+                candidate_metrics[f"mean_top_excess_net_{horizon}d"]
+            )
+            record[
+                f"candidate_mean_non_overlapping_top_excess_net_{horizon}d"
+            ] = candidate_metrics[
+                f"mean_non_overlapping_top_excess_net_{horizon}d"
+            ]
         blocks.append(record)
+        for fixed_candidate_id in evaluated_candidate_ids:
+            fixed_weights = registry[fixed_candidate_id]
+            fixed_metrics = evaluate_weights(
+                config,
+                rows=rows,
+                dates=test_dates,
+                horizons=horizons,
+                weights=fixed_weights,
+            )
+            fixed_pass, fixed_reasons = _fold_product_gate(
+                config,
+                fixed_metrics,
+                horizons,
+            )
+            fixed_candidate_metrics[fixed_candidate_id].append(fixed_metrics)
+            fixed_record: dict[str, Any] = {
+                "candidate_id": fixed_candidate_id,
+                "candidate_role": (
+                    "configured_baseline"
+                    if fixed_candidate_id == "configured_baseline"
+                    else "pre_registered_simple_baseline"
+                ),
+                "block": block,
+                "test_start": test_dates[0],
+                "test_end": test_dates[-1],
+                "test_date_count": len(test_dates),
+                "objective": fixed_metrics["objective"],
+                "product_gate_pass": int(fixed_pass),
+                "gate_reasons": ";".join(fixed_reasons),
+                "weights_json": json.dumps(
+                    fixed_weights,
+                    sort_keys=True,
+                ),
+            }
+            for horizon in horizons:
+                fixed_record[f"mean_ic_{horizon}d"] = fixed_metrics[
+                    f"mean_ic_{horizon}d"
+                ]
+                fixed_record[f"mean_top_excess_net_{horizon}d"] = (
+                    fixed_metrics[f"mean_top_excess_net_{horizon}d"]
+                )
+                fixed_record[
+                    f"mean_non_overlapping_top_excess_net_{horizon}d"
+                ] = fixed_metrics[
+                    f"mean_non_overlapping_top_excess_net_{horizon}d"
+                ]
+                fixed_record[f"mean_spread_net_{horizon}d"] = (
+                    fixed_metrics[f"mean_spread_net_{horizon}d"]
+                )
+            candidate_fold_rows.append(fixed_record)
         block += 1
         test_start += block_size
     block_fields: list[str] = list(WALK_FORWARD_FIELDS)
@@ -1939,9 +3832,26 @@ def run_calibration(
                 f"candidate_mean_ic_{horizon}d",
                 f"baseline_mean_ic_{horizon}d",
                 f"candidate_mean_spread_net_{horizon}d",
+                f"candidate_mean_top_excess_net_{horizon}d",
+                f"candidate_mean_non_overlapping_top_excess_net_{horizon}d",
             )
         )
     write_csv_atomic(paths.walk_forward_csv, block_fields, blocks)
+    candidate_fold_fields: list[str] = list(CANDIDATE_FOLD_FIELDS)
+    for horizon in horizons:
+        candidate_fold_fields.extend(
+            (
+                f"mean_ic_{horizon}d",
+                f"mean_top_excess_net_{horizon}d",
+                f"mean_non_overlapping_top_excess_net_{horizon}d",
+                f"mean_spread_net_{horizon}d",
+            )
+        )
+    write_csv_atomic(
+        paths.candidate_fold_comparison_csv,
+        candidate_fold_fields,
+        candidate_fold_rows,
+    )
     minimum_blocks = int(
         cfg_get(config, f"{CONFIG_KEY}.walk_forward.minimum_blocks", 4)
     )
@@ -1955,10 +3865,91 @@ def run_calibration(
     win_rate = wins / len(blocks) if blocks else 0.0
     gate_rate = gate_passes / len(blocks) if blocks else 0.0
     average_improvement = mean(improvements) or 0.0
-    procedure_adds_value = (
-        len(blocks) >= minimum_blocks
+    bootstrap_confidence = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.walk_forward.improvement_bootstrap_confidence",
+            0.90,
+        )
+    )
+    bootstrap_simulations = int(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.walk_forward.improvement_bootstrap_simulations",
+            2000,
+        )
+    )
+    minimum_noise_band = float(
+        cfg_get(
+            config,
+            f"{CONFIG_KEY}.walk_forward.minimum_objective_improvement_noise_band",
+            0.0,
+        )
+    )
+    nested_improvement_lcb = _bootstrap_mean_lower_bound(
+        improvements,
+        confidence=bootstrap_confidence,
+        simulations=bootstrap_simulations,
+        seed=seed + 10000,
+    )
+    nested_summary = _fold_protocol_summary(
+        config,
+        selected_procedure_metrics,
+        horizons,
+    )
+    fixed_summaries = {
+        identifier: _fold_protocol_summary(config, metrics, horizons)
+        for identifier, metrics in fixed_candidate_metrics.items()
+    }
+    selected_fixed_metrics = fixed_candidate_metrics.get(candidate_id, [])
+    baseline_fixed_metrics = fixed_candidate_metrics.get(
+        "configured_baseline",
+        [],
+    )
+    selected_fixed_improvements = [
+        float(candidate_metrics.get("objective") or 0.0)
+        - float(baseline_metrics.get("objective") or 0.0)
+        for candidate_metrics, baseline_metrics in zip(
+            selected_fixed_metrics,
+            baseline_fixed_metrics,
+        )
+    ]
+    selected_fixed_improvement_lcb = _bootstrap_mean_lower_bound(
+        selected_fixed_improvements,
+        confidence=bootstrap_confidence,
+        simulations=bootstrap_simulations,
+        seed=seed + 20000,
+    )
+    selected_fixed_summary = fixed_summaries.get(candidate_id, {})
+    baseline_fixed_summary = fixed_summaries.get(
+        "configured_baseline",
+        {},
+    )
+    selected_candidate_protocol_pass = bool(
+        candidate_id != "configured_baseline"
+        and selected_fixed_summary.get("protocol_pass") is True
+        and selected_fixed_improvement_lcb is not None
+        and selected_fixed_improvement_lcb > minimum_noise_band
+    )
+    nested_selection_protocol_pass = bool(
+        nested_summary.get("protocol_pass") is True
+        and len(blocks) >= minimum_blocks
         and win_rate >= minimum_win_rate
-        and average_improvement > 0
+        and nested_improvement_lcb is not None
+        and nested_improvement_lcb > minimum_noise_band
+    )
+    procedure_adds_value = bool(
+        selected_candidate_protocol_pass
+        and nested_selection_protocol_pass
+    )
+    baseline_protocol_pass = bool(
+        baseline_fixed_summary.get("protocol_pass") is True
+    )
+    simple_candidate_passes = sorted(
+        identifier
+        for identifier, summary in fixed_summaries.items()
+        if identifier != "configured_baseline"
+        and summary.get("protocol_pass") is True
     )
     walk_forward = {
         "artifact_family": "machinery_stage8_walk_forward",
@@ -1970,10 +3961,26 @@ def run_calibration(
         "embargo_periods": embargo_periods,
         "test_block_dates": block_size,
         "trials_per_refit": walk_forward_trials,
+        "candidate_registry_sha256": registry_hash,
+        "selected_candidate_id": candidate_id,
         "candidate_win_rate": win_rate,
         "candidate_gate_pass_rate": gate_rate,
         "mean_objective_improvement": average_improvement,
         "improvement_t_stat": _stats(improvements)["t_stat"],
+        "improvement_bootstrap_confidence": bootstrap_confidence,
+        "improvement_lower_confidence_bound": nested_improvement_lcb,
+        "minimum_objective_improvement_noise_band": minimum_noise_band,
+        "nested_selection_summary": nested_summary,
+        "nested_selection_protocol_pass": nested_selection_protocol_pass,
+        "fixed_candidate_summaries": fixed_summaries,
+        "selected_fixed_candidate_summary": selected_fixed_summary,
+        "selected_fixed_improvement_lower_confidence_bound": (
+            selected_fixed_improvement_lcb
+        ),
+        "selected_candidate_protocol_pass": selected_candidate_protocol_pass,
+        "baseline_protocol_pass": baseline_protocol_pass,
+        "simple_candidate_passes": simple_candidate_passes,
+        "strategic_exit_recommended": not simple_candidate_passes,
         "procedure_adds_value": procedure_adds_value,
     }
     write_json_atomic(paths.walk_forward_summary_json, walk_forward)
@@ -2017,6 +4024,11 @@ def run_stage8(
         horizons=horizons,
         paths=paths,
     )
+    return_reconciliation = build_return_reconciliation(
+        rows=panel_rows,
+        horizons=horizons,
+        paths=paths,
+    )
     static, walk_forward, blocks = run_calibration(
         config,
         rows=panel_rows,
@@ -2026,13 +4038,12 @@ def run_stage8(
         walk_forward_trials=walk_forward_trials,
     )
     baseline_ready = bool(
-        static["baseline_validation_gate"]
-        and static["baseline_holdout_gate"]
+        static["baseline_development_gate"]
+        and walk_forward["baseline_protocol_pass"]
     )
     candidate_ready = bool(
-        static["candidate_validation_gate"]
-        and static["candidate_holdout_gate"]
-        and static["candidate_improves_validation"]
+        static["candidate_development_gate"]
+        and walk_forward["selected_candidate_protocol_pass"]
         and walk_forward["procedure_adds_value"]
     )
     recommendation = (
@@ -2044,12 +4055,26 @@ def run_stage8(
     )
     blockers: list[str] = []
     if recommendation == "none":
-        blockers.append("no_model_passed_validation_and_holdout_gates")
+        blockers.append("no_model_passed_v13_product_aligned_oos_gates")
     if not blocks:
         blockers.append("walk_forward_blocks_missing")
     acceptance = {
         "acceptance": "PASS",
         "stage8_implementation_status": "COMPLETE",
+        "research_protocol_version": str(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.research_protocol_version",
+                "",
+            )
+        ),
+        "evaluation_policy_version": str(
+            cfg_get(
+                config,
+                f"{CONFIG_KEY}.evaluation_policy_version",
+                "",
+            )
+        ),
         "stage9_readiness": (
             "READY" if recommendation != "none" else "BLOCKED"
         ),
@@ -2069,7 +4094,11 @@ def run_stage8(
         "panel_snapshot_count": panel_manifest["snapshot_count"],
         "panel_row_count": panel_manifest["panel_rows"],
         "diagnostic_row_count": len(diagnostics),
+        "return_reconciliation_row_count": len(return_reconciliation),
         "walk_forward_block_count": len(blocks),
+        "strategic_exit_recommended": walk_forward[
+            "strategic_exit_recommended"
+        ],
         "baseline_ready": baseline_ready,
         "candidate_ready": candidate_ready,
         "blockers": blockers,
@@ -2082,6 +4111,15 @@ def run_stage8(
         paths.splits_csv,
         paths.panel_manifest_json,
         paths.diagnostics_csv,
+        paths.return_reconciliation_csv,
+        paths.model_date_diagnostics_csv,
+        paths.quantile_diagnostics_csv,
+        paths.component_ablation_csv,
+        paths.sleeve_membership_csv,
+        paths.candidate_registry_json,
+        paths.candidate_fold_comparison_csv,
+        paths.regime_diagnostics_csv,
+        paths.ticker_attribution_csv,
         paths.trials_csv,
         paths.static_summary_json,
         paths.walk_forward_csv,
@@ -2096,6 +4134,7 @@ def run_stage8(
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "effective_stage8_config_sha256": stage8_config_sha256(config),
         "git_commit": _git_commit(project_root),
+        "calibration_source_sha256": file_sha256(Path(__file__)),
         "source_db_path": str(db_path),
         "source_db_modified": False,
         "report_only": True,
@@ -2148,6 +4187,15 @@ def validate_stage8(
         paths.splits_csv,
         paths.panel_manifest_json,
         paths.diagnostics_csv,
+        paths.return_reconciliation_csv,
+        paths.model_date_diagnostics_csv,
+        paths.quantile_diagnostics_csv,
+        paths.component_ablation_csv,
+        paths.sleeve_membership_csv,
+        paths.candidate_registry_json,
+        paths.candidate_fold_comparison_csv,
+        paths.regime_diagnostics_csv,
+        paths.ticker_attribution_csv,
         paths.trials_csv,
         paths.static_summary_json,
         paths.walk_forward_csv,
@@ -2170,6 +4218,10 @@ def validate_stage8(
         return result
     manifest = json.loads(paths.run_manifest_json.read_text(encoding="utf-8"))
     issues.extend(_manifest_hash_issues(paths, manifest))
+    if manifest.get("calibration_source_sha256") != file_sha256(
+        Path(__file__)
+    ):
+        issues.append("Stage 8 calibration source changed after run")
     if manifest.get("effective_stage8_config_sha256") != stage8_config_sha256(
         config
     ):
@@ -2182,6 +4234,30 @@ def validate_stage8(
     walk = json.loads(
         paths.walk_forward_summary_json.read_text(encoding="utf-8")
     )
+    registry_artifact = json.loads(
+        paths.candidate_registry_json.read_text(encoding="utf-8")
+    )
+    bounds = _component_bounds(config)
+    _, _, expected_registry_hash = _candidate_registry(config, bounds)
+    if (
+        registry_artifact.get("candidate_registry_sha256")
+        != expected_registry_hash
+    ):
+        issues.append("Stage 8 candidate registry changed after run")
+    if registry_artifact.get("lockbox_outcomes_accessed") is not False:
+        issues.append("Stage 8 candidate registry does not seal the lockbox")
+    expected_protocol = str(
+        cfg_get(config, f"{CONFIG_KEY}.research_protocol_version", "")
+    )
+    expected_policy = str(
+        cfg_get(config, f"{CONFIG_KEY}.evaluation_policy_version", "")
+    )
+    if acceptance.get("research_protocol_version") != expected_protocol:
+        issues.append("Stage 8 research protocol version mismatch")
+    if acceptance.get("evaluation_policy_version") != expected_policy:
+        issues.append("Stage 8 evaluation policy version mismatch")
+    if static.get("static_split_gates_diagnostic_only") is not True:
+        issues.append("Stage 8 static splits are not diagnostic-only")
     sealed_start = parse_date(
         cfg_get(config, f"{CONFIG_KEY}.sealed_start_date")
     )
@@ -2192,8 +4268,21 @@ def validate_stage8(
         issues.append("panel manifest does not prove lockbox exclusion")
     if panel_manifest.get("survivorship_corrected") is not True:
         issues.append("panel is not survivorship-corrected")
+    configured_core_policy = configured_universe_policy(
+        config,
+        config_key=CONFIG_KEY,
+    )
+    if (
+        panel_manifest.get("production_universe_policy")
+        != configured_core_policy
+    ):
+        issues.append("Stage 8 production universe policy mismatch")
     if panel_manifest.get("source_mode") != PANEL_SOURCE:
         issues.append("panel source mode mismatch")
+    if panel_manifest.get("calibration_return_basis") != str(
+        cfg_get(config, f"{CONFIG_KEY}.calibration_return_basis", "")
+    ):
+        issues.append("Stage 8 calibration return basis mismatch")
     panel_rows = read_csv_rows(paths.panel_csv)
     if len(panel_rows) != int(panel_manifest.get("panel_rows") or -1):
         issues.append("panel row count does not match manifest")
@@ -2202,7 +4291,42 @@ def validate_stage8(
         for item in panel_manifest.get("horizons_trading_days", [])
     ]
     for row in panel_rows:
+        expected_core_eligible = (
+            str(row.get("base_panel_eligible_flag") or "") == "1"
+            and production_universe_eligible(
+                row,
+                policy=configured_core_policy,
+            )
+        )
+        if (
+            str(row.get("core_model_eligible_flag") or "") == "1"
+        ) != expected_core_eligible:
+            issues.append("Stage 8 core-model eligibility policy mismatch")
+            break
         asof = parse_date(row.get("asof_date"), field="panel asof")
+        membership_start_raw = str(
+            row.get("membership_start_date") or ""
+        )
+        if not membership_start_raw:
+            issues.append("panel row missing membership_start_date")
+            break
+        membership_end_raw = str(row.get("membership_end_date") or "")
+        membership_end = (
+            parse_date(membership_end_raw, field="membership_end_date")
+            if membership_end_raw
+            else None
+        )
+        expected_execution_eligible = expected_core_eligible and (
+            membership_end is None or membership_end > asof
+        )
+        if (
+            str(
+                row.get("execution_universe_eligible_flag") or ""
+            )
+            == "1"
+        ) != expected_execution_eligible:
+            issues.append("Stage 8 execution-universe eligibility mismatch")
+            break
         if asof >= sealed_start:
             issues.append(f"sealed-window panel row detected: {asof}")
             break
@@ -2249,6 +4373,23 @@ def validate_stage8(
             execution_available = str(
                 row.get(f"execution_available_flag_{horizon}d") or ""
             )
+            execution_excess = as_float(
+                row.get(f"execution_excess_return_{horizon}d")
+            )
+            expected_panel_eligible = (
+                expected_execution_eligible and execution_excess is not None
+            )
+            if (
+                str(
+                    row.get(f"panel_row_eligible_flag_{horizon}d")
+                    or ""
+                )
+                == "1"
+            ) != expected_panel_eligible:
+                issues.append(
+                    f"{horizon}d executable panel eligibility mismatch"
+                )
+                break
             if execution_available == "1" and (
                 not execution_entry
                 or not execution_exit
@@ -2257,12 +4398,46 @@ def validate_stage8(
                     row.get(f"benchmark_execution_return_{horizon}d")
                 )
                 is None
+                or execution_excess is None
             ):
                 issues.append(f"{horizon}d execution availability mismatch")
                 break
+            outcome_type = str(
+                row.get(f"execution_outcome_type_{horizon}d") or ""
+            )
+            if execution_available == "1" and outcome_type not in {
+                "scheduled_horizon",
+                "terminal_membership_exit",
+            }:
+                issues.append(f"{horizon}d execution outcome type missing")
+                break
+            unavailable_reason = str(
+                row.get(f"execution_unavailable_reason_{horizon}d") or ""
+            )
+            if expected_execution_eligible and unavailable_reason == (
+                "missing_terminal_outcome"
+            ):
+                issues.append(f"{horizon}d unresolved terminal outcome")
+                break
+            if outcome_type == "terminal_membership_exit":
+                if (
+                    membership_end is None
+                    or not execution_exit
+                    or parse_date(execution_exit) > membership_end
+                    or str(
+                        row.get(
+                            f"execution_exit_price_basis_{horizon}d"
+                        )
+                        or ""
+                    )
+                    != "adjusted_close"
+                ):
+                    issues.append(
+                        f"{horizon}d invalid terminal execution provenance"
+                    )
+                    break
         if issues:
             break
-    bounds = _component_bounds(config)
     for key in ("baseline_weights", "candidate_weights"):
         weights = static.get(key)
         if not isinstance(weights, Mapping):
@@ -2279,6 +4454,32 @@ def validate_stage8(
         cfg_get(config, f"{CONFIG_KEY}.walk_forward.minimum_blocks", 4)
     ):
         issues.append("walk-forward block count below configured minimum")
+    membership_rows = read_csv_rows(paths.sleeve_membership_csv)
+    if not membership_rows:
+        issues.append("Stage 8 sleeve membership is empty")
+    else:
+        if any(
+            row.get("rank_direction") != "1_is_highest_score"
+            for row in membership_rows
+        ):
+            issues.append("Stage 8 sleeve rank direction mismatch")
+        if any(
+            row.get("universe_policy") != configured_core_policy
+            for row in membership_rows
+        ):
+            issues.append("Stage 8 sleeve universe policy mismatch")
+    quantile_rows = read_csv_rows(paths.quantile_diagnostics_csv)
+    if any(
+        row.get("rank_direction") != "1_is_highest_score"
+        for row in quantile_rows
+    ):
+        issues.append("Stage 8 quantile rank direction mismatch")
+    candidate_fold_rows = read_csv_rows(paths.candidate_fold_comparison_csv)
+    expected_fold_rows = int(walk.get("block_count") or 0) * len(
+        registry_artifact.get("evaluated_candidate_ids") or []
+    )
+    if len(candidate_fold_rows) != expected_fold_rows:
+        issues.append("Stage 8 candidate-fold comparison is incomplete")
     if acceptance.get("production_promotion_performed") is not False:
         issues.append("Stage 8 unexpectedly performed production promotion")
     if acceptance.get("live_dashboard_modified") is not False:
@@ -2298,6 +4499,8 @@ def validate_stage8(
         "diagnostic_rows": len(read_csv_rows(paths.diagnostics_csv)),
         "trial_rows": len(read_csv_rows(paths.trials_csv)),
         "walk_forward_blocks": len(read_csv_rows(paths.walk_forward_csv)),
+        "sleeve_membership_rows": len(membership_rows),
+        "candidate_fold_rows": len(candidate_fold_rows),
         "lockbox_outcomes_accessed": False,
         "issues": issues,
     }
@@ -2312,6 +4515,8 @@ def validate_stage8(
             "diagnostic_rows",
             "trial_rows",
             "walk_forward_blocks",
+            "sleeve_membership_rows",
+            "candidate_fold_rows",
             "lockbox_outcomes_accessed",
             "issues",
         ),

@@ -11,6 +11,10 @@ from typing import Any
 
 import pytest
 
+from market_positioning.api_collectors import (
+    bounded_ibkr_end_date,
+    prune_backdated_ibkr_shortable_rows,
+)
 from technology.core.db import init_db
 from technology.core.oos_provenance import build_oos_provenance
 from technology.core.portfolio_candidate_fields import (
@@ -22,6 +26,11 @@ from technology.core.signal_diagnostics import (
     financial_subfeatures as shared_financial_subfeatures,
 )
 from technology.core.signal_diagnostics import load_prices
+from technology.core.short_interest_float import (
+    enrich_short_interest_float,
+    load_issuer_flags,
+    validate_float_enrichment,
+)
 from technology.core.universe_loader import prune_removed_current_universe_rows
 
 
@@ -320,6 +329,211 @@ def test_semiconductor_short_interest_missing_publication_uses_lag(
     )
     assert "latest_short_interest_pct_float" not in before
     assert after["latest_short_interest_pct_float"] == pytest.approx(0.1)
+
+
+def test_short_interest_float_uses_filing_availability_and_split_adjustment() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    now = "2024-04-15T00:00:00+00:00"
+    conn.executemany(
+        """
+        INSERT INTO source_registry(
+            source_id, stage, source_name, source_type, base_url,
+            status, created_at, updated_at
+        )
+        VALUES (?, 'test', ?, 'test', 'https://example.test', 'active', ?, ?)
+        """,
+        [
+            (source_id, source_id, now, now)
+            for source_id in (
+                "sec_submissions",
+                "sec_companyfacts",
+                "yahoo_finance_adjusted",
+                "market_positioning_upstream",
+            )
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO dim_company(
+            ticker, cik, company_name, universe_status, is_active,
+            data_quality_status, first_seen_at, updated_at
+        )
+        VALUES ('TEST', '0000000001', 'Test Company', 'keep', 1, 'complete', ?, ?)
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO fact_sec_filing(
+            ticker, cik, accession_number, source_id, form_type, filing_date,
+            created_at, updated_at
+        )
+        VALUES ('TEST', '0000000001', 'A1', 'sec_submissions', '10-K',
+                '2024-02-20', ?, ?)
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO fact_sec_xbrl_fact_raw(
+            fact_key, ticker, cik, source_id, taxonomy, concept, unit, value,
+            end_date, accession_number, created_at, updated_at
+        )
+        VALUES ('F1', 'TEST', '0000000001', 'sec_companyfacts', 'dei',
+                'EntityPublicFloat', 'USD', 1000000000.0, '2024-01-15',
+                'A1', ?, ?)
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO fact_price_ohlcv(
+            ticker, bar_date, source_id, close, adj_close, is_adjusted,
+            created_at, updated_at
+        )
+        VALUES ('TEST', '2024-01-15', 'yahoo_finance_adjusted',
+                10.0, 10.0, 1, ?, ?)
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO fact_corporate_action(
+            ticker, action_date, source_id, action_type, split_factor,
+            created_at, updated_at
+        )
+        VALUES ('TEST', '2024-03-01', 'yahoo_finance_adjusted',
+                'split', 2.0, ?, ?)
+        """,
+        (now, now),
+    )
+    conn.executemany(
+        """
+        INSERT INTO fact_short_interest(
+            ticker, settlement_date, source_id, asof_date, publication_date,
+            short_interest_shares, days_to_cover, created_at, updated_at
+        )
+        VALUES ('TEST', ?, 'market_positioning_upstream', ?, ?, 10000000.0, 2.0, ?, ?)
+        """,
+        [
+            ("2024-01-31", "2024-02-14", "2024-02-14", now, now),
+            ("2024-03-31", "2024-04-14", "2024-04-14", now, now),
+        ],
+    )
+
+    stats = enrich_short_interest_float(
+        conn,
+        ["TEST"],
+        source_id="market_positioning_upstream",
+    )
+
+    assert stats.rows_examined == 2
+    assert stats.rows_enriched == 1
+    before = conn.execute(
+        "SELECT * FROM fact_short_interest WHERE settlement_date = '2024-01-31'"
+    ).fetchone()
+    after = conn.execute(
+        "SELECT * FROM fact_short_interest WHERE settlement_date = '2024-03-31'"
+    ).fetchone()
+    assert before["short_interest_pct_float"] is None
+    assert before["float_selection_reason"] == "no_pit_float_candidate"
+    assert after["source_id"] == "market_positioning_upstream"
+    assert after["float_source"] == "sec_entity_public_float_price_proxy"
+    assert after["float_source_asof_date"] == "2024-02-20"
+    assert after["float_measurement_date"] == "2024-01-15"
+    assert after["float_split_adjustment_factor"] == pytest.approx(2.0)
+    assert after["float_shares"] == pytest.approx(200_000_000.0)
+    assert after["short_interest_pct_float"] == pytest.approx(0.05)
+    assert validate_float_enrichment(
+        conn,
+        ["TEST"],
+        source_id="market_positioning_upstream",
+    ) == []
+
+
+def test_ibkr_current_availability_cannot_be_backdated_or_future_dated() -> None:
+    assert bounded_ibkr_end_date(
+        date(2026, 7, 30),
+        capture_date=date(2026, 7, 25),
+    ) == date(2026, 7, 25)
+    assert bounded_ibkr_end_date(
+        date(2026, 7, 20),
+        capture_date=date(2026, 7, 25),
+    ) == date(2026, 7, 20)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE ibkr_shortable_shares_snapshots(
+            ticker TEXT,
+            asof_date TEXT,
+            asof_datetime TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO ibkr_shortable_shares_snapshots VALUES (?, ?, ?)",
+        [
+            ("KEEP", "2026-07-24", "2026-07-25T02:00:00+00:00"),
+            ("DROP", "2026-07-20", "2026-07-23T02:00:00+00:00"),
+        ],
+    )
+    assert prune_backdated_ibkr_shortable_rows(conn) == 1
+    assert conn.execute(
+        "SELECT GROUP_CONCAT(ticker) FROM ibkr_shortable_shares_snapshots"
+    ).fetchone()[0] == "KEEP"
+
+
+def test_ticker_change_is_not_misclassified_as_multiple_share_classes() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    now = "2026-07-25T00:00:00+00:00"
+    conn.executemany(
+        """
+        INSERT INTO dim_company(
+            ticker, cik, company_name, universe_status, is_active,
+            data_quality_status, first_seen_at, updated_at
+        )
+        VALUES (?, '0000004321', ?, ?, ?, 'complete', ?, ?)
+        """,
+        [
+            ("OLD", "Old Name", "historical", 0, now, now),
+            ("NEW", "New Name", "keep", 1, now, now),
+        ],
+    )
+
+    flags = load_issuer_flags(conn, ["OLD", "NEW"])
+
+    assert flags["OLD"] == (False, False)
+    assert flags["NEW"] == (False, False)
+
+
+def test_positioning_stale_fallback_only_accepts_availability_errors() -> None:
+    importer = load_script(
+        "technology/scripts/09_import_technology_positioning.py",
+        "technology_positioning_import_error_classification",
+    )
+    upstream = load_script(
+        "technology/scripts/13_sync_technology_positioning_upstream.py",
+        "technology_positioning_upstream_error_classification",
+    )
+
+    assert importer.is_upstream_availability_error(
+        sqlite3.OperationalError("database is locked")
+    )
+    assert importer.is_upstream_availability_error(OSError("share unavailable"))
+    assert not importer.is_upstream_availability_error(
+        sqlite3.OperationalError("no such table: short_interest_snapshots")
+    )
+    assert upstream.is_shared_db_availability_error(
+        sqlite3.OperationalError("unable to open database file")
+    )
+    assert not upstream.is_shared_db_availability_error(
+        sqlite3.OperationalError("no such column: settlement_date")
+    )
 
 
 def test_yahoo_parser_skips_malformed_corporate_action_dates(yahoo_prices: ModuleType) -> None:

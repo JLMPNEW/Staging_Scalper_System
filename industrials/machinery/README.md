@@ -1,5 +1,13 @@
 # Machinery Pipeline
 
+The fixed v1.4 active-model replacement protocol and the governed v1.4.1
+operational amendment are documented in `V1_4_CONDITIONAL_PROMOTION.md`.
+The original one-time lockbox result remains preserved as blocked because its
+turnover statistic included initial funding. The approved v1.4.1 amendment
+kept all transaction costs, measured recurring turnover separately, passed
+exact five-period production parity, and was activated effective 2026-07-24.
+The protocol has no defense dependency.
+
 The stage-by-stage implementation status, special financial metrics, and
 acceptance gates are maintained in `IMPLEMENTATION_STATUS.md`.
 
@@ -33,11 +41,11 @@ C:\Users\josel\miniconda3\python.exe industrials\machinery\scripts\15_import_mac
 C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\17_run_machinery_refresh_pipeline.py --asof 2026-07-24 --dry-run
 ```
 
-Sealed calibration and portfolio-validation commands:
+Versioned calibration and portfolio-validation commands:
 
 ```powershell
-C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\21_run_machinery_stage8_calibration.py --force --require-stage9-ready
-C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\21_validate_machinery_stage8_calibration.py --require-stage9-ready
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\21_run_machinery_stage8_calibration.py --output-dir output\industrials\machinery\model_cycles\machinery_oos_v1.3.0\stage8 --trials 6 --walk-forward-trials 6 --force
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\21_validate_machinery_stage8_calibration.py --output-dir output\industrials\machinery\model_cycles\machinery_oos_v1.3.0\stage8
 C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\22_run_machinery_stage9_backtest.py --force --require-stage12-ready
 C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\22_validate_machinery_stage9_backtest.py --require-stage12-ready
 C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\23_build_machinery_stage12_governance_lock.py --force
@@ -46,29 +54,55 @@ C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\
 C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\20_validate_machinery_portfolio_adapter.py --asof 2026-07-24 --expect-production
 ```
 
-Stage 8 consumes weekly survivorship-corrected sidecars through `2025-12-31`
-and never queries a price after that date. It writes component/raw-signal
-diagnostics, purged splits, constrained trials, expanding walk-forward blocks,
-D+1 adjusted-open execution labels, acceptance, and hash manifests under
-`output/industrials/machinery/stage8`.
+Frozen v1.4 confirmation commands:
 
-Stage 9 reads only those sealed files. It evaluates baseline and calibrated
-weights across top-decile/top-quintile, equal/score-weighted, long-only and
-long-short variants. Portfolio results use non-overlapping D+1 adjusted-open
-windows, transaction and short-borrow costs, holdings-level attribution,
-turnover, cohort concentration, ADV coverage, and trade-capacity limits. The
-validation-only selection is `long_only_q20_equal`; its untouched holdout and
-5x configured-AUM capacity gates pass. Its production-policy parity artifact
-reconstructs the selected names and weights exactly across all 26 validation
-and holdout periods. Stage 9 remains report-only.
+```powershell
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\27_freeze_machinery_v14_protocol.py
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\28_audit_machinery_v13_defects.py
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\29_capture_machinery_v14_signals.py --asof YYYY-MM-DD
+C:\Users\josel\miniconda3\envs\scalper-staging\python.exe industrials\machinery\scripts\30_assess_machinery_defense_compatibility.py
+```
+
+The v1.4 collector is a post-refresh companion rather than a step inside
+script 17 because the active refresh orchestrator is production-source-sealed.
+It writes only contemporaneous scores, ranks, membership, and intended sleeve
+weights. Outcome, exit, benchmark-return, and forward-return fields are
+prohibited. See `V1_4_CONFIRMATORY_PROTOCOL.md`.
+
+Stage 8 consumes weekly survivorship-corrected sidecars through `2025-12-31`
+and never queries a price after that date. Its canonical calibration target is
+D+1 adjusted-open execution excess return, matching Stage 9. Cohorts are
+formed from point-in-time eligible names before outcome availability is known;
+reviewed membership endings use the final available adjusted close when the
+scheduled horizon is not observable. Exact portfolio-weight turnover drives
+transaction costs. The `machinery_oos_v1.3.0` protocol evaluates exactly six
+pre-registered specifications, records 528 prior same-panel searches, and
+uses top-sleeve net excess as the blocking long-only product gate. The
+top-minus-bottom spread is diagnostic-only. Stage 8 writes one canonical
+sleeve-membership ledger used by the gate, quantile, attribution, and regime
+reports, plus candidate-registry, fixed-candidate/fold, return-reconciliation,
+component-ablation, acceptance, and source/artifact hash manifests.
+
+Stage 9 reads only sealed Stage 8 files and fails closed when calibration
+source, artifacts, eligibility policy, or readiness changes. It evaluates
+baseline and calibrated weights across top-decile/top-quintile,
+equal/score-weighted, long-only and long-short variants. Portfolio results use
+non-overlapping D+1 adjusted-open windows, transaction and short-borrow costs,
+holdings-level attribution, turnover, cohort concentration, ADV coverage, and
+trade-capacity limits. The legacy `long_only_q20_equal` evidence used by the
+2026-07-24 activation remains sealed. Corrected replacement cycle
+`machinery_oos_v1.3.0` is Stage 8 `BLOCKED`, so no promotion under that strict
+v1.3 path is permitted.
 
 Stage 12 is active as of 2026-07-24. It freezes upstream hashes, verifies the
 $300K AUM contract, and applies the validated `long_only_q20_equal` policy
 through the industrial-family portfolio adapter. The production file contains
-113 rows, keeps 99 names broadly OOS-valid, selects 20 names, and reconciles
-exactly 20 candidates to 20 adapter-investable rows. The portfolio optimizer
-preserves equal weights within the machinery sleeve and produced a 4.1636%
-sleeve allocation under the approved 5% cap.
+113 rows: 83 operating-only production-universe names, 99 OOS-valid research
+names, and exactly 17 selected/adapter-investable names. The portfolio
+optimizer preserves equal weights within the machinery sleeve and produced a
+4.4293% sleeve allocation under the approved 5% cap. The original v1.3 strict
+Stage 8 result and original v1.4 lockbox result remain preserved; production
+promotion is governed by the separately approved v1.4.1 amendment.
 
 Script 25 is the production transaction coordinator. On or after 5:00 p.m. ET
 on the approved date it holds the master orchestration lock, runs one incremental machinery
@@ -79,9 +113,11 @@ membership, equal within-sleeve weights, the 5% cap, all production portfolio
 groups, and a passing final-book manifest. Any failure restores the exact
 portfolio config and shadow dashboard bytes. Only after that smoke passes does
 the transaction write the hash-sealed production activation state consumed by
-later daily scorers. The 2026-07-24 transaction passed using hash-validated
-prefix reuse and a bounded downstream smoke; it did not rerun historical
-snapshots or macro stages. Subsequent dates reconstruct the approved
+later daily scorers. The final 2026-07-24 transaction passed a complete
+14-group strategic portfolio smoke. It reused sealed risk-price data but reran
+the portfolio groups so the corrected model identifiers were carried through
+every downstream artifact. It did not rerun machinery historical snapshots or
+calibration. Subsequent dates reconstruct the approved
 top-quintile equal-weight policy; missing, changed, or inconsistent activation
 evidence fails closed. Transaction evidence is written under
 `output/industrials/machinery/stage12/activation_transactions/<date>/`.
@@ -275,6 +311,7 @@ output/industrials/machinery/dashboard/YYYY-MM-DD/machinery_final_rank_table_man
 ```
 
 Stages 8 and 9 are sealed and Stage 12 is active. The 2026-07-24 production
-rank table is the live OOS contract: 20 rows are investable and 99 remain
-research-eligible. The separate survivorship-corrected sidecar remains the
-immutable shadow research and calibration source of record.
+rank table is the live OOS contract: 17 rows are investable, 83 are in the
+operating-only production universe, and 99 remain research-eligible. The
+separate survivorship-corrected sidecar remains the immutable shadow research
+and calibration source of record.

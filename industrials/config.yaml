@@ -138,18 +138,44 @@ model_families:
       supporting_scope_manifest_csv: "transportation/data/transportation_dedicated_parser_support_scope.csv"
       dp0_manifest_json: "transportation/data/transportation_dp0_contract_manifest.json"
       dp1_readiness_audit_json: "transportation/data/transportation_dp1_readiness_audit.json"
-      source_census_version: transportation_dp3_source_census_v1
+      source_census_version: transportation_dp3_source_census_v2
+      # Active issuers need the 400-day PIT lead-in to the 2019 research
+      # window. Inactive issuers are searched over their cached SEC lifetime
+      # so legacy/delisted calibration names are not silently omitted.
       source_census_start_date: "2017-11-28"
+      source_census_legacy_inactive_start_date: "2000-01-01"
       source_census_asof_date: "2026-07-22"
       source_census_expected_identity_count: 160
-      source_census_expected_base_accessions: 3019
+      source_census_expected_base_accessions: 4267
       source_census_csv: "transportation/data/transportation_dedicated_parser_source_census.csv"
       source_decisions_csv: "transportation/data/transportation_dedicated_parser_source_decisions.csv"
       source_cache_gaps_csv: "transportation/data/transportation_dedicated_parser_cache_gaps.csv"
       source_census_manifest_json: "transportation/data/transportation_dp3_source_census_manifest.json"
       source_gap_overrides_csv: "transportation/review_policies/transportation_source_gap_overrides.csv"
+      output_root: "../output/industrials/transportation/dedicated_parser"
+      provider_state_dir: "../tmp/edgartools/transportation"
+      workers: 4
+      hydration_passes: 3
+      max_filings_per_ticker: 0
+      max_documents_per_filing: 0
+      # The DP6S corpus is parsed once. Do not truncate large annual reports
+      # and do not defer image-only PDFs to a second historical pass.
+      pdf_ocr_enabled: true
+      max_pdf_pages: 0
+      max_pdf_bytes: 75000000
+      pdf_extraction_timeout_seconds: 120.0
       production_enabled: false
       parser_execution_authorized: false
+      # DP6A coverage-lift targeting: include metrics that need no more than
+      # two additional usable active issuers to meet the broad or exact-
+      # archetype breadth gate. This stage is local/read-only and cannot
+      # authorize hydration or parsing.
+      coverage_lift_near_gate_max_issuer_shortfall: 2
+      # DP6E audits SEC submissions history directly instead of treating the
+      # already-loaded fact_sec_filing registry as the complete event-form
+      # universe. The audit is metadata-only and cannot authorize hydration,
+      # parsing, historical materialization, calibration, or promotion.
+      source_exhaustion_version: transportation_dp6e_source_exhaustion_v2
       baseline_artifacts:
         - "transportation/data/transportation_metric_registry.yaml"
         - "../output/industrials/transportation/stage4/transportation_metric_availability.csv"
@@ -361,6 +387,7 @@ sec_fundamentals:
 dedicated_parser:
   output_root: "../output/industrials/defense/dedicated_parser"
   provider_state_dir: "../tmp/edgartools/defense"
+  python_executable: "${DEDICATED_PARSER_PYTHON:-C:/Users/josel/miniconda3/envs/scalper-staging/python.exe}"
   # Event filings from this date support the first 2019 PIT score snapshots
   # while avoiding an unbounded pre-research 8-K document archive.
   event_filing_start_date: "2018-01-01"
@@ -553,6 +580,10 @@ oos_calibration_standards:
       # (SCORE_MODEL_VERSION = "defense_shadow_v0.1.0"). Bump both together.
       calibration_provenance_version: "defense_shadow_v0.1.0"
       calibration_validation_method: "weekly_pit_panel_validation_ic_holdout_backtest"
+      # Effective-dated production model locks. The registry is authoritative;
+      # legacy single-lock keys below remain for backward-compatible audit
+      # provenance and are never rewritten.
+      production_lock_registry_csv: "defense/system_csvs/defense_production_model_locks.csv"
       # Sealed by the 2026-07-02 scripts/27 production promotion. Publishers stamp
       # dates >= calibration_production_start_date as production_oos and earlier dates
       # as pre_lock_research, always scoring with the promoted weights read from the

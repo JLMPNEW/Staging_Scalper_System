@@ -1,0 +1,1 @@
+event_id,ticker,event_type,valid_from,valid_to,evidence_artifact,evidence_sha256,decision_status,decision_reason,reviewer,reviewed_at,policy_version,record_sha256

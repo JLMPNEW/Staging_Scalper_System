@@ -237,10 +237,14 @@ scoring_policy:
       eligibility_audit_csv: "../../output/industrials/machinery/stage6/scoring_eligibility_validation.csv"
 
 machinery_scoring:
-  contract_version: industrial_family_final_rank_table_v2_shadow
-  score_model_version: machinery_shadow_v0.2.0
-  model_version: machinery_shadow_2026_07
+  contract_version: industrial_family_final_rank_table_v3_shadow
+  score_model_version: machinery_shadow_v0.3.0
+  model_version: machinery_shadow_2026_08
   min_score_confidence: 0.40
+  # Loss-making issuers have no meaningful profit multiple. Cap the valuation
+  # component absolutely; do not percentile the binary condition or reward
+  # profitable peers merely for clearing it.
+  negative_profit_valuation_score_cap: 25.0
   component_weights:
     quality_score: 0.20
     growth_score: 0.15
@@ -257,9 +261,44 @@ machinery_scoring:
   history_start_date: "2019-01-02"
   historical_policy_lock_date: "2026-07-09"
 
+machinery_lifecycle:
+  # Lifecycle is deliberately separate from calibration_cohort. The current
+  # operating_only production definition remains sealed while this policy runs
+  # in shadow and reviewed transitions accumulate.
+  enabled: true
+  mode: shadow
+  policy_version: machinery_lifecycle_v1
+  output_root: "../../output/industrials/machinery/lifecycle"
+  transitions_csv: "system_csvs/machinery_lifecycle_transitions.csv"
+  revenue_policy_csv: "system_csvs/machinery_lifecycle_revenue_policy.csv"
+  hard_events_csv: "system_csvs/machinery_lifecycle_hard_events.csv"
+  thresholds:
+    emerging_revenue_usd: 10000000
+    emerging_quarters: 4
+    emerging_financial_confidence: 0.55
+    established_revenue_usd: 50000000
+    established_quarters: 8
+    established_financial_confidence: 0.70
+    established_min_listed_days: 730
+    established_demotion_revenue_usd: 25000000
+    emerging_demotion_revenue_usd: 5000000
+    demotion_quarters: 4
+    maximum_capital_raise_dependence: 0.75
+    minimum_cash_runway_years: 2.0
+    maximum_diluted_shares_yoy_growth: 0.15
+    minimum_avg_dollar_volume_60d: 5000000
+    emerging_weight_cap: 0.025
+    minimum_precommercial_calibration_members: 15
+    maximum_period_gap_days: 150
+
 machinery_stage8:
   # Stage 8 is report-only. It cannot alter dashboard ranks or OOS flags.
   output_root: "../../output/industrials/machinery/stage8"
+  research_protocol_version: machinery_oos_v1.3.0
+  evaluation_policy_version: product_aligned_long_only_v1
+  # Retain development-stage names in research artifacts, but calibrate the
+  # regular core model on the same operating-company universe used in Stage 9.
+  production_universe_policy: operating_only
   snapshot_root: "../../output/industrials/machinery/dashboard"
   development_start_date: "2019-01-02"
   development_end_date: "2025-12-31"
@@ -269,6 +308,11 @@ machinery_stage8:
   weekly_selection: last
   cadence_trading_days: 5
   horizons_trading_days: [21, 63]
+  # Calibration must use the same executable D+1-open return convention as
+  # Stage 9. Close-to-close returns remain diagnostic-only.
+  calibration_return_basis: next_session_open_execution_excess
+  minimum_outcome_coverage: 0.95
+  terminal_price_max_staleness_days: 10
   embargo_trading_days: 21
   train_fraction: 0.60
   validation_fraction: 0.20
@@ -278,9 +322,77 @@ machinery_stage8:
   turnover_cost_bps: 20.0
   maximum_turnover: 0.75
   maximum_cohort_share: 0.50
-  stability_penalty: 0.10
   random_seed: 357
-  calibration_trials: 96
+  calibration_trials: 6
+  objective:
+    # Net top-sleeve excess is the investable product. IC remains a secondary
+    # ranking-quality term and spread is diagnostic-only with a small soft weight.
+    top_excess_net_weights: {21: 0.30, 63: 0.30}
+    non_overlapping_top_excess_net_weights: {21: 0.10, 63: 0.10}
+    mean_ic_weights: {21: 0.075, 63: 0.075}
+    spread_diagnostic_weights: {21: 0.025, 63: 0.025}
+    return_scales: {21: 0.02, 63: 0.05}
+    spread_scales: {21: 0.02, 63: 0.05}
+    ic_scale: 0.05
+    uncertainty_penalty_weight: 0.10
+  diagnostics:
+    quantile_buckets: 10
+  candidate_registry:
+    search_policy: preregistered_only
+    maximum_specifications: 6
+    prior_same_panel_static_trials: 192
+    prior_same_panel_walk_forward_trials: 336
+    candidates:
+      equal_components:
+        quality_score: 1.0
+        growth_score: 1.0
+        valuation_score: 1.0
+        risk_control_score: 1.0
+        market_behavior_score: 1.0
+        positioning_score: 1.0
+        industrial_cycle_score: 1.0
+        orders_backlog_score: 1.0
+        capex_cycle_score: 1.0
+      quality_value:
+        quality_score: 0.25
+        growth_score: 0.10
+        valuation_score: 0.25
+        risk_control_score: 0.20
+        market_behavior_score: 0.10
+        positioning_score: 0.02
+        industrial_cycle_score: 0.04
+        orders_backlog_score: 0.02
+        capex_cycle_score: 0.02
+      market_cycle:
+        quality_score: 0.15
+        growth_score: 0.20
+        valuation_score: 0.10
+        risk_control_score: 0.10
+        market_behavior_score: 0.25
+        positioning_score: 0.05
+        industrial_cycle_score: 0.08
+        orders_backlog_score: 0.04
+        capex_cycle_score: 0.03
+      orders_capex:
+        quality_score: 0.18
+        growth_score: 0.10
+        valuation_score: 0.17
+        risk_control_score: 0.18
+        market_behavior_score: 0.12
+        positioning_score: 0.03
+        industrial_cycle_score: 0.10
+        orders_backlog_score: 0.07
+        capex_cycle_score: 0.05
+      defensive_quality:
+        quality_score: 0.30
+        growth_score: 0.05
+        valuation_score: 0.20
+        risk_control_score: 0.25
+        market_behavior_score: 0.10
+        positioning_score: 0.00
+        industrial_cycle_score: 0.05
+        orders_backlog_score: 0.025
+        capex_cycle_score: 0.025
   component_bounds:
     quality_score: [0.10, 0.30]
     growth_score: [0.05, 0.25]
@@ -295,18 +407,31 @@ machinery_stage8:
     minimum_evaluation_dates: 20
     minimum_mean_ic: 0.00
     minimum_ic_hit_rate: 0.50
-    minimum_mean_spread_net: 0.00
+    spread_gate_mode: diagnostic_only
+    minimum_mean_top_excess_net: 0.00
+    minimum_top_excess_net_lcb: 0.00
+    top_excess_one_sided_confidence_z: 1.281552
+    minimum_non_overlapping_top_dates: 4
+    minimum_non_overlapping_top_excess_net: 0.00
     minimum_validation_objective_improvement: 0.001
   walk_forward:
     initial_train_dates: 156
     test_block_dates: 26
     minimum_blocks: 4
     minimum_win_rate: 0.50
-    trials_per_refit: 24
+    minimum_fold_product_pass_rate: 0.70
+    minimum_positive_top_block_rate: 0.70
+    improvement_bootstrap_confidence: 0.90
+    improvement_bootstrap_simulations: 2000
+    minimum_objective_improvement_noise_band: 0.00
+    trials_per_refit: 6
 
 machinery_stage9:
   # Stage 9 is report-only and consumes only the sealed Stage 8 panel.
   output_root: "../../output/industrials/machinery/stage9"
+  # The regular machinery sleeve is an operating-company model. Development-
+  # stage issuers remain scored for research but cannot enter core holdings.
+  production_universe_policy: operating_only
   horizons_trading_days: [21, 63]
   quantiles: [0.10, 0.20]
   minimum_positions: 10
@@ -336,12 +461,13 @@ machinery_stage12:
   # separate operator-approved action and may not overwrite dated history.
   output_root: "../../output/industrials/machinery/stage12"
   portfolio_config_path: "../../portfolio_layer/config.yaml"
-  promotion_candidate_asof: "2026-07-24"
+  promotion_candidate_asof: "2026-07-28"
   production_start_date: "2026-07-24"
-  score_model_version: "machinery_oos_v1.0.0"
-  model_version: "machinery_oos_2026_01"
-  scoring_contract_version: "industrial_family_final_rank_table_v2_production"
-  # The live portfolio cap remains zero until the activation-only transaction.
+  score_model_version: "machinery_oos_v1.4.1_equal_components"
+  model_version: "machinery_production_2026_07_v1.4.1"
+  scoring_contract_version: "industrial_family_final_rank_table_v3_production"
+  # Replacement cycles preserve the active cap and switch model state only
+  # after the new candidate passes the full portfolio smoke.
   proposed_portfolio_cap: 0.05
   activation_approval_token: "ACTIVATE_MACHINERY_STAGE12"
 

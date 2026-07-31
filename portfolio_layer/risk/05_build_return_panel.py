@@ -39,6 +39,7 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
+from portfolio_layer.risk.local_prices import load_local_adjusted_price_fallbacks  # noqa: E402
 from portfolio_layer.risk.panel import assemble_prices, build_universe, master_calendar, to_returns  # noqa: E402
 from portfolio_layer.risk.readiness import check_stage1_readiness, latest_run_with, readiness_passed  # noqa: E402
 from portfolio_layer.risk.yahoo import fetch_adjclose_with_splits  # noqa: E402
@@ -473,6 +474,20 @@ def main() -> int:
     lookback = int(cfg_get(config, "risk_panel.lookback_trading_days", 504))
     run_date = date.fromisoformat(run_as_of)
     start = run_date - timedelta(days=int(lookback * 1.6) + 40)
+    local_price_seed, local_price_provenance, local_price_sources = (
+        load_local_adjusted_price_fallbacks(
+            rc.get("local_adjusted_price_fallbacks"),
+            base_dir=config_path.parent,
+            universe=universe,
+            start=start,
+            end=run_date,
+        )
+    )
+    if local_price_seed:
+        LOGGER.info(
+            "Prepared %d local adjusted-price fallback histories",
+            len(local_price_seed),
+        )
 
     fetch_cfg = cfg_get(config, "risk_panel.fetch", {})
     raw_templates = fetch_cfg.get("chart_url_templates")
@@ -658,6 +673,30 @@ def main() -> int:
             # segments fabricates a level jump at the seam. Refuse the splice: the name routes to
             # coverage as a failed fetch instead of sealing a mixed-basis series.
             statuses.append(f"{ticker}:cross_provider_adjustment_splice_refused:{'+'.join(sorted(set(providers)))}")
+        if not combined_bars and ticker in local_price_seed:
+            bars = local_price_seed[ticker]
+            local_provenance = local_price_provenance[ticker]
+            write_cached_bars(
+                price_cache_dir,
+                ticker,
+                local_provenance.provider,
+                bars,
+                [],
+                query_symbol=ticker,
+                source_symbol=ticker,
+            )
+            return (
+                bars,
+                [],
+                "ok",
+                local_provenance.provider,
+                ticker,
+                ticker,
+                alias_applied,
+                alias_effective_date,
+                alias_issuer_id,
+                alias_reason,
+            )
         if combined_bars and not statuses:
             bars = sorted(combined_bars.items())
             provider = providers[0] if len(set(providers)) == 1 else "lineage:" + "+".join(providers)
@@ -899,6 +938,26 @@ def main() -> int:
             if int(r.get("alias_applied") or 0) == 1
         ],
         "price_history_overrides": price_history_overrides,
+        "local_adjusted_price_fallbacks": local_price_sources,
+        "local_adjusted_price_fallback_tickers": [
+            {
+                "ticker": ticker,
+                "provider": item.provider,
+                "source_id": item.source_id,
+                "database_path": item.database_path,
+                "first_date": item.first_date,
+                "last_date": item.last_date,
+                "row_count": item.row_count,
+                "extracted_sha256": item.extracted_sha256,
+            }
+            for ticker, item in sorted(local_price_provenance.items())
+            if any(
+                row["ticker"] == ticker
+                and row["status"] == "ok"
+                and str(row["provider"]).startswith("local_sqlite:")
+                for row in fetch_rows
+            )
+        ],
         "fallbacks_enabled": {"stooq_us_daily": enable_stooq},
         # This must remain empty: dividend-unadjusted sources are never admitted to this panel.
         "adjustment_policy_exceptions": {

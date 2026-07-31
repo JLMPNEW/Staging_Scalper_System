@@ -36,6 +36,7 @@ LOGGER = logging.getLogger("sync_industrials_yahoo_adjusted_prices")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 RUN_TYPE = "sync_industrials_yahoo_adjusted_prices"
 SOURCE_ID_DEFAULT = "yahoo_finance_adjusted"
+SESSION_CLOSE_TOLERANCE_SECONDS = 1
 FIELDNAMES = [
     "ticker",
     "fetch_ticker",
@@ -165,6 +166,11 @@ def regular_session_bounds(meta: dict[str, Any]) -> tuple[int | None, int | None
     return to_int(regular.get("start")), to_int(regular.get("end")), to_int(meta.get("regularMarketTime"))
 
 
+def regular_session_is_closed(regular_end: int, market_time: int) -> bool:
+    """Accept Yahoo's final-tick convention of end time minus one second."""
+    return market_time >= regular_end - SESSION_CLOSE_TOLERANCE_SECONDS
+
+
 def write_text_atomic(path: Path, text: str) -> None:
     """Write text to a temp file and os.replace() it into place so readers never see a truncated file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +202,10 @@ def cached_payload_stale_reason(payload_text: str) -> str | None:
     _, regular_end, market_time = regular_session_bounds(meta)
     if regular_end is None or market_time is None:
         return None
-    if market_time < regular_end and int(datetime.now(timezone.utc).timestamp()) >= regular_end:
+    if (
+        not regular_session_is_closed(regular_end, market_time)
+        and int(datetime.now(timezone.utc).timestamp()) >= regular_end
+    ):
         return "intraday_payload_for_completed_session"
     return None
 
@@ -430,7 +439,7 @@ def without_unclosed_trailing_bar(bars: list[YahooBar], last_bar_ts: int | None,
         return bars
     regular_start, regular_end, market_time = regular_session_bounds(meta)
     if regular_start is not None and regular_end is not None and market_time is not None:
-        session_closed = market_time >= regular_end
+        session_closed = regular_session_is_closed(regular_end, market_time)
         if not session_closed and last_bar_ts is not None and last_bar_ts >= regular_start:
             return bars[:-1]
         return bars

@@ -28,6 +28,8 @@ from industrials.machinery.stage9_backtest import (
     PRODUCTION_SELECTION_POLICY_VERSION,
     StrategySpec,
     portfolio_weights,
+    production_universe_eligible,
+    production_universe_policy,
     stage9_paths,
     strategy_spec_by_name,
     validate_stage9,
@@ -37,6 +39,8 @@ from portfolio_layer.scores.adapters import run_adapter
 
 MODEL_FAMILY = "machinery"
 CONFIG_KEY = "machinery_stage12"
+ACTIVATION_MODE_INITIAL = "initial_activation"
+ACTIVATION_MODE_REPLACE_ACTIVE = "replace_active_model"
 SLEEVE_TARGET_FIELDS = (
     "asof_date",
     "ticker",
@@ -110,6 +114,52 @@ def portfolio_activation_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def machinery_portfolio_policy_fingerprint(
+    portfolio_config: Mapping[str, Any],
+) -> str:
+    """Hash machinery policy while ignoring only activation toggles."""
+    config = dict(portfolio_config)
+    family = _portfolio_family(config)
+    family["required"] = "<machinery-activation-setting>"
+    payload = {
+        "score_contract_family": family,
+        "optimizer": {
+            "sector_weight_cap": "<machinery-activation-setting>",
+            "fixed_equal_weight": MODEL_FAMILY
+            in {
+                str(value)
+                for value in cfg_get(
+                    config,
+                    "optimizer.fixed_equal_weight_sleeves",
+                    [],
+                )
+            },
+        },
+        "risk_panel_etf": cfg_get(
+            config,
+            f"risk_panel.sector_etf_map.{MODEL_FAMILY}",
+        ),
+        "sleeve_factor_etf": cfg_get(
+            config,
+            f"sleeves.sector_factor_etfs.{MODEL_FAMILY}",
+        ),
+        "black_litterman_strategic_weight": cfg_get(
+            config,
+            f"black_litterman_fusion.strategic_sector_weights.{MODEL_FAMILY}",
+        ),
+        "macro_family_mapping": cfg_get(
+            config,
+            f"macro.family_mappings.{MODEL_FAMILY}",
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _score(
     row: Mapping[str, str],
     weights: Mapping[str, float],
@@ -136,6 +186,7 @@ def production_preview_rows(
     scoring_contract_version: str,
     selection_spec: StrategySpec,
     minimum_positions: int,
+    universe_policy: str,
 ) -> list[dict[str, str]]:
     if selection_spec.portfolio_type != "long_only":
         raise ValueError("Stage 12 supports only a validated long-only policy")
@@ -155,6 +206,10 @@ def production_preview_rows(
             str(row.get("rank_ready_flag") or "") == "1"
             and str(row.get("model_status") or "") == "complete"
             and str(row.get("rank_ready_reason") or "") == "ok"
+            and production_universe_eligible(
+                row,
+                policy=universe_policy,
+            )
         )
     ]
     sleeve_weights = portfolio_weights(
@@ -175,10 +230,14 @@ def production_preview_rows(
     )
     output: list[dict[str, str]] = []
     for rank, (row, _) in enumerate(scored, start=1):
-        universe_eligible = (
+        rank_eligible = (
             str(row.get("rank_ready_flag") or "") == "1"
             and str(row.get("model_status") or "") == "complete"
             and str(row.get("rank_ready_reason") or "") == "ok"
+        )
+        universe_eligible = rank_eligible and production_universe_eligible(
+            row,
+            policy=universe_policy,
         )
         ticker = str(row.get("ticker") or "")
         selected = ticker in sleeve_weights
@@ -191,6 +250,8 @@ def production_preview_rows(
             else (
                 "outside_validated_top_quantile"
                 if universe_eligible
+                else "development_stage_core_sleeve_excluded"
+                if rank_eligible
                 else rank_reason
             )
         )
@@ -224,35 +285,35 @@ def production_preview_rows(
                 ),
                 "portfolio_candidate_reason": candidate_reason,
                 "calibration_eligible_flag": (
-                    "1" if universe_eligible else "0"
+                    "1" if rank_eligible else "0"
                 ),
                 "research_calibration_input_eligible_flag": (
-                    "1" if universe_eligible else "0"
+                    "1" if rank_eligible else "0"
                 ),
                 "research_calibration_reason": (
-                    "ok" if universe_eligible else rank_reason
+                    "ok" if rank_eligible else rank_reason
                 ),
                 "calibration_sample_role": (
-                    "strict_oos" if universe_eligible else "excluded"
+                    "strict_oos" if rank_eligible else "excluded"
                 ),
                 "stage11_calibration_panel_source": (
                     "dashboard_rank_snapshot_current_universe_replay"
                 ),
                 "stage11_calibration_input_eligible_flag": (
-                    "1" if universe_eligible else "0"
+                    "1" if rank_eligible else "0"
                 ),
                 "stage11_calibration_input_reason": (
-                    "ok" if universe_eligible else rank_reason
+                    "ok" if rank_eligible else rank_reason
                 ),
                 "survivorship_corrected_panel_flag": "0",
                 "oos_score_valid_flag": (
-                    "1" if universe_eligible else "0"
+                    "1" if rank_eligible else "0"
                 ),
                 "oos_score_asof_date": (
-                    asof if universe_eligible else ""
+                    asof if rank_eligible else ""
                 ),
                 "oos_invalid_reason": (
-                    "" if universe_eligible else rank_reason
+                    "" if rank_eligible else rank_reason
                 ),
                 "calibration_lock_date": lock_date,
             }
@@ -325,9 +386,25 @@ def _validate_preview_rows(
         ):
             issues.append(f"{ticker}: broad eligible row lost OOS validity")
             break
-        if not universe_eligible and row.get("oos_score_valid_flag") != "0":
-            issues.append(f"{ticker}: ineligible row proposed as OOS valid")
-            break
+        if not universe_eligible:
+            core_excluded = (
+                row.get("portfolio_candidate_reason")
+                == "development_stage_core_sleeve_excluded"
+            )
+            if core_excluded:
+                if (
+                    row.get("oos_score_valid_flag") != "1"
+                    or row.get("calibration_sample_role") != "strict_oos"
+                    or row.get("research_calibration_input_eligible_flag")
+                    != "1"
+                ):
+                    issues.append(
+                        f"{ticker}: core-excluded research row lost OOS validity"
+                    )
+                    break
+            elif row.get("oos_score_valid_flag") != "0":
+                issues.append(f"{ticker}: ineligible row proposed as OOS valid")
+                break
     if not selected_weights:
         issues.append("production preview selected sleeve is empty")
     elif abs(sum(selected_weights) - 1.0) > 1e-8:
@@ -363,6 +440,9 @@ def build_stage12_lock(
     stage9_root: Path,
     output_root: Path,
     asof: str,
+    allow_active_upgrade: bool = False,
+    source_dashboard_dir: Path | None = None,
+    active_governance_root: Path | None = None,
 ) -> dict[str, Any]:
     paths = Stage12Paths(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -401,10 +481,6 @@ def build_stage12_lock(
     portfolio_family = _portfolio_family(portfolio_config)
     if portfolio_family.get("adapter") != "industrial_family":
         raise ValueError("machinery portfolio adapter is not industrial_family")
-    if portfolio_family.get("required") is not False:
-        raise ValueError(
-            "Stage 12 candidate requires machinery to remain optional"
-        )
     if portfolio_family.get("require_oos_score_valid") is not True:
         raise ValueError("machinery portfolio adapter must require OOS validity")
     machinery_aum = float(
@@ -432,6 +508,7 @@ def build_stage12_lock(
     if not isinstance(selection_policy_raw, Mapping):
         raise ValueError("Stage 9 production selection policy is missing")
     selection_policy = dict(selection_policy_raw)
+    configured_universe_policy = production_universe_policy(config)
     if (
         selection_policy.get("version")
         != PRODUCTION_SELECTION_POLICY_VERSION
@@ -443,6 +520,8 @@ def build_stage12_lock(
     )
     if selection_policy.get("variant") != recommended_variant:
         raise ValueError("Stage 9 recommended variant and policy disagree")
+    if selection_policy.get("universe_policy") != configured_universe_policy:
+        raise ValueError("Stage 9 production universe policy is inconsistent")
     selection_spec = strategy_spec_by_name(config, recommended_variant)
     minimum_positions = int(selection_policy.get("minimum_positions") or 0)
     if minimum_positions <= 0:
@@ -473,15 +552,57 @@ def build_stage12_lock(
     if not isinstance(sector_caps, Mapping) or MODEL_FAMILY not in sector_caps:
         raise ValueError("portfolio_layer machinery allocation cap is missing")
     current_portfolio_cap = float(sector_caps[MODEL_FAMILY])
-    if current_portfolio_cap != 0.0:
-        raise ValueError(
-            "Stage 12 candidate requires machinery live cap to remain zero"
-        )
     proposed_portfolio_cap = float(
         cfg_get(config, f"{CONFIG_KEY}.proposed_portfolio_cap", 0.05)
     )
     if proposed_portfolio_cap <= 0 or proposed_portfolio_cap > 0.10:
         raise ValueError("proposed machinery portfolio cap must be in (0, 0.10]")
+    active_state_path = Stage12Paths(
+        active_governance_root
+        or resolve_path(
+            cfg_get(config, f"{CONFIG_KEY}.output_root"),
+            base_dir=config_path.parent,
+        )
+    ).activation_state_json
+    shadow_state = (
+        portfolio_family.get("required") is False
+        and current_portfolio_cap == 0.0
+    )
+    active_state = (
+        portfolio_family.get("required") is True
+        and current_portfolio_cap == proposed_portfolio_cap
+    )
+    previous_activation_state_sha256 = ""
+    if shadow_state:
+        activation_mode = ACTIVATION_MODE_INITIAL
+        if active_state_path.exists():
+            raise ValueError(
+                "Initial Stage 12 candidate conflicts with an existing "
+                "machinery activation state"
+            )
+    elif allow_active_upgrade and active_state:
+        if not active_state_path.is_file():
+            raise ValueError(
+                "Active-model replacement requires the current machinery "
+                "activation state"
+            )
+        previous_state = json.loads(
+            active_state_path.read_text(encoding="utf-8")
+        )
+        if (
+            previous_state.get("acceptance") != "PASS"
+            or previous_state.get("production_policy_status") != "ACTIVE"
+        ):
+            raise ValueError(
+                "Current machinery activation state is not active"
+            )
+        activation_mode = ACTIVATION_MODE_REPLACE_ACTIVE
+        previous_activation_state_sha256 = file_sha256(active_state_path)
+    else:
+        raise ValueError(
+            "Stage 12 requires either optional machinery with zero cap or "
+            "an explicitly approved active-model replacement"
+        )
     weights = {
         str(key): float(value)
         for key, value in stage9_acceptance["recommended_weights"].items()
@@ -492,10 +613,9 @@ def build_stage12_lock(
         cfg_get(config, "machinery_scoring.dashboard_root"),
         base_dir=config_path.parent,
     )
-    source_rank = dashboard_root / asof / "machinery_final_rank_table.csv"
-    source_manifest = (
-        dashboard_root / asof / "machinery_final_rank_table_manifest.json"
-    )
+    source_dir = source_dashboard_dir or (dashboard_root / asof)
+    source_rank = source_dir / "machinery_final_rank_table.csv"
+    source_manifest = source_dir / "machinery_final_rank_table_manifest.json"
     if not source_rank.exists() or not source_manifest.exists():
         raise FileNotFoundError(
             f"Stage 12 source dashboard is incomplete for {asof}"
@@ -524,6 +644,7 @@ def build_stage12_lock(
         ),
         selection_spec=selection_spec,
         minimum_positions=minimum_positions,
+        universe_policy=configured_universe_policy,
     )
     selected_count = sum(
         row["portfolio_sleeve_selected_flag"] == "1"
@@ -587,6 +708,7 @@ def build_stage12_lock(
     lock = {
         "acceptance": "PASS",
         "stage12_status": "READY_NOT_ACTIVATED",
+        "activation_mode": activation_mode,
         "model_family": MODEL_FAMILY,
         "created_at_utc": utc_now(),
         "promotion_candidate_asof": asof,
@@ -620,17 +742,28 @@ def build_stage12_lock(
             "minimum_capacity_multiple"
         ],
         "source_dashboard_asof": asof,
+        "source_dashboard_rank": str(source_rank),
+        "source_dashboard_manifest": str(source_manifest),
         "source_dashboard_sha256": file_sha256(source_rank),
         "source_dashboard_manifest_sha256": file_sha256(source_manifest),
         "stage8_run_manifest_sha256": file_sha256(
             stage8_paths(stage8_root).run_manifest_json
         ),
+        "stage8_run_manifest": str(
+            stage8_paths(stage8_root).run_manifest_json
+        ),
         "stage9_run_manifest_sha256": file_sha256(
+            stage9_paths(stage9_root).run_manifest_json
+        ),
+        "stage9_run_manifest": str(
             stage9_paths(stage9_root).run_manifest_json
         ),
         "portfolio_config_sha256": file_sha256(portfolio_config_path),
         "portfolio_non_activation_config_sha256": (
             portfolio_activation_fingerprint(portfolio_config)
+        ),
+        "machinery_portfolio_policy_sha256": (
+            machinery_portfolio_policy_fingerprint(portfolio_config)
         ),
         "portfolio_adapter_sha256": file_sha256(
             config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
@@ -652,6 +785,10 @@ def build_stage12_lock(
         "production_promotion_performed": False,
         "live_dashboard_modified": False,
         "activation_requires_explicit_operator_approval": True,
+        "active_activation_state": str(active_state_path),
+        "previous_activation_state_sha256": (
+            previous_activation_state_sha256
+        ),
     }
     write_json_atomic(paths.lock_json, lock)
     artifacts = (

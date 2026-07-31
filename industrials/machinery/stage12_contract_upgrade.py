@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from industrials.core.config import cfg_get, resolve_path
+from industrials.core.config import cfg_get, load_yaml, resolve_path
 from industrials.machinery.scoring import (
     FINAL_RANK_FIELDS,
     file_sha256,
@@ -18,11 +18,17 @@ from industrials.machinery.stage12_activation import (
     ACTIVATION_STATUS_FULLY_VALIDATED,
     PRODUCTION_POLICY_STATUS_ACTIVE,
     ActivationPaths,
+    _active_cycle_root,
     _write_bytes_atomic,
     apply_active_production_policy,
     production_policy_source_hashes,
 )
-from industrials.machinery.stage12_governance import Stage12Paths
+from industrials.machinery.stage12_governance import (
+    MODEL_FAMILY,
+    Stage12Paths,
+    _portfolio_family,
+    machinery_portfolio_policy_fingerprint,
+)
 from industrials.machinery.stage8_calibration import utc_now
 
 
@@ -36,6 +42,44 @@ def _require_hash(path: Path, expected: object, *, label: str) -> None:
     actual = file_sha256(path)
     if actual != str(expected or ""):
         raise ValueError(f"{label} hash mismatch: expected={expected!r} actual={actual}")
+
+
+def validate_active_portfolio_contract(
+    portfolio_config: dict[str, Any],
+    *,
+    expected_cap: float,
+    expected_policy_sha256: str,
+) -> None:
+    """Validate machinery activation invariants without freezing other sleeves."""
+    family = _portfolio_family(portfolio_config)
+    cap = float(
+        cfg_get(
+            portfolio_config,
+            f"optimizer.sector_weight_caps.{MODEL_FAMILY}",
+            -1.0,
+        )
+    )
+    fixed_equal = {
+        str(value)
+        for value in cfg_get(
+            portfolio_config,
+            "optimizer.fixed_equal_weight_sleeves",
+            [],
+        )
+    }
+    if (
+        family.get("enabled") is not True
+        or family.get("required") is not True
+        or family.get("require_oos_score_valid") is not True
+        or cap != expected_cap
+        or MODEL_FAMILY not in fixed_equal
+        or machinery_portfolio_policy_fingerprint(portfolio_config)
+        != expected_policy_sha256
+    ):
+        raise ValueError(
+            "Current portfolio configuration no longer satisfies the sealed "
+            "machinery activation contract"
+        )
 
 
 def _run_validator(command: list[str], *, label: str) -> dict[str, Any]:
@@ -98,13 +142,14 @@ def upgrade_active_contract(
 ) -> dict[str, Any]:
     """Upgrade only activation metadata after verifying the sealed 7/24 run."""
     asof = parse_asof(asof)
-    stage12_paths = Stage12Paths(governance_root)
-    activation_paths = ActivationPaths(governance_root, asof)
-    state_path = stage12_paths.activation_state_json
+    state_store_paths = Stage12Paths(governance_root)
+    state_path = state_store_paths.activation_state_json
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    active_root = _active_cycle_root(state, default_root=governance_root)
+    stage12_paths = Stage12Paths(active_root)
+    activation_paths = ActivationPaths(active_root, asof)
     result_path = activation_paths.activation_json
     candidate_path = activation_paths.rank_csv
-
-    state = json.loads(state_path.read_text(encoding="utf-8"))
     result = json.loads(result_path.read_text(encoding="utf-8"))
     if (
         state.get("acceptance") != "PASS"
@@ -119,6 +164,31 @@ def upgrade_active_contract(
         or result.get("full_portfolio_smoke_required") is not False
     ):
         raise ValueError("Machinery activation result is not fully validated")
+
+    current_source_hashes = production_policy_source_hashes()
+    previous_source_hashes = state.get("production_source_sha256")
+    if not isinstance(previous_source_hashes, dict):
+        raise ValueError("Machinery activation state has no source seal")
+    semantic_source_keys = {
+        "scoring.py",
+        "08_build_industrials_financial_features.py",
+        "financial_metric_contract.py",
+        "06a_build_machinery_scoring_features.py",
+        "stage8_calibration.py",
+        "stage9_backtest.py",
+        "production_universe.py",
+        "stage12_governance.py",
+    }
+    changed_semantic_sources = sorted(
+        key
+        for key in semantic_source_keys
+        if previous_source_hashes.get(key) != current_source_hashes.get(key)
+    )
+    if changed_semantic_sources:
+        raise ValueError(
+            "Scoring or selection semantics changed; run a new Stage 8/9/12 "
+            "calibration and activation: " + ",".join(changed_semantic_sources)
+        )
 
     _require_hash(
         stage12_paths.lock_json,
@@ -139,28 +209,22 @@ def upgrade_active_contract(
         cfg_get(config, "machinery_stage12.portfolio_config_path"),
         base_dir=config_path.parent,
     )
-    _require_hash(
-        portfolio_config_path,
-        state.get("portfolio_config_sha256_at_activation"),
-        label="active portfolio configuration",
+    portfolio_config = load_yaml(portfolio_config_path)
+    governance_lock = json.loads(
+        stage12_paths.lock_json.read_text(encoding="utf-8")
     )
-    for path_field, hash_field, label in (
-        (
-            "portfolio_smoke_manifest",
-            "portfolio_smoke_manifest_sha256",
-            "portfolio smoke manifest",
+    validate_active_portfolio_contract(
+        portfolio_config,
+        expected_cap=float(governance_lock["proposed_portfolio_cap"]),
+        expected_policy_sha256=str(
+            governance_lock["machinery_portfolio_policy_sha256"]
         ),
-        (
-            "portfolio_final_manifest",
-            "portfolio_final_manifest_sha256",
-            "portfolio final manifest",
-        ),
-    ):
-        _require_hash(
-            Path(str(result.get(path_field) or "")),
-            result.get(hash_field),
-            label=label,
-        )
+    )
+    current_portfolio_config_sha256 = file_sha256(portfolio_config_path)
+    # The portfolio run directory is shared and may be rebuilt after
+    # activation. Its original hashes remain transitively sealed inside the
+    # unchanged activation result verified above; do not compare those mutable
+    # paths to later rerun content during a source-contract upgrade.
 
     live_rank = Path(str(result.get("rank_table") or ""))
     live_manifest = Path(str(result.get("rank_manifest") or ""))
@@ -263,7 +327,10 @@ def upgrade_active_contract(
         state.update(
             {
                 "activation_result_sha256": file_sha256(result_path),
-                "production_source_sha256": production_policy_source_hashes(),
+                "portfolio_config_sha256_at_activation": (
+                    current_portfolio_config_sha256
+                ),
+                "production_source_sha256": current_source_hashes,
                 "contract_upgraded_at_utc": upgraded_at,
                 "source_upgrade_history": history,
             }

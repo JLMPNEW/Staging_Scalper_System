@@ -20,7 +20,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from industrials.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.refresh_lock import RefreshLock  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
@@ -72,10 +72,38 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--include-dedicated-parser-shadow",
+        "--include-dedicated-parser-production",
+        dest="include_dedicated_parser_shadow",
         action="store_true",
         help=(
-            "Run the full current+historical defense specialized-metric parser "
-            "and before/after audit. The live score remains unchanged."
+            "Explicitly run the defense parser, reviewed production promotion, "
+            "financial rebuild, and before/after audit. This is automatic when "
+            "dedicated_parser.production_enabled=true."
+        ),
+    )
+    parser.add_argument(
+        "--skip-dedicated-parser-production",
+        action="store_true",
+        help=(
+            "Emergency rollback: skip the parser production chain even when "
+            "dedicated_parser.production_enabled=true."
+        ),
+    )
+    parser.add_argument(
+        "--dedicated-parser-python",
+        type=Path,
+        default=None,
+        help=(
+            "Python executable containing Arelle and EdgarTools. Defaults to "
+            "dedicated_parser.python_executable in config, then the current interpreter."
+        ),
+    )
+    parser.add_argument(
+        "--from-step",
+        default="",
+        help=(
+            "Resume at this exact step id and run the remaining sequence. "
+            "Completed prerequisite state is still checked by the final coverage audit."
         ),
     )
     parser.add_argument(
@@ -150,6 +178,38 @@ def build_steps(
                     ],
                     network=True,
                 ),
+            ]
+        )
+        if include_dedicated_parser_shadow:
+            steps.extend(
+                [
+                    Step(
+                        "08d_dedicated_parser_shadow",
+                        "stage_4",
+                        "run defense dedicated parser shadow",
+                        [
+                            "industrials/defense/scripts/08d_run_defense_dedicated_parser_shadow.py",
+                            "--asof",
+                            asof,
+                            "--all-metrics",
+                        ],
+                        accepts_config=True,
+                    ),
+                    Step(
+                        "08e_dedicated_parser_production",
+                        "stage_4",
+                        "promote reviewed defense parser evidence",
+                        [
+                            "industrials/defense/scripts/08e_promote_defense_dedicated_parser.py",
+                            "--asof",
+                            asof,
+                        ],
+                        accepts_config=True,
+                    ),
+                ]
+            )
+        steps.extend(
+            [
                 Step(
                     "08_build_financial",
                     "stage_4",
@@ -162,33 +222,10 @@ def build_steps(
                     "validate financial stage",
                     ["industrials/defense/scripts/08_validate_defense_financial_stage.py", "--asof", asof],
                 ),
-                Step(
-                    "09_profile_graduation",
-                    "stage_4",
-                    "audit reporting-profile graduation",
-                    ["industrials/defense/scripts/09_evaluate_defense_profile_graduation.py", "--asof", asof],
-                ),
             ]
         )
         if include_dedicated_parser_shadow:
-            insert_at = next(
-                index
-                for index, step in enumerate(steps)
-                if step.step_id == "09_profile_graduation"
-            )
-            steps[insert_at:insert_at] = [
-                Step(
-                    "08d_dedicated_parser_shadow",
-                    "stage_4",
-                    "run defense dedicated parser shadow",
-                    [
-                        "industrials/defense/scripts/08d_run_defense_dedicated_parser_shadow.py",
-                        "--asof",
-                        asof,
-                        "--all-metrics",
-                    ],
-                    accepts_config=True,
-                ),
+            steps.append(
                 Step(
                     "08f_compare_specialized_metrics",
                     "stage_4",
@@ -200,7 +237,15 @@ def build_steps(
                     ],
                     accepts_config=True,
                 ),
-            ]
+            )
+        steps.append(
+            Step(
+                "09_profile_graduation",
+                "stage_4",
+                "audit reporting-profile graduation",
+                ["industrials/defense/scripts/09_evaluate_defense_profile_graduation.py", "--asof", asof],
+            )
+        )
     steps.extend(
         [
             Step(
@@ -267,14 +312,70 @@ def build_steps(
     return steps
 
 
-def step_command(step: Step, config_path: Path) -> list[str]:
+def select_steps_from(steps: list[Step], from_step: str) -> list[Step]:
+    requested = from_step.strip()
+    if not requested:
+        return steps
+    step_ids = [step.step_id for step in steps]
+    if requested not in step_ids:
+        raise ValueError(f"Unknown --from-step {requested!r}; valid step ids: {step_ids}")
+    return steps[step_ids.index(requested) :]
+
+
+def resolve_dedicated_parser_python(
+    *,
+    cli_value: Path | None,
+    config: dict[str, Any],
+    base_dir: Path,
+) -> Path:
+    raw: object = (
+        cli_value
+        or cfg_get(config, "dedicated_parser.python_executable")
+        or sys.executable
+    )
+    path = Path(expand_env_vars(raw)).expanduser()
+    resolved = path.resolve() if path.is_absolute() else (base_dir / path).resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Dedicated-parser Python executable not found: {resolved}")
+    return resolved
+
+
+def validate_dedicated_parser_python(python_executable: Path) -> None:
+    probe = subprocess.run(
+        [str(python_executable), "-c", "import arelle.Cntlr, edgar.sgml"],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "provider import probe failed").strip()
+        raise RuntimeError(
+            f"Dedicated-parser Python lacks Arelle or EdgarTools: "
+            f"{python_executable}: {detail}"
+        )
+
+
+def step_command(
+    step: Step,
+    config_path: Path,
+    *,
+    dedicated_parser_python: Path | None = None,
+) -> list[str]:
     """Build a child command, forwarding --config to children that accept it (finding 6).
 
     --config is inserted immediately after the script path (before the step's own flags),
     which every config-aware child's argparse consumes identically. Children without a
     --config option (accepts_config=False) are invoked exactly as before.
     """
-    cmd = [sys.executable, step.args[0]]
+    python_executable = (
+        str(dedicated_parser_python)
+        if step.step_id in {"08d_dedicated_parser_shadow", "08e_dedicated_parser_production"}
+        and dedicated_parser_python is not None
+        else sys.executable
+    )
+    cmd = [python_executable, step.args[0]]
     if step.accepts_config:
         cmd += ["--config", str(config_path)]
     cmd += step.args[1:]
@@ -445,17 +546,18 @@ def run_selftest() -> int:
     )
     assert len(full) == 14, f"expected 14 full steps, got {len(full)}"
     assert len(fast) == 6, f"expected 6 publish-only steps, got {len(fast)}"
-    assert len(shadow) == 16, f"expected 16 parser-shadow steps, got {len(shadow)}"
+    assert len(shadow) == 17, f"expected 17 parser-production steps, got {len(shadow)}"
     shadow_ids = [step.step_id for step in shadow]
+    assert shadow_ids.index("07_sync_sec") < shadow_ids.index("08d_dedicated_parser_shadow")
+    assert shadow_ids.index(
+        "08d_dedicated_parser_shadow"
+    ) < shadow_ids.index("08e_dedicated_parser_production")
+    assert shadow_ids.index(
+        "08e_dedicated_parser_production"
+    ) < shadow_ids.index("08_build_financial")
     assert shadow_ids.index("08_validate_financial") < shadow_ids.index(
-        "08d_dedicated_parser_shadow"
-    )
-    assert shadow_ids.index(
-        "08d_dedicated_parser_shadow"
-    ) < shadow_ids.index("08f_compare_specialized_metrics")
-    assert shadow_ids.index(
         "08f_compare_specialized_metrics"
-    ) < shadow_ids.index("09_profile_graduation")
+    )
     full_ids = [step.step_id for step in full]
     assert full_ids[0] == "03_sync_prices", full_ids
     assert full_ids[-3:] == ["17_publish", "18_validate_publish", "20_validate_portfolio"], full_ids
@@ -542,6 +644,25 @@ def run_selftest() -> int:
     assert "--config" in pub_cmd and pub_cmd.index("--config") == 2, f"config must follow the script path: {pub_cmd}"
     assert str(cfg) == pub_cmd[pub_cmd.index("--config") + 1], "forwarded config path must match"
     assert "--config" not in step_command(price_step, cfg), "config-unaware child must NOT receive --config"
+    parser_python = Path("C:/envs/parser/python.exe")
+    parser_step = next(s for s in shadow if s.step_id == "08d_dedicated_parser_shadow")
+    assert step_command(
+        parser_step,
+        cfg,
+        dedicated_parser_python=parser_python,
+    )[0] == str(parser_python)
+    assert (
+        step_command(price_step, cfg, dedicated_parser_python=parser_python)[0]
+        == sys.executable
+    )
+    assert select_steps_from(shadow, "08d_dedicated_parser_shadow")[0].step_id == (
+        "08d_dedicated_parser_shadow"
+    )
+    try:
+        select_steps_from(shadow, "not_a_step")
+        raise AssertionError("unknown resume step unexpectedly accepted")
+    except ValueError:
+        pass
 
     # --- coverage audit is a gated final step folded into the manifest before it seals (finding 6) ---
     steps_plus_audit = len(full) + 1
@@ -552,7 +673,8 @@ def run_selftest() -> int:
     # steps passed but audit never recorded (crash before folding it in) -> completed < planned -> FAIL
     assert compute_manifest_acceptance(planned_step_count=steps_plus_audit, report_rows=[_row("PASS") for _ in range(len(full))], failures=[], dry_run=False) == "FAIL"
 
-    print("SELFTEST PASS: 14 full / 6 publish-only steps; manifest keys OK; acceptance fail-closed; "
+    print("SELFTEST PASS: 14 base / 17 parser-production / 6 publish-only steps; "
+          "manifest keys OK; acceptance fail-closed; "
           "config forwarding + gated coverage audit + crash-safe lock OK; lock=" + str(lock_path))
     return 0
 
@@ -568,6 +690,11 @@ def main() -> int:
     asof = parse_asof(args.asof)
     history_start = parse_asof(args.positioning_history_start)
     config = load_yaml(config_path)
+    if args.include_dedicated_parser_shadow and args.skip_dedicated_parser_production:
+        raise ValueError(
+            "--include-dedicated-parser-production and "
+            "--skip-dedicated-parser-production are mutually exclusive"
+        )
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     orchestration_root = (PROJECT_ROOT / "output" / "industrials" / "defense" / "orchestration").resolve()
@@ -577,12 +704,37 @@ def main() -> int:
         asof,
         history_start,
         positioning_through_publish_only=args.positioning_through_publish_only,
-        include_dedicated_parser_shadow=args.include_dedicated_parser_shadow,
+        include_dedicated_parser_shadow=(
+            not args.positioning_through_publish_only
+            and (
+                args.include_dedicated_parser_shadow
+                or (
+                    bool(cfg_get(config, "dedicated_parser.production_enabled", False))
+                    and not args.skip_dedicated_parser_production
+                )
+            )
+        ),
+    )
+    steps = select_steps_from(steps, args.from_step)
+    has_parser_steps = any(
+        step.step_id in {"08d_dedicated_parser_shadow", "08e_dedicated_parser_production"}
+        for step in steps
+    )
+    dedicated_parser_python = (
+        resolve_dedicated_parser_python(
+            cli_value=args.dedicated_parser_python,
+            config=config,
+            base_dir=base_dir,
+        )
+        if has_parser_steps
+        else None
     )
     if args.list_steps:
         for step in steps:
             print(f"{step.step_id}\t{step.stage}\t{'network' if step.network else 'local'}\t{step.args[0]}")
         return 0
+    if dedicated_parser_python is not None and not args.dry_run:
+        validate_dedicated_parser_python(dedicated_parser_python)
 
     # Sub-second + PID identity prevents concurrent/retried invocations in the same
     # second from writing indistinguishable manifest rows or log identities.
@@ -598,7 +750,13 @@ def main() -> int:
             "stage": step.stage,
             "script": step.args[0],
             "network_flag": int(step.network),
-            "command": subprocess.list2cmdline(step_command(step, config_path)),
+            "command": subprocess.list2cmdline(
+                step_command(
+                    step,
+                    config_path,
+                    dedicated_parser_python=dedicated_parser_python,
+                )
+            ),
             "log_path": "",
             "status": status,
             "return_code": return_code,
@@ -610,8 +768,11 @@ def main() -> int:
     planned_step_count = len(steps) + 1  # publish chain + the gated coverage audit (finding 6)
     if args.dry_run:
         for index, step in enumerate(steps, start=1):
-            print(f"[defense_daily_refresh][DRY_RUN {index}/{planned_step_count}] {step.label}: "
-                  f"{subprocess.list2cmdline(step_command(step, config_path))}", flush=True)
+            print(
+                f"[defense_daily_refresh][DRY_RUN {index}/{planned_step_count}] {step.label}: "
+                f"{subprocess.list2cmdline(step_command(step, config_path, dedicated_parser_python=dedicated_parser_python))}",
+                flush=True,
+            )
             record(step, index, "DRY_RUN", "", 0.0)
         print(f"[defense_daily_refresh][DRY_RUN {planned_step_count}/{planned_step_count}] coverage audit: "
               f"coverage_audit(config={config_path}, asof={asof})", flush=True)
@@ -639,7 +800,11 @@ def main() -> int:
     try:
         with RefreshLock(lock_path):
             for index, step in enumerate(steps, start=1):
-                cmd = step_command(step, config_path)
+                cmd = step_command(
+                    step,
+                    config_path,
+                    dedicated_parser_python=dedicated_parser_python,
+                )
                 print(f"[defense_daily_refresh] {step.label}: {' '.join(cmd)}", flush=True)
                 started = time.perf_counter()
                 result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False)

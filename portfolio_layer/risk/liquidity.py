@@ -269,6 +269,34 @@ def load_spread_snapshot(path: Path) -> dict[str, dict[str, str]]:
     return out
 
 
+def validate_snapshot_requested_tickers(
+    expected: set[str], requested: object
+) -> set[str]:
+    """Require a snapshot's declared universe to match current sealed inputs."""
+    if requested is None:
+        return expected
+    if not isinstance(requested, list):
+        raise ValueError("spread_snapshot_meta.requested_tickers must be a list")
+    normalized = {
+        str(ticker).strip().upper()
+        for ticker in requested
+        if str(ticker).strip()
+    }
+    if len(normalized) != len(requested):
+        raise ValueError(
+            "spread_snapshot_meta.requested_tickers contains blank or duplicate "
+            "tickers"
+        )
+    if normalized != expected:
+        missing = sorted(expected - normalized)
+        unexpected = sorted(normalized - expected)
+        raise ValueError(
+            "spread snapshot requested universe is stale: "
+            f"missing={missing[:20]} unexpected={unexpected[:20]}"
+        )
+    return expected
+
+
 def summarize_spread_samples(
     rows: Sequence[dict[str, Any]],
     *,

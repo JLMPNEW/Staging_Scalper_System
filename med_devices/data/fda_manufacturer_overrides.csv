@@ -371,3 +371,4 @@
 "9049","Spectralmd, Inc.","MDAI","132","100","manual_override","FDA requester for DeepView AI System DEN250028/SHY; verified against the FDA De Novo database","2026-05-21","2026-07-23"
 "1138","ABBOTT MEDICAL (CRM-SYLMAR)","ABT","3","99","manual_override","Abbott CRM-Sylmar legal entity; St. Jude Medical became a wholly owned Abbott subsidiary when the acquisition closed on 2017-01-04; verified against structured FDA MAUDE manufacturer records and SEC acquisition disclosure","2017-01-04","2026-07-24"
 "186","ABBOTT","ABT","3","99","manual_override","Direct Abbott recalling firm; FDA recall event 97595 identifies Abbott TactiFlex Sensor Enabled Ablation Catheter products under FEI 3005334138","2019-01-04","2026-07-24"
+"6832","HAMILTON MEDICAL AG","","","0","out_of_universe","Family-owned Swiss ventilator manufacturer with no active public parent in the current med-device universe; do not proxy its FDA footprint to a public ticker","2019-01-04","2026-07-29"

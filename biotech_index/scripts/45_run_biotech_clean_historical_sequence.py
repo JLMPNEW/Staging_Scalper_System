@@ -1106,7 +1106,16 @@ def main() -> None:
             args.top_n,
         ]
         run_command(label="gated_optuna", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
-        optuna_status = "success"
+        optuna_manifest_path = output_dir / "optuna" / "optuna_optimizer_manifest.json"
+        if not args.dry_run and optuna_manifest_path.exists():
+            optuna_manifest = json.loads(optuna_manifest_path.read_text(encoding="utf-8"))
+            optuna_status = (
+                "success"
+                if bool(optuna_manifest.get("production_promotion_authorized"))
+                else "research_only_success"
+            )
+        else:
+            optuna_status = "dry_run"
 
     final_manifest = {
         "output_dir": str(output_dir),

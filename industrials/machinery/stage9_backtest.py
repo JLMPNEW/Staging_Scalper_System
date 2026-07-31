@@ -10,6 +10,11 @@ from typing import Any, Mapping, Sequence
 
 from industrials.core.config import cfg_get
 from industrials.core.reports import write_csv_atomic
+from industrials.machinery.production_universe import (
+    ALL_RANK_READY_UNIVERSE_POLICY,
+    configured_universe_policy,
+    production_universe_eligible,
+)
 from industrials.machinery.scoring import file_sha256, write_json_atomic
 from industrials.machinery.stage8_calibration import (
     COMPONENT_FIELDS,
@@ -26,7 +31,7 @@ from industrials.machinery.stage8_calibration import (
 
 MODEL_FAMILY = "machinery"
 CONFIG_KEY = "machinery_stage9"
-PRODUCTION_SELECTION_POLICY_VERSION = "machinery_stage9_selection_v1"
+PRODUCTION_SELECTION_POLICY_VERSION = "machinery_stage9_selection_v2"
 PERIOD_FIELDS = (
     "model",
     "variant",
@@ -225,6 +230,13 @@ def component_score(
     return total
 
 
+def production_universe_policy(config: Mapping[str, Any]) -> str:
+    return configured_universe_policy(
+        config,
+        config_key=CONFIG_KEY,
+    )
+
+
 def _normalize(raw: Mapping[str, float], target: float) -> dict[str, float]:
     total = sum(max(0.0, value) for value in raw.values())
     if total <= 0:
@@ -294,14 +306,18 @@ def non_overlapping_dates(
     horizon: int,
     split_names: set[str],
     minimum_cross_section: int,
+    universe_policy: str = ALL_RANK_READY_UNIVERSE_POLICY,
 ) -> list[str]:
     grouped: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for row in rows:
         if (
             str(row.get("split_name") or "") in split_names
-            and str(row.get(f"execution_available_flag_{horizon}d") or "")
-            == "1"
             and str(row.get("base_panel_eligible_flag") or "") == "1"
+            and str(
+                row.get("execution_universe_eligible_flag") or ""
+            )
+            == "1"
+            and production_universe_eligible(row, policy=universe_policy)
         ):
             grouped[str(row["asof_date"])].append(row)
     selected: list[str] = []
@@ -318,7 +334,10 @@ def non_overlapping_dates(
             for row in members
             if (
                 value := str(
-                    row.get(f"execution_exit_date_{horizon}d") or ""
+                    row.get(
+                        f"benchmark_execution_exit_date_{horizon}d"
+                    )
+                    or ""
                 )
             )
         ]
@@ -399,11 +418,13 @@ def run_variant(
     adv_participation = float(
         cfg_get(config, f"{CONFIG_KEY}.max_adv_participation", 0.05)
     )
+    universe_policy = production_universe_policy(config)
     selected_dates = non_overlapping_dates(
         rows,
         horizon=horizon,
         split_names=split_names,
         minimum_cross_section=minimum_cross_section,
+        universe_policy=universe_policy,
     )
     grouped: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for row in rows:
@@ -417,9 +438,12 @@ def run_variant(
         members = [
             row
             for row in grouped[asof]
-            if str(row.get(f"execution_available_flag_{horizon}d") or "")
+            if str(row.get("base_panel_eligible_flag") or "") == "1"
+            and str(
+                row.get("execution_universe_eligible_flag") or ""
+            )
             == "1"
-            and str(row.get("base_panel_eligible_flag") or "") == "1"
+            and production_universe_eligible(row, policy=universe_policy)
         ]
         scored = [
             (row, score)
@@ -679,6 +703,7 @@ def build_production_policy_parity(
     minimum_positions = int(
         cfg_get(config, f"{CONFIG_KEY}.minimum_positions", 10)
     )
+    universe_policy = production_universe_policy(config)
     source_by_date: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for row in panel_rows:
         source_by_date[str(row.get("asof_date") or "")].append(row)
@@ -726,6 +751,7 @@ def build_production_policy_parity(
             and str(row.get(f"execution_available_flag_{horizon}d") or "")
             == "1"
             and str(row.get("base_panel_eligible_flag") or "") == "1"
+            and production_universe_eligible(row, policy=universe_policy)
         ]
         scored = [
             (row, score)
@@ -1100,6 +1126,17 @@ def run_stage9(
             + ";".join(stage8_validation["issues"])
         )
     source_paths = stage8_paths(stage8_root)
+    panel_manifest = json.loads(
+        source_paths.panel_manifest_json.read_text(encoding="utf-8")
+    )
+    stage9_universe_policy = production_universe_policy(config)
+    if (
+        panel_manifest.get("production_universe_policy")
+        != stage9_universe_policy
+    ):
+        raise ValueError(
+            "Stage 8 and Stage 9 production universe policies differ"
+        )
     stage8_acceptance = json.loads(
         source_paths.acceptance_json.read_text(encoding="utf-8")
     )
@@ -1282,6 +1319,7 @@ def run_stage9(
             "minimum_positions": int(
                 cfg_get(config, f"{CONFIG_KEY}.minimum_positions", 10)
             ),
+            "universe_policy": production_universe_policy(config),
             "parity_period_count": len(parity_rows),
             "parity_status": (
                 "PASS"
@@ -1438,6 +1476,14 @@ def validate_stage9(
         manifest.get("source_stage8_panel_sha256") or ""
     ):
         issues.append("Stage 8 panel changed after Stage 9")
+    panel_manifest = json.loads(
+        source_paths.panel_manifest_json.read_text(encoding="utf-8")
+    )
+    if (
+        panel_manifest.get("production_universe_policy")
+        != production_universe_policy(config)
+    ):
+        issues.append("Stage 8/9 production universe policy mismatch")
     acceptance = json.loads(paths.acceptance_json.read_text(encoding="utf-8"))
     period_rows = read_csv_rows(paths.periods_csv)
     holding_rows = read_csv_rows(paths.holdings_csv)

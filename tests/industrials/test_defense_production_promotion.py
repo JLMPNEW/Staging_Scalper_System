@@ -99,7 +99,7 @@ def test_promotion_issues_require_explicit_overlap_acceptance() -> None:
             panel_check={"status": "pass", "promotable": "1"},
             snapshot_readiness_rows=[{"asof_date": "2026-07-02", "status": "pass"}],
             calibration_summary={
-                "selection_metric": "validation_ic",
+                "selection_metric": "validation_top_quantile_excess",
                 "validation_ic": "0.10",
                 "holdout_ic": "0.05",
             },

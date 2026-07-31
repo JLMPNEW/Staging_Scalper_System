@@ -553,11 +553,10 @@ distribution available only as an explicit config option. Macro sector shifts us
 plus a small sleeve floor, so tiny sleeves are not
 silently eliminated by a single adverse macro score.
 
-**Machinery activation (2026-07-25):** machinery is a required Stage 1 source, has a hard 5% Stage 3
-sector cap with equal weights inside the sleeve, and now receives a 5% neutral strategic weight in the
-Stage 7 BL prior. The prior six-sleeve strategic mix is scaled proportionally to the remaining 95%, so the
-strategic weights still sum to 100%. This activates machinery throughout the shadow BL/sleeve evidence
-chain without promoting Stage 7 itself; `black_litterman_fusion.enabled_in_production` remains `false`.
+**Machinery activation (2026-07-24):** machinery is a required Stage 1 source and has a hard 5% Stage 3
+sector cap with equal weights inside the sleeve. Its Stage 7 BL strategic weight remains zero until that
+separate shadow model is calibrated with machinery included. The existing strategic weights therefore
+remain unchanged and sum to 100%; `black_litterman_fusion.enabled_in_production` remains `false`.
 
 **Authority hierarchy realized in tier1's own machinery** (verified against `tier1_portfolio_optimizer`):
 macro = the **prior/budget** → `benchmark_sector_weights` drives `π = δ·Σ·w_bench`; rotation = the

@@ -1,0 +1,26 @@
+{
+  "amendment_reason": "The sole v1.4 conditional failure averaged one-time initial funding into recurring turnover; the retained production artifact also predates the current scoring schema.",
+  "approval": {
+    "operator_token": "APPROVE_MACHINERY_V141_OPERATIONAL_AMENDMENT",
+    "separate_stage12_activation_token_required": true
+  },
+  "candidate_id": "equal_components",
+  "decision_contract": {
+    "allowed_original_failed_gate_ids": ["average_one_way_turnover"],
+    "allowed_original_failed_horizons": [63],
+    "initial_funding_cost_remains_charged": true,
+    "lockbox_result_must_remain_immutable": true,
+    "minimum_nonempty_parity_periods": 1,
+    "post_lockbox_governance_exception": true,
+    "recurring_turnover_excludes_only_first_portfolio_formation": true
+  },
+  "maximum_average_recurring_one_way_turnover": 0.75,
+  "maximum_portfolio_cap": 0.05,
+  "model_family": "machinery",
+  "original_conditional_protocol": "machinery_oos_v1.4.0_conditional_promotion",
+  "protocol_version": "machinery_oos_v1.4.1_operational_amendment",
+  "source_requirements": {
+    "current_final_rank_contract_required": true,
+    "shadow_only_required": true
+  }
+}

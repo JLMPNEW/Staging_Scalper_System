@@ -37,6 +37,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", required=True)
     parser.add_argument("--input-csv", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--shadow-only",
+        action="store_true",
+        help=(
+            "Build an unpromoted candidate without applying the currently "
+            "active production policy. Intended for a governed model upgrade."
+        ),
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -70,7 +78,13 @@ def main() -> int:
     stage12_output = str(
         cfg_get(config, "machinery_stage12.output_root", "")
     ).strip()
-    if stage12_output:
+    if args.shadow_only:
+        rows = shadow_rows
+        production_metadata = {
+            "production_policy_active": False,
+            "production_policy_status": "SHADOW_MODEL_UPGRADE_CANDIDATE",
+        }
+    elif stage12_output:
         rows, production_metadata = apply_active_production_policy(
             config,
             config_path=config_path,

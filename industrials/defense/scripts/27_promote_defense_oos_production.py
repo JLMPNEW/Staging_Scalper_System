@@ -34,9 +34,13 @@ from industrials.defense.research_artifacts import (  # noqa: E402
 
 
 PROMOTION_STATUS = "production_oos_validated"
-PROMOTION_METHOD = "weekly_pit_panel_validation_ic_holdout_backtest"
+PROMOTION_METHOD = "weekly_pit_panel_validation_selected_holdout_backtest"
 PRODUCTION_SCORING_CONTRACT_VERSION = "tech_family_final_rank_table_v1_production"
 DEFAULT_ASOF = "2026-07-02"
+ALLOWED_VALIDATION_SELECTION_METRICS = {
+    "validation_ic",
+    "validation_top_quantile_excess",
+}
 REPORT_FIELDS = [
     "asof_date",
     "status",
@@ -208,8 +212,12 @@ def promotion_issues(
         issues.append(f"validation_ic={validation_ic} is not above threshold {min_validation_ic}")
     if holdout_ic is None or holdout_ic <= min_holdout_ic:
         issues.append(f"holdout_ic={holdout_ic} is not above threshold {min_holdout_ic}")
-    if str(calibration_summary.get("selection_metric") or "") != "validation_ic":
-        issues.append(f"calibration selection_metric is not validation_ic: {calibration_summary.get('selection_metric')}")
+    selection_metric = str(calibration_summary.get("selection_metric") or "")
+    if selection_metric not in ALLOWED_VALIDATION_SELECTION_METRICS:
+        issues.append(
+            "calibration selection_metric is not an approved validation metric: "
+            f"{selection_metric}"
+        )
     holdout_excess = as_float(backtest_summary.get("holdout_mean_excess_vs_benchmark"))
     if holdout_excess is None or holdout_excess <= min_holdout_excess:
         issues.append(f"holdout_mean_excess_vs_benchmark={holdout_excess} is not above threshold {min_holdout_excess}")

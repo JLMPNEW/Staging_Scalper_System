@@ -124,7 +124,7 @@ def optional_positive_int(raw_value: object, *, default: int = 0, name: str = "v
     if isinstance(raw_value, bool):
         raise SystemExit(f"{name} must be an integer >= 0, got {raw_value!r}")
     try:
-        value = int(raw_value)
+        value = int(str(raw_value))
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"{name} must be an integer >= 0, got {raw_value!r}") from exc
     if value < 0:
@@ -138,7 +138,7 @@ def optional_positive_float(raw_value: object, *, default: float = 0.0, name: st
     if isinstance(raw_value, bool):
         raise SystemExit(f"{name} must be a number >= 0, got {raw_value!r}")
     try:
-        value = float(raw_value)
+        value = float(str(raw_value))
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"{name} must be a number >= 0, got {raw_value!r}") from exc
     if value < 0:
@@ -825,32 +825,32 @@ def process_rows(
         last_progress_seen = seen
 
     for row in rows:
+        form_type = row["form_type"].upper()
+        if form_type not in form_types:
+            continue
+
+        accession_number = accession_from_filename(row["filename"])
+        if (not force_reprocess) and already_loaded(conn, accession_number):
+            continue
+
         if max_filings > 0 and seen >= max_filings:
             limit_hit = True
             print(
                 f"[LIMIT] stage={stage_label} max_filings={max_filings:,} reached; "
-                "leaving remaining rows for a later run."
+                "leaving remaining pending rows for a later run."
             )
             break
         if stop_deadline is not None and time.monotonic() >= stop_deadline:
             limit_hit = True
             print(
                 f"[LIMIT] stage={stage_label} stop_after_sec reached; "
-                "leaving remaining rows for a later run."
+                "leaving remaining pending rows for a later run."
             )
             break
 
-        form_type = row["form_type"].upper()
-        if form_type not in form_types:
-            continue
-
-        accession_number = accession_from_filename(row["filename"])
         filing_url = f"{archives_base_url}/{row['filename']}"
         source_dataset_id = row["source_dataset_id"]
         seen += 1
-
-        if (not force_reprocess) and already_loaded(conn, accession_number):
-            continue
 
         try:
             if source_dataset_id not in manifest_seen:

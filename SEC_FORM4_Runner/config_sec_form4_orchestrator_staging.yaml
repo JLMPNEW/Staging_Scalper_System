@@ -38,11 +38,11 @@ sec_form4_orchestrator:
         form4: 7
       form4_reconcile_current_quarter: false
       form4_max_index_days: 5
-      form4_max_filings: 500
+      form4_max_filings: 6000
       form4_max_reconcile_filings: 250
       form4_progress_every_filings: 100
       form4_progress_interval_sec: 60
-      form4_stop_after_sec: 600
+      form4_stop_after_sec: 1000
       run_form4_quarterly_backfill: false
       run_form4_reports: false
 

@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +18,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from industrials.core.db import init_db  # noqa: E402
 from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 from industrials.defense.research_artifacts import load_production_lock, lock_mode_for_asof  # noqa: E402
 
@@ -124,10 +124,20 @@ def main() -> int:
     if membership_mode not in {"current", "pit"}:
         errors.append(f"manifest membership_mode invalid: {membership_mode!r}")
         membership_mode = "current"
+    research_candidate = bool(manifest.get("research_candidate", False))
+    scoring_mode = str(manifest.get("scoring_mode") or "baseline")
+    if scoring_mode not in {"baseline", "specialized_v1"}:
+        errors.append(f"manifest scoring_mode invalid: {scoring_mode!r}")
+    manifest_score_version = str(manifest.get("score_model_version") or "")
+    row_score_versions = {str(row.get("score_model_version") or "") for row in rows}
+    if not manifest_score_version or row_score_versions != {manifest_score_version}:
+        errors.append(
+            f"rank rows/manifest score_model_version mismatch: manifest={manifest_score_version!r} "
+            f"rows={sorted(row_score_versions)}"
+        )
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
-        init_db(conn)
         expected_count = expected_row_count(conn, asof=asof, membership_mode=membership_mode)
     if len(rows) != expected_count:
         errors.append(f"row count mismatch: expected {membership_mode}={expected_count} actual={len(rows)}")
@@ -147,9 +157,44 @@ def main() -> int:
     ]
     if bad_scores:
         errors.append(f"final_score outside 0..100 or nonnumeric: {bad_scores[:10]}")
-    lock = load_production_lock(config, base_dir=base_dir)
-    mode = lock_mode_for_asof(lock, asof)
-    if mode == "production":
+    lock = load_production_lock(config, base_dir=base_dir, asof=asof)
+    mode = "research_candidate" if research_candidate else lock_mode_for_asof(lock, asof)
+    if not research_candidate and lock is not None:
+        if scoring_mode != str(lock["scoring_mode"]):
+            errors.append(
+                f"manifest scoring_mode={scoring_mode!r} does not match "
+                f"effective lock={lock['scoring_mode']!r}"
+            )
+        if manifest_score_version != str(lock["score_model_version"]):
+            errors.append(
+                f"manifest score_model_version={manifest_score_version!r} does "
+                f"not match effective lock={lock['score_model_version']!r}"
+            )
+    if mode == "research_candidate":
+        bad_candidate_gate = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("oos_score_valid_flag") or "") != "0"
+            or str(row.get("portfolio_candidate_gate") or "") != "0"
+            or str(row.get("calibration_eligible_flag") or "") != "0"
+            or str(row.get("research_calibration_input_eligible_flag") or "") != "0"
+            or str(row.get("stage11_calibration_input_eligible_flag") or "") != "0"
+        ]
+        if bad_candidate_gate:
+            errors.append(f"research candidate has an open production/research gate: {bad_candidate_gate[:10]}")
+        bad_candidate_lock = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("calibration_lock_date") or "").strip()
+            or str(row.get("calibration_production_start_date") or "").strip()
+        ]
+        if bad_candidate_lock:
+            errors.append(f"research candidate carries production lock stamps: {bad_candidate_lock[:10]}")
+        if manifest.get("shadow_only") is not True:
+            errors.append("research candidate manifest must set shadow_only=true")
+        if manifest.get("production_promoted") is True:
+            errors.append("research candidate manifest must not set production_promoted=true")
+    elif mode == "production":
         bad_role = [
             row.get("ticker", "")
             for row in rows
@@ -289,16 +334,39 @@ def main() -> int:
     ]
     if missing_capacity_reason:
         errors.append(f"blank capacity fields missing clear liquidity_capacity_reason: {missing_capacity_reason[:10]}")
-    bad_neutral = [
+    bad_sector_cycle = [
         row.get("ticker", "")
         for row in rows
         if str(row.get("sector_cycle_status") or "") != "neutralized_not_loaded"
-        or str(row.get("defense_budget_backlog_status") or "") != "neutralized_not_loaded"
         or as_float(row.get("sector_cycle_score")) != 50.0
-        or as_float(row.get("defense_budget_backlog_score")) != 50.0
     ]
-    if bad_neutral:
-        errors.append(f"neutral demand/sector pillars not pinned: {bad_neutral[:10]}")
+    if bad_sector_cycle:
+        errors.append(f"neutral sector-cycle pillar not pinned: {bad_sector_cycle[:10]}")
+    if scoring_mode == "baseline":
+        bad_demand = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("defense_budget_backlog_status") or "") != "neutralized_not_loaded"
+            or as_float(row.get("defense_budget_backlog_score")) != 50.0
+        ]
+        if bad_demand:
+            errors.append(f"baseline defense-demand pillar not pinned neutral: {bad_demand[:10]}")
+    else:
+        allowed_statuses = {
+            "candidate_specialized_complete",
+            "candidate_specialized_partial",
+            "candidate_specialized_missing_neutralized",
+        }
+        bad_demand = [
+            row.get("ticker", "")
+            for row in rows
+            if str(row.get("defense_budget_backlog_status") or "") not in allowed_statuses
+            or (score := as_float(row.get("defense_budget_backlog_score"))) is None
+            or score < 0.0
+            or score > 100.0
+        ]
+        if bad_demand:
+            errors.append(f"candidate defense-demand pillar invalid: {bad_demand[:10]}")
     if not manifest_path.exists():
         errors.append("manifest file missing")
     else:

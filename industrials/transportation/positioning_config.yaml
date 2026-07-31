@@ -1,0 +1,60 @@
+paths:
+  database_path: "${INDUSTRIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/industrials.sqlite"
+
+runtime:
+  sqlite_timeout_sec: 120.0
+
+source_registry:
+  path: "../data/free_source_registry.yaml"
+
+industrials_universe:
+  initial_subsector: transportation
+  seed_csv: "system_csvs/transportation_tickers.csv"
+  seed_source_id: transportation_ticker_seed
+  historical_membership_csv: "system_csvs/transportation_historical_membership.csv"
+  historical_membership_source_id: transportation_historical_membership_seed
+  delisted_seed_csv: "system_csvs/transportation_delisted.csv"
+  delisted_source_id: transportation_delisted_calibration_seed
+  sector: Industrials
+  industry: Transportation
+  subsector: Transportation
+
+positioning_import:
+  source_id: industrials_positioning_composite
+  form4_source_id: sec_insider_upstream
+  direct_ownership_source_id: sec_ownership_direct
+  market_positioning_source_id: market_positioning_upstream
+  preferred_source_ids: [market_positioning_upstream]
+  positioning_overrides_csv: "system_csvs/transportation_positioning_overrides.csv"
+  start_date: "2019-01-02"
+  include_historical_members: true
+  positioning_universe_csv: "../../output/industrials_cache/positioning/transportation_positioning_universe.csv"
+  output_csv: "../../output/industrials/transportation/stage5/positioning_import_coverage.csv"
+  feature_output_csv: "../../output/industrials/transportation/stage5/positioning_feature_coverage.csv"
+  lookback_days: {insider: 90, short_change: 92}
+  max_13f_staleness_days: 120
+  max_borrow_staleness_days: 10
+  require_upstream_13f_for_gate: true
+  require_upstream_short_for_gate: true
+  require_short_pct_float_for_gate: false
+  require_upstream_borrow_for_gate: true
+  upstream_form4_gate_exempt_tickers: []
+  upstream_13f_gate_exempt_tickers: []
+  upstream_short_gate_exempt_tickers: []
+  upstream_short_pct_float_gate_exempt_tickers: []
+  upstream_borrow_gate_exempt_tickers: []
+  institutional_13f_data_gate:
+    required_period_of_report: "2026-03-31"
+    anchor_tickers: [AAL, CSX, DAL, FDX, JBHT, NSC, UNP, UPS, XPO, ZIM]
+    min_anchor_tickers_with_period: 10
+
+positioning_validation:
+  # This is a routing-health gate, not an eligibility neutral-fill rule.
+  # Missing foreign/private-issuer coverage remains explicit in the report.
+  min_form4_covered_fraction: 1.00
+
+upstream_databases:
+  form4:
+    db_path: "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}"
+  market_positioning:
+    db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"

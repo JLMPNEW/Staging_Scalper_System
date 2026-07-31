@@ -19,12 +19,14 @@ def validate_corpus(
     corpus_path: Path,
     table: str,
     run_id: int | None = None,
+    evaluation_id: int | None = None,
     value_tolerance: float = 1e-6,
     tickers: set[str] | None = None,
 ) -> list[str]:
     if table not in {
         "fact_sec_metric_disclosure_candidate",
         "sec_parser_metric_evidence_shadow",
+        "sec_parser_review_evidence",
     }:
         raise ValueError(f"Unsupported golden corpus table: {table}")
     if run_id is not None and table != "sec_parser_metric_evidence_shadow":
@@ -32,6 +34,14 @@ def validate_corpus(
         # validate a different population than the caller asked for.
         raise ValueError(
             f"run_id filtering is not supported for table {table}"
+        )
+    if evaluation_id is not None and table != "sec_parser_review_evidence":
+        raise ValueError(
+            f"evaluation_id filtering is not supported for table {table}"
+        )
+    if table == "sec_parser_review_evidence" and evaluation_id is None:
+        raise ValueError(
+            "evaluation_id is required for sec_parser_review_evidence"
         )
     corpus = load_corpus(corpus_path)
     errors: list[str] = []
@@ -70,6 +80,12 @@ def validate_corpus(
             )
             clauses.append("run_evidence.run_id = ?")
             params.append(run_id)
+        if (
+            evaluation_id is not None
+            and table == "sec_parser_review_evidence"
+        ):
+            clauses.append("c.evaluation_id = ?")
+            params.append(evaluation_id)
         rows = conn.execute(
             f"""
             SELECT c.candidate_value, c.unit, c.period_start, c.period_end,

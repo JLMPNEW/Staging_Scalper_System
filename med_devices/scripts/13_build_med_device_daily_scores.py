@@ -926,10 +926,19 @@ def load_ic_tilted_composite_policy(config: dict[str, Any], *, base_dir: Path) -
     if mode not in {"shadow", "replace_raw"}:
         raise ValueError("scoring.ic_tilted_composite.mode must be 'shadow' or 'replace_raw'")
     allow_replace = bool_from_raw(raw_policy.get("allow_production_replace"), False)
+    phase1_safety_lock = bool_from_raw(raw_policy.get("phase1_safety_lock"), False)
+    if phase1_safety_lock:
+        if mode != "shadow" or allow_replace:
+            LOGGER.warning(
+                "Phase-1 IC safety lock forced shadow mode and disabled production replacement"
+            )
+        mode = "shadow"
+        allow_replace = False
     return {
         "enabled": enabled,
         "mode": mode,
         "allow_replace": allow_replace,
+        "phase1_safety_lock": phase1_safety_lock,
         "source_csv": resolve_path(
             raw_policy.get(
                 "source_csv",

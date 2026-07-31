@@ -249,6 +249,18 @@ def build_steps(
             ["--asof", asof],
         ),
         Step(
+            "08f_generate_lifecycle_candidates",
+            "stage_4",
+            "08f_generate_machinery_lifecycle_candidates.py",
+            ["--asof", asof],
+        ),
+        Step(
+            "08g_validate_lifecycle_policy",
+            "stage_4",
+            "08g_validate_machinery_lifecycle_policy.py",
+            ["--asof", asof],
+        ),
+        Step(
             "13_sync_positioning",
             "stage_5",
             "13_sync_machinery_positioning_upstream.py",
@@ -279,6 +291,13 @@ def build_steps(
             "10b_validate",
             "stage_10",
             "10b_validate_machinery_dashboard_reports.py",
+            ["--asof", asof],
+            pass_db=False,
+        ),
+        Step(
+            "10c_lifecycle_shadow",
+            "stage_10",
+            "10c_build_machinery_lifecycle_shadow.py",
             ["--asof", asof],
             pass_db=False,
         ),

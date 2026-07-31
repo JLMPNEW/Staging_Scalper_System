@@ -84,6 +84,11 @@ def _latest_completed_raw_as_of(db_path: Path | None) -> str:
     return str(row[0] or "") if row else ""
 
 
+def _raw_refresh_needed(latest_completed: str, requested_as_of: str) -> bool:
+    """Return whether the raw store lacks the requested PIT date."""
+    return not latest_completed or latest_completed < requested_as_of
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -100,7 +105,7 @@ def main() -> int:
         label="MacroLayer config",
     )
     latest_completed = _latest_completed_raw_as_of(_macro_raw_db_path(macro_config))
-    if latest_completed and latest_completed > args.as_of:
+    if not _raw_refresh_needed(latest_completed, args.as_of):
         LOGGER.info(
             "Skipping historical raw refresh for %s: completed raw ingest %s already covers it; "
             "the serving DAG will reconstruct the requested PIT date.",

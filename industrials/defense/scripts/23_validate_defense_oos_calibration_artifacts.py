@@ -39,6 +39,8 @@ REQUIRED_PANEL_FIELDS = [
     "final_score",
     "native_score_value",
     *PILLAR_SCORE_FIELDS,
+    "defense_budget_backlog_quality",
+    "defense_budget_backlog_status",
     "source_snapshot_asof_date",
     "price_data_asof_date",
     "market_feature_asof_date",
@@ -293,6 +295,36 @@ def main() -> int:
         issues.append("manifest model_family mismatch")
     if manifest.get("benchmark_ticker") != "XAR":
         issues.append(f"manifest benchmark_ticker must be XAR, got {manifest.get('benchmark_ticker')!r}")
+    calendar_path_raw = str(manifest.get("evaluation_calendar_path") or "").strip()
+    calendar_sha = str(manifest.get("evaluation_calendar_sha256") or "").strip()
+    if calendar_path_raw:
+        calendar_path = Path(calendar_path_raw)
+        if not calendar_path.exists():
+            issues.append(f"evaluation calendar missing: {calendar_path}")
+        elif not calendar_sha or sha256_file(calendar_path) != calendar_sha:
+            issues.append("evaluation calendar sha256 mismatch")
+    source_snapshots = [
+        item
+        for item in manifest.get("source_snapshots", [])
+        if isinstance(item, dict)
+    ]
+    if bool(manifest.get("research_candidate", False)):
+        unsafe_sources = [
+            str(item.get("asof_date") or "")
+            for item in source_snapshots
+            if item.get("research_candidate") is not True
+            or item.get("shadow_only") is not True
+            or item.get("production_promoted") is True
+        ]
+        if unsafe_sources:
+            issues.append(f"research panel contains non-isolated source snapshots: {unsafe_sources[:20]}")
+    manifest_score_version = str(manifest.get("score_model_version") or "")
+    row_score_versions = {str(row.get("score_model_version") or "") for row in rows}
+    if not manifest_score_version or row_score_versions != {manifest_score_version}:
+        issues.append(
+            f"panel score_model_version mismatch: manifest={manifest_score_version!r} "
+            f"rows={sorted(row_score_versions)}"
+        )
     header = csv_header(panel_csv)
     missing_fields = [field for field in REQUIRED_PANEL_FIELDS if field not in header]
     if missing_fields:

@@ -1,0 +1,31 @@
+model_family: transportation
+policy_version: transportation_zero_overlay_monitoring_v1
+origin_gate: DP15_FINALIZE_ZERO_OVERLAY_PORTFOLIO_SHADOW
+origin_asof_date: "2026-07-22"
+origin_dp15_sha256: 82e40a8ce4e3af11111b9acb739362f02578e310ffe583f95632fc060d485e89
+first_signal_date: "2026-07-31"
+earliest_outcome_review_date: "2027-09-30"
+signal_cadence: month_end_post_refresh_companion
+forward_horizon_trading_days: 63
+minimum_new_monthly_signals_per_candidate: 12
+minimum_cross_section_per_candidate: 3
+outcome_access_during_capture: prohibited
+optimizer_during_monitoring: disabled
+production_promotion_during_monitoring: prohibited
+historical_rebuild_during_monitoring: prohibited
+portfolio_overlay_weights:
+  fleet_utilization: 0.0
+  operating_ratio: 0.0
+  passenger_load_factor: 0.0
+research_challenger_weights:
+  fleet_utilization: 0.10
+  operating_ratio: 0.10
+  passenger_load_factor: 0.10
+candidate_cohorts:
+  fleet_utilization: marine_shipping_and_maritime
+  operating_ratio: surface_freight_and_logistics
+  passenger_load_factor: air_transport_and_aviation_services
+candidate_directions:
+  fleet_utilization: 1
+  operating_ratio: -1
+  passenger_load_factor: 1

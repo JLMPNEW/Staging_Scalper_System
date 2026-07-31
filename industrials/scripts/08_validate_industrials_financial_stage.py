@@ -27,6 +27,7 @@ LOGGER = logging.getLogger("validate_industrials_financial_stage")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 FEATURE_STAGE = "build_industrials_financial_features"
 DEFAULT_MAX_NEUTRAL_ROW_FRACTION = 0.5
+MAX_AUTOMATIC_DILUTED_SHARES_YOY_GROWTH = 5.0
 # FN-14: unsuffixed TTM/net_cash columns hold local reported-currency values;
 # the *_usd variants carry the USD conversion (TTM-window-average FX).
 TTM_USD_COLUMN_PAIRS = [
@@ -351,6 +352,7 @@ def validate() -> int:
         spinoff_bridge_gate_errors = []
         ttm_usd_gap_errors = []
         ttm_usd_gap_warnings = []
+        diluted_share_growth_outliers = []
         for row in feature_rows:
             ticker = str(row["ticker"])
             status = str(row["data_quality_status"] or "")
@@ -372,6 +374,12 @@ def validate() -> int:
                 non_usd_missing_fx.append(ticker)
             if status == "complete" and (row["revenue_usd"] is None or row["assets_usd"] is None):
                 complete_missing_core.append(ticker)
+            diluted_share_growth = row["diluted_shares_yoy_growth"]
+            if diluted_share_growth is not None and (
+                float(diluted_share_growth) < -1.0
+                or float(diluted_share_growth) > MAX_AUTOMATIC_DILUTED_SHARES_YOY_GROWTH
+            ):
+                diluted_share_growth_outliers.append(f"{ticker}:{float(diluted_share_growth):.6f}")
             # FN-14: local and USD TTM/net_cash columns must move together for
             # USD-native rows (local == USD, so a gap is a writer bug). For
             # converted rows a missing TTM-window-average FX rate can
@@ -426,6 +434,12 @@ def validate() -> int:
             errors.append(f"Financial features have fiscal period ends after asof={audit_asof.isoformat()}: {future_periods}")
         if complete_missing_core:
             errors.append(f"Complete financial rows missing core USD fields: {complete_missing_core}")
+        if diluted_share_growth_outliers:
+            errors.append(
+                "Diluted-share YoY growth outside the automatic scoring range "
+                f"[-1.0,{MAX_AUTOMATIC_DILUTED_SHARES_YOY_GROWTH}]: "
+                f"{diluted_share_growth_outliers}"
+            )
         if recent_stub_missing_observation:
             errors.append(f"Recent public stub rows with interim revenue lack explicit stub observation fields: {recent_stub_missing_observation}")
         if fpi_hybrid_gate_errors:

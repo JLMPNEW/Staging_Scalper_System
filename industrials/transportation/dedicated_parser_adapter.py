@@ -21,9 +21,13 @@ from dedicated_parser.contracts import (
 )
 from dedicated_parser.semantic import SemanticBlock, parse_semantic_document
 from industrials.machinery.disclosure_documents import extract_document_text
+from industrials.transportation.content_text_cache import (
+    ExtractionOptions,
+    extract_document_once,
+)
 
 
-ADAPTER_VERSION = "transportation_specialized_metrics_v3.discovery2"
+ADAPTER_VERSION = "transportation_specialized_metrics_v3.discovery3"
 _ROOT = Path(__file__).resolve().parent
 _DATA = _ROOT / "data"
 _FINAL_REGISTRY = _DATA / "transportation_specialized_metric_discovery_registry.csv"
@@ -36,10 +40,18 @@ _REVIEW_POLICY_GOLDEN = _DATA / "transportation_dedicated_parser_review_policy_g
 _SUPPORTED_FORMS = (
     "10-K",
     "10-K/A",
+    "10-K405",
+    "10-K405/A",
+    "10-KT",
+    "10-KT/A",
     "10-Q",
     "10-Q/A",
+    "10-QT",
+    "10-QT/A",
     "10-12B",
     "10-12B/A",
+    "10-12G",
+    "10-12G/A",
     "20-F",
     "20-F/A",
     "40-F",
@@ -48,14 +60,27 @@ _SUPPORTED_FORMS = (
     "6-K/A",
     "8-K",
     "8-K/A",
+    "ARS",
+    "DEF 14A",
+    "DEF 14A/A",
+    "DEF 14C",
+    "DEF 14C/A",
+    "DEFM14A",
+    "DEFM14A/A",
+    "PREM14A",
+    "PREM14A/A",
+    "FWP",
     "S-1",
     "S-1/A",
     "F-1",
     "F-1/A",
     "F-4",
     "F-4/A",
+    "S-4",
+    "S-4/A",
     "424B3",
     "424B4",
+    "424B5",
 )
 
 # The registry-derived human label is always searched. These aliases widen
@@ -394,6 +419,11 @@ def _concept_patterns(metric_id: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(output))
 
 
+def metric_search_aliases() -> dict[str, tuple[str, ...]]:
+    """Expose the frozen discovery aliases for read-only source screening."""
+    return {metric_id: _pipe(contract["search_aliases"]) for metric_id, contract in sorted(_metric_contracts().items())}
+
+
 def get_registry() -> AdapterRegistry:
     contracts = _metric_contracts()
     source = tuple(
@@ -575,6 +605,7 @@ def _block_evidence(
     document_sha256: str,
     extraction_method: str,
     extraction_warning: str,
+    extraction_cache_status: str,
 ) -> list[MetricEvidence]:
     text = block.search_text
     output: list[MetricEvidence] = []
@@ -637,6 +668,7 @@ def _block_evidence(
                     "document_sha256": document_sha256,
                     "document_extraction_method": extraction_method,
                     "document_extraction_warning": extraction_warning,
+                    "document_extraction_cache_status": (extraction_cache_status),
                     "semantic_block_index": block.index,
                     "semantic_block_kind": block.kind,
                     "semantic_table_id": block.table_id,
@@ -658,14 +690,26 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
         if document.is_full_submission:
             continue
         try:
-            extracted = extract_document_text(
-                Path(document.path).read_bytes(),
-                document_name=document.name,
-                enable_pdf_ocr=item.enable_pdf_ocr,
-                max_pdf_pages=item.max_pdf_pages,
-                max_pdf_bytes=item.max_pdf_bytes,
-                pdf_extraction_timeout_sec=(item.pdf_extraction_timeout_seconds),
-            )
+            if document.source_kind == "transportation_non_sec_primary_document":
+                extracted, extraction_cache_status = extract_document_once(
+                    document,
+                    options=ExtractionOptions(
+                        enable_pdf_ocr=item.enable_pdf_ocr,
+                        max_pdf_pages=item.max_pdf_pages,
+                        max_pdf_bytes=item.max_pdf_bytes,
+                        pdf_extraction_timeout_seconds=(item.pdf_extraction_timeout_seconds),
+                    ),
+                )
+            else:
+                extracted = extract_document_text(
+                    Path(document.path).read_bytes(),
+                    document_name=document.name,
+                    enable_pdf_ocr=item.enable_pdf_ocr,
+                    max_pdf_pages=item.max_pdf_pages,
+                    max_pdf_bytes=item.max_pdf_bytes,
+                    pdf_extraction_timeout_sec=(item.pdf_extraction_timeout_seconds),
+                )
+                extraction_cache_status = "NOT_APPLICABLE"
         except OSError as exc:
             output.extend(
                 MetricEvidence(
@@ -723,6 +767,7 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
                 document_sha256=document.content_sha256,
                 extraction_method=extracted.extraction_method,
                 extraction_warning=extracted.warning,
+                extraction_cache_status=extraction_cache_status,
             ):
                 if per_metric_count[evidence.metric_name] >= 12:
                     continue
@@ -753,15 +798,15 @@ def map_normalized_facts(
     requested = {request.metric_name for request in item.requested_metrics}
     applicable = requested & applicable_parser_metrics(item.filing.ticker)
     registry = get_registry()
-    patterns = {
-        metric_id: tuple(
-            re.compile(pattern)
-            for pattern in (
-                registry.request(metric_id).concept_patterns if registry.request(metric_id) is not None else ()
-            )
+    patterns: dict[str, tuple[re.Pattern[str], ...]] = {}
+    for metric_id in applicable:
+        request = registry.request(metric_id)
+        concept_patterns = (
+            request.concept_patterns if request is not None else ()
         )
-        for metric_id in applicable
-    }
+        patterns[metric_id] = tuple(
+            re.compile(pattern) for pattern in concept_patterns
+        )
     output: list[MetricEvidence] = []
     for fact in facts:
         if fact.numeric_value is None:

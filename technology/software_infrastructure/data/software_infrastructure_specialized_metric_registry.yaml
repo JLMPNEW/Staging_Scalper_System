@@ -1,0 +1,330 @@
+registry_version: software_infrastructure_specialized_metrics_v2
+model_family: software_infrastructure
+status: sealed_measurement_shadow
+history_start_date: "2010-01-01"
+
+source_precedence:
+  - companyfacts_canonical
+  - inline_xbrl_document
+  - filing_html_table
+  - filing_text
+  - event_exhibit
+
+metric_channel_policy:
+  structured_primary:
+    - remaining_performance_obligation
+    - deferred_revenue_current
+    - deferred_revenue_noncurrent
+    - deferred_revenue_total
+    - selling_and_marketing_expense
+  prose_primary:
+    - current_remaining_performance_obligation
+    - annual_recurring_revenue
+    - net_revenue_retention
+    - subscription_revenue
+    - disclosed_billings
+  prose_reconciliation_or_gap_fill:
+    - remaining_performance_obligation
+    - deferred_revenue_current
+    - deferred_revenue_noncurrent
+    - deferred_revenue_total
+  censored_event_only:
+    - customer_count_threshold
+  excluded_from_prose_numeric_panel:
+    - selling_and_marketing_expense
+    - customer_concentration_pct
+
+plausibility_gates:
+  arr_to_revenue: [0.05, 5.00]
+  rpo_to_revenue: [0.00, 10.00]
+  net_revenue_retention: [0.50, 2.00]
+  subscription_revenue_mix: [0.00, 1.20]
+  billings_identity_relative_tolerance: 0.30
+  structured_reconciliation_relative_tolerance: 0.15
+  structured_reconciliation_absolute_tolerance: 1000000
+
+filing_scope:
+  periodic_forms:
+    - 10-K
+    - 10-K/A
+    - 10-Q
+    - 10-Q/A
+    - 20-F
+    - 20-F/A
+    - 40-F
+    - 40-F/A
+  event_forms:
+    - 8-K
+    - 8-K/A
+    - 6-K
+    - 6-K/A
+  registration_forms:
+    - S-1
+    - S-1/A
+    - F-1
+    - F-1/A
+  event_exhibits:
+    - EX-99
+    - EX-99.1
+    - EX-99.2
+
+metrics:
+  - metric_name: remaining_performance_obligation
+    definition_version: rpo_v1
+    tier: 1
+    extraction_policy: recover_if_missing
+    value_type: currency
+    period_type: instant
+    canonical_metrics:
+      - remaining_performance_obligation
+    concept_tokens:
+      - revenueremainingperformanceobligation
+      - remainingperformanceobligation
+    feature_fields:
+      - remaining_performance_obligation
+
+  - metric_name: current_remaining_performance_obligation
+    definition_version: crpo_v1
+    tier: 1
+    extraction_policy: parser_primary
+    value_type: currency
+    period_type: instant
+    canonical_metrics: []
+    concept_tokens:
+      - remainingperformanceobligationcurrent
+      - remainingperformanceobligationexpectedtoberecognizedwithinoneyear
+    feature_fields: []
+
+  - metric_name: deferred_revenue_current
+    definition_version: deferred_revenue_current_v1
+    tier: 1
+    extraction_policy: recover_if_missing
+    value_type: currency
+    period_type: instant
+    canonical_metrics:
+      - deferred_revenue_current
+    concept_tokens:
+      - contractwithcustomerliabilitycurrent
+      - deferredrevenuecurrent
+    feature_fields: []
+
+  - metric_name: deferred_revenue_noncurrent
+    definition_version: deferred_revenue_noncurrent_v1
+    tier: 1
+    extraction_policy: recover_if_missing
+    value_type: currency
+    period_type: instant
+    canonical_metrics:
+      - deferred_revenue_noncurrent
+    concept_tokens:
+      - contractwithcustomerliabilitynoncurrent
+      - deferredrevenuenoncurrent
+    feature_fields: []
+
+  - metric_name: deferred_revenue_total
+    definition_version: deferred_revenue_total_v1
+    tier: 1
+    extraction_policy: recover_if_missing
+    value_type: currency
+    period_type: instant
+    canonical_metrics:
+      - deferred_revenue
+      - deferred_revenue_total
+    concept_tokens:
+      - contractwithcustomerliability
+      - deferredrevenue
+      - contractliabilities
+    feature_fields:
+      - deferred_revenue
+
+  - metric_name: selling_and_marketing_expense
+    definition_version: selling_and_marketing_expense_v1
+    tier: 1
+    extraction_policy: recover_if_missing
+    value_type: currency
+    period_type: duration
+    canonical_metrics:
+      - selling_and_marketing_expense
+    concept_tokens:
+      - sellingandmarketingexpense
+      - salesandmarketingexpense
+      - marketingexpense
+    feature_fields: []
+
+  - metric_name: annual_recurring_revenue
+    definition_version: arr_v1
+    tier: 2
+    extraction_policy: parser_primary
+    value_type: currency
+    period_type: instant
+    canonical_metrics: []
+    concept_tokens:
+      - annualrecurringrevenue
+      - annualizedrecurringrevenue
+    feature_fields: []
+
+  - metric_name: net_revenue_retention
+    definition_version: nrr_v1
+    tier: 2
+    extraction_policy: parser_primary
+    value_type: percentage
+    period_type: instant
+    canonical_metrics: []
+    concept_tokens:
+      - netrevenueretention
+      - dollarbasednetretention
+      - netdollarretention
+    feature_fields: []
+
+  - metric_name: subscription_revenue
+    definition_version: subscription_revenue_v1
+    tier: 2
+    extraction_policy: parser_primary
+    value_type: currency
+    period_type: duration
+    canonical_metrics: []
+    concept_tokens:
+      - subscriptionrevenue
+      - subscriptionandservicesrevenue
+    feature_fields: []
+
+  - metric_name: disclosed_billings
+    definition_version: disclosed_billings_v1
+    tier: 2
+    extraction_policy: parser_primary
+    value_type: currency
+    period_type: duration
+    canonical_metrics: []
+    concept_tokens:
+      - billings
+      - calculatedbillings
+    feature_fields: []
+
+  - metric_name: customer_count_threshold
+    definition_version: customer_count_threshold_v1
+    tier: 3
+    extraction_policy: parser_primary
+    value_type: count
+    period_type: instant
+    canonical_metrics: []
+    concept_tokens:
+      - customerswithannualrecurringrevenue
+      - customersgreaterthan
+      - customersover
+    feature_fields: []
+
+  - metric_name: customer_concentration_pct
+    definition_version: customer_concentration_pct_v1
+    tier: 3
+    extraction_policy: recover_if_missing
+    value_type: percentage
+    period_type: duration
+    canonical_metrics: []
+    concept_tokens:
+      - customerconcentration
+      - revenuefrommajorcustomer
+      - percentofrevenue
+    feature_fields: []
+
+derived_metrics:
+  - metric_name: rpo_yoy_growth
+    definition_version: rpo_yoy_growth_v1
+    inputs:
+      - remaining_performance_obligation
+    production_status: measurement_only
+  - metric_name: rpo_to_revenue
+    definition_version: rpo_to_revenue_v1
+    inputs:
+      - remaining_performance_obligation
+      - revenue_ttm
+    production_status: measurement_only
+  - metric_name: rpo_growth_gap
+    definition_version: rpo_growth_gap_v1
+    inputs:
+      - rpo_yoy_growth
+      - revenue_yoy_growth
+    production_status: measurement_only
+  - metric_name: crpo_yoy_growth
+    definition_version: crpo_yoy_growth_v1
+    inputs:
+      - current_remaining_performance_obligation
+    production_status: measurement_only
+  - metric_name: calculated_billings_growth
+    definition_version: calculated_billings_growth_v1
+    inputs:
+      - revenue
+      - deferred_revenue_total
+    production_status: measurement_only
+  - metric_name: arr_growth
+    definition_version: arr_growth_v1
+    inputs:
+      - annual_recurring_revenue
+    production_status: measurement_only
+  - metric_name: arr_acceleration
+    definition_version: arr_acceleration_v1
+    inputs:
+      - arr_growth
+    production_status: measurement_only
+  - metric_name: nrr_change
+    definition_version: nrr_change_v1
+    inputs:
+      - net_revenue_retention
+    production_status: measurement_only
+  - metric_name: subscription_revenue_growth
+    definition_version: subscription_revenue_growth_v1
+    inputs:
+      - subscription_revenue
+    production_status: measurement_only
+  - metric_name: subscription_revenue_mix
+    definition_version: subscription_revenue_mix_v1
+    inputs:
+      - subscription_revenue
+      - revenue
+    production_status: measurement_only
+  - metric_name: sales_efficiency
+    definition_version: sales_efficiency_v1
+    inputs:
+      - gross_profit_growth
+      - selling_and_marketing_expense
+    production_status: measurement_only
+  - metric_name: sbc_adjusted_fcf_margin
+    definition_version: sbc_adjusted_fcf_margin_v1
+    inputs:
+      - free_cash_flow
+      - stock_based_compensation
+      - revenue
+    production_status: measurement_only
+  - metric_name: rule_of_40_proxy
+    definition_version: rule_of_40_proxy_v1
+    inputs:
+      - revenue_yoy_growth
+      - free_cash_flow_margin
+    production_status: measurement_only
+  - metric_name: annual_recurring_revenue_yoy_growth
+    definition_version: arr_growth_v1
+    inputs: [annual_recurring_revenue]
+    production_status: measurement_only
+  - metric_name: net_revenue_retention_level
+    definition_version: nrr_level_v1
+    inputs: [net_revenue_retention]
+    production_status: measurement_only
+  - metric_name: net_revenue_retention_yoy_change
+    definition_version: nrr_change_v1
+    inputs: [net_revenue_retention]
+    production_status: measurement_only
+  - metric_name: disclosed_billings_yoy_growth
+    definition_version: disclosed_billings_growth_v1
+    inputs: [disclosed_billings]
+    production_status: measurement_only
+  - metric_name: subscription_revenue_yoy_growth
+    definition_version: subscription_revenue_growth_v1
+    inputs: [subscription_revenue]
+    production_status: measurement_only
+  - metric_name: subscription_revenue_mix
+    definition_version: subscription_revenue_mix_v1
+    inputs: [subscription_revenue, revenue]
+    production_status: measurement_only
+  - metric_name: customer_threshold_disclosure_change
+    definition_version: customer_threshold_change_event_v1
+    inputs: [customer_count_threshold]
+    production_status: diagnostic_event_only

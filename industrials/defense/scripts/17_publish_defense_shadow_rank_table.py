@@ -9,6 +9,7 @@ import math
 import os
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,12 +23,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from industrials.core.db import init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.policy_loader import load_eligibility_policy, resolve_policy  # noqa: E402
 from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
+from industrials.defense.metric_contract import (  # noqa: E402
+    BASE_FEATURE_ALIASES,
+    HIGHER_IS_BETTER_SCORE_FIELDS,
+    LOWER_IS_BETTER_SCORE_FIELDS,
+    PILLAR_INPUT_FIELDS,
+    SPECIALIZED_PILLAR_FIELDS,
+)
 from industrials.defense.research_artifacts import (  # noqa: E402
     PRODUCTION_PROMOTION_STATUS,
     PRODUCTION_SCORING_CONTRACT_VERSION,
@@ -67,6 +74,25 @@ def parse_args() -> argparse.Namespace:
         "--allow-overwrite",
         action="store_true",
         help="Explicitly replace an existing dated shadow artifact. Daily/PIT runs should not use this.",
+    )
+    parser.add_argument(
+        "--scoring-mode",
+        choices=["auto", "baseline", "specialized_v1"],
+        default="auto",
+        help=(
+            "Scoring treatment. Auto selects the effective production lock; "
+            "research candidates must choose explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--score-model-version",
+        default="",
+        help="Explicit score-model build id. Required for research candidates.",
+    )
+    parser.add_argument(
+        "--research-candidate",
+        action="store_true",
+        help="Seal this artifact as research-only and keep every portfolio/OOS eligibility gate closed.",
     )
     return parser.parse_args()
 
@@ -119,12 +145,19 @@ def percentile_map(rows: list[dict[str, Any]], field: str, *, higher_is_better: 
         return {}
     values.sort(key=lambda item: item[1])
     if len(values) == 1:
-        score = 100.0 if higher_is_better else 0.0
-        return {values[0][0]: score}
+        return {values[0][0]: NEUTRAL_SCORE}
     out: dict[str, float] = {}
-    for index, (ticker, _) in enumerate(values):
-        pct = 100.0 * index / (len(values) - 1)
-        out[ticker] = pct if higher_is_better else 100.0 - pct
+    index = 0
+    while index < len(values):
+        end = index + 1
+        while end < len(values) and values[end][1] == values[index][1]:
+            end += 1
+        average_rank = (index + end - 1) / 2.0
+        pct = 100.0 * average_rank / (len(values) - 1)
+        score = pct if higher_is_better else 100.0 - pct
+        for ticker, _ in values[index:end]:
+            out[ticker] = score
+        index = end
     return out
 
 
@@ -400,57 +433,74 @@ def load_rows(
         """,
         (MODEL_FAMILY, financial_source, submissions_source),
     )
+    active_tickers = sorted(active)
+    active_ticker_placeholders = placeholders(active_tickers)
     price_dates = fetch_map(
         conn,
-        """
+        f"""
         SELECT ticker, MIN(bar_date) AS price_start_date, MAX(bar_date) AS price_end_date
         FROM fact_price_ohlcv
-        WHERE source_id IN ({})
-        GROUP BY ticker
-        """.format(placeholders(market_sources)),
-        tuple(market_sources),
-    )
-    available_dollar_volume = fetch_map(
-        conn,
-        f"""
-        WITH dedup AS (
-            SELECT ticker, bar_date, close, volume,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY ticker, bar_date
-                       ORDER BY {source_rank_case(market_sources)} ASC
-                   ) AS source_rn
-            FROM fact_price_ohlcv
-            WHERE source_id IN ({placeholders(market_sources)})
-              AND bar_date <= ?
-              AND close IS NOT NULL
-              AND volume IS NOT NULL
-              AND close > 0
-              AND volume >= 0
-        ),
-        ranked AS (
-            SELECT ticker, close, volume,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY bar_date DESC) AS rn
-            FROM dedup
-            WHERE source_rn = 1
-        )
-        SELECT ticker,
-               COUNT(*) AS available_dollar_volume_days,
-               AVG(close * volume) AS avg_dollar_volume_available_window
-        FROM ranked
-        WHERE rn <= 60
+        WHERE source_id IN ({placeholders(market_sources)})
+          AND ticker IN ({active_ticker_placeholders})
         GROUP BY ticker
         """,
-        (*market_sources, *market_sources, asof),
+        (*market_sources, *active_tickers),
     )
+    fallback_volume_tickers = sorted(
+        ticker
+        for ticker in active_tickers
+        if finite(market.get(ticker, {}).get("avg_dollar_volume_60d")) is None
+    )
+    available_dollar_volume: dict[str, dict[str, Any]] = {}
+    if fallback_volume_tickers:
+        available_dollar_volume = fetch_map(
+            conn,
+            f"""
+            WITH dedup AS (
+                SELECT ticker, bar_date, close, volume,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ticker, bar_date
+                           ORDER BY {source_rank_case(market_sources)} ASC
+                       ) AS source_rn
+                FROM fact_price_ohlcv
+                WHERE source_id IN ({placeholders(market_sources)})
+                  AND ticker IN ({placeholders(fallback_volume_tickers)})
+                  AND bar_date <= ?
+                  AND close IS NOT NULL
+                  AND volume IS NOT NULL
+                  AND close > 0
+                  AND volume >= 0
+            ),
+            ranked AS (
+                SELECT ticker, close, volume,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY bar_date DESC) AS rn
+                FROM dedup
+                WHERE source_rn = 1
+            )
+            SELECT ticker,
+                   COUNT(*) AS available_dollar_volume_days,
+                   AVG(close * volume) AS avg_dollar_volume_available_window
+            FROM ranked
+            WHERE rn <= 60
+            GROUP BY ticker
+            """,
+            (
+                *market_sources,
+                *market_sources,
+                *fallback_volume_tickers,
+                asof,
+            ),
+        )
     filing_urls = {
         (str(row["ticker"]), str(row["accession_number"])): dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT ticker, accession_number, form_type, filing_date, filing_url
             FROM fact_sec_filing
             WHERE source_id = ?
+              AND ticker IN ({active_ticker_placeholders})
             """,
-            (submissions_source,),
+            (submissions_source, *active_tickers),
         )
     }
     rows: list[dict[str, Any]] = []
@@ -563,39 +613,6 @@ def liquidity_capacity_reason(row: dict[str, Any], *, market_cap_reason: str, av
 
 
 def add_feature_aliases(rows: list[dict[str, Any]]) -> None:
-    aliases = {
-        "latest_price": "financial_latest_price",
-        "revenue_yoy_growth": "financial_revenue_yoy_growth",
-        "gross_profit_yoy_growth": "financial_gross_profit_yoy_growth",
-        "operating_income_yoy_growth": "financial_operating_income_yoy_growth",
-        "free_cash_flow_yoy_growth": "financial_free_cash_flow_yoy_growth",
-        "revenue_acceleration": "financial_revenue_acceleration",
-        "gross_margin": "financial_gross_margin",
-        "operating_margin": "financial_operating_margin",
-        "fcf_margin": "financial_fcf_margin",
-        "fcf_to_net_income": "financial_fcf_to_net_income",
-        "net_cash_to_assets": "financial_net_cash_to_assets",
-        "sbc_pct_revenue": "financial_sbc_pct_revenue",
-        "r_and_d_pct_revenue": "financial_r_and_d_pct_revenue",
-        "inventory_days": "financial_inventory_days",
-        "fcf_yield": "financial_fcf_yield",
-        "ev_gross_profit": "financial_ev_gross_profit",
-        "ev_operating_income": "financial_ev_operating_income",
-        "ret_3m": "market_ret_3m",
-        "ret_12m_ex_1m": "market_ret_12m_ex_1m",
-        "rel_strength_bench_3m": "market_rel_strength_bench_3m",
-        "realized_vol_60d": "market_realized_vol_60d",
-        "max_drawdown_12m": "market_max_drawdown_12m",
-        "distance_from_52w_high": "market_distance_from_52w_high",
-        "avg_dollar_volume_60d": "market_avg_dollar_volume_60d",
-        "insider_net_value_90d": "positioning_insider_net_value_90d",
-        "insider_cluster_buyers_90d": "positioning_insider_cluster_buyers_90d",
-        "institutional_ownership_delta_pct": "positioning_institutional_ownership_delta_pct",
-        "latest_short_interest_pct_float": "positioning_latest_short_interest_pct_float",
-        "short_interest_change_3m": "positioning_short_interest_change_3m",
-        "latest_days_to_cover": "positioning_latest_days_to_cover",
-        "latest_borrow_fee_rate": "positioning_latest_borrow_fee_rate",
-    }
     for row in rows:
         row["ticker"] = normalize_ticker(row.get("ticker"))
         row["low_liquidity_flag"] = int(finite(row.get("market_low_liquidity_flag")) or 0)
@@ -610,10 +627,38 @@ def add_feature_aliases(rows: list[dict[str, Any]]) -> None:
         row["market_cap"] = market_cap
         row["market_cap_source"] = market_cap_source
         row["_market_cap_reason"] = market_cap_reason
-        for out_name, source_name in aliases.items():
+        for out_name, source_name in BASE_FEATURE_ALIASES.items():
             if out_name != "latest_price":
                 row[out_name] = row.get(source_name)
         row["liquidity_capacity_reason"] = liquidity_capacity_reason(row, market_cap_reason=market_cap_reason)
+
+
+def add_specialized_feature_aliases(rows: list[dict[str, Any]]) -> None:
+    """Resolve overlapping disclosure families into four independent demand signals.
+
+    The reviewed parser can populate funded backlog, reported backlog, RPO, or a
+    contract-load proxy depending on issuer disclosure. Choosing one value per
+    economic dimension avoids rewarding issuers merely for reporting the same
+    backlog through several labels.
+    """
+    for row in rows:
+        row["defense_orders_growth"] = finite(row.get("financial_orders_yoy_growth"))
+        row["defense_backlog_growth"] = first_finite(
+            row.get("financial_backlog_yoy_growth"),
+            row.get("financial_reported_backlog_yoy_growth"),
+            row.get("financial_rpo_yoy_growth"),
+            row.get("financial_contract_load_proxy_yoy_growth"),
+        )
+        row["defense_backlog_coverage"] = first_finite(
+            row.get("financial_backlog_to_revenue"),
+            row.get("financial_reported_backlog_to_revenue"),
+            row.get("financial_rpo_to_revenue"),
+            row.get("financial_contract_load_proxy_to_revenue"),
+        )
+        row["defense_book_to_bill"] = first_finite(
+            row.get("financial_book_to_bill"),
+            row.get("financial_rpo_implied_book_to_bill"),
+        )
 
 
 def apply_export_capacity_fallbacks(rows: list[dict[str, Any]]) -> None:
@@ -632,64 +677,82 @@ def apply_export_capacity_fallbacks(rows: list[dict[str, Any]]) -> None:
         )
 
 
-def build_scores(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def build_scores(
+    rows: list[dict[str, Any]],
+    *,
+    scoring_mode: str = "baseline",
+) -> dict[str, dict[str, Any]]:
+    if scoring_mode not in {"baseline", "specialized_v1"}:
+        raise ValueError(f"Unsupported defense scoring_mode={scoring_mode!r}")
     add_feature_aliases(rows)
+    if scoring_mode == "specialized_v1":
+        add_specialized_feature_aliases(rows)
     score_maps: dict[str, dict[str, float]] = {}
-    high_fields = [
-        "fcf_yield", "gross_margin", "operating_margin", "fcf_margin", "fcf_to_net_income",
-        "net_cash_to_assets", "revenue_yoy_growth", "gross_profit_yoy_growth",
-        "operating_income_yoy_growth", "free_cash_flow_yoy_growth", "revenue_acceleration",
-        "ret_3m", "ret_12m_ex_1m", "rel_strength_bench_3m", "distance_from_52w_high",
-        "avg_dollar_volume_60d", "insider_net_value_90d", "insider_cluster_buyers_90d",
-        "institutional_ownership_delta_pct",
-    ]
-    low_fields = [
-        "ev_gross_profit", "ev_operating_income", "inventory_days", "sbc_pct_revenue",
-        "r_and_d_pct_revenue", "realized_vol_60d", "latest_short_interest_pct_float",
-        "short_interest_change_3m", "latest_days_to_cover", "latest_borrow_fee_rate",
-    ]
-    for field in high_fields:
+    for field in HIGHER_IS_BETTER_SCORE_FIELDS:
         score_maps[field] = percentile_map(rows, field, higher_is_better=True)
-    for field in low_fields:
+    for field in LOWER_IS_BETTER_SCORE_FIELDS:
         score_maps[field] = percentile_map(rows, field, higher_is_better=False)
     score_maps["max_drawdown_12m"] = percentile_map(rows, "max_drawdown_12m", higher_is_better=True)
+    if scoring_mode == "specialized_v1":
+        for field in SPECIALIZED_PILLAR_FIELDS:
+            score_maps[field] = percentile_map(rows, field, higher_is_better=True)
     out: dict[str, dict[str, Any]] = {}
     for row in rows:
         ticker = str(row["ticker"])
         low_liquidity_score = 0.0 if int(row.get("low_liquidity_flag") or 0) else 100.0
-        valuation = component(ticker, ["fcf_yield", "ev_gross_profit", "ev_operating_income"], score_maps)
+        valuation = component(ticker, list(PILLAR_INPUT_FIELDS["valuation"]), score_maps)
         quality = component(
             ticker,
-            ["gross_margin", "operating_margin", "fcf_margin", "fcf_to_net_income", "net_cash_to_assets", "sbc_pct_revenue"],
+            list(PILLAR_INPUT_FIELDS["quality"]),
             score_maps,
         )
         risk = component(
             ticker,
-            ["realized_vol_60d", "max_drawdown_12m", "distance_from_52w_high"],
+            list(PILLAR_INPUT_FIELDS["risk_control"]),
             score_maps,
             extra_scores=[low_liquidity_score],
         )
         positioning = component(
             ticker,
-            [
-                "insider_net_value_90d", "insider_cluster_buyers_90d", "institutional_ownership_delta_pct",
-                "latest_short_interest_pct_float", "short_interest_change_3m", "latest_days_to_cover", "latest_borrow_fee_rate",
-            ],
+            list(PILLAR_INPUT_FIELDS["positioning"]),
             score_maps,
         )
         market_behavior = component(
             ticker,
-            ["ret_3m", "ret_12m_ex_1m", "rel_strength_bench_3m", "realized_vol_60d", "max_drawdown_12m", "distance_from_52w_high"],
+            list(PILLAR_INPUT_FIELDS["market_behavior"]),
             score_maps,
         )
         growth = component(
             ticker,
-            [
-                "revenue_yoy_growth", "gross_profit_yoy_growth", "operating_income_yoy_growth",
-                "free_cash_flow_yoy_growth", "revenue_acceleration",
-            ],
+            list(PILLAR_INPUT_FIELDS["growth"]),
             score_maps,
         )
+        defense_budget_backlog = (
+            component(ticker, list(SPECIALIZED_PILLAR_FIELDS), score_maps)
+            if scoring_mode == "specialized_v1"
+            else Component(NEUTRAL_SCORE, 0.0, "neutralized_not_loaded", 0, 1)
+        )
+        if scoring_mode == "specialized_v1":
+            if defense_budget_backlog.available == 0:
+                defense_budget_backlog = Component(
+                    NEUTRAL_SCORE,
+                    0.0,
+                    "candidate_specialized_missing_neutralized",
+                    0,
+                    len(SPECIALIZED_PILLAR_FIELDS),
+                )
+            else:
+                defense_budget_backlog = Component(
+                    defense_budget_backlog.score,
+                    defense_budget_backlog.quality,
+                    (
+                        "candidate_specialized_complete"
+                        if defense_budget_backlog.missing == 0
+                        else "candidate_specialized_partial"
+                    ),
+                    defense_budget_backlog.available,
+                    defense_budget_backlog.missing,
+                )
         components = [valuation, quality, risk, positioning, market_behavior, growth]
         weighted = [
             (valuation.score, 0.16), (quality.score, 0.18), (risk.score, 0.18),
@@ -711,7 +774,7 @@ def build_scores(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "market_behavior": market_behavior,
             "growth": growth,
             "sector_cycle": Component(NEUTRAL_SCORE, 0.0, "neutralized_not_loaded", 0, 1),
-            "defense_budget_backlog": Component(NEUTRAL_SCORE, 0.0, "neutralized_not_loaded", 0, 1),
+            "defense_budget_backlog": defense_budget_backlog,
             "core_score": core,
             "sector_overlay_score": overlay,
             "final_score": final_score,
@@ -738,6 +801,7 @@ def compose_rows(
     asof: str,
     *,
     provenance_version: str,
+    score_model_version: str,
     membership_mode: str,
 ) -> list[dict[str, str]]:
     ranks = rank_percentiles(scores)
@@ -793,7 +857,7 @@ def compose_rows(
         record: dict[str, str] = {
             "ticker": ticker,
             "asof_date": asof,
-            "score_model_version": SCORE_MODEL_VERSION,
+            "score_model_version": score_model_version,
             "model_family": MODEL_FAMILY,
             "model_version": MODEL_VERSION,
             "scoring_contract_version": SCORING_CONTRACT_VERSION,
@@ -1054,6 +1118,37 @@ def apply_lock_stamps(
     return [row for row, _ in scored]
 
 
+def apply_research_candidate_stamps(rows: list[dict[str, str]], *, scoring_mode: str) -> list[dict[str, str]]:
+    """Fail closed when a candidate is evaluated after a production lock exists."""
+    reason = f"research_candidate_{scoring_mode}_not_production_approved"
+    for row in rows:
+        row["calibration_usage"] = "research_candidate_only"
+        row["calibration_input_valid_flag"] = "0"
+        row["calibration_eligible_flag"] = "0"
+        row["oos_score_valid_flag"] = "0"
+        row["oos_score_asof_date"] = ""
+        row["oos_invalid_reason"] = reason
+        row["calibration_train_start_date"] = ""
+        row["calibration_train_end_date"] = ""
+        row["calibration_lock_date"] = ""
+        row["calibration_production_start_date"] = ""
+        row["calibration_validation_method"] = "candidate_research_not_production"
+        row["oos_assertion_basis"] = "candidate_research_not_production"
+        row["portfolio_candidate_gate"] = "0"
+        row["portfolio_candidate_status"] = "research_candidate"
+        row["portfolio_candidate_reason"] = reason
+        row["research_calibration_input_eligible_flag"] = "0"
+        row["research_calibration_eligible_flag"] = "0"
+        row["research_calibration_status"] = "research_candidate"
+        row["research_calibration_reason"] = reason
+        row["calibration_sample_role"] = "excluded"
+        row["calibration_status"] = "research_candidate"
+        row["calibration_status_reason"] = reason
+        row["stage11_calibration_input_eligible_flag"] = "0"
+        row["stage11_calibration_input_reason"] = reason
+    return rows
+
+
 def write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = ""
@@ -1067,7 +1162,16 @@ def write_text_atomic(path: Path, text: str) -> None:
             Path(tmp_name).unlink()
 
 
-def sealed_artifact_valid(path: Path, *, asof: str, membership_mode: str, calibration_mode: str) -> bool:
+def sealed_artifact_valid(
+    path: Path,
+    *,
+    asof: str,
+    membership_mode: str,
+    calibration_mode: str,
+    scoring_mode: str,
+    score_model_version: str,
+    research_candidate: bool,
+) -> bool:
     manifest_path = path.with_name("defense_final_rank_table_manifest.json")
     if not path.exists() or not manifest_path.exists():
         return False
@@ -1084,6 +1188,9 @@ def sealed_artifact_valid(path: Path, *, asof: str, membership_mode: str, calibr
         and manifest.get("membership_mode", "current") == membership_mode
         and manifest.get("shadow_only") is expected_shadow_only
         and manifest.get("calibration_mode", "shadow" if expected_shadow_only else "production") == calibration_mode
+        and manifest.get("scoring_mode", "baseline") == scoring_mode
+        and manifest.get("score_model_version") == score_model_version
+        and bool(manifest.get("research_candidate", False)) is research_candidate
     )
 
 
@@ -1095,6 +1202,9 @@ def seal_manifest(
     policy_asof: str,
     membership_mode: str,
     calibration_mode: str,
+    scoring_mode: str,
+    score_model_version: str,
+    research_candidate: bool,
     lock: dict[str, Any] | None,
 ) -> Path:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1103,12 +1213,14 @@ def seal_manifest(
         "asof_date": asof,
         "rows": rows,
         "sha256": digest,
-        "score_model_version": SCORE_MODEL_VERSION,
+        "score_model_version": score_model_version,
         "model_family": MODEL_FAMILY,
         "policy_asof_date": policy_asof,
         "membership_mode": membership_mode,
         "calibration_mode": calibration_mode,
-        "shadow_only": calibration_mode != "production",
+        "scoring_mode": scoring_mode,
+        "research_candidate": research_candidate,
+        "shadow_only": research_candidate or calibration_mode != "production",
         "sealed_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
     if lock is not None:
@@ -1120,7 +1232,7 @@ def seal_manifest(
                 "production_promotion_decision_sha256": lock["decision_manifest_sha256"],
             }
         )
-        if calibration_mode == "production":
+        if calibration_mode == "production" and not research_candidate:
             manifest["production_promoted"] = True
     manifest_path = path.with_name("defense_final_rank_table_manifest.json")
     write_text_atomic(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -1137,18 +1249,67 @@ def main() -> int:
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     policy_path = resolve_eligibility_policy_path(config, base_dir=base_dir)
-    # Candidate research runs must not stamp baseline provenance: an explicit
-    # DEFENSE_SCORE_MODEL_VERSION env override (set by the 26 orchestrator for
-    # labeled candidate namespaces) wins over config, which wins over the
-    # module constant.
-    provenance_version = str(
-        os.environ.get("DEFENSE_SCORE_MODEL_VERSION", "").strip()
-        or cfg_get(
-            config,
-            "oos_calibration_standards.families.defense.calibration_provenance_version",
-            SCORE_MODEL_VERSION,
+    lock = load_production_lock(config, base_dir=base_dir, asof=asof)
+    requested_scoring_mode = str(args.scoring_mode)
+    if args.research_candidate:
+        if requested_scoring_mode == "auto":
+            raise ValueError(
+                "--research-candidate requires an explicit --scoring-mode"
+            )
+        if not args.score_model_version.strip():
+            raise ValueError(
+                "--research-candidate requires an explicit --score-model-version"
+            )
+        scoring_mode = requested_scoring_mode
+        score_model_version = args.score_model_version.strip()
+        if score_model_version == SCORE_MODEL_VERSION:
+            raise ValueError(
+                "Research candidates must use a score-model version distinct "
+                "from the production baseline"
+            )
+        calibration_mode = "research_candidate"
+    else:
+        effective_scoring_mode = (
+            str(lock["scoring_mode"]) if lock is not None else "baseline"
         )
-        or SCORE_MODEL_VERSION
+        if (
+            requested_scoring_mode != "auto"
+            and requested_scoring_mode != effective_scoring_mode
+        ):
+            raise ValueError(
+                f"Requested scoring_mode={requested_scoring_mode!r} conflicts "
+                f"with effective production lock mode={effective_scoring_mode!r}"
+            )
+        scoring_mode = effective_scoring_mode
+        effective_score_model_version = (
+            str(lock["score_model_version"])
+            if lock is not None
+            else str(
+                os.environ.get("DEFENSE_SCORE_MODEL_VERSION", "").strip()
+                or SCORE_MODEL_VERSION
+            )
+        )
+        if (
+            args.score_model_version.strip()
+            and args.score_model_version.strip() != effective_score_model_version
+        ):
+            raise ValueError(
+                f"Requested score_model_version={args.score_model_version!r} "
+                "conflicts with the effective production lock"
+            )
+        score_model_version = effective_score_model_version
+        calibration_mode = lock_mode_for_asof(lock, asof)
+    provenance_version = (
+        score_model_version
+        if args.research_candidate or lock is not None
+        else str(
+            cfg_get(
+                config,
+                "oos_calibration_standards.families.defense.calibration_provenance_version",
+                SCORE_MODEL_VERSION,
+            )
+            or SCORE_MODEL_VERSION
+        )
     )
     snapshot_root = resolve_path(
         str(
@@ -1160,8 +1321,6 @@ def main() -> int:
         ),
         base_dir=base_dir,
     )
-    lock = load_production_lock(config, base_dir=base_dir)
-    calibration_mode = lock_mode_for_asof(lock, asof)
     output_dir = args.output_dir.expanduser().resolve() if args.output_dir else snapshot_root / asof
     output_path = output_dir / "defense_final_rank_table.csv"
     manifest_path = output_path.with_name("defense_final_rank_table_manifest.json")
@@ -1177,6 +1336,9 @@ def main() -> int:
             asof=asof,
             membership_mode=args.membership_mode,
             calibration_mode=calibration_mode,
+            scoring_mode=scoring_mode,
+            score_model_version=score_model_version,
+            research_candidate=bool(args.research_candidate),
         ):
             print(f"Existing sealed artifact is valid; keeping {output_path}")
             print(f"Existing sealed manifest is valid; keeping {manifest_path}")
@@ -1197,9 +1359,8 @@ def main() -> int:
     # NEW-2: pass the evaluation asof so versioned (profile, stage) keys select the
     # row effective at that asof instead of raising on the first second version.
     policies = select_effective_policies(load_eligibility_policy(policy_path, asof=policy_asof), asof=policy_asof)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
-        init_db(conn)
         rows = load_rows(
             conn,
             asof=asof,
@@ -1218,7 +1379,7 @@ def main() -> int:
         raise ValueError(
             f"Missing Stage 3/4/5 feature rows for membership_mode={args.membership_mode}: {missing_feature[:20]}"
         )
-    scores = build_scores(rows)
+    scores = build_scores(rows, scoring_mode=scoring_mode)
     apply_export_capacity_fallbacks(rows)
     out_rows = compose_rows(
         rows,
@@ -1226,9 +1387,12 @@ def main() -> int:
         policies,
         asof,
         provenance_version=provenance_version,
+        score_model_version=score_model_version,
         membership_mode=args.membership_mode,
     )
-    if calibration_mode != "shadow":
+    if args.research_candidate:
+        out_rows = apply_research_candidate_stamps(out_rows, scoring_mode=scoring_mode)
+    elif calibration_mode != "shadow":
         assert lock is not None
         out_rows = apply_lock_stamps(
             out_rows,
@@ -1245,7 +1409,10 @@ def main() -> int:
         policy_asof=policy_asof,
         membership_mode=args.membership_mode,
         calibration_mode=calibration_mode,
-        lock=lock,
+        scoring_mode=scoring_mode,
+        score_model_version=score_model_version,
+        research_candidate=bool(args.research_candidate),
+        lock=None if args.research_candidate else lock,
     )
     print(f"Wrote {output_path} (calibration_mode={calibration_mode})")
     print(f"Wrote {manifest_path}")

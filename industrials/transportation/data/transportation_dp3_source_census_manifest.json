@@ -1,53 +1,54 @@
 {
-  "acceptance": "NO_GO",
+  "acceptance": "PASS",
   "active_identity_count": 112,
   "adapter_version": "transportation_specialized_metrics_v3.discovery2",
   "approved_gap_count": 0,
   "artifacts": {
     "cache_gaps": {
-      "canonical_rows_sha256": "d6f61ca413ebc89a3e08efea94dbd623795842c677c788cb162a00895c0a452f",
+      "canonical_rows_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "path": "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\industrials\\transportation\\data\\transportation_dedicated_parser_cache_gaps.csv",
-      "row_count": 152,
-      "sha256": "100aac02211942c8a933668abac2845d9bc77f9083194d169ff00f807d598589"
+      "row_count": 0,
+      "sha256": "4565cbda27f1f6c1aec839ad7657eee44705e5b6e05015e4cd76965c3685535c"
     },
     "source_census": {
-      "canonical_rows_sha256": "8c1e72e31a78a5673c649d32bd05a4b420199635491edcc6a3a184bb63b6715a",
+      "canonical_rows_sha256": "f0e3e54143bf202f58264b9d9470d0d914cd31c8c240a90fda429d990186861a",
       "path": "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\industrials\\transportation\\data\\transportation_dedicated_parser_source_census.csv",
-      "row_count": 3329,
-      "sha256": "6aa953b7586fe4a348c1d0cc978fc54e0871cf75c6ff8583268601e00f29b14f"
+      "row_count": 7761,
+      "sha256": "e57da29a86a73fba32ab5e72a80446821d357910d9a014615483f524965cece9"
     },
     "source_decisions": {
-      "canonical_rows_sha256": "35a1d51885cf4b523d45ac0dbd770db85d670de541be3477a77969d8dca4a07e",
+      "canonical_rows_sha256": "412c808b189fe79ee901b0d8d891b351d9e38389281a94fde8a22421f4e3f69e",
       "path": "C:\\Users\\josel\\OneDrive\\Desktop\\Investment Files\\Staging_Scalper_System\\industrials\\transportation\\data\\transportation_dedicated_parser_source_decisions.csv",
-      "row_count": 11371,
-      "sha256": "ff35bcd039237d8fc2961993eaf31a7cf072aa40e1d8bc29fb12a1a4d39685b7"
+      "row_count": 14672,
+      "sha256": "6716f0406db86a13e38d3999e59283e5c41bcdd92ad5cfe735ed73d3ea9ae0e7"
     }
   },
   "asof_date": "2026-07-22",
-  "base_accession_count": 3019,
-  "cached_document_row_count": 3177,
+  "base_accession_count": 4267,
+  "cached_document_row_count": 7761,
   "database_mode": "read_only",
   "decision_counts": {
-    "EXCLUDE": 941,
-    "EXCLUDE_NO_METADATA_SIGNAL": 7206,
-    "INCLUDE": 3224
+    "EXCLUDE": 1410,
+    "EXCLUDE_NO_METADATA_SIGNAL": 8752,
+    "INCLUDE": 4510
   },
   "dp0_scope_sha256": "2fdff0059514153f6e17c201f7f09fc7751ea106a95ca3e00accbdb26855bb67",
-  "duplicate_cik_accession_group_count": 65,
-  "duplicate_content_group_count": 36,
+  "duplicate_cik_accession_group_count": 1477,
+  "duplicate_content_group_count": 2,
   "errors": [],
-  "expected_base_accession_count": 3019,
+  "expected_base_accession_count": 4267,
   "expected_identity_count": 160,
-  "gap_type_counts": {
-    "SOURCE_DOCUMENT": 152
-  },
+  "gap_type_counts": {},
+  "identities_without_selected_sources": [],
   "identity_count": 160,
   "inactive_identity_count": 48,
-  "manifest_version": "transportation_dp3_source_census_v1",
-  "missing_document_row_count": 152,
+  "legacy_inactive_selected_accession_count": 1414,
+  "legacy_inactive_start_date": "2000-01-01",
+  "manifest_version": "transportation_dp3_source_census_v2",
+  "missing_document_row_count": 0,
   "model_family": "transportation",
   "network_requests": 0,
-  "next_gate": "HYDRATE_OR_ADJUDICATE_EXACT_DP3_GAPS",
+  "next_gate": "DP4_OFFLINE_PLAN_ONLY",
   "parser_execution_authorized": false,
   "parser_execution_options": {
     "accession_selection": "sealed_manifest_only",
@@ -62,18 +63,19 @@
     "require_complete_cache": true
   },
   "parser_metric_count": 84,
-  "selected_accession_count": 3224,
-  "selected_document_row_count": 3329,
+  "selected_accession_count": 4510,
+  "selected_document_row_count": 7761,
+  "selected_identity_count": 160,
   "selection_rule_counts": {
-    "base_periodic": 2765,
-    "base_periodic_financial_6k": 254,
+    "base_periodic": 3984,
+    "base_periodic_financial_6k": 283,
     "supplemental_earnings_item_2_02_or_7_01": 44,
-    "supplemental_event_index_metadata": 9,
-    "supplemental_event_positive_metadata_only": 7206,
+    "supplemental_event_index_metadata": 47,
+    "supplemental_event_positive_metadata_only": 8752,
     "supplemental_registration_listing_window": 152
   },
   "start_date": "2017-11-28",
-  "supplemental_accession_count": 205,
-  "unique_content_hash_count": 3141,
-  "unresolved_gap_count": 152
+  "supplemental_accession_count": 243,
+  "unique_content_hash_count": 7759,
+  "unresolved_gap_count": 0
 }

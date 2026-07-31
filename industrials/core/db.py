@@ -937,6 +937,7 @@ CREATE TABLE IF NOT EXISTS feature_financial_statement (
     ebitda_ttm_usd REAL,
     net_debt_to_ebitda REAL,
     negative_ebitda_leverage_flag INTEGER,
+    negative_profit_valuation_flag INTEGER,
     interest_coverage REAL,
     cash_burn_ttm_usd REAL,
     cash_runway_years REAL,
@@ -1314,7 +1315,7 @@ def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, d
 # One-time data backfills and table rebuilds are gated on this version so init_db
 # (which every pipeline script runs on every connection) does not repeat them.
 # Bump the constant when adding a new gated migration step below.
-DB_USER_VERSION = 4
+DB_USER_VERSION = 5
 
 
 def db_user_version(conn: sqlite3.Connection) -> int:
@@ -1596,6 +1597,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "feature_financial_statement", "ebitda_ttm_usd", "REAL")
     ensure_column(conn, "feature_financial_statement", "net_debt_to_ebitda", "REAL")
     ensure_column(conn, "feature_financial_statement", "negative_ebitda_leverage_flag", "INTEGER")
+    ensure_column(conn, "feature_financial_statement", "negative_profit_valuation_flag", "INTEGER")
     ensure_column(conn, "feature_financial_statement", "interest_coverage", "REAL")
     ensure_column(conn, "feature_financial_statement", "cash_burn_ttm_usd", "REAL")
     ensure_column(conn, "feature_financial_statement", "cash_runway_years", "REAL")

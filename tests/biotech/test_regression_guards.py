@@ -593,6 +593,88 @@ def test_promoted_portfolio_candidate_policy_filters_global_top_by_cohort_caps()
     assert missing["portfolio_candidate_reason"] == "missing_score"
 
 
+def test_promoted_portfolio_candidate_policy_supports_cohort_first_and_cash_floor() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_biotech_cohort_first_gate_regression")
+    config = {
+        "biotech_scoring": {
+            "portfolio_candidate_policy": {
+                "enabled": True,
+                "name": "cohort_first_top4_late_platform_max8_cash2_raw",
+                "selection_order": "cohort_then_rank",
+                "rank_top_n": 20,
+                "allowed_primary_cohorts": [
+                    "late_clinical_pivotal_or_registrational",
+                    "platform_partnered_modality_pipeline",
+                ],
+                "cohort_top_k_per_cohort": 4,
+                "total_max": 8,
+                "min_selected_names": 2,
+                "below_min_selected_action": "cash",
+                "selected_reason": "cohort_first_selected",
+                "excluded_reason": "cohort_first_excluded",
+            }
+        }
+    }
+    rows: list[dict[str, Any]] = []
+    for idx in range(25):
+        rows.append(
+            {
+                "ticker": f"C{idx:02d}",
+                "biotech_primary_cohort": "commercial_profitable_quality_or_mature",
+                "portfolio_candidate_score": float(100 - idx),
+                "score_zero_is_missing_flag": 0.0,
+                "price_data_asof_date": "2026-07-24",
+            }
+        )
+    for idx in range(5):
+        for prefix, cohort in (
+            ("L", "late_clinical_pivotal_or_registrational"),
+            ("P", "platform_partnered_modality_pipeline"),
+        ):
+            rows.append(
+                {
+                    "ticker": f"{prefix}{idx + 1}",
+                    "biotech_primary_cohort": cohort,
+                    "portfolio_candidate_score": float(70 - idx * 2 - (1 if prefix == "P" else 0)),
+                    "score_zero_is_missing_flag": 0.0,
+                    "price_data_asof_date": "2026-07-24",
+                }
+            )
+
+    module.apply_promoted_portfolio_candidate_policy(rows, config)
+
+    selected = [row["ticker"] for row in rows if row.get("portfolio_candidate_gate") == 1.0]
+    assert selected == ["L1", "P1", "L2", "P2", "L3", "P3", "L4", "P4"]
+    assert not any(ticker.startswith("C") for ticker in selected)
+
+    one_name_rows = [dict(rows[-1], ticker="ONLY")]
+    module.apply_promoted_portfolio_candidate_policy(one_name_rows, config)
+    assert one_name_rows[0]["portfolio_candidate_gate"] == 0.0
+    assert one_name_rows[0]["portfolio_candidate_reason"] == (
+        "cash_fallback_insufficient_promoted_policy_breadth"
+    )
+
+
+def test_promoted_portfolio_candidate_policy_rejects_evidence_drift() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_biotech_gate_evidence_regression")
+    config = {
+        "biotech_scoring": {
+            "portfolio_candidate_policy": {
+                "enabled": True,
+                "name": "validated_policy",
+                "rank_top_n": 10,
+                "evidence": {
+                    "validated_policy_name": "validated_policy",
+                    "validated_rank_top_n": 20,
+                },
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="rank_top_n differs"):
+        module.apply_promoted_portfolio_candidate_policy([], config)
+
+
 def test_ctgov_shared_study_merge_is_deterministic_on_conflict() -> None:
     module = load_script_module("03_sync_ctgov_trials.py", "ctgov_sync_merge_regression")
     first = module.SyncResult(
@@ -1025,6 +1107,62 @@ def test_calibration_selection_policy_cohort_top_k_limits_each_cohort() -> None:
     limited = module.apply_policy_cohort_top_k_limit(ranked_rows, policy)
 
     assert [row["ticker"] for row in limited] == ["A1", "A2", "B1", "B2"]
+
+
+def test_calibration_selection_policy_minimum_floor_returns_cash() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_minimum_floor_regression")
+    policy = module.SelectionPolicy(
+        policy_name="cash_below_two",
+        description="test policy",
+        min_selected_names=2,
+        below_min_selected_action="cash",
+    )
+
+    assert module.apply_policy_minimum_selection_floor([{"ticker": "A"}], policy) == []
+    selected = module.apply_policy_minimum_selection_floor(
+        [{"ticker": "A"}, {"ticker": "B"}],
+        policy,
+    )
+    assert [row["ticker"] for row in selected] == ["A", "B"]
+
+
+def test_calibration_constraints_enforce_selection_breadth() -> None:
+    module = load_script_module("28_calibrate_biotech_opportunity.py", "calibration_breadth_gate_regression")
+    params = module.CalibrationParams(
+        min_selected_observations=1,
+        min_asof_dates=1,
+        min_selection_date_coverage_pct=50.0,
+        min_avg_selected_names_per_active_date=3.0,
+        min_selected_names_per_active_date=2,
+    )
+    selected_summary = {
+        "n": 10,
+        "lcb_return_pct": 1.0,
+        "sortino_like": 1.0,
+        "profit_factor": 2.0,
+        "omega_configured": 2.0,
+        "core_hard_weakness_exposure_pct": 0.0,
+        "illiquid_weakness_exposure_pct": 0.0,
+        "top3_gain_contribution_pct": 10.0,
+        "large_loss_20pct_rate_pct": 0.0,
+        "large_loss_40pct_rate_pct": 0.0,
+    }
+
+    result = module.calibration_constraint_fields(
+        selected_summary,
+        asof_dates=4,
+        eligible_asof_dates=10,
+        avg_selected_names_per_active_date=2.5,
+        min_selected_names_per_active_date=1,
+        params=params,
+    )
+
+    assert result["calibration_pass"] is False
+    assert result["calibration_fail_reasons"].split("|") == [
+        "selection_date_coverage<50.0",
+        "avg_selected_names_per_active_date<3.0",
+        "min_selected_names_per_active_date<2",
+    ]
 
 
 def test_calibration_selection_policy_post_selection_gate_filters_global_top_n() -> None:

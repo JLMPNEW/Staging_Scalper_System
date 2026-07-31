@@ -32,6 +32,7 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 RUN_TYPE = "import_industrials_positioning"
 CSV_FIELDS = [
     "ticker",
+    "form4_submissions",
     "form4_transactions",
     "direct_form4_transactions",
     "form4_latest_transaction_date",
@@ -291,13 +292,11 @@ def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, incl
     else:
         rows = conn.execute(
             """
-            SELECT DISTINCT c.ticker
-            FROM dim_company c
-            JOIN dim_industrials_taxonomy t
-              ON t.ticker = c.ticker
-             AND t.model_family = ?
-            WHERE c.is_active = 1
-            ORDER BY c.ticker
+            SELECT DISTINCT m.ticker
+            FROM dim_universe_membership m
+            WHERE m.model_family = ?
+              AND m.is_current_member = 1
+            ORDER BY m.ticker
             """,
             (model_family,),
         ).fetchall()
@@ -491,6 +490,7 @@ def form4_status_for_ticker(
     *,
     form4_rows: int,
     direct_rows: int,
+    submission_rows: int,
     form4_exempt_tickers: set[str],
     form4_exempt_reasons: dict[str, str],
 ) -> tuple[str, str]:
@@ -498,7 +498,51 @@ def form4_status_for_ticker(
         return "not_applicable", form4_exempt_reasons.get(ticker) or "FORM4_POLICY_EXEMPT"
     if form4_rows + direct_rows > 0:
         return "covered", ""
+    if submission_rows > 0:
+        return (
+            "covered_no_eligible_transactions",
+            "FORM4_SUBMISSIONS_PRESENT_NO_ELIGIBLE_NONDERIVATIVE_TRANSACTIONS",
+        )
     return "missing", "NO_FORM4_TRANSACTIONS"
+
+
+def form4_submission_counts(
+    source: sqlite3.Connection,
+    tickers: list[str],
+    *,
+    query_tickers: list[str],
+    query_ciks: list[str],
+    source_to_internal: dict[str, str],
+    cik_to_internal: dict[str, str],
+    routes_by_cik: dict[str, list[Form4Route]],
+    ambiguous_source_tickers: set[str],
+) -> dict[str, int]:
+    counts = {ticker: 0 for ticker in tickers}
+    rows = source.execute(
+        f"""
+        SELECT issuer_cik, issuer_trading_symbol,
+               COUNT(DISTINCT accession_number) AS submissions
+        FROM sec_ownership_submission
+        WHERE issuer_cik IN ({qmarks(query_ciks)})
+           OR UPPER(COALESCE(issuer_trading_symbol, ''))
+              IN ({qmarks(query_tickers)})
+        GROUP BY issuer_cik, issuer_trading_symbol
+        """,
+        (*query_ciks, *query_tickers),
+    )
+    for row in rows:
+        ticker = route_form4_ticker(
+            source_cik=normalize_cik(row["issuer_cik"]),
+            source_ticker=normalize_ticker(row["issuer_trading_symbol"]),
+            security_title="",
+            source_to_internal=source_to_internal,
+            cik_to_internal=cik_to_internal,
+            routes_by_cik=routes_by_cik,
+            ambiguous_source_tickers=ambiguous_source_tickers,
+        )
+        if ticker in counts:
+            counts[ticker] += int(row["submissions"] or 0)
+    return counts
 
 
 def route_form4_ticker(
@@ -1236,6 +1280,18 @@ def build_positioning_features(
     statuses: dict[str, str] = {}
     insider_start = (asof - timedelta(days=insider_days)).isoformat()
     short_prior_cutoff = (asof - timedelta(days=short_change_days)).isoformat()
+    # Replace one exact family/source/date snapshot. Upserts alone retain rows
+    # that leave the family-scoped feature universe (for example, a ticker
+    # that is active in another family but delisted in this one).
+    conn.execute(
+        """
+        DELETE FROM feature_positioning
+        WHERE asof_date = ?
+          AND source_id = ?
+          AND model_family = ?
+        """,
+        (asof.isoformat(), feature_source_id, model_family),
+    )
     for ticker in tickers:
         insider_source = preferred_form4_source(
             conn,
@@ -1365,11 +1421,15 @@ def build_positioning_features(
                 reasons.append("stale_borrow")
             else:
                 reasons.append("missing_borrow")
-        quality = "complete" if not reasons and not waived_reasons else ("policy_exempt" if not reasons else "review")
         form4_status = form4_status_by_ticker.get(ticker) or "missing"
         form4_status_reason = form4_status_reason_by_ticker.get(ticker) or (
             "NO_FORM4_TRANSACTIONS" if form4_status == "missing" else ""
         )
+        if form4_status == "missing":
+            reasons.append("missing_form4")
+        elif form4_status == "not_applicable":
+            waived_reasons.append("form4_policy_not_applicable")
+        quality = "complete" if not reasons and not waived_reasons else ("policy_exempt" if not reasons else "review")
         purchase_value = safe_float(purchase["v"])
         sale_value = safe_float(sale["v"])
         insider_net_value = purchase_value - sale_value if purchase_value is not None and sale_value is not None else None
@@ -1673,6 +1733,16 @@ def main() -> None:
                             start=start,
                             upstream_source=upstream_borrow_source,
                         )
+                    submission_counts = form4_submission_counts(
+                        form4_conn,
+                        fact_tickers,
+                        query_tickers=query_tickers,
+                        query_ciks=query_ciks_for_sql,
+                        source_to_internal=source_to_internal,
+                        cik_to_internal=cik_to_internal,
+                        routes_by_cik=form4_routes_by_cik,
+                        ambiguous_source_tickers=ambiguous_source_tickers,
+                    )
                     form4_status_by_ticker: dict[str, str] = {}
                     form4_status_reason_by_ticker: dict[str, str] = {}
                     for ticker in fact_tickers:
@@ -1680,6 +1750,7 @@ def main() -> None:
                             ticker,
                             form4_rows=int(form4_stats[ticker]["form4_transactions"]),
                             direct_rows=int(direct_stats[ticker]["direct_form4_transactions"]),
+                            submission_rows=int(submission_counts[ticker]),
                             form4_exempt_tickers=form4_exempt_tickers,
                             form4_exempt_reasons=form4_exempt_reasons,
                         )
@@ -1715,6 +1786,7 @@ def main() -> None:
                         if (
                             form4_stats[ticker]["form4_transactions"] == 0
                             and direct_stats[ticker]["direct_form4_transactions"] == 0
+                            and submission_counts[ticker] == 0
                             and ticker not in form4_exempt_tickers
                         ):
                             reasons.append("no_form4_transactions")
@@ -1741,6 +1813,7 @@ def main() -> None:
                         rows.append(
                             {
                                 "ticker": ticker,
+                                "form4_submissions": submission_counts[ticker],
                                 "form4_transactions": form4_stats[ticker]["form4_transactions"],
                                 "direct_form4_transactions": direct_stats[ticker]["direct_form4_transactions"],
                                 "form4_latest_transaction_date": form4_stats[ticker]["form4_latest_transaction_date"],

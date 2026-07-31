@@ -5,6 +5,7 @@ import argparse
 import csv
 import io
 import logging
+import re
 import sqlite3
 import subprocess
 import sys
@@ -118,6 +119,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--user-agent", default="")
     parser.add_argument("--skip-finra-short-interest", action="store_true")
     parser.add_argument("--skip-13f", action="store_true")
+    parser.add_argument(
+        "--offline-13f-cache-only",
+        action="store_true",
+        help=(
+            "Rematch the requested universe against already-cached SEC 13F "
+            "archives without archive discovery or network requests."
+        ),
+    )
     parser.add_argument("--skip-ibkr-borrow", action="store_true")
     parser.add_argument("--skip-float-proxy", action="store_true")
     parser.add_argument(
@@ -161,6 +170,39 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+SEC_13F_ARCHIVE_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+def cached_sec_13f_archives(
+    cache_dir: Path,
+    *,
+    start_year: int,
+    end_year: int,
+) -> list[Path]:
+    if not cache_dir.is_dir():
+        raise FileNotFoundError(
+            f"SEC 13F cache directory not found: {cache_dir}"
+        )
+    selected: list[tuple[int, str, Path]] = []
+    for path in cache_dir.glob("*_form13f.zip"):
+        years = [
+            int(value)
+            for value in SEC_13F_ARCHIVE_YEAR_RE.findall(path.name)
+        ]
+        if not years or max(years) < start_year or min(years) > end_year:
+            continue
+        if path.stat().st_size <= 0:
+            raise ValueError(f"Cached SEC 13F archive is empty: {path}")
+        selected.append((min(years), path.name.lower(), path.resolve()))
+    archives = [path for _, _, path in sorted(selected)]
+    if not archives:
+        raise FileNotFoundError(
+            "No cached SEC 13F archives overlap "
+            f"{start_year}-{end_year} in {cache_dir}"
+        )
+    return archives
 
 
 def cfg_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
@@ -775,6 +817,7 @@ def sync_sec_13f_data_sets_streaming(
     sleep_sec: float = 0.2,
     max_archives: int = 0,
     batch_size: int = 5000,
+    archive_paths: list[Path] | None = None,
 ) -> SyncResult:
     tickers = load_universe_tickers(tickers_csv)
     ticker_set = set(tickers)
@@ -783,21 +826,37 @@ def sync_sec_13f_data_sets_streaming(
     if not name_map and not cusip_map:
         raise RuntimeError("SEC 13F sync requires ticker/company-name or ticker/CUSIP mapping")
 
-    archives = discover_sec_13f_archives(
-        index_url=index_url,
-        start_year=history_start_date.year,
-        end_year=end_date.year,
-        user_agent=user_agent,
-        timeout_sec=timeout_sec,
-    )
+    cache_only = archive_paths is not None
+    archives: list[str | Path]
+    if archive_paths is None:
+        archives = discover_sec_13f_archives(
+            index_url=index_url,
+            start_year=history_start_date.year,
+            end_year=end_date.year,
+            user_agent=user_agent,
+            timeout_sec=timeout_sec,
+        )
+    else:
+        archives = [path.expanduser().resolve() for path in archive_paths]
     if max_archives and max_archives > 0:
         archives = archives[:max_archives]
 
     processed_archives = 0
     total_holdings = 0
     ticker_hits: set[str] = set()
-    for url in archives:
-        archive_path = download_cached(url, cache_dir=cache_dir, user_agent=user_agent, timeout_sec=timeout_sec)
+    for archive in archives:
+        archive_path = (
+            archive
+            if isinstance(archive, Path)
+            else download_cached(
+                archive,
+                cache_dir=cache_dir,
+                user_agent=user_agent,
+                timeout_sec=timeout_sec,
+            )
+        )
+        if not archive_path.is_file():
+            raise FileNotFoundError(archive_path)
         now = utc_now()
         filing_rows: dict[str, tuple[Any, ...]] = {}
         holding_rows: list[tuple[Any, ...]] = []
@@ -904,7 +963,8 @@ def sync_sec_13f_data_sets_streaming(
     message = (
         f"SEC Form 13F data-set archives processed={processed_archives} "
         f"new_or_refreshed_matched_holdings={total_holdings} matched_tickers={len(ticker_hits)} "
-        f"industrials_snapshot_rows={snapshot_rows} total_holdings={total_table_holdings}"
+        f"industrials_snapshot_rows={snapshot_rows} total_holdings={total_table_holdings} "
+        f"cache_only={str(cache_only).lower()} network_requests={0 if cache_only else 'archive_discovery_and_cache_misses'}"
     )
     update_feed_state(
         conn,
@@ -1055,6 +1115,15 @@ def main() -> None:
             )
             LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
         if not args.skip_13f:
+            offline_archives = (
+                cached_sec_13f_archives(
+                    cache_dir / "sec_13f",
+                    start_year=history_start.year,
+                    end_year=end_date.year,
+                )
+                if args.offline_13f_cache_only
+                else None
+            )
             result = sync_sec_13f_data_sets_streaming(
                 conn,
                 tickers_csv=tickers_csv,
@@ -1064,6 +1133,7 @@ def main() -> None:
                 cache_dir=cache_dir / "sec_13f",
                 user_agent=user_agent,
                 max_archives=args.sec_13f_max_archives,
+                archive_paths=offline_archives,
             )
             LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
         if not args.skip_ibkr_borrow:

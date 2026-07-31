@@ -53,6 +53,78 @@ def test_incremental_can_skip_only_when_current_and_unforced() -> None:
     )
 
 
+def test_incremental_archive_scope_only_contains_new_accessions() -> None:
+    new_keys = {
+        ("0000000000-26-000001", "2026-07-27", "10-Q"),
+        ("0000000000-26-000002", "2026-07-27", "8-K"),
+    }
+
+    assert sec_sync.incremental_archive_accession_filter(
+        incremental=True,
+        pending_filing_keys=new_keys,
+        force_archive=False,
+        has_completed_profile=True,
+    ) == {"0000000000-26-000001", "0000000000-26-000002"}
+    assert (
+        sec_sync.incremental_archive_accession_filter(
+            incremental=True,
+            pending_filing_keys=new_keys,
+            force_archive=True,
+            has_completed_profile=True,
+        )
+        is None
+    )
+    assert (
+        sec_sync.incremental_archive_accession_filter(
+            incremental=True,
+            pending_filing_keys=new_keys,
+            force_archive=False,
+            has_completed_profile=False,
+        )
+        is None
+    )
+
+    interrupted_keys = {
+        ("0000000000-26-000003", "2026-07-28", "8-K"),
+    }
+    assert sec_sync.incremental_archive_accession_filter(
+        incremental=True,
+        pending_filing_keys=interrupted_keys,
+        force_archive=False,
+        has_completed_profile=True,
+    ) == {"0000000000-26-000003"}
+
+
+def test_filing_keys_respects_pit_end_date() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE fact_sec_filing (
+            ticker TEXT,
+            source_id TEXT,
+            accession_number TEXT,
+            filing_date TEXT,
+            form_type TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO fact_sec_filing VALUES (?, ?, ?, ?, ?)",
+        [
+            ("CAT", "sec_submissions", "old", "2026-07-27", "8-K"),
+            ("CAT", "sec_submissions", "future", "2026-07-28", "8-K"),
+        ],
+    )
+
+    assert sec_sync.filing_keys(
+        conn,
+        ticker="CAT",
+        source_id="sec_submissions",
+        end_date="2026-07-27",
+    ) == {("old", "2026-07-27", "8-K")}
+
+
 def test_sec_user_agent_expands_env_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("INDUSTRIALS_SEC_USER_AGENT", raising=False)
     config = {

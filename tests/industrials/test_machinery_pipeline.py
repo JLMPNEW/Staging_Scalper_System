@@ -84,9 +84,7 @@ def run_script(script: str, *args: str) -> None:
         text=True,
         timeout=120,
     )
-    assert result.returncode == 0, (
-        f"Script failed: {script}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    assert result.returncode == 0, f"Script failed: {script}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 
 def load_machinery_db(tmp_path: Path) -> Path:
@@ -468,19 +466,25 @@ def test_norgate_contract_preserves_provider_symbol_and_rejects_reused_ticker() 
     assert active_override.mapping_reason == "approved_active_symbol_override"
 
 
-def test_portfolio_registration_keeps_defense_on_tech_adapter() -> None:
+def test_portfolio_registration_uses_active_machinery_industrial_adapter() -> None:
     config = load_yaml(PROJECT_ROOT / "portfolio_layer" / "config.yaml")
     sectors = {
-        str(row["model_family"]): row
-        for row in cfg_get(config, "score_contract.sectors", [])
-        if isinstance(row, dict)
+        str(row["model_family"]): row for row in cfg_get(config, "score_contract.sectors", []) if isinstance(row, dict)
     }
     assert sectors["defense"]["adapter"] == "tech_family"
     assert sectors["machinery"]["adapter"] == "industrial_family"
-    assert sectors["machinery"]["required"] is False
+    assert sectors["machinery"]["required"] is True
     assert cfg_get(config, "risk_panel.sector_etf_map.machinery") == "XLI"
-    assert float(cfg_get(config, "optimizer.sector_weight_caps.machinery")) == 0.0
-    assert float(cfg_get(config, "black_litterman_fusion.strategic_sector_weights.machinery")) == 0.0
+    assert float(cfg_get(config, "optimizer.sector_weight_caps.machinery")) == 0.05
+    assert (
+        float(
+            cfg_get(
+                config,
+                "black_litterman_fusion.strategic_sector_weights.machinery",
+            )
+        )
+        == 0.0
+    )
     assert cfg_get(config, "sleeves.sector_factor_etfs.machinery") == "XLI"
 
 
@@ -517,6 +521,8 @@ def test_machinery_orchestrator_orders_related_database_refreshes() -> None:
     assert "--resume" in disclosure_scan.args
     disclosure_audit = next(step for step in steps if step.step_id == "08b_audit_disclosures")
     assert "--scan-cache" not in disclosure_audit.args
+    portfolio_validation = next(step for step in steps if step.step_id == "20_validate_portfolio")
+    assert "--expect-research-eligible" in portfolio_validation.args
 
     historical_steps = build_steps(
         ASOF,
@@ -596,13 +602,7 @@ def test_machinery_orchestrator_orders_related_database_refreshes() -> None:
 
 def test_disclosure_scan_priorities_use_latest_known_availability_snapshot() -> None:
     namespace = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "scripts"
-            / "08b_audit_machinery_disclosure_candidates.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "08b_audit_machinery_disclosure_candidates.py")
     )
     ticker_priorities = namespace["ticker_priorities"]
     connection = sqlite3.connect(":memory:")
@@ -645,12 +645,7 @@ def test_positioning_upstream_pins_nested_import_to_requested_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     namespace = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "scripts"
-            / "13_sync_industrials_positioning_upstream.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "scripts" / "13_sync_industrials_positioning_upstream.py")
     )
     captured: list[tuple[list[str], str | None, bool]] = []
 
@@ -681,13 +676,7 @@ def test_machinery_current_refresh_rejects_regressive_asof(
     tmp_path: Path,
 ) -> None:
     namespace = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "scripts"
-            / "17_run_machinery_refresh_pipeline.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "17_run_machinery_refresh_pipeline.py")
     )
     db_path = tmp_path / "industrials.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -699,9 +688,7 @@ def test_machinery_current_refresh_rejects_regressive_asof(
             )
             """
         )
-        conn.execute(
-            "INSERT INTO feature_financial_metric_availability VALUES ('machinery', '2026-07-21')"
-        )
+        conn.execute("INSERT INTO feature_financial_metric_availability VALUES ('machinery', '2026-07-21')")
 
     committed = namespace["latest_committed_asof"](
         db_path=db_path,
@@ -724,13 +711,7 @@ def test_machinery_failed_or_dry_run_does_not_replace_last_success(
     tmp_path: Path,
 ) -> None:
     namespace = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "scripts"
-            / "17_run_machinery_refresh_pipeline.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "17_run_machinery_refresh_pipeline.py")
     )
     root = tmp_path / "orchestration"
     root.mkdir()
@@ -780,9 +761,7 @@ def test_historical_reuse_requires_current_build_signature(
             / "18_backfill_machinery_historical_dashboard_reports.py"
         )
     )
-    config = load_yaml(
-        PROJECT_ROOT / "industrials" / "machinery" / "config.yaml"
-    )
+    config = load_yaml(PROJECT_ROOT / "industrials" / "machinery" / "config.yaml")
     metadata = historical_build_metadata(
         config,
         policy_lock_date="2026-07-09",
@@ -803,9 +782,7 @@ def test_historical_reuse_requires_current_build_signature(
         "asof_date": "2026-07-21",
         "historical_build_signature": "stale",
     }
-    (output_dir / HISTORICAL_BUILD_METADATA_FILENAME).write_text(
-        json.dumps(stale)
-    )
+    (output_dir / HISTORICAL_BUILD_METADATA_FILENAME).write_text(json.dumps(stale))
     with pytest.raises(ValueError, match="signature is stale"):
         namespace["validate_historical_build_metadata"](
             output_dir=output_dir,
@@ -814,9 +791,7 @@ def test_historical_reuse_requires_current_build_signature(
         )
 
     current = {**metadata, "asof_date": "2026-07-21"}
-    (output_dir / HISTORICAL_BUILD_METADATA_FILENAME).write_text(
-        json.dumps(current)
-    )
+    (output_dir / HISTORICAL_BUILD_METADATA_FILENAME).write_text(json.dumps(current))
     namespace["validate_historical_build_metadata"](
         output_dir=output_dir,
         asof="2026-07-21",
@@ -859,13 +834,7 @@ def test_historical_stage_reports_use_isolated_temporary_workspace(
 
 def test_machinery_disclosure_scan_honors_acceptance_date_lower_bound() -> None:
     namespace = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "scripts"
-            / "08b_audit_machinery_disclosure_candidates.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "08b_audit_machinery_disclosure_candidates.py")
     )
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -916,12 +885,15 @@ def test_machinery_disclosure_scan_honors_acceptance_date_lower_bound() -> None:
         scan_start_date="2018-01-01",
         max_filings_per_ticker=0,
     ) == {"CAT"}
-    assert namespace["completed_scan_tickers"](
-        conn,
-        asof="2026-07-20",
-        scan_start_date="2019-01-01",
-        max_filings_per_ticker=0,
-    ) == set()
+    assert (
+        namespace["completed_scan_tickers"](
+            conn,
+            asof="2026-07-20",
+            scan_start_date="2019-01-01",
+            max_filings_per_ticker=0,
+        )
+        == set()
+    )
     conn.close()
 
 
@@ -931,19 +903,19 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         "orders_yoy_growth",
         "book_to_bill",
         "backlog_yoy_growth",
-            "backlog_to_revenue",
-            "reported_backlog_yoy_growth",
-            "reported_backlog_to_revenue",
-            "rpo_yoy_growth",
-            "rpo_to_revenue",
-            "rpo_implied_orders",
-            "rpo_implied_book_to_bill",
-            "contract_load_proxy",
-            "contract_load_proxy_usd",
-            "contract_load_proxy_source",
-            "contract_load_proxy_yoy_growth",
-            "contract_load_proxy_to_revenue",
-            "financial_metric_classified_fraction",
+        "backlog_to_revenue",
+        "reported_backlog_yoy_growth",
+        "reported_backlog_to_revenue",
+        "rpo_yoy_growth",
+        "rpo_to_revenue",
+        "rpo_implied_orders",
+        "rpo_implied_book_to_bill",
+        "contract_load_proxy",
+        "contract_load_proxy_usd",
+        "contract_load_proxy_source",
+        "contract_load_proxy_yoy_growth",
+        "contract_load_proxy_to_revenue",
+        "financial_metric_classified_fraction",
         "roic",
         "roic_not_meaningful_flag",
         "asset_turnover",
@@ -952,6 +924,7 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         "cash_conversion_cycle_change",
         "net_debt_to_ebitda",
         "negative_ebitda_leverage_flag",
+        "negative_profit_valuation_flag",
         "interest_coverage",
         "cash_runway_years",
         "capital_raise_dependence",
@@ -1012,6 +985,17 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         "RemainingPerformanceObligation",
         "instant",
     )
+    classify_footnote = namespace["classify_machinery_footnote_concept"]
+    assert classify_footnote(
+        "ExpectedRemainingPerformanceObligationsRecognizedRemainderThereafter",
+        labels=["Amount of expected remaining performance obligations recognized remainder thereafter."],
+        period_type="instant",
+    ) == ""
+    assert namespace["rpo_total_amount_from_text"](
+        "As of March 31, 2026, the total RPO amounted to $96.8 million. "
+        "The company expects to recognize $69.6 million during the next 12 months "
+        "and the remaining $13.8 million thereafter."
+    ) == 96_800_000.0
     parse_tables = namespace["parse_archive_text_table_facts"]
     family_concept_map: dict[tuple[str, str], list[dict[str, object]]] = {}
     namespace["add_family_concept_mappings"](family_concept_map, model_family="defense")
@@ -1039,6 +1023,31 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         max_documents=3,
         text_tables_only=True,
     ) == ["issuer-2025x10k.htm", "exhibit99-1.htm"]
+    assert archive_candidates(
+        {
+            "directory": {
+                "item": [
+                    {"name": "issuer-cover.htm"},
+                    {"name": "issuer-quarter.htm"},
+                    {"name": "issuer-quarter.xsd"},
+                    {"name": "R1.htm"},
+                ]
+            }
+        },
+        primary_document="issuer-cover.htm",
+        max_documents=0,
+        text_tables_only=True,
+        machinery_targeted=True,
+        event_filing=True,
+    ) == ["issuer-cover.htm", "issuer-quarter.htm"]
+    should_stop = namespace["should_stop_archive_document_scan"]
+    assert not should_stop(
+        model_family="machinery",
+        form_type="6-K",
+        mapped_estimate=1,
+        special_metric_count=0,
+        parse_all_documents=False,
+    )
     assert archive_candidates(
         {
             "directory": {
@@ -1143,11 +1152,7 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         filing={"report_date": "2026-03-31", "filing_date": "2026-05-01", "form_type": "10-Q"},
         company_currency="USD",
     )
-    assert {
-        (fact.period_end, fact.value)
-        for fact in total_order_facts
-        if fact.concept_name == "Orders"
-    } == {
+    assert {(fact.period_end, fact.value) for fact in total_order_facts if fact.concept_name == "Orders"} == {
         ("2025-03-31", 30_455_000.0),
         ("2026-03-31", 37_422_000.0),
     }
@@ -1167,9 +1172,7 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         company_currency="USD",
     )
     assert {
-        (fact.period_start, fact.period_end, fact.value)
-        for fact in mixed_column_facts
-        if fact.concept_name == "Orders"
+        (fact.period_start, fact.period_end, fact.value) for fact in mixed_column_facts if fact.concept_name == "Orders"
     } == {
         ("2025-04-01", "2026-03-31", 359_442_000.0),
         ("2024-04-01", "2025-03-31", 231_112_000.0),
@@ -1188,19 +1191,12 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         filing={"report_date": "2026-03-31", "filing_date": "2026-05-01", "form_type": "8-K"},
         company_currency="USD",
     )
-    assert {
-        (fact.period_end, fact.value)
-        for fact in quarter_heading_facts
-        if fact.concept_name == "Orders"
-    } == {
+    assert {(fact.period_end, fact.value) for fact in quarter_heading_facts if fact.concept_name == "Orders"} == {
         ("2025-03-31", 1_882_300_000.0),
         ("2026-03-31", 1_978_000_000.0),
     }
     assert all(
-        80 <= (
-            date.fromisoformat(fact.period_end)
-            - date.fromisoformat(fact.period_start)
-        ).days <= 100
+        80 <= (date.fromisoformat(fact.period_end) - date.fromisoformat(fact.period_start)).days <= 100
         for fact in quarter_heading_facts
         if fact.concept_name == "Orders"
     )
@@ -1269,17 +1265,23 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
         "filing_date": "2025-02-15",
         "source_priority": 100,
     }
-    assert select_previous_comparable(
-        [current_instant, prior_instant],
-        "assets",
-        current_instant,
-        instant_metric=True,
-    ) is prior_instant
-    assert select_previous_comparable(
-        [current_instant, prior_instant],
-        "assets",
-        current_instant,
-    ) is None
+    assert (
+        select_previous_comparable(
+            [current_instant, prior_instant],
+            "assets",
+            current_instant,
+            instant_metric=True,
+        )
+        is prior_instant
+    )
+    assert (
+        select_previous_comparable(
+            [current_instant, prior_instant],
+            "assets",
+            current_instant,
+        )
+        is None
+    )
 
     positioning_namespace = runpy.run_path(
         str(PROJECT_ROOT / "industrials" / "scripts" / "13_sync_industrials_positioning_upstream.py")
@@ -1302,13 +1304,7 @@ def test_machinery_special_metric_schema_and_text_labels(tmp_path: Path) -> None
 
 def test_machinery_metric_gate_modes_are_explicit() -> None:
     namespace = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "scripts"
-            / "08a_audit_machinery_financial_metrics.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "08a_audit_machinery_financial_metrics.py")
     )
     gates = {gate.metric: gate for gate in namespace["METRIC_GATES"]}
     gate_status = namespace["gate_status"]
@@ -1322,21 +1318,199 @@ def test_machinery_metric_gate_modes_are_explicit() -> None:
     assert gate_status(gates["orders"], implemented=True, ready=True) == "CALIBRATION_READY"
 
 
-def test_machinery_review_overrides_and_zero_revenue_guardrails() -> None:
-    override_path = (
-        PROJECT_ROOT
-        / "industrials"
-        / "machinery"
-        / "system_csvs"
-        / "machinery_sec_reporting_overrides.csv"
+def test_machinery_complete_metric_audit_summarizes_each_ticker() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "08a_audit_machinery_financial_metrics.py")
     )
+    rows = namespace["build_ticker_coverage_rows"](
+        asof="2026-07-24",
+        members={"CAT": "heavy_machinery"},
+        observation_rows=[
+            {
+                "ticker": "CAT",
+                "metric": "orders",
+                "availability_status": "REPORTED",
+                "applicable_flag": 1,
+                "covered_flag": 1,
+            },
+            {
+                "ticker": "CAT",
+                "metric": "book_to_bill",
+                "availability_status": "NOT_DISCLOSED",
+                "applicable_flag": 1,
+                "covered_flag": 0,
+            },
+            {
+                "ticker": "CAT",
+                "metric": "funded_backlog",
+                "availability_status": "NOT_APPLICABLE",
+                "applicable_flag": 0,
+                "covered_flag": 0,
+            },
+        ],
+    )
+    assert rows == [
+        {
+            "asof_date": "2026-07-24",
+            "ticker": "CAT",
+            "calibration_cohort": "heavy_machinery",
+            "required_metric_count": 3,
+            "applicable_metric_count": 2,
+            "covered_metric_count": 1,
+            "missing_applicable_metric_count": 1,
+            "excluded_metric_count": 1,
+            "coverage_fraction": "0.500000",
+            "reported_count": 1,
+            "proxy_count": 0,
+            "exempt_count": 0,
+            "not_applicable_count": 1,
+            "not_disclosed_count": 1,
+            "disclosed_unparsed_count": 0,
+            "parser_failure_count": 0,
+            "missing_metrics": "book_to_bill",
+        }
+    ]
+
+
+def test_gtls_is_retained_as_a_historical_member_after_acquisition() -> None:
+    data_root = PROJECT_ROOT / "industrials" / "machinery" / "system_csvs"
+    active = {row["ticker"] for row in read_rows(data_root / "machinery_tickers.csv")}
+    delisted = {row["ticker"]: row for row in read_rows(data_root / "machinery_delisted.csv")}
+    membership = {row["internal_ticker"]: row for row in read_rows(data_root / "machinery_historical_membership.csv")}
+    listing_dates = {row["ticker"]: row for row in read_rows(data_root / "machinery_listing_dates.csv")}
+
+    assert "GTLS" not in active
+    assert delisted["GTLS"]["exit_year"] == "2026"
+    assert membership["GTLS"]["membership_status"] == "historical_delisted"
+    assert membership["GTLS"]["end_date"] == "2026-07-16"
+    assert membership["GTLS"]["successor_ticker"] == "BKR"
+    assert listing_dates["GTLS"]["last_eligible_date"] == "2026-07-16"
+
+
+def test_historical_coverage_index_discovers_all_published_sidecars(tmp_path: Path) -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18_backfill_machinery_historical_dashboard_reports.py"
+        )
+    )
+    for asof in ("2026-07-22", "2026-07-23", "2026-07-24"):
+        output_dir = tmp_path / asof
+        output_dir.mkdir()
+        (output_dir / "machinery_stage11_survivorship_calibration_panel.csv").touch()
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "2026-07-25").mkdir()
+
+    assert namespace["published_dashboard_dates"](
+        tmp_path,
+        start_date="2026-07-23",
+        end_date="2026-07-25",
+    ) == ["2026-07-23", "2026-07-24"]
+
+
+def test_historical_resume_rejects_membership_drift() -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18_backfill_machinery_historical_dashboard_reports.py"
+        )
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE dim_universe_membership (
+            ticker TEXT,
+            model_family TEXT,
+            start_date TEXT,
+            end_date TEXT,
+            membership_status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO dim_universe_membership
+            (ticker, model_family, start_date, end_date, membership_status)
+        VALUES ('CAT', 'machinery', '2019-01-02', NULL, 'active')
+        """
+    )
+
+    namespace["validate_existing_membership"](
+        conn,
+        asof="2026-07-24",
+        rows=[{"ticker": "CAT"}],
+    )
+    with pytest.raises(ValueError, match="extra=\\['GTLS'\\]"):
+        namespace["validate_existing_membership"](
+            conn,
+            asof="2026-07-24",
+            rows=[{"ticker": "CAT"}, {"ticker": "GTLS"}],
+        )
+
+
+def test_historical_membership_metadata_repair_is_scoped() -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18_backfill_machinery_historical_dashboard_reports.py"
+        )
+    )
+    expected = {
+        "CAT": {
+            "membership_source_id": "history",
+            "membership_basis": "survivorship_corrected_pit_contract",
+            "membership_start_date": "2019-01-02",
+            "membership_end_date": "",
+            "membership_status": "active",
+            "membership_confidence": "0.95",
+        },
+        "GTLS": {
+            "membership_source_id": "history",
+            "membership_basis": "survivorship_corrected_pit_contract",
+            "membership_start_date": "2019-01-02",
+            "membership_end_date": "2026-07-16",
+            "membership_status": "historical_delisted",
+            "membership_confidence": "0.95",
+        },
+    }
+    rows = [
+        {"ticker": "CAT", **expected["CAT"], "final_score": "80"},
+        {
+            "ticker": "GTLS",
+            **expected["GTLS"],
+            "membership_end_date": "",
+            "membership_status": "active",
+            "final_score": "70",
+        },
+    ]
+    updated, changed = namespace["reconcile_membership_metadata"](
+        rows,
+        expected=expected,
+    )
+    assert changed == ["GTLS"]
+    assert updated[0] == rows[0]
+    assert updated[1]["membership_status"] == "historical_delisted"
+    assert updated[1]["membership_end_date"] == "2026-07-16"
+    assert updated[1]["final_score"] == "70"
+
+
+def test_machinery_review_overrides_and_zero_revenue_guardrails() -> None:
+    override_path = PROJECT_ROOT / "industrials" / "machinery" / "system_csvs" / "machinery_sec_reporting_overrides.csv"
     overrides = {row["ticker"]: row for row in read_rows(override_path)}
     assert {overrides[ticker]["handling_type"] for ticker in ("AIRJ", "FISN", "NNE", "OKLO")} == {
         "Is_Development_Stage"
     }
-    assert {overrides[ticker]["handling_type"] for ticker in ("INIO", "MAIR")} == {
-        "Ingestion_Gap_Pending"
-    }
+    assert {overrides[ticker]["handling_type"] for ticker in ("INIO", "MAIR")} == {"Ingestion_Gap_Pending"}
     assert all(overrides[ticker]["usable_xbrl_flag"] == "true" for ticker in ("AIRJ", "FISN", "NNE", "OKLO"))
     assert all(overrides[ticker]["usable_xbrl_flag"] == "false" for ticker in ("INIO", "MAIR"))
     assert all(overrides[ticker]["reporting_profile"] == "SEC_RAW_ARCHIVE_REQUIRED" for ticker in ("INIO", "MAIR"))
@@ -1349,9 +1523,7 @@ def test_machinery_review_overrides_and_zero_revenue_guardrails() -> None:
     assert load_overrides(override_path, asof="2026-06-18")["FISN"].handling_type == "Is_Development_Stage"
     assert "MAIR" not in load_overrides(override_path, asof="2026-04-15")
     assert load_overrides(override_path, asof="2026-04-16")["MAIR"].handling_type == "Ingestion_Gap_Pending"
-    assert sec_namespace["should_attempt_archive"](
-        load_overrides(override_path, asof="2026-04-16")["MAIR"]
-    )
+    assert sec_namespace["should_attempt_archive"](load_overrides(override_path, asof="2026-04-16")["MAIR"])
 
     financial_namespace = runpy.run_path(
         str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
@@ -1382,9 +1554,7 @@ def test_machinery_review_overrides_and_zero_revenue_guardrails() -> None:
 
     listing_rows = {
         row["ticker"]: row
-        for row in read_rows(
-            PROJECT_ROOT / "industrials" / "machinery" / "system_csvs" / "machinery_listing_dates.csv"
-        )
+        for row in read_rows(PROJECT_ROOT / "industrials" / "machinery" / "system_csvs" / "machinery_listing_dates.csv")
     }
     assert listing_rows["FISN"]["first_eligible_date"] == "2026-06-18"
     assert listing_rows["MAIR"]["first_eligible_date"] == "2026-04-16"
@@ -1392,11 +1562,7 @@ def test_machinery_review_overrides_and_zero_revenue_guardrails() -> None:
     membership_rows = {
         row["internal_ticker"]: row
         for row in read_rows(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "system_csvs"
-            / "machinery_historical_membership.csv"
+            PROJECT_ROOT / "industrials" / "machinery" / "system_csvs" / "machinery_historical_membership.csv"
         )
     }
     assert membership_rows["FISN"]["start_date"] == "2026-06-18"
@@ -1459,19 +1625,12 @@ def test_machinery_inline_xbrl_footnote_and_custom_label_extraction() -> None:
     assert values["ReportedBacklog"] == 500_000_000.0
     assert values["RemainingPerformanceObligation"] == 300_000_000.0
     assert values["RPOPracticalExpedient"] == 1.0
-    assert {
-        (fact.period_start, fact.value)
-        for fact in facts
-        if fact.concept_name == "Orders"
-    } == {
+    assert {(fact.period_start, fact.value) for fact in facts if fact.concept_name == "Orders"} == {
         ("2025-04-01", 900_000_000.0),
         ("2026-01-01", 250_000_000.0),
         ("2025-10-01", 333_000_000.0),
     }
-    assert all(
-        fact.source_detail == "sec_archive_footnote_xbrl"
-        for fact in facts
-    )
+    assert all(fact.source_detail == "sec_archive_footnote_xbrl" for fact in facts)
 
 
 def test_machinery_prose_disclosure_candidates_are_scope_safe() -> None:
@@ -1569,18 +1728,19 @@ def test_machinery_prose_disclosure_candidates_are_scope_safe() -> None:
         filing={"report_date": "2026-03-31", "filing_date": "2026-04-29"},
         company_currency="USD",
     )
-    accepted_orders = [
-        item for item in component_checked_orders if item.candidate_status == "ACCEPTED"
-    ]
+    accepted_orders = [item for item in component_checked_orders if item.candidate_status == "ACCEPTED"]
     assert len(accepted_orders) == 1
     assert accepted_orders[0].value == 623_000_000.0
     assert accepted_orders[0].period_start == "2026-01-01"
 
-    assert extract_machinery_prose_candidates(
-        "<p>For the year ended October 31, 2025, we executed three change orders totaling $5 million.</p>",
-        filing={"report_date": "2025-10-31", "filing_date": "2025-12-18"},
-        company_currency="USD",
-    ) == []
+    assert (
+        extract_machinery_prose_candidates(
+            "<p>For the year ended October 31, 2025, we executed three change orders totaling $5 million.</p>",
+            filing={"report_date": "2025-10-31", "filing_date": "2025-12-18"},
+            company_currency="USD",
+        )
+        == []
+    )
 
     fcel_candidates = extract_machinery_prose_candidates(
         "<p>Overall, backlog increased by approximately 2.6% to $1.19 billion "
@@ -1646,8 +1806,7 @@ def test_machinery_prose_disclosure_comparatives_use_measurement_dates() -> None
         ("2019-12-31", 31_100_000.0),
     }
     assert values(
-        "At the end of 2022, Proterra Transit backlog was approximately "
-        "$0.6 billion.",
+        "At the end of 2022, Proterra Transit backlog was approximately $0.6 billion.",
         report_date="2023-03-15",
     ) == {("2022-12-31", 600_000_000.0)}
 
@@ -1698,9 +1857,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
             value=value,
             unit="USD",
             period_start=(
-                period_start
-                if period_start is not None
-                else "2026-01-01" if concept_name == "Orders" else ""
+                period_start if period_start is not None else "2026-01-01" if concept_name == "Orders" else ""
             ),
             period_end=period_end,
             scope=scope,
@@ -1790,13 +1947,8 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="CR",
         filing={"form_type": "10-K"},
     )
-    assert [item.value for item in crane_direct if item.candidate_status == "ACCEPTED"] == [
-        1_435_400_000.0
-    ]
-    assert sum(
-        item.candidate_status == "CONSUMED_BY_CONSOLIDATED_TOTAL"
-        for item in crane_direct
-    ) == 2
+    assert [item.value for item in crane_direct if item.candidate_status == "ACCEPTED"] == [1_435_400_000.0]
+    assert sum(item.candidate_status == "CONSUMED_BY_CONSOLIDATED_TOTAL" for item in crane_direct) == 2
 
     cir = resolve_machinery_disclosure_candidates(
         [
@@ -1817,9 +1969,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="CIR",
         filing={"form_type": "10-K"},
     )
-    assert [item.value for item in cir if item.candidate_status == "ACCEPTED"] == [
-        409_700_000.0
-    ]
+    assert [item.value for item in cir if item.candidate_status == "ACCEPTED"] == [409_700_000.0]
 
     cxt = resolve_machinery_disclosure_candidates(
         [
@@ -1880,13 +2030,8 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="MIDD",
         filing={"form_type": "10-K"},
     )
-    assert [item.value for item in midd_direct if item.candidate_status == "ACCEPTED"] == [
-        670_300_000.0
-    ]
-    assert sum(
-        item.candidate_status == "CONSUMED_BY_CONSOLIDATED_TOTAL"
-        for item in midd_direct
-    ) == 2
+    assert [item.value for item in midd_direct if item.candidate_status == "ACCEPTED"] == [670_300_000.0]
+    assert sum(item.candidate_status == "CONSUMED_BY_CONSOLIDATED_TOTAL" for item in midd_direct) == 2
 
     fcel = resolve_machinery_disclosure_candidates(
         [
@@ -1910,12 +2055,8 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="FCEL",
         filing={"form_type": "10-K"},
     )
-    assert [item.value for item in fcel if item.candidate_status == "ACCEPTED"] == [
-        1_190_000_000.0
-    ]
-    assert sum(
-        item.candidate_status == "CONSUMED_BY_CONSOLIDATED_TOTAL" for item in fcel
-    ) == 1
+    assert [item.value for item in fcel if item.candidate_status == "ACCEPTED"] == [1_190_000_000.0]
+    assert sum(item.candidate_status == "CONSUMED_BY_CONSOLIDATED_TOTAL" for item in fcel) == 1
 
     mcrn = resolve_machinery_disclosure_candidates(
         [
@@ -1936,9 +2077,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="MCRN",
         filing={"form_type": "8-K"},
     )
-    assert [item.value for item in mcrn if item.candidate_status == "ACCEPTED"] == [
-        1_142_700_000.0
-    ]
+    assert [item.value for item in mcrn if item.candidate_status == "ACCEPTED"] == [1_142_700_000.0]
     assert sum(item.candidate_status == "REJECTED_POLICY" for item in mcrn) == 1
 
     mcrn_single = resolve_machinery_disclosure_candidates(
@@ -1986,10 +2125,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
     leu_total = [item for item in leu if item.candidate_status == "ACCEPTED"]
     assert len(leu_total) == 1
     assert leu_total[0].value == 679_100_000.0
-    assert any(
-        item.candidate_status == "REJECTED_POLICY" and item.concept_name == "ReportedBacklog"
-        for item in leu
-    )
+    assert any(item.candidate_status == "REJECTED_POLICY" and item.concept_name == "ReportedBacklog" for item in leu)
 
     leu_incomplete = resolve_machinery_disclosure_candidates(
         [
@@ -2025,9 +2161,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="MIR",
         filing={"form_type": "10-Q"},
     )
-    assert [item.value for item in mir if item.candidate_status == "ACCEPTED"] == [
-        1_120_600_000.0
-    ]
+    assert [item.value for item in mir if item.candidate_status == "ACCEPTED"] == [1_120_600_000.0]
     assert any(item.candidate_status == "REJECTED_POLICY" for item in mir)
 
     gtls = resolve_machinery_disclosure_candidates(
@@ -2048,9 +2182,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="GTLS",
         filing={"form_type": "10-Q"},
     )
-    assert [item.value for item in gtls if item.candidate_status == "ACCEPTED"] == [
-        1_280_300_000.0
-    ]
+    assert [item.value for item in gtls if item.candidate_status == "ACCEPTED"] == [1_280_300_000.0]
     assert any(item.candidate_status == "REJECTED_POLICY" for item in gtls)
 
     fss = resolve_machinery_disclosure_candidates(
@@ -2070,9 +2202,7 @@ def test_reviewed_machinery_disclosure_semantics_are_deterministic() -> None:
         ticker="FSS",
         filing={"form_type": "10-Q"},
     )
-    assert [item.value for item in fss if item.candidate_status == "ACCEPTED"] == [
-        623_000_000.0
-    ]
+    assert [item.value for item in fss if item.candidate_status == "ACCEPTED"] == [623_000_000.0]
 
     equal_value_durations = resolve_machinery_disclosure_candidates(
         [
@@ -2175,13 +2305,8 @@ def test_reviewed_machinery_batch_03_disclosure_semantics() -> None:
         ticker="BLDP",
         filing={"form_type": "6-K"},
     )
-    assert [item.value for item in bldp if item.candidate_status == "ACCEPTED"] == [
-        112_900_000.0
-    ]
-    assert any(
-        item.status_reason == "twelve_month_operating_backlog_separate_from_total"
-        for item in bldp
-    )
+    assert [item.value for item in bldp if item.candidate_status == "ACCEPTED"] == [112_900_000.0]
+    assert any(item.status_reason == "twelve_month_operating_backlog_separate_from_total" for item in bldp)
 
     mtw = resolve_machinery_disclosure_candidates(
         [
@@ -2204,9 +2329,7 @@ def test_reviewed_machinery_batch_03_disclosure_semantics() -> None:
         ticker="MTW",
         filing={"form_type": "10-K"},
     )
-    assert [item.value for item in mtw if item.candidate_status == "ACCEPTED"] == [
-        793_500_000.0
-    ]
+    assert [item.value for item in mtw if item.candidate_status == "ACCEPTED"] == [793_500_000.0]
     assert any(item.status_reason == "regional_or_component_backlog_rejected" for item in mtw)
 
     twin = resolve_machinery_disclosure_candidates(
@@ -2264,9 +2387,7 @@ def test_reviewed_machinery_batch_03_disclosure_semantics() -> None:
         ticker="MAIR",
         filing=final_prospectus,
     )
-    assert [item.value for item in mair if item.candidate_status == "ACCEPTED"] == [
-        1_653_400_000.0
-    ]
+    assert [item.value for item in mair if item.candidate_status == "ACCEPTED"] == [1_653_400_000.0]
     assert sum(item.candidate_status == "REJECTED_POLICY" for item in mair) == 2
 
     q1_mair = resolve_machinery_disclosure_candidates(
@@ -2330,13 +2451,8 @@ def test_reviewed_machinery_batch_04_disclosure_semantics() -> None:
         ticker="ASTE",
         filing={"form_type": "8-K"},
     )
-    assert [item.value for item in astec if item.candidate_status == "ACCEPTED"] == [
-        246_100_000.0
-    ]
-    assert any(
-        item.status_reason == "reviewed_international_backlog_component"
-        for item in astec
-    )
+    assert [item.value for item in astec if item.candidate_status == "ACCEPTED"] == [246_100_000.0]
+    assert any(item.status_reason == "reviewed_international_backlog_component" for item in astec)
 
     eose = resolve_machinery_disclosure_candidates(
         [
@@ -2359,11 +2475,7 @@ def test_reviewed_machinery_batch_04_disclosure_semantics() -> None:
             "accession_number": "0001628280-23-005669",
         },
     )
-    assert {
-        (item.period_end, item.value)
-        for item in eose
-        if item.candidate_status == "ACCEPTED"
-    } == {
+    assert {(item.period_end, item.value) for item in eose if item.candidate_status == "ACCEPTED"} == {
         ("2021-12-31", 147_500_000.0),
         ("2022-12-31", 463_800_000.0),
     }
@@ -2390,9 +2502,7 @@ def test_reviewed_machinery_batch_04_disclosure_semantics() -> None:
         },
     )
     jbtm_total = [item for item in jbtm if item.candidate_status == "ACCEPTED"]
-    assert [(item.period_end, item.value) for item in jbtm_total] == [
-        ("2022-09-30", 1_049_000_000.0)
-    ]
+    assert [(item.period_end, item.value) for item in jbtm_total] == [("2022-09-30", 1_049_000_000.0)]
 
     proterra = resolve_machinery_disclosure_candidates(
         [
@@ -2415,9 +2525,7 @@ def test_reviewed_machinery_batch_04_disclosure_semantics() -> None:
             "accession_number": "0001628280-23-008121",
         },
     )
-    assert [item.value for item in proterra if item.candidate_status == "ACCEPTED"] == [
-        1_600_000_000.0
-    ]
+    assert [item.value for item in proterra if item.candidate_status == "ACCEPTED"] == [1_600_000_000.0]
 
     mair = resolve_machinery_disclosure_candidates(
         [
@@ -2441,11 +2549,7 @@ def test_reviewed_machinery_batch_04_disclosure_semantics() -> None:
             "filing_date": "2026-04-17",
         },
     )
-    assert {
-        (item.period_end, item.value)
-        for item in mair
-        if item.candidate_status == "ACCEPTED"
-    } == {
+    assert {(item.period_end, item.value) for item in mair if item.candidate_status == "ACCEPTED"} == {
         ("2024-12-31", 987_400_000.0),
         ("2025-12-31", 2_160_800_000.0),
     }
@@ -2471,11 +2575,7 @@ def test_reviewed_machinery_batch_04_disclosure_semantics() -> None:
             "accession_number": "0001193125-20-028316",
         },
     )
-    assert {
-        (item.period_end, item.value)
-        for item in vertiv
-        if item.candidate_status == "ACCEPTED"
-    } == {
+    assert {(item.period_end, item.value) for item in vertiv if item.candidate_status == "ACCEPTED"} == {
         ("2019-09-30", 1_400_800_000.0),
         ("2018-12-31", 1_502_000_000.0),
     }
@@ -2501,10 +2601,7 @@ def test_machinery_prose_extracts_date_first_and_fiscal_year_disclosures() -> No
         filing=filing,
         company_currency="USD",
     )
-    assert {
-        (item.concept_name, item.period_start, item.period_end, item.value)
-        for item in candidates
-    } == {
+    assert {(item.concept_name, item.period_start, item.period_end, item.value) for item in candidates} == {
         ("ReportedBacklog", "", "2025-06-30", 150_500_000.0),
         ("ReportedBacklog", "", "2026-03-31", 2_520_200_000.0),
         ("Orders", "2025-01-01", "2025-12-31", 4_530_800_000.0),
@@ -2594,9 +2691,7 @@ def test_cached_prose_candidate_promotion_replaces_stale_document_facts(tmp_path
             now=now,
         )
         assert counts == (2, 0, 0)
-        assert conn.execute(
-            "SELECT COUNT(*) FROM fact_sec_xbrl_fact WHERE ticker = 'FLS'"
-        ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM fact_sec_xbrl_fact WHERE ticker = 'FLS'").fetchone()[0] == 0
         statuses = conn.execute(
             """
             SELECT candidate_status
@@ -2779,9 +2874,7 @@ def test_machinery_disclosure_reconciliation_prefers_periodic_filing(tmp_path: P
             WHERE ticker = 'POWL' AND canonical_metric = 'reported_backlog'
             """
         ).fetchall()
-        assert [tuple(row) for row in remaining] == [
-            ("10-Q", "2026-05-01T16:00:00Z", 1_800_000_000.0)
-        ]
+        assert [tuple(row) for row in remaining] == [("10-Q", "2026-05-01T16:00:00Z", 1_800_000_000.0)]
         statuses = conn.execute(
             """
             SELECT accession_number, form_type, candidate_status
@@ -2797,12 +2890,7 @@ def test_machinery_disclosure_reconciliation_prefers_periodic_filing(tmp_path: P
         ]
 
         sec_namespace = runpy.run_path(
-            str(
-                PROJECT_ROOT
-                / "industrials"
-                / "scripts"
-                / "07_sync_industrials_sec_fundamentals.py"
-            )
+            str(PROJECT_ROOT / "industrials" / "scripts" / "07_sync_industrials_sec_fundamentals.py")
         )
         archive_fact = sec_namespace["ArchiveFact"]
         upsert_archive_facts = sec_namespace["upsert_archive_facts"]
@@ -2868,9 +2956,7 @@ def test_machinery_disclosure_reconciliation_prefers_periodic_filing(tmp_path: P
                 """
             ).fetchall()
         ] == [("10-Q", 37_422_000.0)]
-        assert conn.execute(
-            "SELECT COUNT(*) FROM fact_sec_xbrl_fact_raw WHERE ticker = 'BWEN'"
-        ).fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM fact_sec_xbrl_fact_raw WHERE ticker = 'BWEN'").fetchone()[0] == 2
 
 
 def test_disclosure_candidate_and_metric_applicability_classification(tmp_path: Path) -> None:
@@ -3055,6 +3141,64 @@ def test_latest_comparable_pair_preserves_older_valid_yoy_history() -> None:
     assert previous is not None and previous["period_end"] == "2024-12-31"
 
 
+def test_diluted_share_growth_uses_latest_comparable_period_and_rejects_scale_outliers() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+    rows = [
+        {
+            "canonical_metric": "diluted_shares",
+            "value": 80_230_000.0,
+            "period_start": "2025-01-01",
+            "period_end": "2025-09-30",
+            "filing_date": "2025-11-01",
+            "source_priority": 10,
+        },
+        {
+            "canonical_metric": "diluted_shares",
+            "value": 70_670_000.0,
+            "period_start": "2024-01-01",
+            "period_end": "2024-09-30",
+            "filing_date": "2024-11-01",
+            "source_priority": 10,
+        },
+        {
+            "canonical_metric": "diluted_shares",
+            "value": 66_491_000.0,
+            "period_start": "2022-01-01",
+            "period_end": "2022-12-31",
+            "filing_date": "2023-03-01",
+            "source_priority": 10,
+        },
+        {
+            "canonical_metric": "diluted_shares",
+            "value": 63_471.0,
+            "period_start": "2021-01-01",
+            "period_end": "2021-12-31",
+            "filing_date": "2022-03-01",
+            "source_priority": 10,
+        },
+    ]
+    current, previous = namespace["select_latest_comparable_pair"](rows, "diluted_shares")
+    value, outlier = namespace["validated_diluted_share_growth"](current, previous)
+    assert current is not None and current["period_end"] == "2025-09-30"
+    assert previous is not None and previous["period_end"] == "2024-09-30"
+    assert value == pytest.approx(0.1352766379)
+    assert outlier is False
+
+    annual_current, annual_previous = namespace["select_latest_comparable_pair"](
+        rows,
+        "diluted_shares",
+        prefer_annual=True,
+    )
+    annual_value, annual_outlier = namespace["validated_diluted_share_growth"](
+        annual_current,
+        annual_previous,
+    )
+    assert annual_value is None
+    assert annual_outlier is True
+
+
 def test_inventory_sales_spread_uses_one_aligned_period_pair() -> None:
     namespace = runpy.run_path(
         str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
@@ -3088,9 +3232,7 @@ def test_inventory_sales_spread_uses_one_aligned_period_pair() -> None:
         fact("revenue", 1_200.0, "2025-12-31", start="2025-01-01"),
         fact("revenue", 1_000.0, "2024-12-31", start="2024-01-01"),
     ]
-    inventory_growth, revenue_growth, spread = namespace[
-        "select_aligned_inventory_revenue_growth"
-    ](rows)
+    inventory_growth, revenue_growth, spread = namespace["select_aligned_inventory_revenue_growth"](rows)
     assert inventory_growth == pytest.approx(0.5)
     assert revenue_growth == pytest.approx(0.2)
     assert spread == pytest.approx(0.3)
@@ -3143,9 +3285,7 @@ def test_recent_public_metric_policies_preserve_proxy_and_not_applicable_semanti
             feature={
                 "revenue": 100.0,
                 "asset_turnover": 0.5,
-                "canonical_quality": (
-                    "mapped_xbrl;asset_turnover_proxy_ttm_revenue_over_ending_assets"
-                ),
+                "canonical_quality": ("mapped_xbrl;asset_turnover_proxy_ttm_revenue_over_ending_assets"),
             },
             rows=[],
             company={"ticker": "XE", "development_stage": "operating"},
@@ -3161,10 +3301,7 @@ def test_recent_public_metric_policies_preserve_proxy_and_not_applicable_semanti
         )
     by_metric = {row["metric_name"]: row for row in availability}
     assert by_metric["asset_turnover"]["availability_status"] == "PROXY"
-    assert (
-        by_metric["asset_turnover"]["status_reason"]
-        == "asset_turnover_proxy_ttm_revenue_over_ending_assets"
-    )
+    assert by_metric["asset_turnover"]["status_reason"] == "asset_turnover_proxy_ttm_revenue_over_ending_assets"
     assert by_metric["inventory_sales_growth_spread"]["availability_status"] == "NOT_APPLICABLE"
     assert by_metric["diluted_shares_yoy_growth"]["availability_status"] == "NOT_APPLICABLE"
 
@@ -3222,9 +3359,7 @@ def test_recent_public_asset_turnover_uses_labeled_ending_assets_proxy(tmp_path:
             fx_max_staleness_days=7,
         )
     assert feature["asset_turnover"] == pytest.approx(0.5)
-    assert "asset_turnover_proxy_ttm_revenue_over_ending_assets" in str(
-        feature["canonical_quality"]
-    )
+    assert "asset_turnover_proxy_ttm_revenue_over_ending_assets" in str(feature["canonical_quality"])
 
 
 def test_registration_statement_heading_survives_long_provenance_context() -> None:
@@ -3299,9 +3434,7 @@ def test_normal_filing_text_tables_do_not_map_cash_flow_inventory_changes() -> N
         filing=filing,
         company_currency="USD",
     )
-    inventory_values = {
-        fact.value for fact in balance_sheet_facts if fact.concept_name == "Inventory"
-    }
+    inventory_values = {fact.value for fact in balance_sheet_facts if fact.concept_name == "Inventory"}
     assert inventory_values == {2_187_500_000.0, 2_367_100_000.0}
 
 
@@ -3309,8 +3442,7 @@ def test_share_concept_seed_uses_counts_not_eps_abstracts() -> None:
     from industrials.core.db import XBRL_CONCEPT_MAP_SEED
 
     mappings = {
-        (str(row["taxonomy"]), str(row["concept_name"])): str(row["canonical_metric"])
-        for row in XBRL_CONCEPT_MAP_SEED
+        (str(row["taxonomy"]), str(row["concept_name"])): str(row["canonical_metric"]) for row in XBRL_CONCEPT_MAP_SEED
     }
     assert mappings[("ifrs-full", "AdjustedWeightedAverageShares")] == "diluted_shares"
     assert mappings[("ifrs-full", "WeightedAverageShares")] == "basic_shares"
@@ -3355,15 +3487,9 @@ def test_structural_backlog_policy_does_not_leak_before_valid_from(tmp_path: Pat
     current_by_metric = {row["metric_name"]: row for row in current}
     assert historical_by_metric["orders"]["availability_status"] == "NOT_DISCLOSED"
     assert current_by_metric["orders"]["availability_status"] == "NOT_APPLICABLE"
-    assert current_by_metric["remaining_performance_obligation"]["availability_status"] == (
-        "NOT_APPLICABLE"
-    )
-    assert current_by_metric["rpo_implied_book_to_bill"]["availability_status"] == (
-        "NOT_APPLICABLE"
-    )
-    assert current_by_metric["contract_load_proxy"]["availability_status"] == (
-        "NOT_APPLICABLE"
-    )
+    assert current_by_metric["remaining_performance_obligation"]["availability_status"] == ("NOT_APPLICABLE")
+    assert current_by_metric["rpo_implied_book_to_bill"]["availability_status"] == ("NOT_APPLICABLE")
+    assert current_by_metric["contract_load_proxy"]["availability_status"] == ("NOT_APPLICABLE")
 
 
 def test_machinery_rpo_timing_dimensions_and_text_percentage() -> None:
@@ -3427,33 +3553,33 @@ def test_machinery_rpo_timing_dimensions_and_text_percentage() -> None:
         filing={"report_date": "2026-03-31", "filing_date": "2026-05-01"},
         ticker="OTIS",
     )
-    assert all(
-        fact.concept_name != "RemainingPerformanceObligationCurrent" for fact in otis_facts
-    )
+    assert all(fact.concept_name != "RemainingPerformanceObligationCurrent" for fact in otis_facts)
 
     preceding_percentage_document = """
         <p>We expect to recognize approximately 94% of our remaining performance
         obligations as revenue within the next twelve months.</p>
     """
-    assert namespace["rpo_timing_percentage_from_text"](
-        preceding_percentage_document
-    ) == pytest.approx(0.94)
-    assert namespace["rpo_timing_percentage_from_text"](
-        preceding_percentage_document
-        + "<p>We expect to recognize 25% of remaining performance obligations within the next year.</p>"
-    ) is None
+    assert namespace["rpo_timing_percentage_from_text"](preceding_percentage_document) == pytest.approx(0.94)
+    assert (
+        namespace["rpo_timing_percentage_from_text"](
+            preceding_percentage_document
+            + "<p>We expect to recognize 25% of remaining performance obligations within the next year.</p>"
+        )
+        is None
+    )
 
     explicit_amount_document = """
         <p>Remaining performance obligations were $1.0 billion. Of that amount,
         $410 million is expected to be recognized within the next 12 months.</p>
     """
-    assert namespace["rpo_current_amount_from_text"](
-        explicit_amount_document
-    ) == pytest.approx(410_000_000.0)
-    assert namespace["rpo_current_amount_from_text"](
-        explicit_amount_document
-        + "<p>We expect to recognize $275 million of remaining performance obligations within the next year.</p>"
-    ) is None
+    assert namespace["rpo_current_amount_from_text"](explicit_amount_document) == pytest.approx(410_000_000.0)
+    assert (
+        namespace["rpo_current_amount_from_text"](
+            explicit_amount_document
+            + "<p>We expect to recognize $275 million of remaining performance obligations within the next year.</p>"
+        )
+        is None
+    )
 
     explicit_amount_facts = parse_facts(
         """
@@ -3473,12 +3599,8 @@ def test_machinery_rpo_timing_dimensions_and_text_percentage() -> None:
         document_name="timing-amount.htm",
         filing={"report_date": "2026-03-31", "filing_date": "2026-05-01"},
     )
-    explicit_amount_values = {
-        fact.concept_name: fact.value for fact in explicit_amount_facts
-    }
-    assert explicit_amount_values["RemainingPerformanceObligationCurrent"] == pytest.approx(
-        410_000_000.0
-    )
+    explicit_amount_values = {fact.concept_name: fact.value for fact in explicit_amount_facts}
+    assert explicit_amount_values["RemainingPerformanceObligationCurrent"] == pytest.approx(410_000_000.0)
 
     archive_fact = namespace["ArchiveFact"]
     cross_source_facts = namespace["derive_cross_source_rpo_current_facts"](
@@ -3513,14 +3635,8 @@ def test_machinery_rpo_timing_dimensions_and_text_percentage() -> None:
         filing={"report_date": "2026-03-31", "filing_date": "2026-05-01"},
         ticker="WAB",
     )
-    derived = [
-        fact
-        for fact in cross_source_facts
-        if fact.concept_name == "RemainingPerformanceObligationCurrent"
-    ]
-    assert [(fact.period_end, fact.value) for fact in derived] == [
-        ("2026-03-31", pytest.approx(940.0))
-    ]
+    derived = [fact for fact in cross_source_facts if fact.concept_name == "RemainingPerformanceObligationCurrent"]
+    assert [(fact.period_end, fact.value) for fact in derived] == [("2026-03-31", pytest.approx(940.0))]
 
 
 def test_exact_funded_backlog_prose_without_date_uses_filing_report_date() -> None:
@@ -3608,10 +3724,13 @@ def test_invested_capital_never_infers_missing_debt_as_zero() -> None:
         },
     ]
     assert capital_at_instant(base, ASOF) is None
-    assert capital_at_instant(
-        [*base, {"canonical_metric": "debt_noncurrent", "period_end": ASOF, "value": 10.0, "source_priority": 1}],
-        ASOF,
-    ) is None
+    assert (
+        capital_at_instant(
+            [*base, {"canonical_metric": "debt_noncurrent", "period_end": ASOF, "value": 10.0, "source_priority": 1}],
+            ASOF,
+        )
+        is None
+    )
     assert capital_at_instant(
         [
             *base,
@@ -3752,7 +3871,10 @@ def test_reporting_profile_snapshots_are_point_in_time(tmp_path: Path) -> None:
             )
             VALUES ('PIT', '0000000001', 'sec_companyfacts', ?, ?, ?, ?, ?, ?)
             """,
-            [(accession, form_type, filing_date, accepted, now, now) for accession, filing_date, accepted, form_type in filings],
+            [
+                (accession, form_type, filing_date, accepted, now, now)
+                for accession, filing_date, accepted, form_type in filings
+            ],
         )
         facts = [
             ("OLD", "2026-05-01", "2026-05-01T12:00:00Z", "Assets", "assets", 100.0),
@@ -4190,9 +4312,7 @@ def test_combined_historical_coverage_reconciles_active_and_delisted(
     assert summary["delisted_unresolved_tickers"] == ["MISS"]
     metric_rows = read_rows(report_root / "machinery_combined_historical_metric_coverage.csv")
     combined_orders = next(
-        row
-        for row in metric_rows
-        if row["universe_class"] == "combined" and row["metric_name"] == "orders"
+        row for row in metric_rows if row["universe_class"] == "combined" and row["metric_name"] == "orders"
     )
     assert combined_orders["observation_count"] == "4"
     assert combined_orders["coverage_fraction"] == "1.00000000"
@@ -4247,11 +4367,7 @@ def test_scoring_enforces_financial_policy_and_recomputes_staleness(tmp_path: Pa
     seed_scoring_features(db_path)
     config = load_yaml(MACHINERY_CONFIG)
     policies = load_eligibility_policy(
-        PROJECT_ROOT
-        / "industrials"
-        / "machinery"
-        / "system_csvs"
-        / "machinery_scoring_eligibility_policy.csv",
+        PROJECT_ROOT / "industrials" / "machinery" / "system_csvs" / "machinery_scoring_eligibility_policy.csv",
         asof=ASOF,
     )
     weights = cfg_get(config, "machinery_scoring.component_weights", {})
@@ -4270,8 +4386,7 @@ def test_scoring_enforces_financial_policy_and_recomputes_staleness(tmp_path: Pa
         fallback_values["latest_adj_close"] = 999.0
         columns = list(fallback_values)
         conn.execute(
-            f"INSERT INTO feature_market_technical({', '.join(columns)}) "
-            f"VALUES ({', '.join('?' for _ in columns)})",
+            f"INSERT INTO feature_market_technical({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
             tuple(fallback_values[column] for column in columns),
         )
         baseline = build_scoring_feature_rows(
@@ -4289,9 +4404,7 @@ def test_scoring_enforces_financial_policy_and_recomputes_staleness(tmp_path: Pa
         )
         rank_ready = [row for row in baseline if row["rank_ready_flag"] == "1"]
         assert rank_ready
-        primary_ticker_row = next(
-            row for row in baseline if row["ticker"] == str(primary_market_row["ticker"])
-        )
+        primary_ticker_row = next(row for row in baseline if row["ticker"] == str(primary_market_row["ticker"]))
         assert primary_ticker_row["market_feature_source_id"] == "yahoo_finance_adjusted"
         assert primary_ticker_row["latest_adj_close"] != "999"
         blocked_ticker = rank_ready[0]["ticker"]
@@ -4373,11 +4486,7 @@ def test_machinery_strict_registration_statement_parser() -> None:
         company_currency="USD",
         strict_registration_statements=True,
     )
-    revenue_periods = {
-        (fact.period_end, fact.value)
-        for fact in mixed_facts
-        if fact.concept_name == "Revenue"
-    }
+    revenue_periods = {(fact.period_end, fact.value) for fact in mixed_facts if fact.concept_name == "Revenue"}
     assert revenue_periods == {
         ("2026-03-31", 668_600_000.0),
         ("2025-03-31", 494_000_000.0),
@@ -4461,19 +4570,49 @@ def test_machinery_strict_registration_statement_parser() -> None:
     )
     assert taxonomy == "sec-text"
     assert filtered == [rows[1]]
+    archive_supplemental = [
+        *rows,
+        {
+            "taxonomy": "dedicated-parser",
+            "canonical_metric": "orders",
+            "value": 12.0,
+        },
+        {
+            "taxonomy": "dedicated-parser",
+            "canonical_metric": "assets",
+            "value": 11.0,
+        },
+    ]
+    filtered, taxonomy = financial_namespace["rows_for_reporting_profile"](
+        archive_supplemental,
+        {"reporting_profile": "SEC_ARCHIVE_TEXT_TABLE"},
+        model_family="machinery",
+    )
+    assert taxonomy == "sec-text"
+    assert filtered == [rows[1], archive_supplemental[2]]
     defense_rows, defense_taxonomy = financial_namespace["rows_for_reporting_profile"](
         rows,
         {"reporting_profile": "SEC_ARCHIVE_TEXT_TABLE"},
         model_family="defense",
     )
-    assert defense_taxonomy is None
-    assert defense_rows == rows
+    assert defense_taxonomy == "sec-text"
+    assert defense_rows == [rows[1]]
 
     supplemental_rows = [
         {"taxonomy": "us-gaap", "canonical_metric": "assets", "value": 10.0},
         {"taxonomy": "sec-text", "canonical_metric": "assets", "value": 999.0},
         {"taxonomy": "sec-footnote", "canonical_metric": "reported_backlog", "value": 50.0},
         {"taxonomy": "sec-text", "canonical_metric": "orders", "value": 25.0},
+        {
+            "taxonomy": "dedicated-parser",
+            "canonical_metric": "remaining_performance_obligation",
+            "value": 75.0,
+        },
+        {
+            "taxonomy": "dedicated-parser",
+            "canonical_metric": "debt_total",
+            "value": 0.0,
+        },
     ]
     machinery_rows, machinery_taxonomy = financial_namespace["rows_for_reporting_profile"](
         supplemental_rows,
@@ -4484,6 +4623,131 @@ def test_machinery_strict_registration_statement_parser() -> None:
     assert supplemental_rows[0] in machinery_rows
     assert supplemental_rows[1] not in machinery_rows
     assert supplemental_rows[2:] == machinery_rows[1:]
+    defense_rows, defense_taxonomy = financial_namespace["rows_for_reporting_profile"](
+        supplemental_rows,
+        {"reporting_profile": "SEC_XBRL_US_GAAP"},
+        model_family="defense",
+    )
+    assert defense_taxonomy == "us-gaap"
+    assert defense_rows == [
+        supplemental_rows[0],
+        *supplemental_rows[2:],
+    ]
+
+
+def test_machinery_ttm_uses_four_unlabeled_discrete_quarters() -> None:
+    financial_namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+    rows = [
+        {
+            "canonical_metric": "orders",
+            "value": 75.0,
+            "period_start": "2025-01-01",
+            "period_end": "2025-12-31",
+            "fiscal_period": "FY",
+            "form_type": "10-K",
+        },
+        *[
+            {
+                "canonical_metric": "orders",
+                "value": value,
+                "period_start": start,
+                "period_end": end,
+                "fiscal_period": "",
+                "form_type": "10-Q",
+            }
+            for value, start, end in (
+                (20.0, "2025-07-01", "2025-09-30"),
+                (21.0, "2025-10-01", "2025-12-31"),
+                (25.0, "2026-01-01", "2026-03-31"),
+                (23.0, "2026-04-01", "2026-06-30"),
+            )
+        ],
+    ]
+    result = financial_namespace["ttm_metric_result"](rows, "orders")
+    assert result.value == pytest.approx(89.0)
+    assert result.window_start.isoformat() == "2025-07-01"
+    assert result.window_end.isoformat() == "2026-06-30"
+
+
+def test_machinery_book_to_bill_uses_reviewed_aligned_annual_window() -> None:
+    financial_namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+    rows = [
+        {
+            "canonical_metric": "orders",
+            "taxonomy": "dedicated-parser",
+            "value": 120.0,
+            "period_start": "2025-01-01",
+            "period_end": "2025-12-31",
+            "fiscal_period": "FY",
+            "form_type": "10-K",
+        },
+        {
+            "canonical_metric": "revenue",
+            "taxonomy": "us-gaap",
+            "value": 100.0,
+            "period_start": "2025-01-01",
+            "period_end": "2025-12-31",
+            "fiscal_period": "FY",
+            "form_type": "10-K",
+        },
+        {
+            "canonical_metric": "revenue",
+            "taxonomy": "us-gaap",
+            "value": 30.0,
+            "period_start": "2026-01-01",
+            "period_end": "2026-03-31",
+            "fiscal_period": "Q1",
+            "form_type": "10-Q",
+        },
+        {
+            "canonical_metric": "revenue",
+            "taxonomy": "us-gaap",
+            "value": 20.0,
+            "period_start": "2025-01-01",
+            "period_end": "2025-03-31",
+            "fiscal_period": "Q1",
+            "form_type": "10-Q",
+        },
+    ]
+    orders = financial_namespace["ttm_metric_result"](rows, "orders")
+    latest_revenue = financial_namespace["ttm_metric_result"](
+        rows,
+        "revenue",
+    )
+    value, quality = financial_namespace["calculate_book_to_bill"](
+        rows,
+        orders=orders,
+        revenue=latest_revenue,
+    )
+    assert value == pytest.approx(1.2)
+    assert quality == "book_to_bill_aligned_to_latest_reported_orders_window"
+
+    stale_orders = financial_namespace["TtmResult"](
+        120.0,
+        "",
+        window_start=date(2024, 1, 1),
+        window_end=date(2024, 12, 31),
+    )
+    value, quality = financial_namespace["calculate_book_to_bill"](
+        rows,
+        orders=stale_orders,
+        revenue=latest_revenue,
+    )
+    assert value is None
+    assert quality == "stale_orders_window_book_to_bill"
+
+    rows[0]["taxonomy"] = "sec-footnote"
+    value, quality = financial_namespace["calculate_book_to_bill"](
+        rows,
+        orders=orders,
+        revenue=latest_revenue,
+    )
+    assert value is None
+    assert quality == "period_mismatch_book_to_bill"
 
 
 def test_machinery_loaders_preserve_defense_rows(tmp_path: Path) -> None:
@@ -4511,15 +4775,22 @@ def test_machinery_loaders_preserve_defense_rows(tmp_path: Path) -> None:
         str(db_path),
     )
     with connect(db_path) as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM dim_industrials_taxonomy WHERE model_family='defense' AND ticker='DEFTEST'"
-        ).fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) FROM dim_universe_membership WHERE model_family='defense' AND ticker='DEFTEST'"
-        ).fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) FROM dim_industrials_taxonomy WHERE model_family='machinery'"
-        ).fetchone()[0] == 136
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM dim_industrials_taxonomy WHERE model_family='defense' AND ticker='DEFTEST'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM dim_universe_membership WHERE model_family='defense' AND ticker='DEFTEST'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM dim_industrials_taxonomy WHERE model_family='machinery'").fetchone()[0]
+            == 136
+        )
 
 
 def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
@@ -4562,14 +4833,10 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
     assert {row["positioning_quality"] for row in seeded_scoring_rows} == {"complete"}
     assert {row["latest_bar_date"] for row in seeded_scoring_rows} == {ASOF}
     development_totals = {
-        int(row["score_input_total_count"])
-        for row in scoring_rows
-        if row["development_stage"] == "development_stage"
+        int(row["score_input_total_count"]) for row in scoring_rows if row["development_stage"] == "development_stage"
     }
     operating_totals = {
-        int(row["score_input_total_count"])
-        for row in scoring_rows
-        if row["development_stage"] == "operating"
+        int(row["score_input_total_count"]) for row in scoring_rows if row["development_stage"] == "operating"
     }
     assert len(development_totals) == len(operating_totals) == 1
     assert next(iter(development_totals)) > next(iter(operating_totals))
@@ -4663,13 +4930,7 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
     assert manifest["acceptance"] == "PASS"
     assert manifest["sidecar_calibration_eligible_count"] == 12
     validator_namespace = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "scripts"
-            / "10b_validate_machinery_dashboard_reports.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "10b_validate_machinery_dashboard_reports.py")
     )
     manifest_path = output_dir / "machinery_final_rank_table_manifest.json"
     original_manifest_text = manifest_path.read_text(encoding="utf-8")
@@ -4694,10 +4955,13 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
             / "18_backfill_machinery_historical_dashboard_reports.py"
         )
     )
-    assert history_namespace["validate_portfolio_handoff"](
-        sector_output_root=sector_root,
-        asof=ASOF,
-    ) == 114
+    assert (
+        history_namespace["validate_portfolio_handoff"](
+            sector_output_root=sector_root,
+            asof=ASOF,
+        )
+        == 114
+    )
     assert sum(row.calibration_research_eligible for row in adapted.rows) == 0
 
     history_root = tmp_path / "h"
@@ -4710,9 +4974,9 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
     )
     historical_adapted = run_adapter(adapter_config(), history_root, ASOF)
     assert sum(row.calibration_research_eligible for row in historical_adapted.rows) == 12
-    assert {
-        row.stage1_sample_role for row in historical_adapted.rows if row.calibration_research_eligible
-    } == {"pre_lock_research"}
+    assert {row.stage1_sample_role for row in historical_adapted.rows if row.calibration_research_eligible} == {
+        "pre_lock_research"
+    }
     run_script(
         "industrials/machinery/scripts/20_validate_machinery_portfolio_adapter.py",
         "--asof",
@@ -4746,13 +5010,7 @@ def test_historical_promotion_is_scoped_idempotent_and_preserves_defense(
     tmp_path: Path,
 ) -> None:
     module = runpy.run_path(
-        str(
-            PROJECT_ROOT
-            / "industrials"
-            / "machinery"
-            / "scripts"
-            / "19_promote_machinery_historical_data.py"
-        )
+        str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "19_promote_machinery_historical_data.py")
     )
     promote_historical_data = module["promote_historical_data"]
     source = sqlite3.connect(tmp_path / "source.sqlite")
@@ -4877,27 +5135,29 @@ def test_historical_promotion_is_scoped_idempotent_and_preserves_defense(
     assert result["resolved_in_scope_tickers"] == ["OLD"]
     assert result["tables"]["fact_financial_statement_canonical"]["inserted_rows"] == 1
     assert result["tables"]["dim_issuer_reporting_profile_history"]["inserted_rows"] == 1
-    assert target.execute(
-        "SELECT value FROM fact_financial_statement_canonical WHERE model_family='machinery'"
-    ).fetchone()[0] == 100.0
-    assert target.execute(
-        "SELECT value FROM fact_financial_statement_canonical WHERE model_family='defense'"
-    ).fetchone()[0] == 777.0
-    assert target.execute(
-        "SELECT COUNT(*) FROM fact_financial_statement_canonical WHERE ticker='PRE'"
-    ).fetchone()[0] == 0
+    assert (
+        target.execute(
+            "SELECT value FROM fact_financial_statement_canonical WHERE model_family='machinery'"
+        ).fetchone()[0]
+        == 100.0
+    )
+    assert (
+        target.execute("SELECT value FROM fact_financial_statement_canonical WHERE model_family='defense'").fetchone()[
+            0
+        ]
+        == 777.0
+    )
+    assert (
+        target.execute("SELECT COUNT(*) FROM fact_financial_statement_canonical WHERE ticker='PRE'").fetchone()[0] == 0
+    )
     for table in (
         "feature_market_technical",
         "feature_financial_statement",
         "feature_financial_metric_availability",
         "feature_positioning",
     ):
-        assert target.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE model_family='machinery'"
-        ).fetchone()[0] == 1
-        assert target.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE model_family='defense'"
-        ).fetchone()[0] == 1
+        assert target.execute(f"SELECT COUNT(*) FROM {table} WHERE model_family='machinery'").fetchone()[0] == 1
+        assert target.execute(f"SELECT COUNT(*) FROM {table} WHERE model_family='defense'").fetchone()[0] == 1
 
     repeated = promote_historical_data(
         source,
@@ -4929,8 +5189,21 @@ def test_historical_promotion_is_scoped_idempotent_and_preserves_defense(
             preserve_asof="",
             commit=True,
         )
-    assert target.execute(
-        "SELECT value FROM fact_financial_statement_canonical WHERE model_family='machinery'"
-    ).fetchone()[0] == 101.0
+    assert (
+        target.execute(
+            "SELECT value FROM fact_financial_statement_canonical WHERE model_family='machinery'"
+        ).fetchone()[0]
+        == 101.0
+    )
     source.close()
     target.close()
+
+
+def test_financial_builder_rejects_sector_config_mismatch() -> None:
+    namespace = runpy.run_path(
+        str(PROJECT_ROOT / "industrials" / "scripts" / "08_build_industrials_financial_features.py")
+    )
+    resolve_model_family = namespace["resolve_model_family"]
+    assert resolve_model_family("machinery", "machinery") == "machinery"
+    with pytest.raises(ValueError, match="matching sector config"):
+        resolve_model_family("machinery", "defense")

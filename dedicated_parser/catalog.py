@@ -293,20 +293,38 @@ def build_document_refs(
     filing: FilingRef,
     keywords: tuple[str, ...],
     max_documents: int = 16,
+    required_documents: Iterable[str] | None = None,
 ) -> tuple[DocumentRef, ...]:
     directory = accession_directory(cache_dir, filing)
     if not directory.exists():
         return ()
-    names = relevant_document_names(
-        directory,
-        filing=filing,
-        keywords=keywords,
+    names = (
+        tuple(
+            sorted(
+                {
+                    str(name).strip()
+                    for name in required_documents
+                    if str(name).strip()
+                },
+                key=str.lower,
+            )
+        )
+        if required_documents is not None
+        else relevant_document_names(
+            directory,
+            filing=filing,
+            keywords=keywords,
+        )
     )
     full_submission = _full_submission_name(
         directory,
         accession_number=filing.accession_number,
     )
-    if max_documents > 0 and len(names) > max_documents:
+    if (
+        required_documents is None
+        and max_documents > 0
+        and len(names) > max_documents
+    ):
         truncated = list(names[:max_documents])
         # The sort places the full submission last, so a plain cap silently
         # drops it and the edgartools SGML inspection never runs. Reserve a
@@ -317,6 +335,8 @@ def build_document_refs(
     documents: list[DocumentRef] = []
     for name in names:
         path = directory / name
+        if not path.is_file():
+            continue
         stat = path.stat()
         content_hash = _known_hash(
             conn,

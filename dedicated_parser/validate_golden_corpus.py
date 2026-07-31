@@ -26,7 +26,9 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Golden corpus path. Repeat to validate manual and generated corpora.",
     )
-    parser.add_argument("--run-id", type=int, required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--run-id", type=int)
+    selection.add_argument("--evaluation-id", type=int)
     parser.add_argument("--ticker-cohort", type=Path, default=None)
     return parser.parse_args()
 
@@ -45,8 +47,13 @@ def main() -> int:
             for error in validate_corpus(
                 conn,
                 corpus_path=corpus_path,
-                table="sec_parser_metric_evidence_shadow",
+                table=(
+                    "sec_parser_review_evidence"
+                    if args.evaluation_id is not None
+                    else "sec_parser_metric_evidence_shadow"
+                ),
                 run_id=args.run_id,
+                evaluation_id=args.evaluation_id,
                 tickers=tickers,
             )
         ]
@@ -55,8 +62,13 @@ def main() -> int:
             print(f"FAIL: {error}")
         return 1
     print(
-        f"PASS: run_id={args.run_id} "
-        f"corpora={','.join(str(path) for path in args.corpus)}"
+        "PASS: "
+        + (
+            f"evaluation_id={args.evaluation_id} "
+            if args.evaluation_id is not None
+            else f"run_id={args.run_id} "
+        )
+        + f"corpora={','.join(str(path) for path in args.corpus)}"
     )
     return 0
 

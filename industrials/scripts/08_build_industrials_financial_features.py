@@ -212,6 +212,7 @@ FEATURE_COLUMNS = [
     "fcf_yield",
     "ev_gross_profit",
     "ev_operating_income",
+    "negative_profit_valuation_flag",
     "market_cap",
     "latest_price",
     "deferred_revenue",
@@ -344,6 +345,11 @@ METRIC_SELECTION_ORDER = (
 # a derived metric or ratio (FN-4). Matches the 20-day tolerance already used by
 # periods_are_one_year_apart.
 PERIOD_DURATION_TOLERANCE_DAYS = 20
+
+# A larger one-year increase can occur after a listing or restructuring, but it
+# is not safe to score automatically. Values above this bound remain missing
+# and carry an explicit review flag instead of being clipped into the model.
+MAX_AUTOMATIC_DILUTED_SHARES_YOY_GROWTH = 5.0
 
 # A selected fact whose period ended more than this many days before the anchor
 # filing's period is a stale carry-forward from an old accession (e.g. a
@@ -1067,6 +1073,21 @@ def select_latest_comparable_pair(
     return None, None
 
 
+def validated_diluted_share_growth(
+    current: dict[str, Any] | None,
+    previous: dict[str, Any] | None,
+) -> tuple[float | None, bool]:
+    value = growth(
+        as_float(current.get("value")) if current is not None else None,
+        as_float(previous.get("value")) if previous is not None else None,
+    )
+    if value is None:
+        return None, False
+    if value < -1.0 or value > MAX_AUTOMATIC_DILUTED_SHARES_YOY_GROWTH:
+        return None, True
+    return value, False
+
+
 def select_aligned_inventory_revenue_growth(
     rows: list[dict[str, Any]],
 ) -> tuple[float | None, float | None, float | None]:
@@ -1578,6 +1599,43 @@ def calculate_book_to_bill(
         orders.value / aligned_revenue.value,
         "book_to_bill_aligned_to_latest_reported_orders_window",
     )
+
+
+def revenue_ttm_aligned_to_instant_metric(
+    rows: list[dict[str, Any]],
+    *,
+    metric_period_end: date | None,
+    current_revenue: TtmResult,
+) -> tuple[TtmResult, str]:
+    if metric_period_end is None:
+        return TtmResult(None, ""), "period_mismatch_missing_metric_date"
+    if (
+        current_revenue.value is not None
+        and current_revenue.value > 0
+        and current_revenue.window_end is not None
+        and abs((metric_period_end - current_revenue.window_end).days)
+        <= PERIOD_DURATION_TOLERANCE_DAYS
+    ):
+        return current_revenue, ""
+    if (
+        current_revenue.window_end is not None
+        and (current_revenue.window_end - metric_period_end).days
+        > STALE_FACT_MAX_LAG_DAYS
+    ):
+        return TtmResult(None, ""), "stale_instant_metric_revenue_alignment"
+    aligned = ttm_metric_result(
+        ttm_rows_ending_near(rows, target_end=metric_period_end),
+        "revenue",
+    )
+    if (
+        aligned.value is None
+        or aligned.value <= 0
+        or aligned.window_end is None
+        or abs((metric_period_end - aligned.window_end).days)
+        > PERIOD_DURATION_TOLERANCE_DAYS
+    ):
+        return TtmResult(None, ""), "period_mismatch_instant_metric_to_revenue"
+    return aligned, "aligned_to_disclosure_period"
 
 
 def build_ccc_snapshot(
@@ -2885,10 +2943,25 @@ def build_feature_from_facts(
         ttm_results["debt_issuance_proceeds"],
     )
     orders_ttm_usd = usd_ttm(orders_ttm_local, ttm_results["orders"])
+    gross_profit_ttm_usd = usd_ttm(
+        gross_profit_ttm_local,
+        ttm_results["gross_profit"],
+    )
     operating_income_ttm_usd = usd_ttm(operating_income_ttm_local, ttm_results["operating_income"])
     revenue_ttm_usd = usd_ttm(revenue_ttm_local, ttm_results["revenue"])
     operating_cash_flow_ttm_usd = usd_ttm(operating_cash_flow_ttm_local, ttm_results["operating_cash_flow"])
     capex_ttm_usd = usd_ttm(capex_ttm_local, ttm_results["capex"])
+    gross_profit_for_valuation_usd = gross_profit_ttm_usd
+    if gross_profit_for_valuation_usd is None and gross_profit_usd is not None:
+        gross_profit_for_valuation_usd = gross_profit_usd
+        quality_flags.append("valuation_gross_profit_fallback_latest_period")
+    operating_income_for_valuation_usd = operating_income_ttm_usd
+    if (
+        operating_income_for_valuation_usd is None
+        and operating_income_usd is not None
+    ):
+        operating_income_for_valuation_usd = operating_income_usd
+        quality_flags.append("valuation_operating_income_fallback_latest_period")
     # FN-4 for TTM composites: only combine OI and D&A resolved over the same
     # TTM window (mirrors book_to_bill's existing gate).
     if (
@@ -2953,38 +3026,36 @@ def build_feature_from_facts(
     if cash_burn_ttm_usd is not None and cash_burn_ttm_usd <= 0:
         capital_raise_dependence = 0.0
     elif (
-        len(capital_raise_components) == 2
+        capital_raise_components
         and gross_capital_raised_ttm_usd is not None
         and cash_burn_ttm_usd is not None
     ):
+        # Partial proceeds are a lower bound. Preserve the ratio for audit and
+        # one-sided scoring: it may establish high dependence, but incomplete
+        # evidence must never earn low-dependence credit.
         capital_raise_dependence = gross_capital_raised_ttm_usd / cash_burn_ttm_usd
     else:
         capital_raise_dependence = None
     diluted_share_current_row, diluted_share_previous_row = select_latest_comparable_pair(
         currency_rows,
         "diluted_shares",
-        prefer_annual=True,
     )
-    diluted_shares_yoy_growth = growth(
-        as_float(diluted_share_current_row.get("value"))
-        if diluted_share_current_row is not None
-        else None,
-        as_float(diluted_share_previous_row.get("value"))
-        if diluted_share_previous_row is not None
-        else None,
+    diluted_shares_yoy_growth, diluted_share_outlier = validated_diluted_share_growth(
+        diluted_share_current_row,
+        diluted_share_previous_row,
     )
+    if diluted_share_outlier:
+        quality_flags.append("diluted_shares_yoy_outlier_rejected")
     if diluted_shares_yoy_growth is None:
         basic_share_current_row, basic_share_previous_row = select_basic_share_pair_when_eps_equal(
             currency_rows
         )
-        diluted_shares_yoy_growth = growth(
-            as_float(basic_share_current_row.get("value"))
-            if basic_share_current_row is not None
-            else None,
-            as_float(basic_share_previous_row.get("value"))
-            if basic_share_previous_row is not None
-            else None,
+        diluted_shares_yoy_growth, basic_share_outlier = validated_diluted_share_growth(
+            basic_share_current_row,
+            basic_share_previous_row,
         )
+        if basic_share_outlier:
+            quality_flags.append("basic_shares_yoy_outlier_rejected")
         if diluted_shares_yoy_growth is not None:
             quality_flags.append("diluted_shares_proxy_basic_when_eps_equal")
     if (
@@ -2996,14 +3067,12 @@ def build_feature_from_facts(
             "shares_outstanding",
             instant_metric=True,
         )
-        diluted_shares_yoy_growth = growth(
-            as_float(outstanding_current_row.get("value"))
-            if outstanding_current_row is not None
-            else None,
-            as_float(outstanding_previous_row.get("value"))
-            if outstanding_previous_row is not None
-            else None,
+        diluted_shares_yoy_growth, outstanding_share_outlier = validated_diluted_share_growth(
+            outstanding_current_row,
+            outstanding_previous_row,
         )
+        if outstanding_share_outlier:
+            quality_flags.append("shares_outstanding_yoy_outlier_rejected")
         if diluted_shares_yoy_growth is not None:
             quality_flags.append("diluted_shares_yoy_proxy_outstanding_shares")
     orders_yoy_growth = growth(orders_growth_current, orders_growth_previous)
@@ -3020,67 +3089,100 @@ def build_feature_from_facts(
     )
     if book_to_bill_quality:
         quality_flags.append(book_to_bill_quality)
+    current_revenue_result = ttm_results["revenue"]
     backlog_row = selected.get("funded_backlog")
-    backlog_period_end = parse_date(backlog_row.get("period_end")) if backlog_row is not None else None
-    revenue_window_end = ttm_results["revenue"].window_end
-    backlog_to_revenue = (
-        funded_backlog / revenue_ttm_local
-        if funded_backlog is not None
-        and revenue_ttm_local is not None
-        and revenue_ttm_local > 0
-        and backlog_period_end is not None
-        and revenue_window_end is not None
-        and abs((backlog_period_end - revenue_window_end).days) <= PERIOD_DURATION_TOLERANCE_DAYS
+    backlog_period_end = (
+        parse_date(backlog_row.get("period_end"))
+        if backlog_row is not None
         else None
     )
-    if funded_backlog is not None and backlog_to_revenue is None:
-        quality_flags.append("period_mismatch_backlog_to_revenue")
+    backlog_revenue, backlog_alignment = revenue_ttm_aligned_to_instant_metric(
+        currency_rows,
+        metric_period_end=backlog_period_end,
+        current_revenue=current_revenue_result,
+    )
+    backlog_to_revenue = safe_div(funded_backlog, backlog_revenue.value)
+    if funded_backlog is not None:
+        if backlog_to_revenue is None:
+            quality_flags.append(
+                f"backlog_to_revenue_{backlog_alignment}"
+                if backlog_alignment
+                else "period_mismatch_backlog_to_revenue"
+            )
+        elif backlog_alignment:
+            quality_flags.append(
+                f"backlog_to_revenue_{backlog_alignment}"
+            )
+
     reported_backlog_row = selected.get("reported_backlog")
     reported_backlog_period_end = (
         parse_date(reported_backlog_row.get("period_end"))
         if reported_backlog_row is not None
         else None
     )
-    reported_backlog_to_revenue = (
-        reported_backlog / revenue_ttm_local
-        if reported_backlog is not None
-        and revenue_ttm_local is not None
-        and revenue_ttm_local > 0
-        and reported_backlog_period_end is not None
-        and revenue_window_end is not None
-        and abs((reported_backlog_period_end - revenue_window_end).days) <= PERIOD_DURATION_TOLERANCE_DAYS
-        else None
+    reported_backlog_revenue, reported_backlog_alignment = (
+        revenue_ttm_aligned_to_instant_metric(
+            currency_rows,
+            metric_period_end=reported_backlog_period_end,
+            current_revenue=current_revenue_result,
+        )
     )
-    if reported_backlog is not None and reported_backlog_to_revenue is None:
-        quality_flags.append("period_mismatch_reported_backlog_to_revenue")
+    reported_backlog_to_revenue = safe_div(
+        reported_backlog,
+        reported_backlog_revenue.value,
+    )
+    if reported_backlog is not None:
+        if reported_backlog_to_revenue is None:
+            quality_flags.append(
+                "reported_backlog_to_revenue_"
+                f"{reported_backlog_alignment}"
+                if reported_backlog_alignment
+                else "period_mismatch_reported_backlog_to_revenue"
+            )
+        elif reported_backlog_alignment:
+            quality_flags.append(
+                "reported_backlog_to_revenue_"
+                f"{reported_backlog_alignment}"
+            )
+
     rpo_row = selected.get("remaining_performance_obligation")
-    rpo_period_end = parse_date(rpo_row.get("period_end")) if rpo_row is not None else None
-    rpo_to_revenue = (
-        rpo / revenue_ttm_local
-        if rpo is not None
-        and revenue_ttm_local is not None
-        and revenue_ttm_local > 0
-        and rpo_period_end is not None
-        and revenue_window_end is not None
-        and abs((rpo_period_end - revenue_window_end).days) <= PERIOD_DURATION_TOLERANCE_DAYS
+    rpo_period_end = (
+        parse_date(rpo_row.get("period_end"))
+        if rpo_row is not None
         else None
     )
-    if rpo is not None and rpo_to_revenue is None:
-        quality_flags.append("period_mismatch_rpo_to_revenue")
+    rpo_revenue, rpo_alignment = revenue_ttm_aligned_to_instant_metric(
+        currency_rows,
+        metric_period_end=rpo_period_end,
+        current_revenue=current_revenue_result,
+    )
+    rpo_to_revenue = safe_div(rpo, rpo_revenue.value)
+    if rpo is not None:
+        if rpo_to_revenue is None:
+            quality_flags.append(
+                f"rpo_to_revenue_{rpo_alignment}"
+                if rpo_alignment
+                else "period_mismatch_rpo_to_revenue"
+            )
+        elif rpo_alignment:
+            quality_flags.append(f"rpo_to_revenue_{rpo_alignment}")
     rpo_implied_orders = (
-        rpo - previous_rpo + revenue_ttm_local
+        rpo - previous_rpo + rpo_revenue.value
         if rpo is not None
         and previous_rpo is not None
-        and revenue_ttm_local is not None
-        and rpo_period_end is not None
-        and revenue_window_end is not None
-        and abs((rpo_period_end - revenue_window_end).days) <= PERIOD_DURATION_TOLERANCE_DAYS
+        and rpo_revenue.value is not None
         else None
     )
-    rpo_implied_book_to_bill = safe_div(rpo_implied_orders, revenue_ttm_local)
-    rpo_implied_orders_usd = usd_ttm(rpo_implied_orders, ttm_results["revenue"])
+    rpo_implied_book_to_bill = safe_div(
+        rpo_implied_orders,
+        rpo_revenue.value,
+    )
+    rpo_implied_orders_usd = usd_ttm(rpo_implied_orders, rpo_revenue)
     if rpo_implied_orders is not None:
-        quality_flags.append("rpo_implied_orders_proxy_unadjusted_for_fx_cancellations_and_contract_changes")
+        quality_flags.append(
+            "rpo_implied_orders_proxy_unadjusted_for_fx_cancellations_"
+            "and_contract_changes"
+        )
 
     # Keep reported backlog and GAAP/IFRS RPO intact. This separate proxy gives
     # calibration one contract-load series without treating the two disclosure
@@ -3292,7 +3394,7 @@ def build_feature_from_facts(
             "revenue_stub_period_days": revenue_stub_period_days,
             "revenue_stub_quality": revenue_stub_quality,
             "gross_profit_ttm": gross_profit_ttm_local,
-            "gross_profit_ttm_usd": usd_ttm(gross_profit_ttm_local, ttm_results["gross_profit"]),
+            "gross_profit_ttm_usd": gross_profit_ttm_usd,
             "operating_income_ttm": operating_income_ttm_local,
             "operating_income_ttm_usd": operating_income_ttm_usd,
             "net_income_ttm": net_income_ttm_local,
@@ -3336,12 +3438,41 @@ def build_feature_from_facts(
             # would rank loss-makers as the cheapest names under direction -1;
             # emit NULL instead (negative EV over positive profit stays: net cash
             # in excess of market cap is legitimately cheap).
-            "ev_gross_profit": safe_div(enterprise_value, gross_profit_usd)
-            if gross_profit_usd is not None and gross_profit_usd > 0
+            "ev_gross_profit": safe_div(
+                enterprise_value,
+                gross_profit_for_valuation_usd,
+            )
+            if gross_profit_for_valuation_usd is not None
+            and gross_profit_for_valuation_usd > 0
             else None,
-            "ev_operating_income": safe_div(enterprise_value, operating_income_usd)
-            if operating_income_usd is not None and operating_income_usd > 0
+            "ev_operating_income": safe_div(
+                enterprise_value,
+                operating_income_for_valuation_usd,
+            )
+            if operating_income_for_valuation_usd is not None
+            and operating_income_for_valuation_usd > 0
             else None,
+            # Valuation unmeasurable BECAUSE of losses must not score neutral:
+            # nulling the EV multiples for non-positive profits is correct
+            # (negative multiples are meaningless ranks), but the component
+            # falling back to 50 rewarded unmeasurability. This flag carries
+            # the penalty into the valuation component instead (mirrors
+            # negative_ebitda_leverage_flag in risk control).
+            "negative_profit_valuation_flag": (
+                int(
+                    (
+                        gross_profit_for_valuation_usd is not None
+                        and gross_profit_for_valuation_usd <= 0
+                    )
+                    or (
+                        operating_income_for_valuation_usd is not None
+                        and operating_income_for_valuation_usd <= 0
+                    )
+                )
+                if gross_profit_for_valuation_usd is not None
+                or operating_income_for_valuation_usd is not None
+                else None
+            ),
             "market_cap": market_cap,
             "latest_price": latest_price,
             "deferred_revenue": deferred_revenue,
@@ -3581,6 +3712,31 @@ def availability_confidence(row: dict[str, Any] | None, *, derived: bool, proxy:
     return 0.95
 
 
+def dynamic_metric_proxy_reason(
+    metric_name: str,
+    quality_tokens: set[str],
+) -> str:
+    if metric_name == "asset_turnover":
+        prefixes = ("asset_turnover_proxy_",)
+    elif metric_name == "diluted_shares_yoy_growth":
+        prefixes = (
+            "diluted_shares_proxy_",
+            "diluted_shares_yoy_proxy_",
+        )
+    elif metric_name == "capital_raise_dependence":
+        prefixes = ("capital_raise_proceeds_partial_component_coverage",)
+    else:
+        return ""
+    return next(
+        (
+            token
+            for token in quality_tokens
+            if any(token.startswith(prefix) for prefix in prefixes)
+        ),
+        "",
+    )
+
+
 def classify_financial_metric_availability(
     conn: Any,
     *,
@@ -3691,26 +3847,10 @@ def classify_financial_metric_availability(
         if metric_name in CONTRACT_LOAD_PROXY_METRICS:
             source_metric = str(feature.get("contract_load_proxy_source") or "")
         source_row = metric_source_row(rows, source_metric) if source_metric else None
-        dynamic_proxy_reason = ""
-        if metric_name == "asset_turnover":
-            dynamic_proxy_reason = next(
-                (
-                    token
-                    for token in quality_tokens
-                    if token.startswith("asset_turnover_proxy_")
-                ),
-                "",
-            )
-        elif metric_name == "diluted_shares_yoy_growth":
-            dynamic_proxy_reason = next(
-                (
-                    token
-                    for token in quality_tokens
-                    if token.startswith("diluted_shares_proxy_")
-                    or token.startswith("diluted_shares_yoy_proxy_")
-                ),
-                "",
-            )
+        dynamic_proxy_reason = dynamic_metric_proxy_reason(
+            metric_name,
+            quality_tokens,
+        )
         proxy = metric_name in PROXY_METRIC_FEATURES or bool(dynamic_proxy_reason)
         derived = metric_name not in SOURCE_METRIC_FEATURES
         disclosure_candidate = unresolved_disclosure_candidate(
@@ -3963,9 +4103,24 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    configured_model_family = cfg_get(
+        config,
+        "industrials_universe.initial_subsector",
+        "defense",
+    )
+    configured_families = cfg_get(config, "model_families", {}) or {}
+    if (
+        args.model_family
+        and isinstance(configured_families, dict)
+        and args.model_family in configured_families
+    ):
+        # A consolidated family-aware config is authoritative for an explicit
+        # family request. The legacy initial_subsector remains the fallback
+        # guard for older single-family configs.
+        configured_model_family = args.model_family
     model_family = resolve_model_family(
         args.model_family,
-        cfg_get(config, "industrials_universe.initial_subsector", "defense"),
+        configured_model_family,
     )
     source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts")
     supplemental_disclosure_source_ids = tuple(

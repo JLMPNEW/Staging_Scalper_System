@@ -1,0 +1,91 @@
+{
+  "active_model_comparison": {
+    "minimum_mean_net_excess_improvement": {
+      "21": 0.0,
+      "63": 0.0
+    },
+    "required": true
+  },
+  "approval": {
+    "lockbox_open_token": "OPEN_MACHINERY_V14_LOCKBOX_ONCE",
+    "separate_stage12_activation_token_required": true
+  },
+  "artifact_family": "machinery_conditional_promotion_protocol",
+  "candidate_id": "equal_components",
+  "candidate_protocol_path": "machinery_oos_v1.4.0.json",
+  "conditional_status_label": "PROVISIONAL_PRODUCT_ALIGNED",
+  "decision_policy": {
+    "confidence_bound_role": "advisory_only",
+    "failed_gate_action": "retain_current_active_model",
+    "portfolio_smoke_required_before_replacement": true,
+    "production_cap_increase_permitted": false,
+    "stage8_v1_3_result_is_not_overridden": true
+  },
+  "evaluation_contract": {
+    "benchmark_ticker": "XLI",
+    "horizons_trading_days": [
+      21,
+      63
+    ],
+    "minimum_cross_section": 30,
+    "minimum_positions": 10,
+    "production_universe_policy": "operating_only",
+    "return_basis": "next_session_open_execution_excess",
+    "signal_cadence": "weekly_last_snapshot",
+    "top_quantile": 0.2,
+    "turnover_cost_bps": 20.0
+  },
+  "evidence_window": {
+    "end_date": "2026-07-29",
+    "sealed_start_date": "2026-01-01"
+  },
+  "hard_gates": {
+    "maximum_average_one_way_turnover": 0.75,
+    "maximum_drawdown": -0.35,
+    "maximum_position_weight": 0.15,
+    "maximum_selected_cohort_share": 0.5,
+    "minimum_adv_weight_coverage": 0.95,
+    "minimum_capacity_multiple": 5.0,
+    "minimum_hit_rate": {
+      "21": 0.5,
+      "63": 0.5
+    },
+    "minimum_mean_net_excess_return": {
+      "21": 0.0,
+      "63": 0.0
+    },
+    "minimum_median_net_excess_return": {
+      "21": 0.0,
+      "63": 0.0
+    },
+    "minimum_non_overlapping_observations": {
+      "21": 4,
+      "63": 2
+    },
+    "minimum_selected_cohorts": 3,
+    "minimum_weekly_observations": {
+      "21": 12,
+      "63": 12
+    }
+  },
+  "model_family": "machinery",
+  "portfolio_contract": {
+    "maximum_provisional_cap": 0.05,
+    "minimum_fixed_cap_marginal_net_alpha": {
+      "21": 0.0,
+      "63": 0.0
+    },
+    "minimum_fixed_cap_marginal_net_alpha_improvement": {
+      "21": 0.0,
+      "63": 0.0
+    },
+    "portfolio_marginal_measure": "fixed_cap_replacement_net_alpha",
+    "target_aum_usd": 300000.0
+  },
+  "protocol_version": "machinery_oos_v1.4.0_conditional_promotion",
+  "rollback_policy": {
+    "activation_transaction_must_be_atomic": true,
+    "failed_portfolio_smoke_restores_dashboard_and_active_state": true,
+    "previous_active_model_remains_live_until_all_gates_pass": true
+  }
+}

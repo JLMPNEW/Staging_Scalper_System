@@ -1,0 +1,31 @@
+ticker,source_ticker,ibkr_ticker,cusip,institutional_13f_issuer_alias,institutional_13f_exempt,institutional_13f_exemption_reason,institutional_13f_exempt_until,short_interest_exempt,exemption_reason,short_pct_float_exempt,short_pct_float_exemption_reason,form4_exempt,form4_exemption_reason,form4_cik,form4_security_title_regex,form4_security_title_exclude_regex,notes,valid_from,reviewed_at
+ASR,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+AZUL,,,,,1,POST_RESTRUCTURING_NO_Q1_2026_13F_HOLDINGS,2026-10-15,0,,0,,0,,,,,No Q1 2026 holding survives in the complete source after the reviewed capital-structure break; do not carry the 2025 holding across regimes and review the next complete dataset,2026-07-30,2026-07-30
+CAAP,,,L1995B107,CORP AMERICA AIRPORTS SA,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,13F CUSIP and alias verified in cached Q1 2026 SEC archive; reviewed FPI Form 4 nonapplicability,2026-07-22,2026-07-30
+CCEC,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+CISS,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+CNI,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed Canadian issuer reporting profile and zero SEC ownership submissions,2026-07-22,2026-07-30
+CP,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed Canadian issuer reporting profile and zero SEC ownership submissions,2026-07-22,2026-07-30
+CPA,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+CTNT,,,16307X202,CHEETAH NET SUPPLY CHAIN INC,0,,,0,,0,,0,,,,,13F Class A CUSIP and alias verified in cached Q1 2026 SEC archive,2026-07-22,2026-07-30
+CTRM,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+DAC,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+ECO,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+EHLD,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+ELOG,,,,,1,NO_Q1_2026_13F_HOLDINGS_REVIEWED,2026-10-15,0,,0,,0,,,,,No exact issuer or CUSIP holdings in cached Q1 2026 archive; review next complete dataset,2026-07-22,2026-07-30
+FDXF,,,,,1,POST_Q1_2026_SPINOFF_13F_LISTING_LAG,2026-10-15,0,,0,,0,,,,,Security did not exist in Q1 2026 holdings period; review after next complete dataset,2026-07-22,2026-07-30
+HTCO,,,G1901X116,HIGH-TREND INTERNATIONAL GRO,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,13F Class A CUSIP and alias verified in cached Q1 2026 SEC archive; reviewed FPI Form 4 nonapplicability,2026-07-22,2026-07-30
+JYD,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+LTM,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+NCEW,,,,,1,NO_Q1_2026_13F_HOLDINGS_REVIEWED,2026-10-15,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,No exact issuer or CUSIP holdings in cached Q1 2026 archive; reviewed FPI Form 4 nonapplicability,2026-07-22,2026-07-30
+NCT,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+OMAB,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+PSHG,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+PSIG,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+SB,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+SFWL,,,G8117B101,SHENGFENG DEV LTD,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,13F Class A CUSIP and alias verified in cached Q1 2026 SEC archive; reviewed FPI Form 4 nonapplicability,2026-07-22,2026-07-30
+SWVL,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30
+TFII,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed Canadian FPI reporting profile and zero SEC ownership submissions,2026-07-22,2026-07-30
+UFG,,,G92Y4F100,UNI-FUELS HLDGS LTD,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,13F Class A CUSIP and alias verified in cached Q1 2026 SEC archive; reviewed FPI Form 4 nonapplicability,2026-07-22,2026-07-30
+VLRS,,,21240E105,CONTROLADORA VUELA COMP DE A,0,,,0,,0,,0,,,,,13F sponsored ADR CUSIP and alias verified in cached Q1 2026 SEC archive,2026-07-22,2026-07-30
+VNTG,,,,,0,,,0,,0,,1,FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE,,,,Reviewed SEC FPI reporting profile and zero ownership submissions,2026-07-22,2026-07-30

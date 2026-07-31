@@ -183,7 +183,12 @@ def main() -> int:
             errors.append("portfolio adapter returned no machinery rows")
         if result.source_asof_date != asof:
             errors.append(f"source_asof_date={result.source_asof_date} expected={asof}")
-    research_eligible = sum(row.calibration_research_eligible for row in adapter_rows)
+    research_eligible_tickers = {
+        row.ticker
+        for row in adapter_rows
+        if row.calibration_research_eligible
+    }
+    research_eligible = len(research_eligible_tickers)
     investable = {
         row.ticker for row in adapter_rows if row.investable_eligible
     }
@@ -198,17 +203,31 @@ def main() -> int:
             for row in rank_rows
             if str(row.get("portfolio_universe_eligible_flag") or "") == "1"
         }
+        expected_research_eligible = {
+            str(row.get("ticker") or "").strip().upper()
+            for row in rank_rows
+            if str(
+                row.get("stage11_calibration_input_eligible_flag") or ""
+            )
+            == "1"
+        }
         if not selected:
             errors.append("production machinery sleeve is empty")
         if investable != selected:
             errors.append(
                 "production adapter membership does not match selected sleeve"
             )
-        if research_eligible != len(broad_eligible):
+        if research_eligible_tickers != expected_research_eligible:
+            missing_research = sorted(
+                expected_research_eligible - research_eligible_tickers
+            )
+            unexpected_research = sorted(
+                research_eligible_tickers - expected_research_eligible
+            )
             errors.append(
-                "production adapter research population does not match broad "
-                f"eligibility expected={len(broad_eligible)} "
-                f"actual={research_eligible}"
+                "production adapter research population does not match the "
+                "Stage 11 research contract "
+                f"missing={missing_research} unexpected={unexpected_research}"
             )
         try:
             target_weights = [
@@ -250,6 +269,9 @@ def main() -> int:
         "contract_mode": "production" if production_expected else "shadow",
         "investable_rows": len(investable),
         "research_eligible_rows": research_eligible,
+        "broad_eligible_rows": len(broad_eligible)
+        if production_expected
+        else 0,
         "calibration_financial_field_count": len(CALIBRATION_FINANCIAL_FIELDS & rank_fields),
         "errors": errors,
     }

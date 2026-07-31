@@ -25,6 +25,9 @@ from industrials.core.text_norm import normalize_ticker  # noqa: E402
 LOGGER = logging.getLogger("validate_industrials_sec_positioning_stages")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 POSITIONING_STAGE = "import_industrials_positioning"
+FORM4_SOURCE_COVERED_STATUSES = frozenset(
+    {"covered", "covered_no_eligible_transactions"}
+)
 CSV_FIELDS = [
     "ticker",
     "is_active",
@@ -247,13 +250,11 @@ def load_exempt_tickers(
 def load_active_universe(conn: Any, model_family: str) -> list[str]:
     rows = conn.execute(
         """
-        SELECT DISTINCT c.ticker
-        FROM dim_company c
-        JOIN dim_industrials_taxonomy t
-          ON t.ticker = c.ticker
-         AND t.model_family = ?
-        WHERE c.is_active = 1
-        ORDER BY c.ticker
+        SELECT DISTINCT m.ticker
+        FROM dim_universe_membership m
+        WHERE m.model_family = ?
+          AND m.is_current_member = 1
+        ORDER BY m.ticker
         """,
         (model_family,),
     ).fetchall()
@@ -265,11 +266,8 @@ def load_inactive_universe(conn: Any, model_family: str) -> list[str]:
         """
         SELECT DISTINCT m.ticker
         FROM dim_universe_membership m
-        JOIN dim_company c
-          ON c.ticker = m.ticker
         WHERE m.model_family = ?
           AND m.is_current_member = 0
-          AND c.is_active = 0
         ORDER BY m.ticker
         """,
         (model_family,),
@@ -353,6 +351,12 @@ def feature_tickers_missing_field(
         if field in missing_fields:
             missing.append(ticker)
     return sorted(missing)
+
+
+def form4_source_is_covered(feature: dict[str, str]) -> bool:
+    return str(feature.get("form4_status") or "") in (
+        FORM4_SOURCE_COVERED_STATUSES
+    )
 
 
 def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -561,7 +565,7 @@ def validate() -> int:
         form4_covered_count = sum(
             1
             for ticker in form4_gate_universe
-            if form4_counts.get(ticker, 0) + direct_counts.get(ticker, 0) > 0
+            if form4_source_is_covered(feature_map.get(ticker, {}))
         )
         form4_covered_fraction = (
             form4_covered_count / len(form4_gate_universe) if form4_gate_universe else 0.0
@@ -620,7 +624,7 @@ def validate() -> int:
         )
         warnings.append(
             "Form 4 covered active/inactive="
-            f"{sum(1 for t in active if form4_counts.get(t, 0) + direct_counts.get(t, 0) > 0)}/{len(active)} "
+            f"{sum(1 for t in active if form4_source_is_covered(feature_map.get(t, {})))}/{len(active)} "
             f"{sum(1 for t in inactive if form4_counts.get(t, 0) + direct_counts.get(t, 0) > 0)}/{len(inactive)} "
             f"non_exempt_covered_fraction={form4_covered_fraction:.3f} "
             f"min_required={min_form4_covered_fraction:.3f} "

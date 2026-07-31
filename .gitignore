@@ -42,6 +42,10 @@ med_devices/secrets*.local.yaml
 *.arrow
 *.log
 *.html
+*.htm
+*.pdf
+*.bin
+*.txt
 
 # --- Large data / generated files ---
 tmpomvpuh6h/
@@ -49,6 +53,9 @@ tmpomvpuh6h/
 *.json
 !pyrightconfig.json
 !pyrightconfig.biotech.json
+!industrials/machinery/model_protocols/machinery_oos_v1.4.0.json
+!industrials/machinery/model_protocols/machinery_oos_v1.4.0_conditional_promotion.json
+!industrials/machinery/model_protocols/machinery_oos_v1.4.1_operational_amendment.json
 
 # --- CSVs: ignore all by default ---
 *.csv

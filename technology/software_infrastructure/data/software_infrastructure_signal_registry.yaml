@@ -215,6 +215,46 @@ signals:
     production_policy: measurement_only_zero_weight
     notes: RPO coverage ratio; initial measurement suggested promise but still requires promotion review.
 
+  - signal: annual_recurring_revenue_yoy_growth
+    score_key: annual_recurring_revenue_yoy_growth_score
+    components: [growth]
+    source_layer: dedicated_parser_adjudicated
+    source_ids: [software_adjudication_v1]
+    production_policy: measurement_only_zero_weight
+    notes: Total-ARR YoY growth; definition variants never pool.
+  - signal: net_revenue_retention_level
+    score_key: net_revenue_retention_level_score
+    components: [growth]
+    source_layer: dedicated_parser_adjudicated
+    source_ids: [software_adjudication_v1]
+    production_policy: measurement_only_zero_weight
+    notes: Dollar-based NRR only; gross retention and expansion variants excluded.
+  - signal: net_revenue_retention_yoy_change
+    score_key: net_revenue_retention_yoy_change_score
+    components: [growth]
+    source_layer: dedicated_parser_adjudicated
+    source_ids: [software_adjudication_v1]
+    production_policy: measurement_only_zero_weight
+  - signal: disclosed_billings_yoy_growth
+    score_key: disclosed_billings_yoy_growth_score
+    components: [growth]
+    source_layer: dedicated_parser_adjudicated
+    source_ids: [software_adjudication_v1]
+    production_policy: measurement_only_zero_weight
+    notes: Reported billings that passes revenue plus deferred-revenue reconciliation.
+  - signal: subscription_revenue_yoy_growth
+    score_key: subscription_revenue_yoy_growth_score
+    components: [growth]
+    source_layer: dedicated_parser_adjudicated
+    source_ids: [software_adjudication_v1]
+    production_policy: measurement_only_zero_weight
+  - signal: subscription_revenue_mix
+    score_key: subscription_revenue_mix_score
+    components: [quality, growth]
+    source_layer: dedicated_parser_adjudicated
+    source_ids: [software_adjudication_v1]
+    production_policy: measurement_only_zero_weight
+
 planned_signals:
   - signal: rule_of_40_proxy
     source_layer: sec_financials

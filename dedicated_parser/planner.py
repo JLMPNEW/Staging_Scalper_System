@@ -4,17 +4,16 @@ import sqlite3
 from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from dedicated_parser.adapters import load_ticker_selector
 from dedicated_parser.catalog import (
-    accession_directory,
     build_document_refs,
     filing_rows,
-    relevant_document_names,
 )
 from dedicated_parser.contracts import (
     AdapterRegistry,
+    DocumentRef,
     FilingRef,
     PlanSummary,
     WorkItem,
@@ -31,6 +30,69 @@ MISSING_STATUSES = frozenset(
         "PROXY",
     }
 )
+
+DocumentScope = Mapping[tuple[str, str], Mapping[str, str]]
+DirectFilings = Mapping[tuple[str, str], FilingRef]
+DirectDocuments = Mapping[tuple[str, str], tuple[DocumentRef, ...]]
+MetricScope = Mapping[tuple[str, str], frozenset[str]]
+
+
+def _source_documents(
+    conn: sqlite3.Connection,
+    *,
+    cache_dir: Path,
+    filing: FilingRef,
+    keywords: tuple[str, ...],
+    max_documents: int,
+    required_documents: Mapping[str, str] | None,
+    direct_documents: DirectDocuments | None,
+) -> tuple[DocumentRef, ...]:
+    if direct_documents is not None:
+        return tuple(
+            direct_documents.get(
+                (filing.ticker.upper(), filing.accession_number),
+                (),
+            )
+        )
+    return build_document_refs(
+        conn,
+        cache_dir=cache_dir,
+        filing=filing,
+        keywords=keywords,
+        max_documents=max_documents,
+        required_documents=required_documents,
+    )
+
+
+def _apply_document_scope(
+    *,
+    filing: FilingRef,
+    documents: tuple[DocumentRef, ...],
+    document_scope: DocumentScope | None,
+) -> tuple[tuple[DocumentRef, ...], str]:
+    if document_scope is None:
+        return documents, ""
+    expected = document_scope.get((filing.ticker.upper(), filing.accession_number))
+    if expected is None:
+        return (), "filing_not_present_in_source_manifest"
+    actual = {document.name: document for document in documents}
+    missing = sorted(set(expected) - set(actual))
+    unexpected = sorted(set(actual) - set(expected))
+    mismatched = sorted(
+        name
+        for name in set(expected) & set(actual)
+        if str(expected[name]).lower() != str(actual[name].content_sha256).lower()
+    )
+    if missing:
+        return (), "manifest_documents_missing:" + "|".join(missing)
+    if unexpected:
+        return (), "unsealed_documents_present:" + "|".join(unexpected)
+    if mismatched:
+        return (), "manifest_document_hash_mismatch:" + "|".join(mismatched)
+    return (
+        tuple(actual[name] for name in sorted(expected)),
+        "",
+    )
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -78,10 +140,7 @@ def unresolved_requests(
         asof_date=asof_date,
         tickers=tickers,
     )
-    return {
-        ticker: set(source_requirements)
-        for ticker, source_requirements in dependencies.items()
-    }
+    return {ticker: set(source_requirements) for ticker, source_requirements in dependencies.items()}
 
 
 def unresolved_dependency_requirements(
@@ -94,15 +153,10 @@ def unresolved_dependency_requirements(
     ticker_list = sorted(set(tickers))
     if not ticker_list:
         return {}
-    requests: dict[str, dict[str, set[str]]] = defaultdict(
-        lambda: defaultdict(set)
-    )
+    requests: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     if not _table_exists(conn, "feature_financial_metric_availability"):
         return {
-            ticker: {
-                metric.metric_name: {metric.metric_name}
-                for metric in registry.parser_metrics
-            }
+            ticker: {metric.metric_name: {metric.metric_name} for metric in registry.parser_metrics}
             for ticker in ticker_list
         }
     placeholders = ",".join("?" for _ in ticker_list)
@@ -128,13 +182,10 @@ def unresolved_dependency_requirements(
         dependent_metric = str(row["metric_name"])
         request = registry.request(dependent_metric)
         if request is not None:
-            requests[str(row["ticker"])][request.metric_name].add(
-                dependent_metric
-            )
+            requests[str(row["ticker"])][request.metric_name].add(dependent_metric)
     return {
         ticker: {
-            source_metric: set(dependent_metrics)
-            for source_metric, dependent_metrics in source_requirements.items()
+            source_metric: set(dependent_metrics) for source_metric, dependent_metrics in source_requirements.items()
         }
         for ticker, source_requirements in requests.items()
     }
@@ -179,12 +230,7 @@ def _feature_field_is_populated(
         raise ValueError(f"Unsafe feature field in parser requirement: {field!r}")
     if not _table_exists(conn, "feature_financial_statement"):
         return False
-    columns = {
-        str(row["name"])
-        for row in conn.execute(
-            "PRAGMA table_info(feature_financial_statement)"
-        )
-    }
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(feature_financial_statement)")}
     if field not in columns:
         return False
     row = conn.execute(
@@ -282,8 +328,7 @@ def _series_gap_detail(
     anchor = str(feature.get("fiscal_period_end") or asof_date)[:10]
     try:
         lower_bound = (
-            date.fromisoformat(anchor)
-            - timedelta(days=max(1, requirement.lookback_days or 460))
+            date.fromisoformat(anchor) - timedelta(days=max(1, requirement.lookback_days or 460))
         ).isoformat()
     except ValueError:
         lower_bound = ""
@@ -350,14 +395,9 @@ def _series_gap_detail(
         }
         for row in reversed(revenue_rows)
     ]
-    available_keys = {
-        (item["period_start"], item["period_end"])
-        for item in available_periods
-    }
+    available_keys = {(item["period_start"], item["period_end"]) for item in available_periods}
     missing_periods = [
-        item
-        for item in required_periods
-        if (item["period_start"], item["period_end"]) not in available_keys
+        item for item in required_periods if (item["period_start"], item["period_end"]) not in available_keys
     ]
     return {
         "ticker": ticker,
@@ -365,9 +405,7 @@ def _series_gap_detail(
         "dependent_metric": dependent_metric,
         "facet": "series_incomplete_for_ttm",
         "anchor_period_end": anchor,
-        "minimum_discrete_periods": (
-            requirement.minimum_discrete_periods or 4
-        ),
+        "minimum_discrete_periods": (requirement.minimum_discrete_periods or 4),
         "lookback_days": requirement.lookback_days or 460,
         "available_periods": available_periods,
         "required_periods": required_periods,
@@ -386,6 +424,8 @@ def _planning_scope(
     max_filings_per_ticker: int,
     force: bool,
     all_metrics: bool,
+    document_scope: DocumentScope | None = None,
+    direct_filings: DirectFilings | None = None,
 ) -> tuple[
     list[str],
     dict[str, set[str]],
@@ -415,10 +455,7 @@ def _planning_scope(
     )
     if force or all_metrics:
         dependency_requirements = {
-            ticker: {
-                request.metric_name: {request.metric_name}
-                for request in registry.parser_metrics
-            }
+            ticker: {request.metric_name: {request.metric_name} for request in registry.parser_metrics}
             for ticker in selected_tickers
         }
     database_satisfied = 0
@@ -444,9 +481,7 @@ def _planning_scope(
                 continue
             remaining.add(source_metric)
             for dependent_metric in sorted(dependent_metrics):
-                requirement = registry.metric_requirements.get(
-                    dependent_metric
-                )
+                requirement = registry.metric_requirements.get(dependent_metric)
                 if requirement is not None and requirement.mode == "series_ttm":
                     series_gaps.append(
                         _series_gap_detail(
@@ -471,21 +506,44 @@ def _planning_scope(
                 {
                     str(item.get("period_end") or "")
                     for item in missing_periods
-                    if isinstance(item, dict)
-                    and str(item.get("period_end") or "")
+                    if isinstance(item, dict) and str(item.get("period_end") or "")
                 }
             )
         )
-    filings = filing_rows(
-        conn,
-        model_family=registry.model_family,
-        asof_date=asof_date,
-        tickers=unresolved,
-        accessions=accessions,
-        supported_forms=registry.supported_forms,
-        max_filings_per_ticker=max_filings_per_ticker,
-        target_periods_by_ticker=target_periods_by_ticker,
-    )
+    if direct_filings is not None:
+        filings = {ticker: [] for ticker in unresolved}
+        for (ticker, _), filing in sorted(direct_filings.items()):
+            if ticker in filings:
+                filings[ticker].append(filing)
+    else:
+        filings = filing_rows(
+            conn,
+            model_family=registry.model_family,
+            asof_date=asof_date,
+            tickers=unresolved,
+            accessions=accessions,
+            supported_forms=registry.supported_forms,
+            max_filings_per_ticker=max_filings_per_ticker,
+            target_periods_by_ticker=target_periods_by_ticker,
+        )
+    if document_scope is not None:
+        # An accession number identifies an SEC submission, not a ticker
+        # lifecycle. Predecessor/current tickers can therefore share a CIK and
+        # accession. The source manifest is sealed at ticker + accession +
+        # document granularity, so do not let the global accession filter pull
+        # a current issuer's filing into an inactive predecessor's scope.
+        filings = {
+            ticker: [
+                filing
+                for filing in ticker_filings
+                if (
+                    filing.ticker.upper(),
+                    filing.accession_number,
+                )
+                in document_scope
+            ]
+            for ticker, ticker_filings in filings.items()
+        }
     return (
         selected_tickers,
         unresolved,
@@ -508,6 +566,9 @@ def audit_cache_completeness(
     max_documents_per_filing: int = 16,
     force: bool = False,
     all_metrics: bool = False,
+    document_scope: DocumentScope | None = None,
+    direct_filings: DirectFilings | None = None,
+    direct_documents: DirectDocuments | None = None,
 ) -> PlanSummary:
     (
         selected_tickers,
@@ -525,43 +586,51 @@ def audit_cache_completeness(
         max_filings_per_ticker=max_filings_per_ticker,
         force=force,
         all_metrics=all_metrics,
+        document_scope=document_scope,
+        direct_filings=direct_filings,
     )
     available_accessions = 0
     available_documents = 0
     missing_cache_details: list[dict[str, str]] = []
     for ticker in sorted(unresolved):
         for filing in filings.get(ticker, []):
-            directory = accession_directory(cache_dir, filing)
-            names = (
-                relevant_document_names(
-                    directory,
-                    filing=filing,
-                    keywords=registry.document_keywords,
-                )
-                if directory.is_dir()
-                else ()
+            expected_documents = (
+                document_scope.get((filing.ticker.upper(), filing.accession_number))
+                if document_scope is not None
+                else None
             )
-            if max_documents_per_filing > 0:
-                names = names[:max_documents_per_filing]
-            if not names:
+            documents = _source_documents(
+                conn,
+                cache_dir=cache_dir,
+                filing=filing,
+                keywords=registry.document_keywords,
+                max_documents=max_documents_per_filing,
+                required_documents=expected_documents,
+                direct_documents=direct_documents,
+            )
+            documents, scope_error = _apply_document_scope(
+                filing=filing,
+                documents=documents,
+                document_scope=document_scope,
+            )
+            if not documents:
                 missing_cache_details.append(
                     {
                         "ticker": filing.ticker,
                         "accession_number": filing.accession_number,
                         "form_type": filing.form_type,
                         "filing_date": filing.filing_date,
+                        "reason": scope_error or "no_cached_source_document",
                     }
                 )
                 continue
             available_accessions += 1
-            available_documents += len(names)
+            available_documents += len(documents)
     return PlanSummary(
         asof_date=asof_date,
         model_family=registry.model_family,
         requested_tickers=len(selected_tickers),
-        unresolved_metric_pairs=sum(
-            len(metrics) for metrics in unresolved.values()
-        ),
+        unresolved_metric_pairs=sum(len(metrics) for metrics in unresolved.values()),
         database_satisfied_pairs=database_satisfied,
         scheduled_accessions=available_accessions,
         scheduled_documents=available_documents,
@@ -593,17 +662,16 @@ def build_plan(
     max_pdf_pages: int = 250,
     max_pdf_bytes: int = 25_000_000,
     pdf_extraction_timeout_seconds: float = 30.0,
+    document_scope: DocumentScope | None = None,
+    direct_filings: DirectFilings | None = None,
+    direct_documents: DirectDocuments | None = None,
+    metric_scope: MetricScope | None = None,
+    catalog_documents_enabled: bool = True,
 ) -> tuple[list[WorkItem], PlanSummary]:
     review_policy_path = (
-        Path(registry.review_policy_path).expanduser().resolve()
-        if registry.review_policy_path
-        else None
+        Path(registry.review_policy_path).expanduser().resolve() if registry.review_policy_path else None
     )
-    review_policy_sha256 = (
-        file_sha256(review_policy_path)
-        if review_policy_path is not None
-        else ""
-    )
+    review_policy_sha256 = file_sha256(review_policy_path) if review_policy_path is not None else ""
     (
         selected_tickers,
         unresolved,
@@ -620,6 +688,8 @@ def build_plan(
         max_filings_per_ticker=max_filings_per_ticker,
         force=force,
         all_metrics=all_metrics,
+        document_scope=document_scope,
+        direct_filings=direct_filings,
     )
     completed = (
         completed_work_keys(
@@ -638,12 +708,24 @@ def build_plan(
     scheduled_documents = 0
     for ticker in sorted(unresolved):
         for filing in filings.get(ticker, []):
-            documents = build_document_refs(
+            expected_documents = (
+                document_scope.get((filing.ticker.upper(), filing.accession_number))
+                if document_scope is not None
+                else None
+            )
+            documents = _source_documents(
                 conn,
                 cache_dir=cache_dir,
                 filing=filing,
                 keywords=registry.document_keywords,
                 max_documents=max_documents_per_filing,
+                required_documents=expected_documents,
+                direct_documents=direct_documents,
+            )
+            documents, scope_error = _apply_document_scope(
+                filing=filing,
+                documents=documents,
+                document_scope=document_scope,
             )
             if not documents:
                 missing_cache += 1
@@ -653,10 +735,38 @@ def build_plan(
                         "accession_number": filing.accession_number,
                         "form_type": filing.form_type,
                         "filing_date": filing.filing_date,
+                        "reason": scope_error or "no_cached_source_document",
                     }
                 )
                 continue
-            catalog_documents(conn, filing=filing, documents=documents)
+            if catalog_documents_enabled:
+                catalog_documents(
+                    conn,
+                    filing=filing,
+                    documents=documents,
+                )
+            key = (filing.ticker.upper(), filing.accession_number)
+            scoped_metric_names = unresolved[ticker]
+            if metric_scope is not None:
+                requested_scope = metric_scope.get(key)
+                if requested_scope is None:
+                    raise ValueError(
+                        "Direct source manifest has no requested metric "
+                        f"scope for {filing.ticker}/{filing.accession_number}"
+                    )
+                registry_metric_names = {request.metric_name for request in registry.parser_metrics}
+                unknown_metrics = sorted(set(requested_scope) - registry_metric_names)
+                if unknown_metrics:
+                    raise ValueError(
+                        f"Source manifest requested metrics absent from adapter registry: {unknown_metrics}"
+                    )
+                scoped_metric_names = set(scoped_metric_names) & set(requested_scope)
+                if not scoped_metric_names:
+                    raise ValueError(
+                        "Source manifest has no applicable requested "
+                        f"metrics for {filing.ticker}/"
+                        f"{filing.accession_number}"
+                    )
             item = WorkItem(
                 model_family=registry.model_family,
                 adapter_path=adapter_path,
@@ -664,24 +774,16 @@ def build_plan(
                 filing=filing,
                 documents=documents,
                 requested_metrics=tuple(
-                    request
-                    for request in registry.parser_metrics
-                    if request.metric_name in unresolved[ticker]
+                    request for request in registry.parser_metrics if request.metric_name in scoped_metric_names
                 ),
-                review_policy_path=(
-                    str(review_policy_path)
-                    if review_policy_path is not None
-                    else ""
-                ),
+                review_policy_path=(str(review_policy_path) if review_policy_path is not None else ""),
                 review_policy_sha256=review_policy_sha256,
                 enable_arelle=enable_arelle,
                 enable_edgartools=enable_edgartools,
                 enable_pdf_ocr=enable_pdf_ocr,
                 max_pdf_pages=max_pdf_pages,
                 max_pdf_bytes=max_pdf_bytes,
-                pdf_extraction_timeout_seconds=(
-                    pdf_extraction_timeout_seconds
-                ),
+                pdf_extraction_timeout_seconds=(pdf_extraction_timeout_seconds),
             )
             if item.work_key in completed:
                 skipped_completed += 1

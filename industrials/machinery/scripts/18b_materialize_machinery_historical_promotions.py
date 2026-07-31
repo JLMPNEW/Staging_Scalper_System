@@ -527,6 +527,13 @@ def main(argv: list[str] | None = None) -> int:
                                 5_000_000,
                             )
                         ),
+                        negative_profit_valuation_score_cap=float(
+                            cfg_get(
+                                config,
+                                "machinery_scoring.negative_profit_valuation_score_cap",
+                                25.0,
+                            )
+                        ),
                     )
                 rank_rows = finalize_rank_rows(
                     feature_rows,

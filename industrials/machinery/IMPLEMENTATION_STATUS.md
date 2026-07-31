@@ -1,6 +1,16 @@
 # Machinery Implementation Status
 
-Status date: 2026-07-25
+## Conditional v1.4 Replacement
+
+The original v1.4 lockbox result is preserved as
+`BLOCKED_KEEP_ACTIVE_MODEL`: its 63-day turnover average included 100% initial
+funding and exceeded the frozen 75% gate. The separately approved v1.4.1
+operational amendment excludes formation from recurring-turnover averages but
+continues charging all initial-funding transaction costs. It passed all gates
+and exact production parity across five dates. The amended fixed model was
+activated effective 2026-07-24 with no change to the 5% machinery cap.
+
+Status date: 2026-07-30
 
 This document is the authoritative implementation sequence and acceptance
 checklist for the machinery model family. `README.md` remains the operating
@@ -72,10 +82,49 @@ The full coverage table, per-ticker missingness, parser comparison, historical
 result, and remaining gates are recorded in
 `ALL_METRICS_REVIEW_2026-07-24.md`.
 
-Stage 8 calibration and Stage 9 portfolio validation are sealed and pass.
-Stage 12 is active as of 2026-07-24. The production contract separates 99
-broad OOS-valid names from the validated top-quintile sleeve and maps exactly
-20 selected candidates to 20 investable portfolio-adapter rows.
+The legacy Stage 8 calibration and Stage 9 portfolio validation remain sealed.
+Stage 12 is active as of 2026-07-24 under the v1.4.1 amendment. The production
+contract separates 83 operating-only production-universe names from 99
+OOS-valid research names and maps exactly 17 selected candidates to 17
+investable portfolio-adapter rows.
+
+Replacement cycle `machinery_oos_v1.2.0` supersedes the rejected
+`machinery_oos_v1.1.0` evidence and is not approved for production. Its 366
+weekly development snapshots from 2019-01-02 through 2025-12-31 contain
+41,464 rows and 154 columns. There are 27,235 core-model-eligible rows and
+27,232 next-session-executable rows. The calibration target is now the same
+D+1 adjusted-open execution excess return used by Stage 9; cohorts are formed
+before outcome availability is known, reviewed terminal membership exits use
+the final available adjusted close, and turnover/costs use exact portfolio
+weight changes. Return reconciliation reports 100% execution-outcome coverage
+and zero unresolved terminal outcomes in the development splits.
+
+The source-sealed 96-trial `v1.2.0` calibration and seven-block walk-forward
+completed without lockbox access and remains preserved as rejected evidence.
+Its static split diagnosis was corrected by `machinery_oos_v1.3.0`: all gate,
+quantile, attribution, and regime artifacts now use one canonical operating-
+company population; top-sleeve net excess is the blocking long-only product
+objective; top-minus-bottom spread is diagnostic-only; and the burned static
+splits are diagnostic rather than acceptance gates.
+
+The definitive `v1.3.0` run evaluated exactly six pre-registered candidates
+and records 528 prior same-panel searches. All artifacts pass validation and
+the 2026 lockbox remains unopened. The selected `equal_components` candidate
+has all-development net top-sleeve excess of 0.49% at 21 days and 1.01% at 63
+days, but its one-sided 90% HAC lower bound at 63 days is -0.039%. The fixed
+candidate passes 6/7 outer folds, while the nested selection procedure fails
+fold consistency and has a negative improvement lower bound. Stage 8 is
+therefore correctly `BLOCKED`; Stage 9 and replacement activation were not
+run. The 2026-07-24 model remains the last sealed production model.
+
+`machinery_oos_v1.4.0` is now frozen as a one-spec confirmation protocol.
+`equal_components` is the only candidate, optimization is disabled, and the
+protocol records that the candidate was selected from v1.3 rather than from
+independent evidence. The freeze validator passes against all sealed v1.3
+hashes. A defect-only audit of 41,464 panel rows, 197,888 canonical membership
+rows, 42 candidate/fold rows, and all 19 manifest-sealed files found zero
+defects and performed no tuning. The forward collector is implemented but
+cannot capture before 2026-07-30 and cannot access outcome fields.
 
 ## Stage Checklist
 
@@ -89,11 +138,11 @@ broad OOS-valid names from the validated top-quintile sleeve and maps exactly
 | 5 | SEC ownership, 13F, FINRA, IBKR, positioning | Complete | Passed current date | All three databases refresh in order; family-scoped import passes; missing feeds remain explicit. |
 | 6 | Scoring feature contract and eligibility | Production implementation complete | Passed current date | One row per PIT member; zero is distinct from missing; required portfolio and calibration fields pass validation. |
 | 7 | Scores and ranks | Complete and activated | Passed 2026-07-24 | Scores are deterministic, ranks contiguous, missing metrics reduce confidence, and the sealed production selection policy controls investment/OOS gates. |
-| 8 | Signal diagnostics, constrained calibration, walk-forward OOS | Complete | Passed 2026-07-25; Stage 9 readiness `READY` | The 2019-01-02 through 2025-12-31 development panel contains 366 weekly snapshots and 41,464 rows; the 2026 lockbox was not read; 96 constrained trials and seven expanding walk-forward blocks pass the configured IC, stability, turnover, coverage, and leakage gates. |
-| 9 | Portfolio backtest and capacity analysis | Complete | Passed 2026-07-25; Stage 12 readiness `READY` | D+1 adjusted-open, non-overlapping, net-of-cost replays pass return, drawdown, turnover, concentration, cohort breadth, ADV coverage, and 5x deployed-AUM capacity gates. The production policy exactly matches all 26 validation/holdout period memberships and weights. |
+| 8 | Signal diagnostics, constrained calibration, walk-forward OOS | `v1.3.0` implementation complete | Artifacts pass; Stage 9 readiness `BLOCKED` | The product-aligned panel contains 366 weekly snapshots and 41,464 rows, evaluates six pre-registered specifications, records all prior same-panel searches, uses canonical sleeve populations, and never reads the 2026 lockbox. The selected fixed candidate is promising but fails the 63-day uncertainty gate and the nested selector fails fold consistency. |
+| 9 | Portfolio backtest and capacity analysis | Implementation complete; replacement not run | Legacy production evidence passed; `v1.3.0` blocked upstream | The legacy active policy retains its sealed evidence. A replacement run is prohibited until strict Stage 8 readiness passes; stale Stage 9 evidence cannot be reused because calibration source and manifests are hash-sealed. |
 | 10 | Dashboard and portfolio-layer handoff | Production contract active; shadow sidecar retained | Passed current 2026-07-24 and all 1,900 dated files | Production rank file and shadow calibration sidecar pass their contracts; all financial values, provenance, USD fields, and availability statuses required for calibration are present. |
 | 11 | PIT history from 2019-01-02 | Complete | Passed 1,900/1,900 dates after 689/689 targeted promoted-fact materializations | Every scheduled date publishes an immutable survivorship-corrected file and manifest; each file passes the portfolio adapter; combined active/delisted coverage passes using the finalized promoted source facts. |
-| 12 | Governance lock and production promotion | Complete and active | `ACTIVE` as of 2026-07-24 | The sealed dashboard passes 113 rows/99 broad eligible/20 selected/20 adapter-investable. The bounded strategic smoke passed exact membership, equal weights, the 5% cap, required downstream groups, and the final-book manifest. The persistent daily state is hash-sealed and fails closed on source or evidence changes. |
+| 12 | Governance lock and production promotion | Complete and active | `ACTIVE` as of 2026-07-24 | The sealed dashboard passes 113 rows/83 operating-only eligible/99 research-eligible/17 selected/17 adapter-investable. The bounded strategic smoke passed exact membership, equal weights, the 5% cap, required downstream groups, and the final-book manifest. Rank, sidecar, and manifest publication is atomic and the persistent daily state fails closed on source or evidence changes. |
 
 ## Machinery Financial Metrics
 
@@ -125,16 +174,18 @@ pass the coverage audit before Stage 8:
 | Cash-conversion-cycle change | Current CCC minus prior comparable CCC | Derived | All three CCC operands must pass period-alignment checks. |
 | Net leverage | Net debt divided by EBITDA or approved operating-profit proxy | Standard statements plus derived EBITDA | Never silently substitute operating income for EBITDA; label proxy use. |
 | Interest coverage | EBIT or EBITDA divided by interest expense | Standard statements | Sign normalization and near-zero denominator policy required. |
-| Capital-raise dependence | Gross TTM equity and debt issuance proceeds divided by TTM cash burn | Explicit cash-flow-statement issuance facts | Require both issuance components for scoring; preserve a one-component lower bound only as a flagged diagnostic; do not infer absent proceeds as zero; undefined for non-burning firms. |
+| Capital-raise dependence | Gross TTM equity and debt issuance proceeds divided by TTM cash burn | Explicit cash-flow-statement issuance facts | A one-component amount is a conservative lower bound: it may impose an adverse score when already high, but it may never earn a favorable low-dependence score. Preserve the partial-coverage flag; do not infer absent proceeds as zero; undefined for non-burning firms. |
 
 ### Development-Stage Metrics
 
 The development-stage cohort additionally requires cash burn, cash runway,
-share-count dilution, SBC/revenue, and capital-raise dependence. Capital-raise
-dependence uses only explicit equity/debt issuance proceeds and is null unless
-both component classes are available. These metrics enter only the development-stage
-risk modifier and that cohort's confidence denominator; they are not mixed into
-mature-company peer percentiles without cohort-specific calibration.
+share-count dilution, SBC/revenue, and capital-raise dependence. Partial
+capital-raise evidence is scored only when its conservative lower bound is
+already adverse; it cannot create a favorable observation. These metrics enter
+only the development-stage risk modifier and that cohort's confidence
+denominator; they are not mixed into mature-company peer percentiles without
+cohort-specific calibration. Development-stage issuers remain research and OOS
+calibration rows but are excluded from the regular core machinery sleeve.
 
 ### Research-Only Metrics
 
@@ -162,6 +213,11 @@ signals until extraction coverage and definition stability are demonstrated.
    capital is non-positive. Net debt/EBITDA remains null and carries
    `negative_ebitda_leverage_flag=1` when EBITDA is non-positive. Neither case
    receives a fabricated zero or sentinel ratio.
+9. A loss-maker with non-positive TTM gross profit or operating income cannot
+   receive a neutral valuation score because its multiples are undefined. The
+   loss observation applies an absolute valuation-score cap after cohort
+   percentile scoring; latest-period profit is used only as a labeled fallback
+   when a TTM denominator is unavailable.
 
 ## Metric Availability Contract
 
@@ -218,17 +274,21 @@ and eligible date remains `2026-04-16`.
 
 ## Correct Execution Sequence
 
-The enhanced extraction, historical reconciliation, Stage 8/9 validation,
-portfolio-policy parity, governance lock, publisher, and fail-closed
-activation transaction are complete. The continuing sequence is:
+The enhanced extraction, historical reconciliation, versioned Stage 8/9
+evidence, portfolio-policy parity, governance lock, publisher, and atomic
+active-model replacement transaction are complete. The continuing sequence is:
 
-1. Do not rerun the 2026-07-24 activation or historical snapshots. The active
-   state and completed portfolio smoke are hash-sealed.
-2. Run normal incremental machinery refreshes for later completed trading
-   dates. The scorer reconstructs the approved policy from the sealed state
-   and fails closed if activation evidence or production source code changes.
-3. Continue optional-disclosure recovery as maintenance work without changing
-   the sealed model unless a new version repeats Stages 8 and 9. `book_to_bill`
+1. Preserve the rejected `machinery_oos_v1.1.0`, `machinery_oos_v1.2.0`,
+   blocked `machinery_oos_v1.3.0`, and original blocked v1.4 lockbox evidence.
+2. Use the v1.4.1 activation state as the sole active production source. Any
+   scoring-source change requires a new governed replacement transaction.
+3. Keep the operating-only 17-name selection policy and 5% cap unchanged
+   unless a future calibration and Stage 12 approval explicitly replaces them.
+4. Run normal dated refreshes from the active state; do not rerun the spent
+   lockbox, historical panel, or calibration as part of routine operation.
+5. Do not run defense for machinery acceptance and do not pool defense
+   observations into machinery results.
+6. Continue optional-disclosure recovery as maintenance work. `book_to_bill`
    remains diagnostic-only until a later fingerprinted history preflight
    clears its depth gate.
 
@@ -240,8 +300,9 @@ activation transaction are complete. The continuing sequence is:
 - Production Stage 4 contains 113 feature rows and 3,164 classified metric
   rows. The strict audit passes all 22/22 calibration metrics. The full
   all-metrics result is `ALL_METRICS_REVIEW_2026-07-24.md`.
-- The production dashboard has 113 rows, including 99 rank-ready and
-  research-eligible rows and 20 investable rows. The retained shadow
+- The production dashboard has 113 rows, including 83 operating-only
+  production-universe rows, 99 rank-ready/research-eligible rows, and 17
+  investable rows. The retained shadow
   calibration sidecar includes every required financial value, provenance
   field, USD amount, and all 28 availability statuses.
 - Dedicated-parser full-universe run 36 completed the 4,403-accession scope
@@ -266,32 +327,53 @@ activation transaction are complete. The continuing sequence is:
   ticker-date observations. Combined coverage includes 113 active and 23
   resolved delisted tickers. Finalized promoted parser facts are materialized
   in every preflight-identified partition, so Stage 8 may begin.
-- Stage 8 passed on 366 weekly snapshots and 41,464 survivorship-corrected
-  rows. All 96 constrained trials and seven expanding walk-forward blocks are
-  hash-sealed under `output/industrials/machinery/stage8`. The selected
-  candidate passed validation and untouched holdout gates; the walk-forward
-  candidate win rate is 71.43% with positive mean objective improvement.
-- Stage 9 passed 2,000 non-overlapping portfolio periods and 56,494
-  holdings/trade rows under `output/industrials/machinery/stage9`. Strategy
-  choice used validation data only and selected `long_only_q20_equal`.
-  Holdout D+1 adjusted-open annualized return was 14.95% versus 11.11% for
-  XLI, with 3.84 percentage points annualized excess, -23.73% maximum
-  drawdown, 36.05% average one-way turnover, 100% ADV coverage, and $5.52M
-  10th-percentile capacity versus $300K configured AUM.
-- Both strict Stage 8/9 validators report zero issues. Those calibration and
-  backtest stages remained report-only and accessed no 2026 lockbox outcome;
-  the later approved Stage 12 transaction performed production activation.
-- Stage 9 production-policy parity passes all 26 validation and holdout
-  periods with exact membership and weight reconstruction.
-- Stage 12 passed with 113 production rows, 99 broad OOS-valid rows, and exact
-  20 selected/20 adapter-investable reconciliation. The optimizer retained all
-  20 selected names at equal 0.20817883% portfolio weights, totaling 4.1635766%
-  under the 5% machinery cap.
-- Script 25 completed the 2026-07-24 activation using hash-validated portfolio
-  prefix evidence and a bounded ledger-through-final smoke. The final manifest
-  passed, the persistent daily-policy state is `ACTIVE`, and no historical or
-  macro rebuild was needed. The dashboard/sidecar contract reseal also passed
-  independently with 76 required calibration financial fields.
+- The corrected replacement Stage 8 run is hash-sealed under
+  `output/industrials/machinery/model_cycles/machinery_oos_v1.2.0/stage8`.
+  Its 366 weekly snapshots, 41,464 survivorship-corrected rows, 96 constrained
+  trials, and seven expanding walk-forward blocks pass artifact, leakage,
+  source-seal, and outcome-reconciliation validation. The run read no 2026
+  lockbox outcome and modified no production artifact.
+- Replacement Stage 8 readiness is `BLOCKED`. The candidate validation
+  objective is 0.010826 below the configured baseline, and both models fail
+  one or more untouched holdout gates. The candidate's 21-day and 63-day net
+  spreads are -0.59% and -4.96%; Stage 9 was not run.
+- Product-aligned replacement `machinery_oos_v1.3.0` is hash-sealed under
+  `output/industrials/machinery/model_cycles/machinery_oos_v1.3.0/stage8`.
+  The run contains 41,464 panel rows, 197,888 canonical sleeve-membership
+  rows, 42 fixed-candidate/fold comparisons, 60 regime diagnostics, and six
+  pre-registered trials across seven outer blocks. Its artifact validator
+  reports no issues and confirms no lockbox access.
+- `equal_components` is the selected fixed candidate. Its development net
+  top-sleeve excess is 0.490%/1.006% at 21/63 days; the corresponding 90% HAC
+  lower bounds are 0.112%/-0.039%. It passes 6/7 fixed-candidate folds, but the
+  nested selector passes only 4/7 and its improvement lower bound is -0.144.
+  Stage 9 readiness remains `BLOCKED`. Because `equal_components` and
+  `orders_capex` pass the fixed fold protocol, strategic exit is not yet
+  recommended.
+- The v1.4 fixed-spec definition and freeze validation pass. The v1.3
+  defect-only audit found zero defects, accessed no outcome in the 2026
+  lockbox, and changed no model or gate. The signal-only collector is armed
+  for dates on or after 2026-07-30 and refuses pre-freeze dates.
+- The read-only defense compatibility assessment preserved identical panel
+  and manifest hashes. Direct replication is blocked by the missing
+  capex-cycle pillar, semantic cycle/backlog mappings, absent 21-day horizon,
+  adjusted-close rather than D+1-open labels, and no matching cost contract.
+  The result is not eligible for machinery acceptance.
+- The legacy Stage 8/9 and production-policy-parity evidence used for the
+  2026-07-24 activation remains preserved. It is not evidence that replacement
+  `v1.2.0` is ready, and its manifests cannot be reused for the replacement.
+- Stage 12 passed with 113 production rows, 83 operating-only eligible rows,
+  99 OOS-valid research rows, and exact 17 selected/17 adapter-investable
+  reconciliation. The optimizer retained all 17 selected names at equal
+  0.26054474% portfolio weights, totaling 4.42926058% under the 5% machinery
+  cap.
+- Script 25 completed the correctly versioned 2026-07-24 activation with a
+  full 14-group strategic portfolio smoke. Sealed risk-price data were reused,
+  but every portfolio group reran so the v1.4.1 model identifiers propagated
+  through all downstream artifacts. The final manifest and persistent `ACTIVE`
+  state passed; no machinery historical or calibration rebuild was needed.
+  Independent dashboard and portfolio-adapter validators pass with all 76
+  required calibration financial fields.
 - `GTLS` ends on 2026-07-16 and is absent from later active partitions. It is
   retained as historical/delisted with successor `BKR`.
 - SQLite `PRAGMA quick_check` returned `ok`; the database contains 113

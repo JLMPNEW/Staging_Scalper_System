@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -25,6 +27,7 @@ from industrials.defense.research_artifacts import select_weekly_snapshot_dates 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 MODEL_FAMILY = "defense"
+DEFAULT_SCORE_MODEL_VERSION = "defense_shadow_v0.1.0"
 FIELDNAMES = [
     "asof_date",
     "active_tickers",
@@ -37,6 +40,10 @@ FIELDNAMES = [
     "weekly_selection",
     "policy_asof_date",
     "membership_mode",
+    "scoring_mode",
+    "score_model_version",
+    "research_candidate",
+    "evaluation_calendar",
     "snapshot_root",
     "snapshot_status",
     "message",
@@ -98,6 +105,15 @@ def parse_args() -> argparse.Namespace:
         "--allow-overwrite",
         action="store_true",
         help="Rebuild existing dated snapshots. Intended for research roots after upstream data fixes.",
+    )
+    parser.add_argument("--scoring-mode", choices=["baseline", "specialized_v1"], default="baseline")
+    parser.add_argument("--score-model-version", default="")
+    parser.add_argument("--research-candidate", action="store_true")
+    parser.add_argument(
+        "--evaluation-calendar",
+        type=Path,
+        default=None,
+        help="Frozen one-column asof_date CSV. Every listed date must be publishable and is used exactly once.",
     )
     parser.add_argument(
         "--skip-existing",
@@ -263,6 +279,7 @@ def load_pit_candidates(
     config: dict[str, Any],
     start_date: date | None,
     end_date: date | None,
+    requested_dates: list[str] | None = None,
 ) -> list[SnapshotCandidate]:
     market_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
     market_sources = source_priority_list(
@@ -271,27 +288,31 @@ def load_pit_candidates(
     )
     financial_source = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     positioning_source = str(cfg_get(config, "positioning_import.source_id", "industrials_positioning_composite"))
-    dates = sorted(
-        feature_dates(
-            conn,
-            table="feature_market_technical",
-            source_ids=market_sources,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        | feature_dates(
-            conn,
-            table="feature_financial_statement",
-            source_ids=[financial_source],
-            start_date=start_date,
-            end_date=end_date,
-        )
-        | feature_dates(
-            conn,
-            table="feature_positioning",
-            source_ids=[positioning_source],
-            start_date=start_date,
-            end_date=end_date,
+    dates = (
+        list(requested_dates)
+        if requested_dates is not None
+        else sorted(
+            feature_dates(
+                conn,
+                table="feature_market_technical",
+                source_ids=market_sources,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            | feature_dates(
+                conn,
+                table="feature_financial_statement",
+                source_ids=[financial_source],
+                start_date=start_date,
+                end_date=end_date,
+            )
+            | feature_dates(
+                conn,
+                table="feature_positioning",
+                source_ids=[positioning_source],
+                start_date=start_date,
+                end_date=end_date,
+            )
         )
     )
     return [
@@ -328,9 +349,16 @@ def load_candidates(
     start_date: date | None,
     end_date: date | None,
     membership_mode: str,
+    requested_dates: list[str] | None = None,
 ) -> list[SnapshotCandidate]:
     if membership_mode == "pit":
-        return load_pit_candidates(conn, config=config, start_date=start_date, end_date=end_date)
+        return load_pit_candidates(
+            conn,
+            config=config,
+            start_date=start_date,
+            end_date=end_date,
+            requested_dates=requested_dates,
+        )
     market_source = str(cfg_get(config, "market_feature_build.source_id", "yahoo_finance_adjusted"))
     market_sources = source_priority_list(
         market_source,
@@ -360,7 +388,7 @@ def load_candidates(
         start_date=start_date,
         end_date=end_date,
     )
-    dates = sorted(set(market) | set(financial) | set(positioning))
+    dates = list(requested_dates) if requested_dates is not None else sorted(set(market) | set(financial) | set(positioning))
     return [
         SnapshotCandidate(
             asof_date=asof,
@@ -373,7 +401,15 @@ def load_candidates(
     ]
 
 
-def manifest_valid(snapshot_dir: Path, asof: str, *, membership_mode: str) -> bool:
+def manifest_valid(
+    snapshot_dir: Path,
+    asof: str,
+    *,
+    membership_mode: str,
+    scoring_mode: str,
+    score_model_version: str,
+    research_candidate: bool,
+) -> bool:
     csv_path = snapshot_dir / "defense_final_rank_table.csv"
     manifest_path = snapshot_dir / "defense_final_rank_table_manifest.json"
     if not csv_path.exists() or not manifest_path.exists():
@@ -383,6 +419,12 @@ def manifest_valid(snapshot_dir: Path, asof: str, *, membership_mode: str) -> bo
     except ValueError:
         return False
     if str(manifest.get("membership_mode") or "current") != membership_mode:
+        return False
+    if str(manifest.get("scoring_mode") or "baseline") != scoring_mode:
+        return False
+    if str(manifest.get("score_model_version") or "") != score_model_version:
+        return False
+    if bool(manifest.get("research_candidate", False)) is not research_candidate:
         return False
     validator = PROJECT_ROOT / "industrials" / "defense" / "scripts" / "18_validate_defense_shadow_rank_table.py"
     completed = subprocess.run(
@@ -404,6 +446,9 @@ def run_step(
     membership_mode: str = "",
     rank_table: Path | None = None,
     allow_overwrite: bool = False,
+    scoring_mode: str = "",
+    score_model_version: str = "",
+    research_candidate: bool = False,
 ) -> None:
     command = [sys.executable, script, "--asof", asof]
     if policy_asof:
@@ -416,6 +461,12 @@ def run_step(
         command.extend(["--rank-table", str(rank_table)])
     if allow_overwrite:
         command.append("--allow-overwrite")
+    if scoring_mode:
+        command.extend(["--scoring-mode", scoring_mode])
+    if score_model_version:
+        command.extend(["--score-model-version", score_model_version])
+    if research_candidate:
+        command.append("--research-candidate")
     subprocess.run(
         command,
         cwd=str(PROJECT_ROOT),
@@ -441,11 +492,31 @@ def filter_weekly_candidates(
     return [candidate for candidate in candidates if candidate.asof_date in selected]
 
 
+def read_evaluation_calendar(path: Path) -> list[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Evaluation calendar does not exist: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    dates = [str(row.get("asof_date") or "").strip() for row in rows]
+    if not dates or any(not value for value in dates):
+        raise ValueError(f"Evaluation calendar must contain nonblank asof_date rows: {path}")
+    parsed = [parse_date(value) for value in dates]
+    normalized = [value.isoformat() for value in parsed if value is not None]
+    if len(normalized) != len(dates) or normalized != sorted(set(normalized)):
+        raise ValueError(f"Evaluation calendar dates must be valid, unique, and ascending: {path}")
+    return normalized
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
     if not 0.0 < args.coverage_threshold <= 1.0:
         raise ValueError("--coverage-threshold must be > 0 and <= 1")
+    if args.research_candidate and not args.score_model_version.strip():
+        raise ValueError("--research-candidate requires --score-model-version")
+    if args.scoring_mode != "baseline" and not args.research_candidate:
+        raise ValueError("Non-baseline scoring modes require --research-candidate")
+    score_model_version = str(args.score_model_version or DEFAULT_SCORE_MODEL_VERSION).strip()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
@@ -473,8 +544,14 @@ def main() -> int:
     end_date = parse_date(args.end_date)
     if start_date and end_date and start_date > end_date:
         raise ValueError("--start-date cannot be after --end-date")
+    evaluation_calendar = (
+        args.evaluation_calendar.expanduser().resolve()
+        if args.evaluation_calendar
+        else None
+    )
+    requested_dates = read_evaluation_calendar(evaluation_calendar) if evaluation_calendar else None
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         candidates = load_candidates(
             conn,
@@ -482,10 +559,21 @@ def main() -> int:
             start_date=start_date,
             end_date=end_date,
             membership_mode=args.membership_mode,
+            requested_dates=requested_dates,
         )
 
     publishable = [candidate for candidate in candidates if candidate.is_publishable(args.coverage_threshold)]
-    if args.cadence == "weekly":
+    if evaluation_calendar is not None:
+        assert requested_dates is not None
+        by_date = {candidate.asof_date: candidate for candidate in publishable}
+        missing_dates = [asof for asof in requested_dates if asof not in by_date]
+        if missing_dates:
+            raise ValueError(
+                "Frozen evaluation calendar contains dates without complete PIT feature coverage: "
+                f"{missing_dates[:20]}"
+            )
+        publishable = [by_date[asof] for asof in requested_dates]
+    elif args.cadence == "weekly":
         publishable = filter_weekly_candidates(
             publishable,
             weekly_start_date=args.weekly_start_date,
@@ -499,6 +587,9 @@ def main() -> int:
                 snapshot_root / candidate.asof_date,
                 candidate.asof_date,
                 membership_mode=args.membership_mode,
+                scoring_mode=args.scoring_mode,
+                score_model_version=score_model_version,
+                research_candidate=bool(args.research_candidate),
             )
         ]
     if args.max_dates > 0:
@@ -523,6 +614,10 @@ def main() -> int:
                     "weekly_selection": args.weekly_selection,
                     "policy_asof_date": args.policy_asof,
                     "membership_mode": args.membership_mode,
+                    "scoring_mode": args.scoring_mode,
+                    "score_model_version": score_model_version,
+                    "research_candidate": int(bool(args.research_candidate)),
+                    "evaluation_calendar": str(evaluation_calendar or ""),
                     "snapshot_root": str(snapshot_root),
                     "snapshot_status": "no_publishable_dates",
                     "message": "No dates have enough loaded Stage 3/4/5 feature coverage.",
@@ -537,7 +632,14 @@ def main() -> int:
     for candidate in publishable:
         snapshot_dir = snapshot_root / candidate.asof_date
         rank_table = snapshot_dir / "defense_final_rank_table.csv"
-        if not args.allow_overwrite and manifest_valid(snapshot_dir, candidate.asof_date, membership_mode=args.membership_mode):
+        if not args.allow_overwrite and manifest_valid(
+            snapshot_dir,
+            candidate.asof_date,
+            membership_mode=args.membership_mode,
+            scoring_mode=args.scoring_mode,
+            score_model_version=score_model_version,
+            research_candidate=bool(args.research_candidate),
+        ):
             status = "valid_existing"
             message = "Existing immutable snapshot passed validation."
         elif args.dry_run:
@@ -551,6 +653,9 @@ def main() -> int:
                 output_dir=snapshot_dir,
                 membership_mode=args.membership_mode,
                 allow_overwrite=bool(args.allow_overwrite),
+                scoring_mode=args.scoring_mode,
+                score_model_version=score_model_version,
+                research_candidate=bool(args.research_candidate),
             )
             run_step(validator, candidate.asof_date, rank_table=rank_table)
             status = "published"
@@ -568,6 +673,10 @@ def main() -> int:
                 "weekly_selection": args.weekly_selection,
                 "policy_asof_date": args.policy_asof,
                 "membership_mode": args.membership_mode,
+                "scoring_mode": args.scoring_mode,
+                "score_model_version": score_model_version,
+                "research_candidate": int(bool(args.research_candidate)),
+                "evaluation_calendar": str(evaluation_calendar or ""),
                 "snapshot_root": str(snapshot_root),
                 "snapshot_status": status,
                 "message": message,

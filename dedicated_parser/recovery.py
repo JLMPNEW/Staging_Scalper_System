@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import sqlite3
 from collections import Counter
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from dedicated_parser.contracts import AdapterRegistry
 from dedicated_parser.storage import utc_now
@@ -16,6 +17,18 @@ from dedicated_parser.storage import utc_now
 STRUCTURAL_STATUSES = frozenset({"EXEMPT", "NOT_APPLICABLE"})
 COVERED_STATUSES = frozenset({"PROXY", "REPORTED"})
 REVIEW_STATUSES = frozenset({"REVIEW_REQUIRED"})
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        number = float(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -461,13 +474,19 @@ def build_recovery_assessments(
                     accepted_by_observation[observation_key] = row
             accepted = list(accepted_by_observation.values())
             baseline_value = baseline_row.get("metric_value")
-            if baseline_status in COVERED_STATUSES and baseline_value is not None:
+            baseline_numeric = _finite_float_or_none(baseline_value)
+            if (
+                baseline_status in COVERED_STATUSES
+                and baseline_numeric is not None
+            ):
                 matching_baseline_rows = [
                     row
                     for row in accepted
                     if row["candidate_value"] is not None
-                    and abs(float(row["candidate_value"]) - float(baseline_value))
-                    <= max(1.0, abs(float(baseline_value)) * 1e-9)
+                    and abs(
+                        float(row["candidate_value"]) - baseline_numeric
+                    )
+                    <= max(1.0, abs(baseline_numeric) * 1e-9)
                     and str(row["period_end"] or "")
                     # PIT guard (matches accepted_periods below): a post-asof
                     # period must never become the anchor, or forward RPO
@@ -514,14 +533,16 @@ def build_recovery_assessments(
                 str(row["candidate_status"]).startswith(("REJECTED", "SUPPRESSED")) for row in metric_evidence
             )
             baseline_rejected_match = bool(
-                baseline_value is not None
+                baseline_numeric is not None
                 and any(
                     str(row["candidate_status"]).startswith(("REJECTED", "SUPPRESSED"))
                     and row["candidate_value"] is not None
-                    and abs(float(row["candidate_value"]) - float(baseline_value))
+                    and abs(
+                        float(row["candidate_value"]) - baseline_numeric
+                    )
                     <= max(
                         1.0,
-                        abs(float(baseline_value)) * 0.005,
+                        abs(baseline_numeric) * 0.005,
                     )
                     for row in metric_evidence
                 )

@@ -274,6 +274,35 @@ def parse_ticker_list(raw: object) -> list[str]:
     return out
 
 
+def resolve_benchmark_mapping(
+    config: dict[str, Any],
+    *,
+    benchmark_override: object,
+    primary_override: object,
+) -> tuple[list[str], str, list[str]]:
+    explicit = parse_ticker_list(benchmark_override)
+    benchmarks = explicit or parse_ticker_list(
+        cfg_get(config, "industrials_universe.benchmark_tickers", [])
+    )
+    primary = normalize_ticker(
+        primary_override
+        or cfg_get(config, "industrials_universe.benchmark_ticker", "XAR")
+        or "XAR"
+    )
+    if primary and primary not in benchmarks:
+        benchmarks.insert(0, primary)
+    secondary = (
+        [ticker for ticker in benchmarks if ticker != primary]
+        if explicit
+        else parse_ticker_list(
+            cfg_get(config, "market_feature_build.secondary_benchmarks", [])
+        )
+    )
+    if not secondary:
+        secondary = [ticker for ticker in benchmarks if ticker != primary]
+    return benchmarks, primary, secondary
+
+
 def parse_source_list(raw: object) -> list[str]:
     values = raw if isinstance(raw, list) else str(raw or "").split(",")
     out: list[str] = []
@@ -666,13 +695,13 @@ def main() -> None:
         or 0
     )
     min_source_bars = int(cfg_get(config, "market_data_policy.min_source_bars_for_selection", 20))
-    benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(cfg_get(config, "industrials_universe.benchmark_tickers", []))
-    primary_benchmark = normalize_ticker(args.primary_benchmark or cfg_get(config, "industrials_universe.benchmark_ticker", "XAR") or "XAR")
-    if primary_benchmark and primary_benchmark not in benchmark_tickers:
-        benchmark_tickers.insert(0, primary_benchmark)
-    secondary_benchmarks = parse_ticker_list(cfg_get(config, "market_feature_build.secondary_benchmarks", []))
-    if not secondary_benchmarks:
-        secondary_benchmarks = [ticker for ticker in benchmark_tickers if ticker != primary_benchmark]
+    benchmark_tickers, primary_benchmark, secondary_benchmarks = (
+        resolve_benchmark_mapping(
+            config,
+            benchmark_override=args.benchmark_tickers,
+            primary_override=args.primary_benchmark,
+        )
+    )
     if len(secondary_benchmarks) > MAX_SECONDARY_BENCHMARKS:
         raise ValueError(
             f"market_feature_build.secondary_benchmarks supports at most {MAX_SECONDARY_BENCHMARKS} entries; got {secondary_benchmarks}."

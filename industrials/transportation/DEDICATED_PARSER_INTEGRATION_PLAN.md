@@ -1,7 +1,10 @@
 # Transportation Dedicated Parser Integration Plan
 
-Status: implementation plan; no parser run, feature rebuild, recalibration, or
-production promotion is authorized by this document.
+Status: DP0-DP9 and G8 implemented. The exhaustive evidence sequence, bounded
+recovery, final 90-metric freeze, read-only historical-impact preflight,
+one-time v3 materialization, and independent panel validation are complete.
+Walk-forward calibration and production promotion remain unauthorized until
+the DP10 calibration contract is frozen.
 
 Plan baseline date: 2026-07-26
 
@@ -509,23 +512,19 @@ run after the cache and plan-only gates pass, preserving the one-pass policy.
 ### DP3 — Seal the exact source census
 
 1. Generate the base and supplemental accession manifest.
-2. Reconcile the original 3,019 periodic accessions.
+2. Reconcile the active-window and inactive-lifecycle periodic accessions.
 3. Identify duplicate CIK/accession/document hashes.
 4. Hydrate only manifest cache gaps through the existing SEC synchronizer.
 5. Repeat the read-only cache audit until every row is cached or carries an
    approved source-gap disposition.
 6. Seal the manifest hash and parser execution options.
 
-DP3 census status: `NO_GO_CACHE_GAPS`. The read-only census reconciles all
-3,019 base periodic accessions and adds a bounded 205-accession supplemental
-scope: 53 result/event filings selected from positive SEC metadata and 152
-registration, listing, relisting, or structural-break-window filings. It
-contains 3,329 selected document rows, of which 3,177 are cached and byte-hash
-verified. The exact unresolved hydration batch is 152 documents. An unbounded
-7,206-filing non-XBRL 6-K sweep is explicitly excluded because those filings
-have no positive results/release/presentation metadata signal. Parser
-execution remains unauthorized until the 152 rows are cached or receive a
-reviewed source-gap disposition and the census is resealed.
+DP3 census status: `PASS`. The census covers all 160 identities with 4,267
+base and 243 supplemental accessions. Inactive issuers use their SEC lifecycle
+from 2000-01-01 through membership end, adding 1,414 pre-2017 accessions and
+preventing the legacy/delisted cohort from being silently omitted. The final
+sealed scope contains 4,510 accessions and 7,761 cached, byte-hash-verified
+documents, with zero approved or unresolved gaps.
 
 ### DP4 — Plan-only full-universe gate
 
@@ -539,14 +538,24 @@ Run the transportation wrapper with:
 - Normalized providers enabled.
 - No network access.
 
-The plan is reviewed before any work is allocated.
+DP4 status: `PASS`. The network-disabled plan contains 160 requested
+identities, 13,440 ticker-metric requests, 4,510 work keys, 7,761 documents,
+and zero cache misses. Its source-manifest hash equals the DP3 census hash.
 
 ### DP5 — Execute one exhaustive shadow parse
 
 Run one immutable full-universe shadow census. Checkpoint and resume are
 allowed after interruption; `--force` is not.
 
-The base run is never repeated merely because:
+DP5 status: `PASS` through canonical resume-linked run 58. Run 57 performed
+the actual parse for all 4,510 work items and persisted 61,384 evidence rows
+and 13,169 normalized facts. A post-parse recovery-report conversion failed
+on a blank legacy baseline; the completed ledger was preserved. After the
+shared conversion was fixed, run 58 linked all 4,510 completed work keys and
+finalized comparison/recovery outputs without re-invoking the providers.
+Failed parser work is zero and execution authorization is false again.
+
+The base work is never repeated merely because:
 
 - A review decision changes.
 - A recovery report changes.
@@ -569,6 +578,243 @@ The base run is never repeated merely because:
    or exclude.
 
 Do not rebuild the 92-date feature panel and do not calibrate during DP6.
+
+DP6 coverage-only status: `PASS`. The generated artifacts contain 14,400
+ticker-metric rows, 90 metric summaries, 142 cohort-metric summaries, and
+1,120 supporting rows. Across 2,535 applicable final pairs, discovery coverage
+is 45.64%, usable pre-adjudication coverage is 30.02%, and accepted coverage
+is 5.09%. Direct/parser-derived findings remain review-only; the 129 currently
+accepted pairs are financial-derived from already-loaded data. No feature
+builder or calibration process was invoked. The next gate is coverage review
+and reduction of the extended discovery metric list.
+
+#### DP6A — Bounded coverage-lift targeting
+
+DP6A measures active-issuer breadth using the frozen acceptance rules: the
+broad gate is the greater of five active issuers or 30% of active applicable
+issuers, and the exact-archetype gate is the greater of three issuers or 25%.
+The bounded source target includes any parser metric with zero active
+discovery or a usable shortfall of no more than two issuers.
+
+The implemented result is `PASS`: six metrics pass on accepted coverage, 39
+pass usable breadth pending adjudication, five are one issuer short, seven are
+two issuers short, 20 have zero active discovery, and 13 are below the bounded
+threshold. The 1,028-pair review queue always places existing evidence before
+new source work. Priorities 1-3 contain 932 pairs; the compact DP6B artifact
+contains 4,157 evidence previews and zero missing-evidence pairs. Derived
+metrics are reviewed through their underlying parser operands rather than
+being incorrectly labeled as evidence-free.
+
+The same step examines only cached index metadata for excluded 8-K, 6-K, and
+registration filings. Of 513 eligible cached indexes, 83 FTAI 8-K/8-K-A
+filings are retained as material-event review candidates, producing 498
+metric/filing rows. No metric-alias match, cached 6-K candidate, or cached
+registration candidate was found. These records are a bounded review set,
+not parsing authorization.
+
+DP6A and DP6B must retain all of the following zero side-effect counters:
+
+- Network, provider, and parser invocations: zero.
+- Shared database writes: zero.
+- Feature builds and calibration invocations: zero.
+- Hydration and parser authorization on every source candidate: false.
+
+The next gate is manual review of the compact evidence artifact and the 83
+source-candidate filings. Accepted/rejected decisions then enter policy-only
+replay. New document hydration is permitted only for an explicitly approved
+delta list after existing evidence has been exhausted.
+
+#### DP6C — Conservative priority-1/2 adjudication
+
+The first review batch contains exactly 551 priority-1 and 59 priority-2
+ticker/metric pairs. Positive decisions require an exact match to an already
+accepted transportation disclosure for ticker, accession, source document,
+period, unit, and value. The only reviewed legacy semantic mappings are
+asset-utilization to equipment-utilization, airline load-factor to passenger
+load-factor, and marine TCE/day-rate to TCE day rate. All other ambiguous
+evidence remains `DEFER`.
+
+The applied result is 42 accepted, 23 rejected, and 545 deferred pairs. The
+318-row exact policy registry contains 218 positive policies and 100 bounded
+negative golden cases, one per metric/frozen-rejection rule. This avoids the
+redundant 16,000-plus policy population that would result from locking every
+historical instance of the same already-enforced bounds/scope rule.
+
+Policy-only evaluation 1 applies all 318 policies to the immutable run-58
+evidence overlay. It evaluates 61,384 evidence rows, opens zero source
+documents, invokes zero providers and zero OCR operations, materializes no
+new observations, and leaves the run-58 scope hash unchanged. Repeating the
+same evaluation reuses evaluation 1 idempotently. The generated 418-row
+positive/prohibited golden corpus passes against the evaluated overlay.
+
+#### DP6D — Formal post-review coverage
+
+Accepted applicable coverage increases from 129 to 171 pairs. The 42-row
+increase is a status promotion from the existing review population, so it
+does not claim new source discovery. Formal metric dispositions apply the
+accepted breadth, exact-confirmation precision, median four-period/three-year
+history, and survivor-bias requirements:
+
+- `operating_ratio`: calibration candidate; all gates pass.
+- Twelve metrics: diagnostic-only because breadth or historical depth remains
+  insufficient. This group includes the six already accepted financial-derived
+  metrics.
+- Fifty-two metrics: deferred review.
+- Twenty-five metrics: excluded for insufficient accepted or usable evidence.
+
+No priority-2 near-gate pair satisfied the exact-confirmation rule. The
+near-gate population remains open for source-specific review; it must not be
+represented as accepted coverage. The next bounded action is to resolve
+deferred existing evidence by metric, then approve only the minimum delta
+source list still required to close a formal gate.
+
+#### DP6E — Exhaust the source universe before rebuilding
+
+DP6E audits SEC submissions metadata independently of the already-loaded
+`fact_sec_filing` rows. This prevents a locally complete DP3 manifest from
+being mistaken for a complete SEC disclosure universe.
+
+1. Enumerate all 160 issuer submissions files and every referenced history
+   shard that overlaps the sealed active or inactive source window.
+2. Reconcile every filing against the database registry and DP3 decision
+   manifest.
+3. Inventory periodic, event, annual-report, proxy, supplemental-investor,
+   and transaction forms. The scope includes `10-K`/`10-Q`, `20-F`/`40-F`,
+   transition and amended forms, Items 2.02/7.01, every foreign `6-K`, `ARS`,
+   annual/information/merger proxies, `FWP`, and targeted
+   registration/transaction statements.
+4. Hydrate missing submissions-history JSON first and rerun the audit.
+5. Hydrate only candidate archive `index.json` metadata with a resume-safe
+   process-wide SEC throttle.
+6. Append only missing filing metadata to `fact_sec_filing`, then rerun the
+   read-only audit so the final delta seal reflects the loaded registry. This
+   step may not update or delete an existing filing row.
+7. Rerun the audit to select exact primary documents and PDF/EX-99/metric
+   exhibits, then seal the minimum append-only delta document manifest.
+8. Build the document-level shared-parser manifest and require an offline,
+   complete-cache plan for all 84 parser-addressable metrics. Keep the six
+   financial-derived specialized metrics in the 90-metric coverage contract,
+   but do not send them through document parsing.
+9. Parse only new content hashes/work keys and union the result with run 58;
+   do not reparse the 4,510 completed DP3 work items.
+
+The completed SEC metadata audit enumerates 93,460 filings and 32,273 relevant
+source-lane filings. All 21 overlapping submissions-history shards and all
+23,097 required archive indexes are cached. The append-only filing-registry
+load inserted 17,494 missing rows with zero updates/deletes and an idempotent
+rerun leaves zero registry gaps. The final delta contains 23,410 new
+accessions and 26,241 exact cached document rows (26,219 unique content
+hashes). The shared-parser offline plan passes for all 160 identities and all
+84 parser-addressable metrics with zero missing-cache accessions. Parser
+execution remains separately unauthorized.
+
+DP6E acceptance requires:
+
+- 160 main submissions files and every overlapping history shard present and
+  valid;
+- every actionable filing classified by form, priority, database-registry
+  status, DP3 status, index status, and target metrics;
+- no feature, historical materialization, calibration, portfolio, or
+  production work;
+- a refreshed, hash-sealed delta document manifest after index hydration;
+- path, row-count, and SHA-256 verification immediately before hydration,
+  plus a final check that the source manifest did not change during the run;
+- an idempotent filing-registry load with zero updates/deletes and a repeated
+  DP6E audit before the selected-document seal is used;
+- explicit negative or non-electronic-paper dispositions only when the
+  hydrated metadata supports them. Generic `6-K` and material `8-K` filings
+  retain their primary document because SEC index filenames alone cannot
+  safely establish that specialized metrics are absent.
+
+#### Remaining exhaustive-source sequence
+
+The SEC gate is exhaustive only for the declared EDGAR filing lanes. It does
+not claim that issuer or global primary sources are complete. To avoid
+repeated parsing, feature rebuilds, and calibration:
+
+1. Execute the current hash-sealed SEC delta exactly once and union it with
+   the completed run-58 corpus.
+2. Recompute parser/metric coverage only; do not rebuild historical features,
+   calibration, ranks, or portfolio outputs.
+3. Build one residual source manifest for all still-unresolved applicable
+   ticker/metric pairs across issuer IR earnings releases, presentations,
+   supplements, non-EDGAR annual reports, operating-statistics sources,
+   local-exchange filings, and recoverable archived disclosures for delisted
+   issuers.
+4. Retrieve and parse that sealed residual non-SEC manifest once, then freeze
+   the final 90-metric dispositions.
+5. Run the comprehensive implementation, provenance, point-in-time,
+   survivorship, leakage, and regression audit. Only after it passes should
+   historical specialized features, walk-forward calibration, ranks, and the
+   portfolio adapter be rebuilt once.
+
+Fail-closed schema, artifact-hash, source-seal, cache, and zero-downstream-
+invocation audits remain mandatory at each stage. The broader systematic
+production audit is intentionally last, when the final extraction corpus and
+metric list are stable.
+
+DP6F execution result: `PASS`. Run 59 executed the 23,410-accession,
+26,241-document SEC delta with zero failed work and produced 40,642 evidence
+rows. The coverage-only union with reviewed run 58 has zero accession overlap
+and 27,920 effective completed work items. Discovery coverage increased from
+45.64% to 50.49%; usable coverage increased from 30.02% to 34.52%; accepted
+coverage remains 171/2,535 applicable pairs because new reviewable evidence
+was not auto-promoted.
+
+DP6G residual audit result: `PASS`. The remaining 2,364 applicable pairs are
+partitioned before external retrieval:
+
+- 1,556 pairs are eligible for one sealed non-SEC primary-source retrieval
+  pass;
+- 704 pairs must adjudicate already-loaded evidence first;
+- 59 pairs require targeted PDF/parser-failure repair;
+- 45 pairs remain financial-input pipeline repairs.
+
+Therefore steps 1-3 above are complete. Step 4 begins only after the repair
+and adjudication queues are resolved and the endpoint manifest for the 1,556
+retrieval-eligible pairs is hash-sealed. Historical feature construction,
+calibration, ranking, and portfolio integration remain blocked.
+
+DP6H-DP6K result: `PASS`. The targeted repair run processed the 14 PDFs that
+created all 214 parser-failure evidence rows and left zero parser failures.
+Systematic adjudication promoted seven pairs through 17 exact-match policies
+using policy-only review evaluation 2; accepted coverage is now 178/2,535 and
+697 pairs remain in the semantic-fixture queue. The updated residual has 1,615
+retrieval-eligible pairs, all mapped to 160 hash-sealed discovery roots (112
+live issuer sites and 48 archived issuer sites), with zero unresolved endpoint
+roots.
+
+At DP6K, hydration and parsing remained blocked pending the semantic-fixture
+freeze for the 697 deferred pairs and the repair-contract freeze for the 45
+missing financial inputs. Those prerequisites were completed in DP6L-DP6N.
+
+DP6L-DP6N result: `PASS`. The semantic freeze covers all 84 parser-addressable
+metrics, all 697 deferred pair fixtures, and all 1,942 representative evidence
+rows without accepting any candidate or modifying a review policy. The
+financial freeze maps all 45 missing pairs to six formulas and 92 operand
+requirements. Nine cash-runway pairs are formula-defined not applicable, 23
+pairs can be repaired from already-loaded canonical facts, and only 13 require
+new primary documents.
+
+The all-inclusive preflight reconciles all 2,357 residual pairs across all 160
+issuers and all 90 metrics. It seals 2,325 document-discovery requirements and
+32 no-document financial repairs. A discovery term may locate a document, but
+the document must be parsed once against every applicable parser metric and
+supporting operand for that issuer.
+
+DP6O-DP6P result: `PASS`. The one-pass census enumerated 9,268 primary-document
+candidates across 102 tickers, preserving 7,193 unique ticker/URL identities
+and 4,413 archive content digests. It quarantined 23 rows whose document date
+or archive capture is after the 2026-07-22 source-census cutoff. The failed-root
+repair policy contains 27 reviewed decisions: 15 roots or archive lanes were
+recovered and 12 remain explicit primary-site/archive access limitations with
+named fallback lanes. TLS validation was never disabled.
+
+The next gate reviews 47 zero-document endpoints, 19 partial-discovery
+endpoints, 12 access-limited endpoints, and 130 external-domain candidates.
+Only that compact review may freeze the hydration set. Retrieval, parser
+execution, feature construction, historical materialization, calibration,
+ranking, portfolio integration, and production promotion remain disabled.
 
 ### DP7 — Publish the reviewed research candidate
 
@@ -711,6 +957,100 @@ Do not reuse the defense source
 `dedicated_parser_defense_production` or machinery source
 `dedicated_parser_production`.
 
+## 12A. DP6Q Primary-Document Review Status
+
+DP6Q passed for the 2026-07-22 census. It reviewed all 160 endpoints, all 78
+exception endpoint rows, and all 130 external-domain candidates without a
+network or parser call. The frozen hydration scope approves 9,249 of 9,268
+documents, reuses 166 verified cached bodies, and deduplicates the remaining
+9,083 documents into 8,404 physical retrieval requests. The next gate is the
+single restartable hydration and SHA-256 content-deduplication pass; parser,
+feature, calibration, portfolio, and production authorization remain false.
+
+## 12B. DP6R Primary-Document Hydration Status
+
+DP6R is implemented as a restartable, content-addressed hydration gate. The
+initial 8,404-request run completed, reused the 166 discovery-cache bodies, and
+sealed every success or source gap without invoking the parser. Exact redirect
+and host-recovery policies are separate transportation files; the independent
+`dedicated_parser` repository is unchanged.
+
+The completed canonical reseal has 6,562 content-ready requests, 1,840 explicit
+failures, two terminal non-financial exclusions, 7,095 content-ready document
+mappings, 2,152 source-gap mappings, 6,594 unique catalog hashes, 98 ready
+tickers, and zero parser or network calls during reseal. No further retrieval is
+authorized; unavailable sources remain explicit terminal coverage evidence.
+
+## 12C. DP6S-DP6X Efficient One-Pass Execution
+
+The enforced sequence is documented in `DP6S_EFFICIENT_PARSER_BATCH.md` and
+implemented by scripts `09g` through `09l`.
+
+- DP6S seals 6,591 new unique hashes across 6,958 ticker/content contexts and
+  proves that all residual source decisions are terminal or covered by a ready
+  alternate source.
+- DP6T plans the exact 84 direct-metric scope offline with zero missing local
+  documents.
+- DP6U decodes each unique physical body once into a content-addressed cache;
+  duplicate ticker contexts reuse the same text.
+- DP6V is the only authorized semantic parser invocation for this delta. It is
+  resumable, never forced, and cannot run until the source, plan, and cache
+  hashes all match.
+- DP6W merges the new evidence with reviewed runs 58-60 and performs coverage,
+  adjudication, policy replay, and semantic-fixture freezing without opening or
+  parsing a document.
+
+Execution is complete. DP6U cached all 6,591 hashes with zero failures; 33 of
+67 targeted PDF recovery records became nonempty and 34 remain explicit
+native-text-empty limitations. DP6V run 65 completed all 6,958 contexts with
+zero failed work, one parser invocation, and zero physical re-extractions.
+
+DP6W uses policy evaluation 2 and preserves all seven exact confirmations.
+Across 2,535 applicable pairs, accepted coverage is 7.02%, usable coverage is
+35.38%, and discovery coverage is 53.18%. The final adjudication defers 719
+ambiguous pairs and creates no new policy candidates. The seven derived
+metrics are represented from their reviewed operand states; no unaccepted
+operand is promoted.
+
+DP6X freezes the full 90-metric disposition table using accepted periods for
+historical-depth validation. Only `operating_ratio` is a calibration candidate;
+54 metrics remain deferred review, 14 are diagnostic only, and 21 are excluded.
+The manifest records zero additional specialized parser batches required.
+Feature materialization, calibration, portfolio writes, and production
+promotion remain blocked until their downstream gates pass.
+
+The bounded DP6Y-DP7A residual sequence then sealed 898 exact repair items and
+used only the existing database, stored evidence, and compressed text cache.
+Four aligned feature formulas and two reviewed same-period primary-source
+fixtures were recovered; nine cash-runway pairs were proven not applicable.
+Final accepted coverage is 184/2,526 applicable pairs (7.28%), usable coverage
+is 35.75%, and discovery coverage is 53.60%. The remaining 30 financial gaps,
+100 no-value pairs, 34 OCR-unavailable hashes, and 719 deferred evidence pairs
+are explicit terminal or deferred states. This result does not authorize a
+second corpus parse. The next expensive step remains one selected-feature and
+point-in-time history materialization against the frozen disposition contract.
+
+## 12D. Fixture-Bound Priority Review
+
+The post-parse fixture sequence is complete and documented in
+`DP6Y_FIXTURE_PRIORITY_REVIEW.md`. The full 719-pair queue was frozen first.
+All 93 single-value pairs were reviewed before the remaining pairs from the
+six largest priority metrics, yielding 234 unique reviewed pairs.
+
+Exact policies were replayed separately against runs 58, 59, 60, and 65 as
+evaluations 3, 4, 5, and 6. The run-scoped policy/golden contract prevents
+cross-run policy application and all 663 golden expectations pass. The
+combined coverage applies the prior financial overrides after reviewed parser
+coverage, retaining both sets of gains: 201/2,526 applicable pairs are
+accepted (7.96%) and 696 remain deferred.
+
+Only `operating_ratio` is a calibration candidate. This batch invoked no
+retrieval, parser, feature materialization, calibration, or portfolio path.
+Because the all-metric freeze changed after the existing v3 build, the
+remaining fixture queue must be explicitly closed before one versioned
+full-panel rebuild. Reuse of the old panel for the unchanged candidate
+requires a separate candidate-stability gate.
+
 ## 13. Acceptance Gates
 
 ### G0 — Independence
@@ -734,7 +1074,8 @@ Do not reuse the defense source
 ### G2 — Source completeness
 
 - Active count is 112 and inactive/delisted count is 48.
-- The base 3,019 periodic accessions reconcile exactly.
+- The 4,267 base accessions reconcile exactly across active windows and
+  inactive issuer lifecycles.
 - Every supplemental accession has a documented selection rule.
 - Every selected document is cached with a valid SHA-256 or has an approved,
   sealed source-gap disposition.

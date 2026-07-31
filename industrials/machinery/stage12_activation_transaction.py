@@ -27,9 +27,12 @@ from industrials.machinery.stage12_activation import (
     rollback_published_candidate,
 )
 from industrials.machinery.stage12_governance import (
+    ACTIVATION_MODE_INITIAL,
+    ACTIVATION_MODE_REPLACE_ACTIVE,
     MODEL_FAMILY,
     Stage12Paths,
     _portfolio_family,
+    machinery_portfolio_policy_fingerprint,
     portfolio_activation_fingerprint,
     validate_stage12_lock,
 )
@@ -842,15 +845,48 @@ def preflight_activation_transaction(
             -1.0,
         )
     )
-    if family.get("required") is not False or cap != 0.0:
-        issues.append(
-            "portfolio config is not in machinery shadow state "
-            f"(required={family.get('required')!r}, cap={cap})"
+    activation_mode = str(
+        lock.get("activation_mode") or ACTIVATION_MODE_INITIAL
+    )
+    if activation_mode == ACTIVATION_MODE_INITIAL:
+        settings_valid = family.get("required") is False and cap == 0.0
+    elif activation_mode == ACTIVATION_MODE_REPLACE_ACTIVE:
+        settings_valid = (
+            family.get("required") is True
+            and cap == float(lock.get("proposed_portfolio_cap") or -1.0)
         )
-    source_rank = resolve_path(
-        cfg_get(config, "machinery_scoring.dashboard_root"),
-        base_dir=config_path.parent,
-    ) / asof / "machinery_final_rank_table.csv"
+        active_state_path = Path(
+            str(lock.get("active_activation_state") or "")
+        )
+        if (
+            not active_state_path.is_file()
+            or active_state_path.resolve()
+            != Stage12Paths(
+                resolve_path(
+                    cfg_get(config, "machinery_stage12.output_root"),
+                    base_dir=config_path.parent,
+                )
+            ).activation_state_json.resolve()
+            or file_sha256(active_state_path)
+            != str(lock.get("previous_activation_state_sha256") or "")
+        ):
+            issues.append("current machinery activation state changed")
+    else:
+        settings_valid = False
+        issues.append(f"unknown activation mode {activation_mode!r}")
+    if not settings_valid:
+        issues.append(
+            "portfolio config does not match the sealed machinery "
+            f"activation mode (required={family.get('required')!r}, cap={cap})"
+        )
+    source_rank_raw = str(lock.get("source_dashboard_rank") or "").strip()
+    if source_rank_raw:
+        source_rank = Path(source_rank_raw)
+    else:
+        source_rank = resolve_path(
+            cfg_get(config, "machinery_scoring.dashboard_root"),
+            base_dir=config_path.parent,
+        ) / asof / "machinery_final_rank_table.csv"
     return {
         "acceptance": "PASS" if not issues else "BLOCKED",
         "asof_date": asof,
@@ -859,6 +895,7 @@ def preflight_activation_transaction(
             today or datetime.now(MARKET_TIMEZONE).date()
         ).isoformat(),
         "governance_acceptance": validation.get("acceptance"),
+        "activation_mode": activation_mode,
         "portfolio_shadow_required": family.get("required"),
         "portfolio_shadow_cap": cap,
         "source_dashboard_exists": source_rank.exists(),
@@ -896,12 +933,48 @@ def run_activation_transaction(  # noqa: C901
     if not configured_token or approval_token != configured_token:
         raise PermissionError("Explicit machinery activation token is invalid")
     paths = ActivationPaths(governance_root, asof)
-    stage12_paths = Stage12Paths(governance_root)
-    if stage12_paths.activation_state_json.exists():
-        raise ValueError(
-            "Machinery production activation state already exists; "
-            "a second activation requires a new governance cycle"
+    cycle_stage12_paths = Stage12Paths(governance_root)
+    active_root_config = str(
+        cfg_get(config, "machinery_stage12.output_root", "") or ""
+    ).strip()
+    active_governance_root = (
+        resolve_path(active_root_config, base_dir=config_path.parent)
+        if active_root_config
+        else governance_root
+    )
+    active_stage12_paths = Stage12Paths(active_governance_root)
+    activation_mode = str(
+        lock_payload.get("activation_mode") or ACTIVATION_MODE_INITIAL
+    )
+    existing_state = active_stage12_paths.activation_state_json
+    previous_state_bytes: bytes | None = None
+    if activation_mode == ACTIVATION_MODE_INITIAL:
+        if existing_state.exists():
+            raise ValueError(
+                "Machinery production activation state already exists; "
+                "use a sealed active-model replacement cycle"
+            )
+    elif activation_mode == ACTIVATION_MODE_REPLACE_ACTIVE:
+        if not existing_state.is_file():
+            raise ValueError(
+                "Active-model replacement requires the current activation state"
+            )
+        approved_state_path = Path(
+            str(lock_payload.get("active_activation_state") or "")
         )
+        if approved_state_path.resolve() != existing_state.resolve():
+            raise ValueError(
+                "Replacement approval points to a different activation state"
+            )
+        if file_sha256(existing_state) != str(
+            lock_payload.get("previous_activation_state_sha256") or ""
+        ):
+            raise ValueError(
+                "Current activation state changed after replacement approval"
+            )
+        previous_state_bytes = existing_state.read_bytes()
+    else:
+        raise ValueError(f"Unknown machinery activation mode: {activation_mode}")
     transaction_root = governance_root / "activation_transactions" / asof
     transaction_root.mkdir(parents=True, exist_ok=True)
     result_path = transaction_root / TRANSACTION_RESULT_NAME
@@ -920,9 +993,16 @@ def run_activation_transaction(  # noqa: C901
             -1.0,
         )
     )
-    if family_before.get("required") is not False or cap_before != 0.0:
+    proposed_cap = float(lock_payload["proposed_portfolio_cap"])
+    expected_required = activation_mode == ACTIVATION_MODE_REPLACE_ACTIVE
+    expected_cap = proposed_cap if expected_required else 0.0
+    if (
+        family_before.get("required") is not expected_required
+        or cap_before != expected_cap
+    ):
         raise ValueError(
-            "Portfolio config is not in the sealed machinery shadow state"
+            "Portfolio config does not match the sealed machinery "
+            "activation mode"
         )
     if (
         portfolio_activation_fingerprint(portfolio_before)
@@ -931,6 +1011,11 @@ def run_activation_transaction(  # noqa: C901
         raise ValueError(
             "Portfolio configuration changed outside activation settings"
         )
+    if (
+        machinery_portfolio_policy_fingerprint(portfolio_before)
+        != lock_payload.get("machinery_portfolio_policy_sha256")
+    ):
+        raise ValueError("Machinery portfolio policy changed after approval")
     original_config = b""
     backup_path = transaction_root / CONFIG_BACKUP_NAME
     config_committed = False
@@ -951,14 +1036,21 @@ def run_activation_transaction(  # noqa: C901
                 )
             )
             if (
-                locked_family.get("required") is not False
-                or locked_cap != 0.0
+                locked_family.get("required") is not expected_required
+                or locked_cap != expected_cap
                 or portfolio_activation_fingerprint(locked_portfolio)
                 != lock_payload.get("portfolio_non_activation_config_sha256")
+                or machinery_portfolio_policy_fingerprint(locked_portfolio)
+                != lock_payload.get("machinery_portfolio_policy_sha256")
             ):
                 raise ValueError(
                     "Portfolio config changed before the activation lock "
                     "was acquired"
+                )
+            if run_refresh and activation_mode == ACTIVATION_MODE_REPLACE_ACTIVE:
+                raise ValueError(
+                    "Active-model replacement requires a separately built, "
+                    "sealed shadow dashboard; use --skip-refresh"
                 )
             if run_refresh:
                 refresh = run_logged_command(
@@ -994,11 +1086,24 @@ def run_activation_transaction(  # noqa: C901
                 force=force_candidate,
             )
             _write_bytes_atomic(backup_path, original_config)
-            config_transition = commit_portfolio_activation_config(
-                portfolio_config_path,
-                cap=float(lock_payload["proposed_portfolio_cap"]),
-            )
-            config_committed = True
+            if activation_mode == ACTIVATION_MODE_INITIAL:
+                config_transition = commit_portfolio_activation_config(
+                    portfolio_config_path,
+                    cap=proposed_cap,
+                )
+                config_committed = True
+            else:
+                config_transition = {
+                    "mode": ACTIVATION_MODE_REPLACE_ACTIVE,
+                    "before_sha256": file_sha256(portfolio_config_path),
+                    "after_sha256": file_sha256(portfolio_config_path),
+                    "portfolio_non_activation_config_sha256": (
+                        portfolio_activation_fingerprint(portfolio_before)
+                    ),
+                    "machinery_required": True,
+                    "machinery_cap": proposed_cap,
+                    "configuration_changed": False,
+                }
             activation = activate_candidate(
                 config,
                 config_path=config_path,
@@ -1094,9 +1199,11 @@ def run_activation_transaction(  # noqa: C901
                 "production_policy_status": PRODUCTION_POLICY_STATUS_ACTIVE,
                 "activated_at_utc": utc_now(),
                 "activation_asof": asof,
-                "governance_lock": str(stage12_paths.lock_json),
+                "activation_mode": activation_mode,
+                "governance_root": str(governance_root),
+                "governance_lock": str(cycle_stage12_paths.lock_json),
                 "governance_lock_sha256": file_sha256(
-                    stage12_paths.lock_json
+                    cycle_stage12_paths.lock_json
                 ),
                 "candidate_rank": str(paths.rank_csv),
                 "candidate_rank_sha256": file_sha256(paths.rank_csv),
@@ -1121,17 +1228,22 @@ def run_activation_transaction(  # noqa: C901
                 "production_source_sha256": (
                     production_policy_source_hashes()
                 ),
+                "previous_activation_state_sha256": (
+                    file_sha256_bytes(previous_state_bytes)
+                    if previous_state_bytes is not None
+                    else ""
+                ),
             }
             write_json_atomic(
-                stage12_paths.activation_state_json,
+                active_stage12_paths.activation_state_json,
                 activation_state,
             )
             activation_state_written = True
             result["activation_state"] = {
                 **activation_state,
-                "path": str(stage12_paths.activation_state_json),
+                "path": str(active_stage12_paths.activation_state_json),
                 "sha256": file_sha256(
-                    stage12_paths.activation_state_json
+                    active_stage12_paths.activation_state_json
                 ),
             }
             write_json_atomic(result_path, result)
@@ -1161,9 +1273,15 @@ def run_activation_transaction(  # noqa: C901
                     )
             if activation_state_written:
                 try:
-                    stage12_paths.activation_state_json.unlink(
-                        missing_ok=True
-                    )
+                    if previous_state_bytes is None:
+                        active_stage12_paths.activation_state_json.unlink(
+                            missing_ok=True
+                        )
+                    else:
+                        _write_bytes_atomic(
+                            active_stage12_paths.activation_state_json,
+                            previous_state_bytes,
+                        )
                 except BaseException as rollback_exc:
                     rollback_errors.append(
                         "activation state rollback failed: "

@@ -88,6 +88,9 @@ def main() -> int:
             active_source_id=str(universe["seed_source_id"]),
             historical_source_id=str(universe["historical_membership_source_id"]),
             start_date=str(parser_cfg["source_census_start_date"]),
+            legacy_inactive_start_date=str(
+                parser_cfg["source_census_legacy_inactive_start_date"]
+            ),
             asof_date=str(parser_cfg["source_census_asof_date"]),
             expected_identity_count=int(parser_cfg["source_census_expected_identity_count"]),
             expected_base_accession_count=int(parser_cfg["source_census_expected_base_accessions"]),

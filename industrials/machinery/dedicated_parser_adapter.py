@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import asdict, replace
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from dedicated_parser.contracts import (
     AdapterRegistry,
@@ -24,6 +24,7 @@ from dedicated_parser.semantic import (
     SemanticDocument,
     parse_semantic_document,
 )
+from industrials.core.db import XBRL_CONCEPT_MAP_SEED
 from industrials.machinery.disclosure_candidates import (
     DisclosureCandidate,
     extract_machinery_prose_candidates,
@@ -32,7 +33,7 @@ from industrials.machinery.disclosure_candidates import (
 from industrials.machinery.disclosure_documents import extract_document_text
 
 
-ADAPTER_VERSION = "machinery_specialized_metrics_v3.6"
+ADAPTER_VERSION = "machinery_specialized_metrics_v3.7"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _REVIEW_POLICY_PATH = (
     Path(__file__).resolve().parent
@@ -45,6 +46,85 @@ _REVIEW_POLICY_GOLDEN_PATH = (
     / "golden_corpus"
     / "machinery_policy_generated.json"
 )
+
+_STANDARD_OPERAND_METRICS = frozenset(
+    {
+        "accounts_payable",
+        "accounts_receivable",
+        "assets",
+        "capex",
+        "cash_and_equivalents",
+        "cost_of_sales",
+        "costs_and_expenses",
+        "debt_current",
+        "debt_issuance_proceeds",
+        "debt_noncurrent",
+        "debt_total",
+        "depreciation_and_amortization",
+        "equity",
+        "equity_issuance_proceeds",
+        "gross_profit",
+        "income_tax_expense",
+        "interest_expense",
+        "inventory",
+        "operating_cash_flow",
+        "operating_income",
+        "pretax_income",
+        "research_and_development",
+        "revenue",
+        "selling_general_admin",
+    }
+)
+_STANDARD_OPERAND_ROWS = tuple(
+    row
+    for row in XBRL_CONCEPT_MAP_SEED
+    if str(row["taxonomy"]).lower() in {"ifrs-full", "us-gaap"}
+    and str(row["canonical_metric"]) in _STANDARD_OPERAND_METRICS
+    # The production mapper intentionally supports only as-reported and
+    # positive-absolute signs. Net-interest concepts need separate semantic
+    # handling and must not be promoted through the exact-concept lane.
+    and str(row["sign_policy"]) != "expense_from_net"
+)
+_STANDARD_OPERAND_BY_CONCEPT = {
+    (
+        str(row["taxonomy"]).lower(),
+        str(row["concept_name"]).lower(),
+    ): row
+    for row in _STANDARD_OPERAND_ROWS
+}
+_STANDARD_OPERAND_CONCEPT_PATTERN = (
+    r"^(?:"
+    + "|".join(
+        re.escape(str(row["concept_name"]))
+        for row in sorted(
+            _STANDARD_OPERAND_ROWS,
+            key=lambda item: str(item["concept_name"]),
+        )
+    )
+    + r")\b"
+)
+_STANDARD_OPERAND_PRODUCTION_MAPPINGS = {
+    metric_name: ProductionMetricMapping(
+        metric_name,
+        str(best_row["financial_statement"]),
+        str(best_row["period_type"]),
+        160,
+        sign_policy=str(best_row["sign_policy"]),
+    )
+    for metric_name in sorted(_STANDARD_OPERAND_METRICS)
+    if (
+        best_row := min(
+            (
+                row
+                for row in _STANDARD_OPERAND_ROWS
+                if str(row["canonical_metric"]) == metric_name
+            ),
+            key=lambda row: int(str(row["priority"])),
+            default=None,
+        )
+    )
+    is not None
+}
 
 
 def select_tickers(
@@ -139,10 +219,12 @@ def get_registry() -> AdapterRegistry:
         ),
         supporting_metrics=(
             MetricRequest(
-                "debt_total",
-                (
-                    r"(?:Debt|Borrowings|LongTermDebt|ShortTermBorrowings)",
-                ),
+                "financial_operands",
+                (_STANDARD_OPERAND_CONCEPT_PATTERN,),
+            ),
+            MetricRequest(
+                "going_concern_flag",
+                (r"(?:SubstantialDoubt|GoingConcern)",),
             ),
         ),
         metric_dependencies={
@@ -159,7 +241,13 @@ def get_registry() -> AdapterRegistry:
             "contract_load_proxy": "reported_backlog",
             "contract_load_proxy_yoy_growth": "reported_backlog",
             "contract_load_proxy_to_revenue": "reported_backlog",
-            "roic": "debt_total",
+            "roic": "financial_operands",
+            "incremental_operating_margin": "financial_operands",
+            "cash_conversion_cycle_change": "financial_operands",
+            "net_debt_to_ebitda": "financial_operands",
+            "interest_coverage": "financial_operands",
+            "cash_runway_years": "financial_operands",
+            "capital_raise_dependence": "financial_operands",
         },
         metric_requirements={
             "orders": MetricRequirement("orders"),
@@ -209,8 +297,19 @@ def get_registry() -> AdapterRegistry:
                 "contract_load_proxy_to_revenue"
             ),
             "roic": MetricRequirement("roic"),
+            "incremental_operating_margin": MetricRequirement(
+                "incremental_operating_margin"
+            ),
+            "cash_conversion_cycle_change": MetricRequirement(
+                "cash_conversion_cycle_change"
+            ),
+            "net_debt_to_ebitda": MetricRequirement("net_debt_to_ebitda"),
+            "interest_coverage": MetricRequirement("interest_coverage"),
+            "cash_runway_years": MetricRequirement("cash_runway_years"),
+            "capital_raise_dependence": MetricRequirement("capital_raise_dependence"),
         },
         production_mappings={
+            **_STANDARD_OPERAND_PRODUCTION_MAPPINGS,
             "orders": ProductionMetricMapping(
                 "orders",
                 "orders",
@@ -241,19 +340,24 @@ def get_registry() -> AdapterRegistry:
                 "instant",
                 165,
             ),
-            "debt_total": ProductionMetricMapping(
-                "debt_total",
-                "balance_sheet",
+            "going_concern_flag": ProductionMetricMapping(
+                "going_concern_flag",
+                "qualitative_risk",
                 "instant",
-                175,
+                180,
             ),
         },
         document_keywords=(
             "backlog",
             "booking",
+            "borrowings",
+            "cash flow",
             "contract",
             "customer",
+            "going concern",
+            "interest expense",
             "inventory",
+            "operating income",
             "order",
             "performance obligation",
             "remaining performance",
@@ -271,7 +375,10 @@ _TABLE_METRIC_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
         "remaining_performance_obligation",
         re.compile(
             r"\b(?:remaining|unsatisfied)\s+performance\s+obligations?\b"
-            r"|\btransaction\s+price\s+allocated\s+to\s+remaining\b",
+            r"|\bperformance\s+obligations?\s+(?:that\s+(?:are|were)\s+)?"
+            r"(?:unsatisfied|not\s+yet\s+satisfied)\b"
+            r"|\btransaction\s+price\s+allocated\s+to\s+(?:the\s+)?"
+            r"(?:remaining|unsatisfied)\b",
             re.IGNORECASE,
         ),
     ),
@@ -349,7 +456,8 @@ _ISO_DATE = re.compile(r"\b((?:19|20)\d{2}-\d{2}-\d{2})\b")
 _CURRENT_HORIZON = re.compile(
     r"\b(?:(?:within|over)\s+(?:the\s+)?next|next)\s+"
     r"(?:12|twelve)\s+months?\b"
-    r"|\bwithin\s+(?:one|1)\s+year\b",
+    r"|\bwithin\s+(?:one|1)\s+year\b"
+    r"|\b(?:during|in|over)\s+the\s+next\s+(?:one\s+)?year\b",
     re.IGNORECASE,
 )
 _CURRENT_PERCENT = re.compile(
@@ -364,7 +472,11 @@ _CURRENT_PERCENT = re.compile(
     r"[^.;]{0,160}?"
     r"\b(?P<percent_after>\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)"
     r"|\b(?P<percent_one_year>\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)"
-    r"[^.;]{0,160}?within\s+(?:one|1)\s+year",
+    r"[^.;]{0,160}?(?:within\s+(?:one|1)\s+year"
+    r"|(?:during|in|over)\s+the\s+next\s+(?:one\s+)?year)"
+    r"|\b(?:during|in|over)\s+the\s+next\s+(?:one\s+)?year"
+    r"[^.;]{0,160}?"
+    r"(?P<percent_after_year>\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)",
     re.IGNORECASE,
 )
 _CURRENT_RECOGNITION = re.compile(
@@ -399,6 +511,20 @@ _NO_DEBT_PROSE = re.compile(
 _FACILITY_NO_DEBT_PROSE = re.compile(
     r"\bno\s+(?:debt|borrowings)\s+outstanding\s+under\s+"
     r"(?:the|our)\s+(?:credit|revolving)\s+facility\b",
+    re.IGNORECASE,
+)
+_GOING_CONCERN_POSITIVE = re.compile(
+    r"\b(?:(?<!may\s)(?<!can\s)(?<!could\s)(?<!would\s)raise[sd]?"
+    r"\s+substantial\s+doubt|there\s+(?:is|exists)\s+substantial\s+doubt"
+    r"|substantial\s+doubt\s+exists)\b"
+    r"[^.;]{0,260}?\b(?:ability\s+to\s+continue|continue)\b"
+    r"[^.;]{0,100}?\bas\s+a\s+going\s+concern\b",
+    re.IGNORECASE,
+)
+_GOING_CONCERN_RESOLVED = re.compile(
+    r"\b(?:does|do|did)\s+not\s+(?:raise|create)\s+substantial\s+doubt\b"
+    r"|\bsubstantial\s+doubt\b[^.;]{0,180}?"
+    r"\b(?:has\s+been|was|is)\s+alleviated\b",
     re.IGNORECASE,
 )
 _RPO_PRACTICAL_EXPEDIENT = re.compile(
@@ -1339,6 +1465,7 @@ def _current_rpo_evidence(
                         percentage_match.group("percent"),
                         percentage_match.group("percent_after"),
                         percentage_match.group("percent_one_year"),
+                        percentage_match.group("percent_after_year"),
                     )
                     if group
                 ),
@@ -1583,6 +1710,81 @@ def _debt_and_structural_evidence(
     return output
 
 
+def _going_concern_evidence(
+    document: SemanticDocument,
+    *,
+    filing: dict[str, Any],
+    document_sha256: str,
+) -> list[MetricEvidence]:
+    report_date = str(
+        filing.get("report_date") or filing.get("filing_date") or ""
+    )[:10]
+    positive: list[tuple[SemanticBlock, re.Match[str]]] = []
+    resolved: list[tuple[SemanticBlock, re.Match[str]]] = []
+    for block in document.blocks:
+        text = block.search_text
+        resolved_match = _GOING_CONCERN_RESOLVED.search(text)
+        if resolved_match is not None:
+            resolved.append((block, resolved_match))
+            continue
+        positive_match = _GOING_CONCERN_POSITIVE.search(text)
+        if positive_match is not None:
+            positive.append((block, positive_match))
+    if not positive and not resolved:
+        return []
+
+    conflict = bool(positive and resolved)
+    selected_block, selected_match = (
+        positive[-1] if positive else resolved[-1]
+    )
+    clause, clause_offset = _clause_containing(
+        selected_block.search_text,
+        start=selected_match.start(),
+        end=selected_match.end(),
+    )
+    if conflict:
+        status = "REVIEW_REQUIRED"
+        value = None
+        reason = "conflicting_going_concern_language_requires_review"
+        confidence = 0.72
+    elif positive:
+        status = "ACCEPTED"
+        value = 1.0
+        reason = "explicit_substantial_doubt_going_concern_statement"
+        confidence = 0.97
+    else:
+        status = "ACCEPTED"
+        value = 0.0
+        reason = "explicit_no_or_alleviated_substantial_doubt_statement"
+        confidence = 0.97
+    return [
+        MetricEvidence(
+            metric_name="going_concern_flag",
+            concept_name="ExplicitGoingConcernAssessment",
+            value=value,
+            unit="pure",
+            period_start="",
+            period_end=report_date,
+            scope="consolidated",
+            confidence=confidence,
+            status=status,
+            reason=reason,
+            evidence_text=clause[:1000],
+            source_document=document.source_document,
+            extraction_method="dedicated_parser:going_concern_prose",
+            provenance={
+                "document_sha256": document_sha256,
+                "adapter_version": ADAPTER_VERSION,
+                "semantic_block_index": selected_block.index,
+                "section_path": list(selected_block.section_path),
+                "clause_offset": clause_offset,
+                "positive_match_count": len(positive),
+                "resolved_match_count": len(resolved),
+            },
+        )
+    ]
+
+
 def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
     filing = asdict(item.filing)
     evidence: list[MetricEvidence] = []
@@ -1713,6 +1915,13 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
                 document_sha256=document.content_sha256,
             )
         )
+        evidence.extend(
+            _going_concern_evidence(
+                semantic_document,
+                filing=filing,
+                document_sha256=document.content_sha256,
+            )
+        )
     unique: dict[str, MetricEvidence] = {}
     for item_evidence in evidence:
         key = item_evidence.evidence_key(
@@ -1736,7 +1945,76 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
     )
 
 
+def _standard_operand_row(fact: NormalizedFact) -> dict[str, object] | None:
+    taxonomy = fact.taxonomy.lower()
+    if taxonomy not in {"ifrs-full", "us-gaap"}:
+        metadata = _fact_metadata(fact)
+        namespace = str(metadata.get("namespace_uri") or "").lower()
+        if "fasb.org/us-gaap" in namespace:
+            taxonomy = "us-gaap"
+        elif "xbrl.ifrs.org" in namespace:
+            taxonomy = "ifrs-full"
+        else:
+            return None
+    return _STANDARD_OPERAND_BY_CONCEPT.get(
+        (taxonomy, fact.concept_name.lower())
+    )
+
+
+def _standard_operand_is_period_valid(
+    fact: NormalizedFact,
+    operand_row: dict[str, object],
+) -> bool:
+    if not fact.period_end:
+        return False
+    if str(operand_row["period_type"]) == "duration" and not fact.period_start:
+        return False
+    return fact.unit.strip().lower() not in {
+        "",
+        "%",
+        "percent",
+        "pure",
+        "share",
+        "shares",
+    }
+
+
+def _zero_debt_component_is_correlated(
+    fact: NormalizedFact,
+    facts: Sequence[NormalizedFact],
+) -> bool:
+    """Allow an explicit zero component only beside positive debt evidence."""
+    if fact.numeric_value != 0.0:
+        return True
+    fact_row = _standard_operand_row(fact)
+    if fact_row is None or str(fact_row["canonical_metric"]) == "debt_total":
+        return False
+    for other in facts:
+        if other is fact or other.numeric_value is None:
+            continue
+        if other.numeric_value <= 0.0 or other.period_end != fact.period_end:
+            continue
+        if other.scope != "consolidated":
+            continue
+        other_row = _standard_operand_row(other)
+        if other_row is None:
+            continue
+        if str(other_row["canonical_metric"]) in {
+            "debt_current",
+            "debt_noncurrent",
+            "debt_total",
+        }:
+            return True
+    return False
+
+
 def _fact_metric(fact: NormalizedFact) -> tuple[str, str] | None:
+    operand_row = _standard_operand_row(fact)
+    if operand_row is not None:
+        return (
+            str(operand_row["canonical_metric"]),
+            fact.concept_name,
+        )
     metadata = _fact_metadata(fact)
     semantic_text = " ".join(
         (
@@ -1763,6 +2041,8 @@ def _fact_metric(fact: NormalizedFact) -> tuple[str, str] | None:
     if (
         "remainingperformanceobligation" in lower
         or "unsatisfiedperformanceobligation" in lower
+        or "performanceobligationsthatareunsatisfied" in lower
+        or "performanceobligationsnotyetsatisfied" in lower
     ):
         if "percentage" in lower or (
             fact.unit.lower() in {"pure", "percent", "%"}
@@ -2427,45 +2707,57 @@ def map_normalized_facts(
             continue
         if metric_name == "remaining_performance_obligation":
             total_rpo_facts.append(fact)
+        operand_row = _standard_operand_row(fact)
         non_operating = _non_operating_fact(fact)
         reviewed_extension = _reviewed_consolidated_extension(item, fact)
-        accepted = (
+        is_rpo_metric = metric_name in {
+            "remaining_performance_obligation",
+            "rpo_current",
+        }
+        rpo_accepted = (
             not non_operating
-            and
-            metric_name
-            in {
-                "remaining_performance_obligation",
-                "rpo_current",
-            }
+            and is_rpo_metric
             and (_standard_taxonomy(fact) or reviewed_extension)
             and fact.scope == "consolidated"
         )
-        if metric_name == "debt_total":
-            accepted = False
+        operand_period_valid = bool(
+            operand_row
+            and _standard_operand_is_period_valid(fact, operand_row)
+        )
+        zero_debt_review = bool(
+            operand_row
+            and metric_name
+            in {"debt_current", "debt_noncurrent", "debt_total"}
+            and not _zero_debt_component_is_correlated(fact, facts)
+        )
+        operand_accepted = bool(
+            operand_row
+            and not non_operating
+            and operand_period_valid
+            and not zero_debt_review
+            and fact.scope == "consolidated"
+        )
+        accepted = rpo_accepted or operand_accepted
+        if non_operating:
+            reason = "non_operating_acquisition_or_intangible_fact"
+        elif zero_debt_review:
+            reason = "explicit_zero_debt_fact_requires_review"
+        elif operand_row and not operand_period_valid:
+            reason = "standard_operand_missing_period_or_monetary_unit"
+        elif operand_accepted:
+            reason = "exact_standard_taxonomy_consolidated_operand"
+        elif reviewed_extension:
+            reason = "reviewed_consolidated_extension_fact"
+        elif rpo_accepted:
+            reason = "standard_taxonomy_consolidated_semantic_fact"
+        else:
+            reason = "extension_or_dimensional_fact_requires_sector_review"
         mapped_evidence = _fact_evidence(
             fact,
             metric_name=metric_name,
             concept_name=concept_name,
             value=fact.numeric_value,
-            reason=(
-                "non_operating_acquisition_or_intangible_fact"
-                if non_operating
-                else (
-                    "reviewed_consolidated_extension_fact"
-                    if reviewed_extension
-                    else (
-                        "explicit_total_debt_fact_requires_zero_debt_review"
-                        if metric_name == "debt_total"
-                        else (
-                        "standard_taxonomy_consolidated_semantic_fact"
-                        if accepted
-                        else (
-                            "extension_or_dimensional_fact_requires_sector_review"
-                        )
-                        )
-                    )
-                )
-            ),
+            reason=reason,
             accepted=accepted,
         )
         if non_operating:

@@ -9,6 +9,7 @@ import pytest
 
 from dedicated_parser.adapters import load_registry
 from dedicated_parser.contracts import (
+    AdapterRegistry,
     DOCUMENT_PARSER_RELEASE,
     DocumentRef,
     FilingRef,
@@ -41,6 +42,7 @@ from industrials.machinery.dedicated_parser_adapter import (
     extract_metric_evidence,
     get_registry,
     map_normalized_facts,
+    postprocess_metric_evidence,
 )
 from industrials.machinery.disclosure_candidates import (
     extract_machinery_prose_candidates,
@@ -75,6 +77,10 @@ def _create_planner_source_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE feature_financial_metric_availability (
             ticker TEXT, model_family TEXT, asof_date TEXT,
             metric_name TEXT, availability_status TEXT
+        );
+        CREATE TABLE feature_financial_statement (
+            ticker TEXT, model_family TEXT, asof_date TEXT,
+            reported_currency TEXT
         );
         CREATE TABLE fact_sec_xbrl_fact (
             ticker TEXT, canonical_metric TEXT, accepted_at TEXT,
@@ -173,6 +179,27 @@ def test_work_key_is_deterministic(tmp_path: Path) -> None:
     )
     assert first.work_key == second.work_key
     assert first.parser_release == DOCUMENT_PARSER_RELEASE
+    non_usd_filing = FilingRef(
+        ticker=filing.ticker,
+        cik=filing.cik,
+        accession_number=filing.accession_number,
+        form_type=filing.form_type,
+        filing_date=filing.filing_date,
+        accepted_at=filing.accepted_at,
+        report_date=filing.report_date,
+        primary_document=filing.primary_document,
+        source_id=filing.source_id,
+        company_currency="CAD",
+    )
+    non_usd = WorkItem(
+        model_family="machinery",
+        adapter_path=ADAPTER,
+        adapter_version="test_v1",
+        filing=non_usd_filing,
+        documents=(document,),
+        requested_metrics=(MetricRequest("reported_backlog", ("Backlog",)),),
+    )
+    assert non_usd.work_key != first.work_key
 
 
 def test_planner_is_database_and_cache_first(tmp_path: Path) -> None:
@@ -183,6 +210,14 @@ def test_planner_is_database_and_cache_first(tmp_path: Path) -> None:
     with connect_database(db_path) as conn:
         _create_planner_source_schema(conn)
         _seed_planner_source(conn)
+        conn.execute(
+            """
+            INSERT INTO feature_financial_statement VALUES (
+                'TEST', 'machinery', '2026-07-22', 'CAD'
+            )
+            """
+        )
+        conn.commit()
         work, summary = build_plan(
             conn,
             registry=registry,
@@ -194,6 +229,7 @@ def test_planner_is_database_and_cache_first(tmp_path: Path) -> None:
             max_filings_per_ticker=2,
         )
         assert len(work) == 1
+        assert work[0].filing.company_currency == "CAD"
         assert summary.scheduled_accessions == 1
         assert summary.missing_cache_accessions == 0
         catalog_count = conn.execute(
@@ -235,6 +271,137 @@ def test_planner_is_database_and_cache_first(tmp_path: Path) -> None:
             force=True,
         )
         assert len(forced) == 1
+
+        all_metrics, all_metrics_summary = build_plan(
+            conn,
+            registry=registry,
+            adapter_path=ADAPTER,
+            asof_date="2026-07-22",
+            cache_dir=cache_dir,
+            tickers=["TEST"],
+            accessions=["0000000001-26-000001"],
+            max_filings_per_ticker=2,
+            all_metrics=True,
+        )
+        assert len(all_metrics) == 1
+        assert all_metrics_summary.database_satisfied_pairs == 0
+
+
+def test_planner_requires_completed_orders_series_for_book_to_bill(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "industrials.sqlite"
+    cache_dir = tmp_path / "cache"
+    _cached_filing(cache_dir)
+    registry = load_registry(ADAPTER)
+    with connect_database(db_path) as conn:
+        _create_planner_source_schema(conn)
+        _seed_planner_source(conn)
+        conn.execute(
+            "ALTER TABLE feature_financial_statement "
+            "ADD COLUMN fiscal_period_end TEXT"
+        )
+        conn.execute(
+            "ALTER TABLE feature_financial_statement "
+            "ADD COLUMN book_to_bill REAL"
+        )
+        conn.execute(
+            "ALTER TABLE feature_financial_statement "
+            "ADD COLUMN orders_ttm REAL"
+        )
+        conn.execute(
+            "ALTER TABLE fact_sec_xbrl_fact ADD COLUMN period_start TEXT"
+        )
+        conn.execute(
+            "DELETE FROM feature_financial_metric_availability"
+        )
+        conn.execute("DELETE FROM feature_financial_statement")
+        conn.execute(
+            """
+            INSERT INTO feature_financial_metric_availability VALUES (
+                'TEST', 'machinery', '2026-07-22',
+                'book_to_bill', 'NOT_DISCLOSED'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO feature_financial_statement(
+                ticker, model_family, asof_date, reported_currency,
+                fiscal_period_end, book_to_bill, orders_ttm
+            ) VALUES (
+                'TEST', 'machinery', '2026-07-22', 'USD',
+                '2026-03-31', NULL, NULL
+            )
+            """
+        )
+        for start, end in (
+            ("2025-04-01", "2025-06-30"),
+            ("2025-07-01", "2025-09-30"),
+            ("2025-10-01", "2025-12-31"),
+            ("2026-01-01", "2026-03-31"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO fact_sec_xbrl_fact(
+                    ticker, canonical_metric, accepted_at, filing_date,
+                    period_end, value, period_start
+                ) VALUES (
+                    'TEST', 'revenue', '2026-04-30T12:00:00Z',
+                    '2026-04-30', ?, 100.0, ?
+                )
+                """,
+                (end, start),
+            )
+        conn.execute(
+            """
+            INSERT INTO fact_sec_xbrl_fact(
+                ticker, canonical_metric, accepted_at, filing_date,
+                period_end, value, period_start
+            ) VALUES (
+                'TEST', 'orders', '2026-04-30T12:00:00Z',
+                '2026-04-30', '2026-03-31', 110.0, '2026-01-01'
+            )
+            """
+        )
+        conn.commit()
+
+        work, summary = build_plan(
+            conn,
+            registry=registry,
+            adapter_path=ADAPTER,
+            asof_date="2026-07-22",
+            cache_dir=cache_dir,
+            tickers=["TEST"],
+            accessions=None,
+            max_filings_per_ticker=4,
+        )
+        assert work
+        assert summary.series_gap_details
+        gap = summary.series_gap_details[0]
+        assert gap["facet"] == "series_incomplete_for_ttm"
+        assert len(gap["missing_periods"]) == 3
+
+        conn.execute(
+            """
+            UPDATE feature_financial_statement
+            SET book_to_bill = 1.1, orders_ttm = 440.0
+            WHERE ticker = 'TEST'
+            """
+        )
+        conn.commit()
+        no_work, satisfied = build_plan(
+            conn,
+            registry=registry,
+            adapter_path=ADAPTER,
+            asof_date="2026-07-22",
+            cache_dir=cache_dir,
+            tickers=["TEST"],
+            accessions=None,
+            max_filings_per_ticker=4,
+        )
+        assert no_work == []
+        assert satisfied.database_satisfied_pairs == 1
 
 
 def test_parallel_runtime_uses_single_writer(tmp_path: Path) -> None:
@@ -544,11 +711,24 @@ def test_orchestrator_shadow_stage_is_opt_in() -> None:
         include_dedicated_parser_shadow=True,
     )
     ids = [step.step_id for step in shadow_steps]
-    assert ids.index("08c_classify_recoverable_coverage") < ids.index(
+    assert ids.index("08b_scan_disclosures") < ids.index(
         "08d_dedicated_parser_shadow"
     )
     assert ids.index("08d_dedicated_parser_shadow") < ids.index(
-        "13_sync_positioning"
+        "08_build_financial"
+    )
+    production_steps = build_steps(
+        "2026-07-22",
+        force=False,
+        include_norgate_backfill=False,
+        include_dedicated_parser_production=True,
+    )
+    production_ids = [step.step_id for step in production_steps]
+    assert production_ids.index("08d_dedicated_parser_shadow") < (
+        production_ids.index("08e_dedicated_parser_production")
+    )
+    assert production_ids.index("08e_dedicated_parser_production") < (
+        production_ids.index("08_build_financial")
     )
 
 
@@ -574,6 +754,88 @@ def test_semantic_document_preserves_table_headers_and_sections() -> None:
         "March 31, 2025",
     )
     assert "Total remaining performance obligations" in rows[1].search_text
+
+
+def test_semantic_document_attaches_nearest_table_preamble() -> None:
+    document = parse_semantic_document(
+        """
+        <html>
+          <h2>Orders</h2>
+          <p>Amounts in thousands</p>
+          <table>
+            <tr><th>Three months ended</th><th>March 31, 2026</th></tr>
+            <tr><td>Total orders</td><td>1,500</td></tr>
+          </table>
+        </html>
+        """,
+        source_document="filing.htm",
+    )
+    row = document.table_rows[-1]
+    assert row.preamble_text == "Amounts in thousands"
+    assert "Amounts in thousands" in row.search_text
+
+
+def test_orders_interval_arithmetic_derives_only_discrete_quarters(
+    tmp_path: Path,
+) -> None:
+    document_path = tmp_path / "filing.htm"
+    document_path.write_text("<html></html>", encoding="utf-8")
+    filing, document = _filing_for_document(document_path)
+    item = WorkItem(
+        model_family="machinery",
+        adapter_path=ADAPTER,
+        adapter_version="test",
+        filing=filing,
+        documents=(document,),
+        requested_metrics=(MetricRequest("orders"),),
+    )
+
+    def orders(
+        value: float,
+        period_start: str,
+        period_end: str,
+    ) -> MetricEvidence:
+        return MetricEvidence(
+            metric_name="orders",
+            concept_name="Orders",
+            value=value,
+            unit="USD",
+            period_start=period_start,
+            period_end=period_end,
+            scope="consolidated",
+            confidence=0.95,
+            status="ACCEPTED",
+            reason="test",
+            evidence_text="test",
+            source_document=document.name,
+            extraction_method="test",
+        )
+
+    processed = postprocess_metric_evidence(
+        item,
+        (
+            orders(600.0, "2026-01-01", "2026-06-30"),
+            orders(350.0, "2026-04-01", "2026-06-30"),
+            orders(1_000.0, "2026-01-01", "2026-09-30"),
+        ),
+    )
+    derived = [
+        row
+        for row in processed
+        if row.extraction_method
+        == "dedicated_parser:explicit_interval_arithmetic"
+    ]
+    assert any(
+        row.period_start == "2026-01-01"
+        and row.period_end == "2026-03-31"
+        and row.value == 250.0
+        for row in derived
+    )
+    assert not any(
+        row.period_start == "2026-04-01"
+        and row.period_end == "2026-09-30"
+        for row in derived
+    )
 
 
 def _filing_for_document(path: Path, *, ticker: str = "TEST") -> tuple[FilingRef, DocumentRef]:
@@ -652,7 +914,7 @@ def test_explicit_current_rpo_percentage_requires_and_uses_accepted_total(
         """,
         encoding="utf-8",
     )
-    filing, document = _filing_for_document(path)
+    filing, document = _filing_for_document(path, ticker="JCI")
     evidence = extract_metric_evidence(
         WorkItem(
             model_family="machinery",
@@ -673,7 +935,53 @@ def test_explicit_current_rpo_percentage_requires_and_uses_accepted_total(
     assert len(current) == 1
     assert current[0].value == 700_000_000.0
     assert current[0].status == "ACCEPTED"
+    assert current[0].confidence == 0.93
     assert current[0].reason == "explicit_twelve_month_rpo_percentage"
+
+
+def test_current_rpo_ignores_subcomponent_and_horizon_numbers(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "emr.htm"
+    path.write_text(
+        """
+        <html><p>As of September 30, 2024, total backlog was $7.8 billion,
+        of which $1.2 billion related to AspenTech. Approximately 75 percent
+        of the total backlog is expected to be recognized over the next
+        12 months.</p></html>
+        """,
+        encoding="utf-8",
+    )
+    filing, document = _filing_for_document(path, ticker="EMR")
+    filing = FilingRef(
+        **{
+            **filing.__dict__,
+            "report_date": "2024-09-30",
+        }
+    )
+    evidence = extract_metric_evidence(
+        WorkItem(
+            model_family="machinery",
+            adapter_path=ADAPTER,
+            adapter_version="test_v2",
+            filing=filing,
+            documents=(document,),
+            requested_metrics=get_registry().source_metrics,
+            enable_arelle=False,
+            enable_edgartools=False,
+        )
+    )
+    current = [
+        row for row in evidence if row.metric_name == "rpo_current"
+    ]
+    assert len(current) == 1
+    assert current[0].value == 5_850_000_000.0
+    assert current[0].status == "REVIEW_REQUIRED"
+    assert current[0].confidence == 0.72
+    assert (
+        current[0].reason
+        == "explicit_percentage_total_rpo_requires_review"
+    )
 
 
 def test_explicit_current_rpo_amount_is_not_treated_as_total(
@@ -910,6 +1218,48 @@ def test_noncommercial_order_table_rows_are_rejected(
         for row in evidence
         if row.metric_name == "orders" and row.status == "ACCEPTED"
     ]
+
+
+def test_revenue_contract_narrative_is_not_accepted_as_orders(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "revenue-contract-detail.htm"
+    path.write_text(
+        """
+        <html>
+        <p>Revenue from Contracts with Customers (Details) - USD ($)
+        $ in Millions</p>
+        <table>
+        <tr><th></th><th>March 31, 2026</th></tr>
+        <tr><td>Revenue from Contract with Customer [Text Block].
+        We recognize revenue when control transfers under customer orders
+        and consolidated contract arrangements. This narrative describes
+        contract assets and liabilities rather than commercial bookings.
+        </td><td>7</td></tr>
+        </table>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+    filing, document = _filing_for_document(path, ticker="MWA")
+    evidence = extract_metric_evidence(
+        WorkItem(
+            model_family="machinery",
+            adapter_path=ADAPTER,
+            adapter_version="test_v2",
+            filing=filing,
+            documents=(document,),
+            requested_metrics=get_registry().source_metrics,
+            enable_arelle=False,
+            enable_edgartools=False,
+        )
+    )
+    orders = [row for row in evidence if row.metric_name == "orders"]
+    assert orders
+    assert {row.status for row in orders} == {"REJECTED_POLICY"}
+    assert {
+        row.reason for row in orders
+    } == {"revenue_contract_narrative_is_not_orders"}
 
 
 def test_intangible_asset_backlog_table_is_not_operating_backlog(
@@ -1387,6 +1737,178 @@ def test_xbrl_timing_dimensions_produce_exhaustive_total_and_current_bucket() ->
     assert current.status == "ACCEPTED"
 
 
+def test_dimensionless_rpo_total_supersedes_incomplete_timing_sum() -> None:
+    filing = FilingRef(
+        ticker="ENS",
+        cik="0001289308",
+        accession_number="0001289308-24-000018",
+        form_type="10-Q",
+        filing_date="2024-05-08",
+        accepted_at="2024-05-08T12:00:00Z",
+        report_date="2024-03-31",
+        primary_document="ens-20240331.htm",
+        source_id="sec_submissions",
+    )
+    metadata = json.dumps(
+        {
+            "namespace_uri": "https://fasb.org/us-gaap/2024",
+            "is_extension": False,
+        }
+    )
+    common = {
+        "taxonomy": "us-gaap",
+        "concept_name": "RevenueRemainingPerformanceObligation",
+        "unit": "USD",
+        "period_start": "",
+        "period_end": "2024-03-31",
+        "source_document": "ens-20240331.htm",
+        "provider": "arelle",
+        "concept_metadata_json": metadata,
+    }
+    axis = (
+        "us-gaap:"
+        "RevenueRemainingPerformanceObligationExpectedTimingOfSatisfaction"
+        "StartDateAxis"
+    )
+    facts = (
+        NormalizedFact(
+            **common,
+            value_text="147016000",
+            numeric_value=147_016_000.0,
+            context_id="dimensionless",
+            dimensions_json="{}",
+            scope="consolidated",
+        ),
+        NormalizedFact(
+            **common,
+            value_text="90000000",
+            numeric_value=90_000_000.0,
+            context_id="timing-current",
+            dimensions_json=json.dumps({axis: "2024-04-01"}),
+            scope="dimensional",
+        ),
+        NormalizedFact(
+            **common,
+            value_text="48685000",
+            numeric_value=48_685_000.0,
+            context_id="timing-tail",
+            dimensions_json=json.dumps({axis: "2025-04-01"}),
+            scope="dimensional",
+        ),
+    )
+    evidence = map_normalized_facts(
+        WorkItem(
+            model_family="machinery",
+            adapter_path=ADAPTER,
+            adapter_version="test_v2",
+            filing=filing,
+            documents=(),
+            requested_metrics=get_registry().source_metrics,
+        ),
+        facts,
+    )
+    totals = [
+        row
+        for row in evidence
+        if row.metric_name == "remaining_performance_obligation"
+    ]
+    accepted = [row for row in totals if row.status == "ACCEPTED"]
+    rejected = [row for row in totals if row.status == "REJECTED_POLICY"]
+    assert [(row.value, row.reason) for row in accepted] == [
+        (147_016_000.0, "standard_taxonomy_consolidated_semantic_fact")
+    ]
+    assert [(row.value, row.reason) for row in rejected] == [
+        (138_685_000.0, "dimensionless_total_supersedes_timing_dimension_sum")
+    ]
+    current = next(
+        row for row in evidence if row.metric_name == "rpo_current"
+    )
+    assert current.status == "ACCEPTED"
+    assert current.value == 90_000_000.0
+
+
+def test_tiny_timing_stub_is_not_twelve_month_current_rpo() -> None:
+    filing = FilingRef(
+        ticker="GNRC",
+        cik="0001474735",
+        accession_number="0001437749-25-033048",
+        form_type="10-Q",
+        filing_date="2025-11-04",
+        accepted_at="2025-11-04T21:46:36Z",
+        report_date="2025-09-30",
+        primary_document="gnrc20250930_10q.htm",
+        source_id="sec_submissions",
+    )
+    metadata = json.dumps(
+        {
+            "namespace_uri": "https://fasb.org/us-gaap/2025",
+            "is_extension": False,
+        }
+    )
+    common = {
+        "taxonomy": "us-gaap",
+        "concept_name": "RevenueRemainingPerformanceObligation",
+        "unit": "USD",
+        "period_start": "",
+        "period_end": "2025-09-30",
+        "source_document": "gnrc20250930_10q.htm",
+        "provider": "arelle",
+        "concept_metadata_json": metadata,
+    }
+    axis = (
+        "us-gaap:"
+        "RevenueRemainingPerformanceObligationExpectedTimingOfSatisfaction"
+        "StartDateAxis"
+    )
+    facts = (
+        NormalizedFact(
+            **common,
+            value_text="211430000",
+            numeric_value=211_430_000.0,
+            context_id="dimensionless",
+            dimensions_json="{}",
+            scope="consolidated",
+        ),
+        NormalizedFact(
+            **common,
+            value_text="9199",
+            numeric_value=9_199.0,
+            context_id="timing-stub",
+            dimensions_json=json.dumps({axis: "2025-10-01"}),
+            scope="dimensional",
+        ),
+        NormalizedFact(
+            **common,
+            value_text="38423000",
+            numeric_value=38_423_000.0,
+            context_id="timing-2026",
+            dimensions_json=json.dumps({axis: "2026-10-01"}),
+            scope="dimensional",
+        ),
+    )
+    evidence = map_normalized_facts(
+        WorkItem(
+            model_family="machinery",
+            adapter_path=ADAPTER,
+            adapter_version="test_v2",
+            filing=filing,
+            documents=(),
+            requested_metrics=get_registry().source_metrics,
+        ),
+        facts,
+    )
+    current = next(
+        row for row in evidence if row.metric_name == "rpo_current"
+    )
+    assert current.value == 9_199.0
+    assert current.status == "REJECTED_POLICY"
+    assert current.confidence == 0.99
+    assert (
+        current.reason
+        == "timing_dimension_current_fraction_outside_valid_range"
+    )
+
+
 def test_xbrl_timing_dimension_old_bucket_current_value_fails_closed() -> None:
     filing = FilingRef(
         ticker="FLS",
@@ -1457,8 +1979,94 @@ def test_xbrl_timing_dimension_old_bucket_current_value_fails_closed() -> None:
         == "timing_dimension_incomplete_schedule_requires_sector_review"
     )
     assert current.value == 390_000_000.0
-    assert current.status == "REVIEW_REQUIRED"
-    assert current.reason == "timing_dimension_current_requires_sector_review"
+    assert current.status == "REJECTED_POLICY"
+    assert current.confidence == 0.99
+    assert (
+        current.reason
+        == "timing_dimension_current_bucket_not_twelve_months"
+    )
+
+
+def test_xbrl_partial_year_timing_stub_uses_ratio_before_spacing_gate() -> None:
+    filing = FilingRef(
+        ticker="GNRC",
+        cik="0001474735",
+        accession_number="0001437749-25-024879",
+        form_type="10-Q",
+        filing_date="2025-07-31",
+        accepted_at="2025-07-31T12:00:00Z",
+        report_date="2025-06-30",
+        primary_document="gnrc20250630_10q.htm",
+        source_id="sec_submissions",
+    )
+    metadata = json.dumps(
+        {
+            "namespace_uri": "https://fasb.org/us-gaap/2025",
+            "is_extension": False,
+        }
+    )
+    common = {
+        "taxonomy": "us-gaap",
+        "concept_name": "RevenueRemainingPerformanceObligation",
+        "unit": "USD",
+        "period_start": "",
+        "period_end": "2025-06-30",
+        "source_document": "gnrc20250630_10q.htm",
+        "provider": "arelle",
+        "concept_metadata_json": metadata,
+    }
+    axis = (
+        "us-gaap:"
+        "RevenueRemainingPerformanceObligationExpectedTimingOfSatisfaction"
+        "StartDateAxis"
+    )
+    facts = (
+        NormalizedFact(
+            **common,
+            value_text="202650000",
+            numeric_value=202_650_000.0,
+            context_id="dimensionless",
+            dimensions_json="{}",
+            scope="consolidated",
+        ),
+        NormalizedFact(
+            **common,
+            value_text="17994",
+            numeric_value=17_994.0,
+            context_id="remainder-2025",
+            dimensions_json=json.dumps({axis: "2025-07-01"}),
+            scope="dimensional",
+        ),
+        NormalizedFact(
+            **common,
+            value_text="37534000",
+            numeric_value=37_534_000.0,
+            context_id="calendar-2026",
+            dimensions_json=json.dumps({axis: "2026-01-01"}),
+            scope="dimensional",
+        ),
+    )
+    evidence = map_normalized_facts(
+        WorkItem(
+            model_family="machinery",
+            adapter_path=ADAPTER,
+            adapter_version="test_v2",
+            filing=filing,
+            documents=(),
+            requested_metrics=get_registry().source_metrics,
+        ),
+        facts,
+    )
+    current = next(
+        row for row in evidence if row.metric_name == "rpo_current"
+    )
+    assert current.value == 17_994.0
+    assert current.status == "REJECTED_POLICY"
+    assert current.confidence == 0.99
+    assert (
+        current.reason
+        == "timing_dimension_current_fraction_outside_valid_range"
+    )
 
 
 def test_xbrl_future_only_timing_dimensions_do_not_become_total_rpo() -> None:
@@ -1532,7 +2140,12 @@ def test_xbrl_future_only_timing_dimensions_do_not_become_total_rpo() -> None:
         == "timing_dimension_incomplete_schedule_requires_sector_review"
     )
     assert total.provenance["timing_schedule_complete"] is False
-    assert current.status == "REVIEW_REQUIRED"
+    assert current.status == "REJECTED_POLICY"
+    assert current.confidence == 0.99
+    assert (
+        current.reason
+        == "timing_dimension_current_bucket_not_twelve_months"
+    )
 
 
 def test_recovery_assessment_classifies_every_requested_source_metric(
@@ -1721,3 +2334,85 @@ def test_policy_correction_is_not_counted_as_predicted_coverage() -> None:
     assert recovery_class == "BASELINE_POLICY_CORRECTION"
     assert predicted_status == "NOT_DISCLOSED"
     assert "intentionally_suppressed" in reason
+
+
+def test_recovery_document_counts_follow_cik_for_shared_ticker_aliases(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "shared_cik_recovery.sqlite"
+    registry = AdapterRegistry(
+        model_family="test_family",
+        adapter_version="test_v1",
+        supported_forms=("10-K",),
+        source_metrics=(MetricRequest("reported_backlog"),),
+        metric_dependencies={},
+        document_keywords=("backlog",),
+    )
+    now = "2026-07-25T12:00:00Z"
+    with connect_database(db_path) as conn:
+        run_id = start_run(
+            conn,
+            model_family="test_family",
+            asof_date="2026-07-24",
+            adapter_version="test_v1",
+            mode="shadow",
+            worker_count=1,
+        )
+        conn.execute(
+            """
+            INSERT INTO sec_parser_work_ledger(
+                work_key, run_id, model_family, ticker, cik,
+                accession_number, parser_release, adapter_version,
+                requested_metrics_json, input_hashes_json, status,
+                attempt_count, completed_at
+            )
+            VALUES (
+                'work-a', ?, 'test_family', 'CLASS-A', '0000001234',
+                '0000001234-26-000001', 'test', 'test_v1',
+                '[{"metric_name":"reported_backlog"}]', '{}',
+                'COMPLETED', 1, ?
+            )
+            """,
+            (run_id, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO sec_parser_run_work(
+                run_id, work_key, ticker, accession_number
+            )
+            VALUES (?, 'work-a', 'CLASS-A', '0000001234-26-000001')
+            """,
+            (run_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO sec_parser_document_catalog(
+                cik, accession_number, document_name, ticker, form_type,
+                filing_date, accepted_at, report_date, source_path,
+                content_sha256, file_size, modified_ns, is_primary,
+                is_full_submission, source_kind, cataloged_at
+            )
+            VALUES (
+                '0000001234', '0000001234-26-000001', 'issuer.htm',
+                'CLASS-B', '10-K', '2026-03-01', ?, '2025-12-31',
+                'issuer.htm', 'hash', 100, 1, 1, 0,
+                'sec_archive_document', ?
+            )
+            """,
+            (now, now),
+        )
+        assessments = build_recovery_assessments(
+            conn,
+            run_id=run_id,
+            registry=registry,
+            asof_date="2026-07-24",
+            tickers=["CLASS-A"],
+        )
+
+    assert len(assessments) == 1
+    assert assessments[0]["searched_filing_count"] == 1
+    assert assessments[0]["searched_document_count"] == 1
+    assert (
+        assessments[0]["recovery_class"]
+        == "NOT_FOUND_IN_SEARCHED_DOCUMENTS"
+    )

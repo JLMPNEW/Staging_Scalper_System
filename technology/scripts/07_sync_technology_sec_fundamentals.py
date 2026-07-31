@@ -33,7 +33,30 @@ from technology.core.text_norm import normalize_cik, normalize_ticker  # noqa: E
 LOGGER = logging.getLogger("sync_technology_sec_fundamentals")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 RUN_TYPE = "sync_technology_sec_fundamentals"
-FILING_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "8-K", "8-K/A", "DEF 14A", "S-3", "S-3/A", "S-8", "424B2", "424B3", "424B5"}
+FILING_FORMS = {
+    "10-K",
+    "10-K/A",
+    "10-Q",
+    "10-Q/A",
+    "20-F",
+    "20-F/A",
+    "40-F",
+    "8-K",
+    "8-K/A",
+    "6-K",
+    "6-K/A",
+    "S-1",
+    "S-1/A",
+    "F-1",
+    "F-1/A",
+    "DEF 14A",
+    "S-3",
+    "S-3/A",
+    "S-8",
+    "424B2",
+    "424B3",
+    "424B5",
+}
 FACT_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F"}
 ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A", "40-F"}
 QUARTERLY_FORMS = {"10-Q", "10-Q/A"}
@@ -98,6 +121,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--filing-index-only",
+        action="store_true",
+        help="Sync submissions filing metadata without reprocessing companyfacts.",
+    )
     return parser.parse_args()
 
 
@@ -1314,6 +1342,51 @@ def main() -> None:
                         reasons.append(f"submissions_error:{type(exc).__name__}:{exc}")
                         with conn:
                             add_issue(conn, ticker, submissions_source, "sec_submissions_fetch_failed", reasons[-1], "error")
+
+                if args.filing_index_only:
+                    with conn:
+                        profile_row = conn.execute(
+                            """
+                            SELECT coverage_status, companyfacts_lag_status
+                            FROM dim_issuer_reporting_profile
+                            WHERE ticker = ?
+                            """,
+                            (ticker,),
+                        ).fetchone()
+                    if profile_row is not None:
+                        coverage_status = str(profile_row["coverage_status"] or "")
+                        companyfacts_lag_status = str(
+                            profile_row["companyfacts_lag_status"] or ""
+                        )
+                    facts_status = "skipped_filing_index_only"
+                    inline_fallback_status = "skipped_filing_index_only"
+                    report_rows.append(
+                        {
+                            "ticker": ticker,
+                            "cik": cik,
+                            "company_name": company["company_name"],
+                            "submissions_status": sub_status,
+                            "filings_upserted": filings_count,
+                            "companyfacts_status": facts_status,
+                            "facts_upserted": 0,
+                            "mapped_facts_upserted": 0,
+                            "coverage_status": coverage_status,
+                            "companyfacts_lag_status": companyfacts_lag_status,
+                            "inline_fallback_status": inline_fallback_status,
+                            "inline_fallback_mapped_facts": 0,
+                            "latest_financial_filing_date": latest_financial,
+                            "review_reason": ";".join(reasons),
+                        }
+                    )
+                    LOGGER.info(
+                        "[%d/%d] %s filings=%d status=%s filing_index_only",
+                        idx,
+                        len(companies),
+                        ticker,
+                        filings_count,
+                        sub_status,
+                    )
+                    continue
 
                 try:
                     facts_url = str(cfg_get(config, "sec_fundamentals.companyfacts_url_template")).format(cik=cik)

@@ -38,6 +38,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage8-dir", type=Path, default=None)
     parser.add_argument("--stage9-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--source-dashboard-dir",
+        type=Path,
+        default=None,
+        help="Reviewed shadow dashboard directory used by this governance cycle.",
+    )
+    parser.add_argument(
+        "--active-upgrade",
+        action="store_true",
+        help="Build a replacement cycle while the prior machinery model remains active.",
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -90,6 +101,12 @@ def main() -> int:
         stage9_root=stage9_root,
         output_root=output_root,
         asof=asof,
+        allow_active_upgrade=bool(args.active_upgrade),
+        source_dashboard_dir=(
+            args.source_dashboard_dir.expanduser().resolve()
+            if args.source_dashboard_dir
+            else None
+        ),
     )
     validation = validate_stage12_lock(output_root=output_root)
     print(

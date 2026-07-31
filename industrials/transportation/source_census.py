@@ -8,7 +8,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from dedicated_parser.catalog import accession_directory, relevant_document_names
 from dedicated_parser.contracts import FilingRef, file_sha256
@@ -210,6 +210,19 @@ def _members(
         """
         SELECT t.ticker, c.company_name, c.cik, t.industry,
                t.calibration_cohort_id,
+               COALESCE((
+                 SELECT MIN(history.start_date)
+                 FROM dim_universe_membership AS history
+                 WHERE history.ticker=t.ticker
+                   AND history.model_family=t.model_family
+               ), '') AS membership_start_date,
+               COALESCE((
+                 SELECT MAX(history.end_date)
+                 FROM dim_universe_membership AS history
+                 WHERE history.ticker=t.ticker
+                   AND history.model_family=t.model_family
+                   AND COALESCE(history.end_date, '')<>''
+               ), '') AS membership_end_date,
                CASE
                  WHEN EXISTS (
                    SELECT 1
@@ -251,6 +264,10 @@ def _members(
             "industry": str(row["industry"] or ""),
             "calibration_cohort": str(row["calibration_cohort_id"] or ""),
             "universe_role": str(row["universe_role"] or ""),
+            "membership_start_date": str(
+                row["membership_start_date"] or ""
+            ),
+            "membership_end_date": str(row["membership_end_date"] or ""),
         }
         for row in rows
     }
@@ -260,8 +277,8 @@ def _scope_by_ticker(
     *,
     final_scope_path: Path,
     support_scope_path: Path,
-) -> dict[str, dict[str, object]]:
-    output: dict[str, dict[str, object]] = defaultdict(
+) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
             "metrics": set(),
             "packs": set(),
@@ -299,14 +316,16 @@ def _filing_rows(
     connection: sqlite3.Connection,
     *,
     tickers: Sequence[str],
+    members: Mapping[str, Mapping[str, str]],
     source_id: str,
     start_date: str,
+    legacy_inactive_start_date: str,
     asof_date: str,
 ) -> list[dict[str, str]]:
     if not tickers:
         return []
     placeholders = ",".join("?" for _ in tickers)
-    return [
+    candidates = [
         {
             key: str(row[key] or "")
             for key in (
@@ -332,9 +351,25 @@ def _filing_rows(
               AND COALESCE(primary_document, '')<>''
             ORDER BY ticker, filing_date, accession_number
             """,
-            (source_id, *tickers, start_date, asof_date),
+            (
+                source_id,
+                *tickers,
+                legacy_inactive_start_date,
+                asof_date,
+            ),
         ).fetchall()
     ]
+    output: list[dict[str, str]] = []
+    for row in candidates:
+        member = members[row["ticker"]]
+        if member["universe_role"] == "active":
+            if row["filing_date"] >= start_date:
+                output.append(row)
+            continue
+        membership_end = member["membership_end_date"] or asof_date
+        if row["filing_date"] <= membership_end:
+            output.append(row)
+    return output
 
 
 def _raw_xbrl_accessions(
@@ -547,6 +582,7 @@ def build_source_census(
     active_source_id: str,
     historical_source_id: str,
     start_date: str,
+    legacy_inactive_start_date: str,
     asof_date: str,
     expected_identity_count: int,
     expected_base_accession_count: int,
@@ -588,8 +624,10 @@ def build_source_census(
     filings = _filing_rows(
         connection,
         tickers=sorted(members),
+        members=members,
         source_id=source_id,
         start_date=start_date,
+        legacy_inactive_start_date=legacy_inactive_start_date,
         asof_date=asof_date,
     )
     raw_xbrl = _raw_xbrl_accessions(connection, tickers=sorted(members))
@@ -845,7 +883,7 @@ def build_source_census(
             str(row["ticker"]),
             str(row["filing_date"]),
             str(row["accession_number"]),
-            0 if int(row["is_primary"]) else 1,
+            0 if int(str(row["is_primary"])) else 1,
             str(row["document_name"]),
         )
     )
@@ -885,6 +923,17 @@ def build_source_census(
         errors.append("one or more selected source rows has no applicable parser metric")
     if len({row["row_key"] for row in census_rows}) != len(census_rows):
         errors.append("source census contains duplicate row keys")
+    selected_tickers = {
+        str(row["ticker"]) for row in census_rows
+    }
+    identities_without_selected_sources = sorted(
+        set(members) - selected_tickers
+    )
+    if identities_without_selected_sources:
+        errors.append(
+            "transportation identities without selected parser sources="
+            f"{identities_without_selected_sources}"
+        )
 
     summary: dict[str, object] = {
         "acceptance": "PASS" if not errors and not unresolved_gaps else "NO_GO",
@@ -892,6 +941,7 @@ def build_source_census(
         "manifest_version": manifest_version,
         "asof_date": asof_date,
         "start_date": start_date,
+        "legacy_inactive_start_date": legacy_inactive_start_date,
         "parser_execution_authorized": False,
         "database_mode": "read_only",
         "network_requests": 0,
@@ -899,6 +949,10 @@ def build_source_census(
         "identity_count": len(members),
         "active_identity_count": sum(member["universe_role"] == "active" for member in members.values()),
         "inactive_identity_count": sum(member["universe_role"] != "active" for member in members.values()),
+        "selected_identity_count": len(selected_tickers),
+        "identities_without_selected_sources": (
+            identities_without_selected_sources
+        ),
         "parser_metric_count": len(parser_metric_ids),
         "adapter_version": get_registry().adapter_version,
         "parser_execution_options": {
@@ -915,6 +969,11 @@ def build_source_census(
         },
         "expected_base_accession_count": expected_base_accession_count,
         "base_accession_count": len(base_keys),
+        "legacy_inactive_selected_accession_count": sum(
+            str(row["filing_date"]) < start_date
+            for row in decisions
+            if row["decision"] == "INCLUDE"
+        ),
         "selected_accession_count": len(selected_keys),
         "selected_document_row_count": len(census_rows),
         "cached_document_row_count": sum(row["cache_status"] == "CACHED_HASHED" for row in census_rows),

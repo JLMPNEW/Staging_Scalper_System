@@ -175,6 +175,13 @@ risk_panel:
       price_history_csv: "data/price_lineage_p.csv"
       issuer_id: "CIK0001474432"
       reason: "Pure Storage/Everpure active ticker; stitch PSTG history before P effective date"
+  local_adjusted_price_fallbacks:
+    - name: industrials_shared_db
+      enabled: true
+      database_path: "${INDUSTRIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/industrials.sqlite"
+      source_pipelines: [defense, machinery, transportation]
+      source_ids: [yahoo_finance_adjusted]
+      accepted_price_adjustments: [adjusted_close]
   benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, XAR, ITA, VIS, IYT]
   hedge_rotation_etfs: [IGV, IHI, XAR, MCHI, FXI, INDA, EWZ, EWG, EWY, EWT, IEMG]
   sector_etf_map:                                  # source_pipeline -> shrinkage-target ETF
@@ -430,15 +437,15 @@ black_litterman_fusion:
   sector_alpha_scale_annual: 0.03           # annual magnitude of the rotation/macro sector tilt
   macro_sector_baseline_source: "strategic_weights"  # strategic_weights | stage3_weights | eligible_count
   strategic_sector_weights:                 # neutral sleeve policy before bounded macro/rotation tilts
-    # Machinery activation 2026-07-25: allocate 5% and proportionally scale the
-    # prior six-sleeve strategic mix to the remaining 95%; total remains 1.0.
-    biotech: 0.27075
-    med_devices: 0.09025
-    semiconductors: 0.225625
-    software_infrastructure: 0.1805
-    technology_hardware: 0.135375
-    defense: 0.0475
-    machinery: 0.05
+    # Machinery is capped in the live optimizer but has no uncalibrated BL
+    # strategic prior. A positive prior requires separate BL calibration.
+    biotech: 0.285
+    med_devices: 0.095
+    semiconductors: 0.2375
+    software_infrastructure: 0.19
+    technology_hardware: 0.1425
+    defense: 0.05
+    machinery: 0.00
     transportation: 0.00
   benchmark_within_sector_source: "equal"   # equal | stage3_weights; ticker-level BL prior inside each sleeve
   macro_sector_shift_mode: "relative_with_floor"

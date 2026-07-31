@@ -27,6 +27,11 @@ from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "biotech_index_reports" / "feature_ic_monitor"
 CALIBRATION_MODULE_PATH = PACKAGE_ROOT / "scripts" / "28_calibrate_biotech_opportunity.py"
+LEGACY_IC_CONTRACT_VERSION = "biotech_feature_ic_pooled_v0"
+LEGACY_EVIDENCE_STATUS = "legacy_pooled_research_only"
+LEGACY_PROMOTION_BLOCKER = (
+    "pooled_cross_date_ic_without_overlap_adjusted_inference_or_campaign_fdr"
+)
 
 
 # Factors that measure data availability or history depth rather than fundamental signal.
@@ -438,6 +443,10 @@ def summary_for_group(
         "horizon": horizon,
         "cohort": cohort,
         "source_group": source_group,
+        "factor_validation_contract": LEGACY_IC_CONTRACT_VERSION,
+        "evidence_status": LEGACY_EVIDENCE_STATUS,
+        "promotion_eligible": 0,
+        "promotion_blocker": LEGACY_PROMOTION_BLOCKER,
         **base,
         "q1_mean_return_pct": q1.get("mean_return_pct", ""),
         "q5_mean_return_pct": q5.get("mean_return_pct", ""),
@@ -668,6 +677,10 @@ def main() -> None:
                         "cohort": cohort,
                         "source_group": source_group,
                         "classification": summary["classification"],
+                        "factor_validation_contract": LEGACY_IC_CONTRACT_VERSION,
+                        "evidence_status": LEGACY_EVIDENCE_STATUS,
+                        "promotion_eligible": 0,
+                        "promotion_blocker": LEGACY_PROMOTION_BLOCKER,
                         "n": summary["n"],
                         "unique_tickers": summary["unique_tickers"],
                         "spearman_ic": summary["spearman_ic"],
@@ -692,6 +705,10 @@ def main() -> None:
             "market_sources": "|".join(market_sources),
             "min_observations": int(args.min_observations),
             "min_quintile_observations": int(args.min_quintile_observations),
+            "factor_validation_contract": LEGACY_IC_CONTRACT_VERSION,
+            "evidence_status": LEGACY_EVIDENCE_STATUS,
+            "production_promotion_authorized": 0,
+            "promotion_blocker": LEGACY_PROMOTION_BLOCKER,
         }
     ]
     write_csv(output_dir / "feature_ic_monitor_manifest.csv", manifest)

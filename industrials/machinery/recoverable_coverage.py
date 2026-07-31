@@ -98,6 +98,34 @@ LEDGER_FIELDS = [
     "provenance_json",
 ]
 
+ISSUER_IR_REQUEST_FIELDS = [
+    "ticker",
+    "asof_date",
+    "source_metrics",
+    "blocked_metrics",
+    "missing_cell_count",
+    "preferred_document_types",
+    "search_terms",
+    "source_policy",
+    "manifest_status",
+    "notes",
+]
+ISSUER_IR_SEARCH_TERMS = {
+    "contract_load": "backlog|order book|orders|bookings|remaining performance obligations",
+    "funded_backlog": "funded backlog|authorized backlog|appropriated backlog",
+    "orders": "orders|bookings|order intake|book-to-bill",
+    "remaining_performance_obligation": (
+        "remaining performance obligations|RPO|unsatisfied performance obligations"
+    ),
+    "reported_backlog": "backlog|order book",
+}
+ISSUER_IR_DOCUMENT_TYPES = (
+    "EARNINGS_RELEASE",
+    "INVESTOR_PRESENTATION",
+    "SUPPLEMENTAL_KPI_REPORT",
+)
+
+
 LEDGER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS fact_machinery_metric_recovery_evidence (
     ticker TEXT NOT NULL,
@@ -536,6 +564,56 @@ def build_recovery_evidence(
             str(item["metric_name"]),
         ),
     )
+
+
+def build_issuer_ir_recovery_requests(
+    rows: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        if str(row.get("source_lane") or "") != "ISSUER_IR":
+            continue
+        key = (
+            str(row.get("ticker") or ""),
+            str(row.get("asof_date") or ""),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    requests: list[dict[str, Any]] = []
+    for (ticker, asof_date), ticker_rows in sorted(grouped.items()):
+        source_metrics = sorted(
+            {
+                str(row.get("source_metric") or "")
+                for row in ticker_rows
+                if str(row.get("source_metric") or "")
+            }
+        )
+        blocked_metrics = sorted(
+            {str(row.get("metric_name") or "") for row in ticker_rows}
+        )
+        search_terms = sorted(
+            {
+                term
+                for metric in source_metrics
+                for term in ISSUER_IR_SEARCH_TERMS.get(metric, metric).split("|")
+                if term
+            }
+        )
+        requests.append(
+            {
+                "ticker": ticker,
+                "asof_date": asof_date,
+                "source_metrics": "|".join(source_metrics),
+                "blocked_metrics": "|".join(blocked_metrics),
+                "missing_cell_count": len(ticker_rows),
+                "preferred_document_types": "|".join(ISSUER_IR_DOCUMENT_TYPES),
+                "search_terms": "|".join(search_terms),
+                "source_policy": "official_issuer_domain_only",
+                "manifest_status": "RESEARCH_REQUIRED",
+                "notes": "Add a reviewed dated document URL to machinery_issuer_ir_documents.csv.",
+            }
+        )
+    return requests
 
 
 def replace_recovery_evidence(

@@ -957,6 +957,13 @@ def main() -> int:
                         min_avg_dollar_volume=float(
                             cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 5000000)
                         ),
+                        negative_profit_valuation_score_cap=float(
+                            cfg_get(
+                                config,
+                                "machinery_scoring.negative_profit_valuation_score_cap",
+                                25.0,
+                            )
+                        ),
                     )
                 rank_rows = finalize_rank_rows(
                     feature_rows,

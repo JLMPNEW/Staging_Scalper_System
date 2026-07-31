@@ -601,7 +601,10 @@ def parse_args() -> argparse.Namespace:
         "--archive-accession-scope-csv",
         type=Path,
         default=None,
-        help=("Optional ticker/accession CSV restricting cache-only hydration to the exact missing accession set."),
+        help=(
+            "Optional ticker/accession CSV restricting selected archive "
+            "hydration and fact writes to the exact accession set."
+        ),
     )
     parser.add_argument(
         "--archive-bootstrap",
@@ -1133,6 +1136,30 @@ def should_force_companyfacts_payload_fetch(*, incremental: bool, force_companyf
     return bool(force_companyfacts or incremental)
 
 
+def incremental_archive_accession_filter(
+    *,
+    incremental: bool,
+    pending_filing_keys: set[tuple[str, str, str]],
+    force_archive: bool,
+    has_completed_profile: bool,
+) -> set[str] | None:
+    """Limit incremental archive work to filings after a completed profile.
+
+    A prior completed reporting profile is the transaction boundary. This
+    safely covers both newly discovered filings and metadata left ahead of the
+    profile by an interrupted run. No prior profile or an explicit force still
+    requests a complete archive rebuild.
+    """
+    if not incremental or force_archive or not has_completed_profile:
+        return None
+    accessions = {
+        str(key[0]).strip()
+        for key in pending_filing_keys
+        if str(key[0]).strip()
+    }
+    return accessions or None
+
+
 def add_issue(
     conn: Any,
     *,
@@ -1289,15 +1316,24 @@ def group_cache_hydration_items(
     return list(items_by_cik.values())
 
 
-def filing_keys(conn: Any, *, ticker: str, source_id: str) -> set[tuple[str, str, str]]:
+def filing_keys(
+    conn: Any,
+    *,
+    ticker: str,
+    source_id: str,
+    end_date: str = "",
+) -> set[tuple[str, str, str]]:
+    end_date_sql = "AND filing_date <= ?" if end_date else ""
+    params: tuple[object, ...] = (ticker, source_id, end_date) if end_date else (ticker, source_id)
     rows = conn.execute(
-        """
+        f"""
         SELECT accession_number, filing_date, form_type
         FROM fact_sec_filing
         WHERE ticker = ?
           AND source_id = ?
+          {end_date_sql}
         """,
-        (ticker, source_id),
+        params,
     ).fetchall()
     return {
         (
@@ -1307,6 +1343,24 @@ def filing_keys(conn: Any, *, ticker: str, source_id: str) -> set[tuple[str, str
         )
         for row in rows
     }
+
+
+def completed_profile_latest_filing(
+    conn: Any,
+    *,
+    ticker: str,
+    model_family: str,
+) -> str:
+    row = conn.execute(
+        """
+        SELECT latest_filing_date
+        FROM dim_issuer_reporting_profile
+        WHERE ticker = ?
+          AND model_family = ?
+        """,
+        (ticker, model_family),
+    ).fetchone()
+    return str(row["latest_filing_date"] or "") if row is not None else ""
 
 
 def has_filing_metadata(conn: Any, *, ticker: str, source_id: str) -> bool:
@@ -1330,6 +1384,7 @@ def has_existing_sec_financial_state(
     model_family: str,
     source_id: str,
     override: ReportingOverride | None,
+    asof: str = "",
 ) -> bool:
     """Return True only when a prior sync completed for this ticker (XC-12).
 
@@ -1354,8 +1409,13 @@ def has_existing_sec_financial_state(
         # Never classified for this family: fact rows alone are not completeness evidence.
         return False
     newest_filing_row = conn.execute(
-        "SELECT MAX(filing_date) FROM fact_sec_filing WHERE ticker = ?",
-        (ticker,),
+        """
+        SELECT MAX(filing_date)
+        FROM fact_sec_filing
+        WHERE ticker = ?
+          AND (? = '' OR filing_date <= ?)
+        """,
+        (ticker, asof, asof),
     ).fetchone()
     newest_filing = str(newest_filing_row[0] or "") if newest_filing_row is not None else ""
     profile_latest_filing = str(profile_row["latest_filing_date"] or "")
@@ -1817,6 +1877,7 @@ def sync_submission_history_files(
     sleep_sec: float,
     allowed_forms: set[str],
     start_date: str,
+    end_date: str,
     url_template: str,
     max_files: int,
     ingestion_run_id: int,
@@ -1884,6 +1945,7 @@ def sync_submission_history_files(
                 payload=payload,
                 allowed_forms=allowed_forms,
                 start_date=start_date,
+                end_date=end_date,
                 source_detail="sec_submissions_history",
             )
     return filing_count, request_count
@@ -1980,6 +2042,7 @@ def sync_browse_edgar_filings(
     sleep_sec: float,
     allowed_forms: set[str],
     start_date: str,
+    end_date: str,
     url_template: str,
     ingestion_run_id: int,
 ) -> tuple[int, int]:
@@ -2039,6 +2102,8 @@ def sync_browse_edgar_filings(
             for filing in parse_browse_atom_filings(text, fallback_form_type=form_type):
                 filing_date = parse_date(filing.get("filing_date"))
                 if start_date and filing_date and filing_date < start_date:
+                    continue
+                if end_date and filing_date and filing_date > end_date:
                     continue
                 accession = str(filing.get("accession_number") or "").strip()
                 if not accession:
@@ -2330,6 +2395,11 @@ def classify_machinery_footnote_concept(
             return ""
         if any(token in semantic for token in ("next twelve months", "next 12 months", "within one year", "current")):
             return "RemainingPerformanceObligationCurrent"
+        if any(
+            token in semantic
+            for token in ("subsequent", "thereafter", "remainder")
+        ):
+            return ""
         return "RemainingPerformanceObligation"
     if period_type == "instant" and "backlog" in semantic:
         if any(token in semantic for token in ("unfunded", "potential", "growth", "cancellation")):
@@ -2485,7 +2555,7 @@ def rpo_timing_start(context: ContextInfo) -> date | None:
 
 
 def rpo_timing_percentage_from_text(document_text: str) -> float | None:
-    plain = normalize_table_label(strip_html_cell(document_text))
+    plain = " ".join(strip_html_cell(document_text).split())
     percentages: set[float] = set()
     anchors = list(re.finditer(r"remaining performance obligations?", plain, re.IGNORECASE))
     horizon = (
@@ -2516,6 +2586,34 @@ def rpo_timing_percentage_from_text(document_text: str) -> float | None:
     return percentages.pop()
 
 
+def rpo_total_amount_from_text(document_text: str) -> float | None:
+    """Return one explicitly labeled total RPO amount, in base units."""
+    plain = " ".join(strip_html_cell(document_text).split())
+    money = (
+        r"(?:\$|usd\s*)"
+        r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
+        r"(thousand|million|billion)"
+    )
+    rpo = r"(?:remaining performance obligations?|rpo)"
+    pattern = (
+        rf"(?:total\s+)?{rpo}.{{0,100}}?"
+        rf"(?:amounted\s+to|totaled|stood\s+at|was|were)\s+"
+        rf"(?:approximately\s+|about\s+)?{money}"
+    )
+    scale = {
+        "thousand": 1_000.0,
+        "million": 1_000_000.0,
+        "billion": 1_000_000_000.0,
+    }
+    amounts = {
+        round(float(match.group(1).replace(",", "")) * scale[match.group(2).lower()], 6)
+        for match in re.finditer(pattern, plain, re.IGNORECASE)
+    }
+    if len(amounts) != 1:
+        return None
+    return amounts.pop()
+
+
 def rpo_current_amount_from_text(document_text: str) -> float | None:
     """Return one explicitly disclosed next-12-month RPO amount, in base units.
 
@@ -2523,7 +2621,7 @@ def rpo_current_amount_from_text(document_text: str) -> float | None:
     explicit magnitude word, and a 12-month horizon in the same short passage.
     Conflicting amounts fail closed instead of selecting one heuristically.
     """
-    plain = normalize_table_label(strip_html_cell(document_text))
+    plain = " ".join(strip_html_cell(document_text).split())
     money = (
         r"(?<![\d.])"
         r"(?:\$|usd\s*)?"
@@ -2596,6 +2694,34 @@ def derived_rpo_current_fact(
                 "source": FOOTNOTE_XBRL_SOURCE_DETAIL,
                 "derivation": method,
                 **evidence,
+            }
+        ),
+        source_detail=FOOTNOTE_XBRL_SOURCE_DETAIL,
+    )
+
+
+def derived_rpo_total_fact(
+    *,
+    document_name: str,
+    period_end: str,
+    unit: str,
+    value: float,
+) -> ArchiveFact:
+    return ArchiveFact(
+        taxonomy="sec-footnote",
+        concept_name="RemainingPerformanceObligation",
+        unit=unit,
+        value=value,
+        period_start="",
+        period_end=period_end,
+        frame=f"footnote_derived:{document_name}:{period_end}:rpo_total:text_disclosed_total",
+        decimals="",
+        payload_json=compact_json(
+            {
+                "document": document_name,
+                "source": FOOTNOTE_XBRL_SOURCE_DETAIL,
+                "derivation": "text_disclosed_total",
+                "disclosed_amount": value,
             }
         ),
         source_detail=FOOTNOTE_XBRL_SOURCE_DETAIL,
@@ -2845,6 +2971,28 @@ def parse_machinery_footnote_facts(
             facts.append(nondimensional[0][1])
             continue
         facts.append(grouped[0][1])
+
+    if filing_period_end and not any(
+        fact.concept_name == "RemainingPerformanceObligation"
+        and fact.period_end == filing_period_end
+        for fact in facts
+    ):
+        disclosed_total = rpo_total_amount_from_text(document_text)
+        rpo_units = {
+            fact.unit
+            for fact in facts
+            if fact.period_end == filing_period_end
+            and fact.concept_name.startswith("RemainingPerformanceObligation")
+        }
+        if disclosed_total is not None and len(rpo_units) == 1:
+            facts.append(
+                derived_rpo_total_fact(
+                    document_name=document_name,
+                    period_end=filing_period_end,
+                    unit=next(iter(rpo_units)),
+                    value=disclosed_total,
+                )
+            )
 
     direct_current_periods = {
         (fact.period_end, fact.unit) for fact in facts if fact.concept_name == "RemainingPerformanceObligationCurrent"
@@ -4681,6 +4829,11 @@ def archive_document_candidates(
     event_exhibits_only: bool = False,
 ) -> list[str]:
     raw_items = (index_payload.get("directory") or {}).get("item") or []
+    schema_stems = {
+        Path(str(item.get("name") or "")).stem.lower()
+        for item in raw_items
+        if isinstance(item, dict) and str(item.get("name") or "").lower().endswith(".xsd")
+    }
     candidates: list[str] = []
     event_research_documents: set[str] = set()
     primary = str(primary_document or "").strip()
@@ -4713,13 +4866,23 @@ def archive_document_candidates(
             name,
             metadata=item_metadata,
         )
+        is_inline_xbrl_entry = (
+            lower.endswith((".xhtml", ".htm", ".html"))
+            and Path(name).stem.lower() in schema_stems
+        )
         if is_event_exhibit:
             event_research_documents.add(name)
         if (machinery_targeted or research_targeted) and name != primary:
             is_targeted_report = name in (targeted_report_documents or set())
             is_instance_xml = lower.endswith(".xml")
             is_event_pdf = event_filing and lower.endswith(ARCHIVE_PDF_SUFFIXES)
-            if not (is_targeted_report or is_instance_xml or is_event_exhibit or is_event_pdf):
+            if not (
+                is_targeted_report
+                or is_instance_xml
+                or is_inline_xbrl_entry
+                or is_event_exhibit
+                or is_event_pdf
+            ):
                 continue
         candidates.append(name)
     if event_filing and event_exhibits_only:
@@ -4781,7 +4944,12 @@ def should_stop_archive_document_scan(
     """Keep scanning machinery event filings until an operating exhibit is found."""
     if parse_all_documents or scan_all_documents or mapped_estimate <= 0:
         return False
-    if model_family == "machinery" and form_type.strip().upper() in {"8-K", "8-K/A"}:
+    if model_family == "machinery" and form_type.strip().upper() in {
+        "8-K",
+        "8-K/A",
+        "6-K",
+        "6-K/A",
+    }:
         # Separate EX-99 exhibits often contain different metrics. Parse all
         # eligible event-filing documents and deduplicate after ticker staging.
         return False
@@ -5059,6 +5227,70 @@ def purge_archive_text_table_facts(conn: Any, *, ticker: str, source_id: str, mo
     )
 
 
+def purge_archive_accession_facts(
+    conn: Any,
+    *,
+    ticker: str,
+    source_id: str,
+    model_family: str,
+    accessions: set[str],
+) -> None:
+    """Replace archive facts only for an explicitly selected accession set."""
+    if not accessions:
+        return
+    placeholders = ",".join("?" for _ in accessions)
+    accession_params = tuple(sorted(accessions))
+    archive_raw_details = (
+        "sec_archive_xbrl",
+        "sec_archive_text_table",
+        "sec_archive_footnote_xbrl",
+        "sec_archive_prose_metric",
+    )
+    archive_mapped_details = tuple(f"{detail}_mapped" for detail in archive_raw_details)
+    raw_placeholders = ",".join("?" for _ in archive_raw_details)
+    mapped_placeholders = ",".join("?" for _ in archive_mapped_details)
+    conn.execute(
+        f"""
+        DELETE FROM fact_financial_statement_canonical
+        WHERE ticker = ?
+          AND source_id = ?
+          AND model_family = ?
+          AND accession_number IN ({placeholders})
+        """,
+        (ticker, source_id, model_family, *accession_params),
+    )
+    conn.execute(
+        f"""
+        DELETE FROM fact_sec_xbrl_fact
+        WHERE ticker = ?
+          AND source_id = ?
+          AND accession_number IN ({placeholders})
+          AND source_detail IN ({mapped_placeholders})
+        """,
+        (ticker, source_id, *accession_params, *archive_mapped_details),
+    )
+    conn.execute(
+        f"""
+        DELETE FROM fact_sec_xbrl_fact_raw
+        WHERE ticker = ?
+          AND source_id = ?
+          AND accession_number IN ({placeholders})
+          AND source_detail IN ({raw_placeholders})
+        """,
+        (ticker, source_id, *accession_params, *archive_raw_details),
+    )
+    conn.execute(
+        f"""
+        DELETE FROM fact_sec_metric_disclosure_candidate
+        WHERE ticker = ?
+          AND source_id = ?
+          AND model_family = ?
+          AND accession_number IN ({placeholders})
+        """,
+        (ticker, source_id, model_family, *accession_params),
+    )
+
+
 def should_attempt_archive(override: ReportingOverride | None) -> bool:
     if override is None:
         return False
@@ -5132,12 +5364,10 @@ def sync_archive_xbrl(
 ) -> tuple[int, int, int]:
     """Refresh archive-derived XBRL facts with stage-then-swap semantics (FN-2, XC-23).
 
-    Phase 1 fetches and parses every filing document with no write transaction
-    open. Phase 2 opens one short transaction that purges the prior archive
-    facts and swaps in the staged ones — and refuses (raises, rolling back the
-    purge) when document fetch failures leave an implausibly small fraction of
-    the previously stored facts. A complete reparse may legitimately remove
-    facts after a mapping or parser-policy correction.
+    Phase 1 fetches and parses selected filing documents with no write
+    transaction open. A full refresh uses stage-then-swap semantics. An
+    accession-filtered refresh replaces only the requested accessions,
+    preserving all other archive facts.
     """
     filing_rows = conn.execute(
         """
@@ -5314,6 +5544,17 @@ def sync_archive_xbrl(
             event_filing=event_filing,
             event_exhibits_only=(model_family == "defense" and bool(document_keywords) and event_filing),
         )
+        inline_xbrl_entry_documents = {
+            name
+            for name in document_candidates
+            if Path(name).suffix.lower() in {".xhtml", ".htm", ".html"}
+            and any(
+                isinstance(item, dict)
+                and str(item.get("name") or "").lower()
+                == f"{Path(name).stem.lower()}.xsd"
+                for item in (index_payload.get("directory") or {}).get("item") or []
+            )
+        }
         # SEC's complete-submission text file is the authoritative fallback
         # for pre-XBRL filings whose legacy split-document links return 404.
         # Keep it last so a working primary/instance document wins, and do not
@@ -5441,7 +5682,7 @@ def sync_archive_xbrl(
                         ticker=ticker,
                     ),
                 ]
-            if not text_tables_only:
+            if not text_tables_only or document_name in inline_xbrl_entry_documents:
                 facts = [
                     *parse_archive_facts(document_text, document_name=document_name, concept_map=concept_map),
                     *facts,
@@ -5472,6 +5713,12 @@ def sync_archive_xbrl(
             time.sleep(sleep_sec)
 
     staged_fact_count = sum(len(facts) for _, _, facts, _ in staged)
+    staged_inline_xbrl_accessions = {
+        str(filing.get('accession_number') or '')
+        for filing, _, facts, _ in staged
+        if any(fact.source_detail == 'sec_archive_xbrl' for fact in facts)
+    }
+    staged_inline_xbrl_accessions.discard('')
     low_currency_documents = sorted(
         {
             document_name
@@ -5508,38 +5755,54 @@ def sync_archive_xbrl(
                 "source_detail IN ('sec_archive_xbrl', 'sec_archive_text_table', 'sec_archive_footnote_xbrl', 'sec_archive_prose_metric')"
             )
         )
-        prior_row = conn.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM fact_sec_xbrl_fact_raw
-            WHERE ticker = ?
-              AND source_id = ?
-              AND {source_filter}
-            """,
-            (ticker, source_id),
-        ).fetchone()
-        prior_fact_count = int(prior_row[0] or 0)
-        if (
-            prior_fact_count > 0
-            and fetch_failures > 0
-            and staged_fact_count < prior_fact_count * min_refetch_fact_fraction
-        ):
-            raise RuntimeError(
-                f"SEC archive refetch for ticker={ticker} staged only {staged_fact_count} facts vs "
-                f"{prior_fact_count} previously stored (fetch_failures={fetch_failures}, "
-                f"min_refetch_fact_fraction={min_refetch_fact_fraction}); refusing to purge existing archive facts."
+        if accession_filter is None:
+            prior_row = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM fact_sec_xbrl_fact_raw
+                WHERE ticker = ?
+                  AND source_id = ?
+                  AND {source_filter}
+                """,
+                (ticker, source_id),
+            ).fetchone()
+            prior_fact_count = int(prior_row[0] or 0)
+            if (
+                prior_fact_count > 0
+                and fetch_failures > 0
+                and staged_fact_count < prior_fact_count * min_refetch_fact_fraction
+            ):
+                raise RuntimeError(
+                    f"SEC archive refetch for ticker={ticker} staged only {staged_fact_count} facts vs "
+                    f"{prior_fact_count} previously stored (fetch_failures={fetch_failures}, "
+                    f"min_refetch_fact_fraction={min_refetch_fact_fraction}); refusing to purge existing archive facts."
+                )
+            if text_tables_only:
+                purge_archive_text_table_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
+                purge_archive_accession_facts(
+                    conn,
+                    ticker=ticker,
+                    source_id=source_id,
+                    model_family=model_family,
+                    accessions=staged_inline_xbrl_accessions,
+                )
+            else:
+                purge_archive_xbrl_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
+            conn.execute(
+                """
+                DELETE FROM fact_sec_metric_disclosure_candidate
+                WHERE ticker = ? AND source_id = ? AND model_family = ?
+                """,
+                (ticker, source_id, model_family),
             )
-        if text_tables_only:
-            purge_archive_text_table_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
         else:
-            purge_archive_xbrl_facts(conn, ticker=ticker, source_id=source_id, model_family=model_family)
-        conn.execute(
-            """
-            DELETE FROM fact_sec_metric_disclosure_candidate
-            WHERE ticker = ? AND source_id = ? AND model_family = ?
-            """,
-            (ticker, source_id, model_family),
-        )
+            purge_archive_accession_facts(
+                conn,
+                ticker=ticker,
+                source_id=source_id,
+                model_family=model_family,
+                accessions=accession_filter,
+            )
         for filing, document_name, facts, prose_candidates in staged:
             upsert_disclosure_candidates(
                 conn,
@@ -6426,8 +6689,11 @@ def main() -> None:
     )
     archive_accession_scope: dict[str, set[str]] = {}
     if args.archive_accession_scope_csv is not None:
-        if not args.archive_cache_only:
-            raise ValueError("--archive-accession-scope-csv requires --archive-cache-only")
+        if not args.archive_cache_only and not args.archive_selected:
+            raise ValueError(
+                "--archive-accession-scope-csv requires --archive-cache-only "
+                "or --archive-selected"
+            )
         scope_path = args.archive_accession_scope_csv.expanduser().resolve()
         if not scope_path.is_file():
             raise ValueError(f"Archive accession scope CSV not found: {scope_path}")
@@ -6957,8 +7223,22 @@ def main() -> None:
                                 override=reporting_override,
                             )
                     else:
+                        profile_latest_before = (
+                            completed_profile_latest_filing(
+                                conn,
+                                ticker=ticker,
+                                model_family=model_family,
+                            )
+                            if args.incremental
+                            else ""
+                        )
                         existing_filing_keys = (
-                            filing_keys(conn, ticker=ticker, source_id=submissions_source_id)
+                            filing_keys(
+                                conn,
+                                ticker=ticker,
+                                source_id=submissions_source_id,
+                                end_date=evaluation_asof,
+                            )
                             if args.incremental
                             else set()
                         )
@@ -7029,6 +7309,7 @@ def main() -> None:
                                     payload=submissions_payload,
                                     allowed_forms=allowed_forms,
                                     start_date=start_date,
+                                    end_date=evaluation_asof,
                                 )
                         if name_mismatch:
                             report_rows.append(
@@ -7071,6 +7352,7 @@ def main() -> None:
                                 sleep_sec=sleep_sec,
                                 allowed_forms=allowed_forms,
                                 start_date=start_date,
+                                end_date=evaluation_asof,
                                 url_template=archive_submission_file_template,
                                 max_files=archive_max_submission_files,
                                 ingestion_run_id=submissions_run_id,
@@ -7091,23 +7373,52 @@ def main() -> None:
                                     sleep_sec=sleep_sec,
                                     allowed_forms=allowed_forms,
                                     start_date=start_date,
+                                    end_date=evaluation_asof,
                                     url_template=archive_browse_edgar_template,
                                     ingestion_run_id=submissions_run_id,
                                 )
                                 filing_count += browse_filing_count
                                 submissions_requests += browse_requests
 
-                        new_filing_keys = (
-                            filing_keys(conn, ticker=ticker, source_id=submissions_source_id) - existing_filing_keys
+                        current_filing_keys = (
+                            filing_keys(
+                                conn,
+                                ticker=ticker,
+                                source_id=submissions_source_id,
+                                end_date=evaluation_asof,
+                            )
                             if args.incremental
                             else set()
                         )
+                        new_filing_keys = (
+                            current_filing_keys - existing_filing_keys
+                            if args.incremental
+                            else set()
+                        )
+                        pending_filing_keys = set(new_filing_keys)
+                        if profile_latest_before:
+                            pending_filing_keys.update(
+                                key
+                                for key in existing_filing_keys
+                                if key[1] > profile_latest_before
+                            )
                         has_existing_state = has_existing_sec_financial_state(
                             conn,
                             ticker=ticker,
                             model_family=model_family,
                             source_id=companyfacts_source_id,
                             override=reporting_override,
+                            asof=evaluation_asof,
+                        )
+                        archive_accession_filter = (
+                            archive_accession_scope.get(ticker)
+                            if archive_accession_scope
+                            else incremental_archive_accession_filter(
+                                incremental=bool(args.incremental),
+                                pending_filing_keys=pending_filing_keys,
+                                force_archive=force_archive or archive_bootstrap,
+                                has_completed_profile=bool(profile_latest_before),
+                            )
                         )
                         if should_skip_incremental_companyfacts(
                             incremental=bool(args.incremental),
@@ -7264,6 +7575,7 @@ def main() -> None:
                                 company_currency=company_currency,
                                 min_refetch_fact_fraction=archive_min_refetch_fraction,
                                 ingestion_run_id=companyfacts_run_id,
+                                accession_filter=archive_accession_filter,
                             )
                             raw_count += archive_raw_count
                             mapped_count += archive_mapped_count
@@ -7396,6 +7708,7 @@ def main() -> None:
                                     company_currency=company_currency,
                                     min_refetch_fact_fraction=archive_min_refetch_fraction,
                                     ingestion_run_id=companyfacts_run_id,
+                                    accession_filter=archive_accession_filter,
                                 )
                                 raw_count += archive_raw_count
                                 mapped_count += archive_mapped_count

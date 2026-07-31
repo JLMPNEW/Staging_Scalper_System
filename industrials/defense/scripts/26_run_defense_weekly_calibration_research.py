@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import argparse
-import os
+import csv
+import json
 import re
 import sqlite3
 import subprocess
@@ -20,7 +21,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
-from industrials.defense.research_artifacts import parse_required_date, select_weekly_snapshot_dates  # noqa: E402
+from industrials.defense.research_artifacts import (  # noqa: E402
+    parse_required_date,
+    select_weekly_snapshot_dates,
+    sha256_file,
+    utc_now,
+    write_json_atomic,
+)
 
 
 DEFAULT_WEEKLY_START = "2026-01-04"
@@ -66,6 +73,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-days", type=int, default=63)
     parser.add_argument("--embargo-days", type=int, default=21)
     parser.add_argument("--trials", type=int, default=64)
+    parser.add_argument(
+        "--optuna-sampler",
+        choices=["tpe", "random"],
+        default="tpe",
+        help="Use random for matched experiments so both runs receive identical trial weights.",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        choices=["validation_ic", "validation_top_quantile_excess"],
+        default="validation_ic",
+    )
+    parser.add_argument("--top-quantile", type=float, default=0.20)
+    parser.add_argument("--min-positions", type=int, default=5)
     parser.add_argument(
         "--backfill-features",
         action="store_true",
@@ -152,6 +172,23 @@ def parse_args() -> argparse.Namespace:
             "(exported as DEFENSE_SCORE_MODEL_VERSION to sub-steps). Requires "
             "--research-label so a candidate version can never stamp baseline artifacts."
         ),
+    )
+    parser.add_argument(
+        "--scoring-mode",
+        choices=["baseline", "specialized_v1"],
+        default="baseline",
+        help="Candidate scoring treatment. Non-baseline modes require --research-label.",
+    )
+    parser.add_argument(
+        "--evaluation-calendar",
+        type=Path,
+        default=None,
+        help="Shared frozen weekly asof_date CSV used by matched baseline and candidate runs.",
+    )
+    parser.add_argument(
+        "--create-evaluation-calendar",
+        action="store_true",
+        help="Create the shared calendar if absent; fail if an existing calendar does not match the requested dates.",
     )
     return parser.parse_args()
 
@@ -244,6 +281,68 @@ def selected_market_dates(
             selection=weekly_selection,
         )
     raise ValueError(f"Unsupported feature cadence: {cadence}")
+
+
+def ensure_evaluation_calendar(
+    path: Path,
+    *,
+    dates: list[str],
+    start_date: str,
+    end_date: str,
+    weekly_selection: str,
+    create: bool,
+) -> Path:
+    normalized_dates = sorted(set(dates))
+    if not normalized_dates:
+        raise ValueError("Cannot create or validate an empty evaluation calendar")
+    if path.exists():
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            existing = [str(row.get("asof_date") or "").strip() for row in csv.DictReader(handle)]
+        if existing != normalized_dates:
+            raise ValueError(
+                "Existing frozen evaluation calendar does not match the requested market-date sample; "
+                f"path={path} existing={len(existing)} requested={len(normalized_dates)}"
+            )
+    elif not create:
+        raise FileNotFoundError(
+            f"Frozen evaluation calendar does not exist: {path}. "
+            "Run the matched baseline once with --create-evaluation-calendar."
+        )
+    else:
+        write_csv_atomic(path, ["asof_date"], [{"asof_date": asof} for asof in normalized_dates])
+    manifest_path = path.with_suffix(".manifest.json")
+    payload = {
+        "artifact_family": "defense_weekly_evaluation_calendar",
+        "created_at_utc": utc_now(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "weekly_selection": weekly_selection,
+        "snapshot_count": len(normalized_dates),
+        "snapshot_start_date": normalized_dates[0],
+        "snapshot_end_date": normalized_dates[-1],
+        "calendar_csv": str(path),
+        "calendar_sha256": sha256_file(path),
+    }
+    if manifest_path.exists():
+        existing_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        comparable = {
+            key: existing_payload.get(key)
+            for key in [
+                "start_date",
+                "end_date",
+                "weekly_selection",
+                "snapshot_count",
+                "snapshot_start_date",
+                "snapshot_end_date",
+                "calendar_sha256",
+            ]
+        }
+        expected = {key: payload[key] for key in comparable}
+        if comparable != expected:
+            raise ValueError(f"Evaluation-calendar manifest does not match requested sample: {manifest_path}")
+    else:
+        write_json_atomic(manifest_path, payload)
+    return path
 
 
 def parse_source_list(raw: object) -> list[str]:
@@ -475,6 +574,10 @@ def main() -> int:
         raise ValueError("--embargo-days cannot be negative")
     if args.trials <= 0:
         raise ValueError("--trials must be positive")
+    if not 0.0 < args.top_quantile <= 1.0:
+        raise ValueError("--top-quantile must be > 0 and <= 1")
+    if args.min_positions <= 0:
+        raise ValueError("--min-positions must be positive")
     if args.feature_backfill_only and not args.backfill_features:
         raise ValueError("--feature-backfill-only requires --backfill-features")
 
@@ -484,6 +587,10 @@ def main() -> int:
         raise ValueError("--research-label must match [a-z0-9_]{1,64}")
     if args.score_model_version and not research_label:
         raise ValueError("--score-model-version requires --research-label; a candidate version must never stamp baseline artifacts")
+    if research_label and not args.score_model_version.strip():
+        raise ValueError("--research-label requires an explicit --score-model-version")
+    if args.scoring_mode != "baseline" and not research_label:
+        raise ValueError("Non-baseline scoring modes require --research-label")
     stage8_root = PROJECT_ROOT / "output" / "industrials" / "defense" / "stage8"
     stage9_root = PROJECT_ROOT / "output" / "industrials" / "defense" / "stage9"
     if research_label:
@@ -494,8 +601,7 @@ def main() -> int:
         stage9_root = stage9_root / "candidates" / research_label
         print(f"Candidate research namespace: {stage8_root}")
     if args.score_model_version:
-        os.environ["DEFENSE_SCORE_MODEL_VERSION"] = str(args.score_model_version).strip()
-        print(f"Candidate score_model_version: {os.environ['DEFENSE_SCORE_MODEL_VERSION']}")
+        print(f"Candidate score_model_version: {str(args.score_model_version).strip()}")
     panel_dir = stage8_root / "oos_calibration_panel_weekly"
     weekly_snapshot_root = stage8_root / "weekly_rank_snapshots"
     config_path = PACKAGE_ROOT / "config.yaml"
@@ -539,6 +645,40 @@ def main() -> int:
     if args.end_date:
         date_args.extend(["--end-date", args.end_date])
 
+    evaluation_calendar: Path | None = None
+    if research_label or args.evaluation_calendar:
+        evaluation_calendar = (
+            args.evaluation_calendar.expanduser().resolve()
+            if args.evaluation_calendar
+            else (
+                PROJECT_ROOT
+                / "output"
+                / "industrials"
+                / "defense"
+                / "stage8"
+                / "matched_evaluation_calendar"
+                / "defense_weekly_evaluation_calendar.csv"
+            )
+        )
+        calendar_dates = selected_market_dates(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            cadence="weekly",
+            weekly_selection=args.weekly_selection,
+        )
+        requested_calendar = evaluation_calendar
+        if requested_calendar is None:
+            raise AssertionError("evaluation calendar path resolution failed")
+        evaluation_calendar = ensure_evaluation_calendar(
+            requested_calendar,
+            dates=calendar_dates,
+            start_date=args.start_date,
+            end_date=args.end_date or calendar_dates[-1],
+            weekly_selection=args.weekly_selection,
+            create=bool(args.create_evaluation_calendar),
+        )
+        print(f"Frozen evaluation calendar: {evaluation_calendar} dates={len(calendar_dates)}")
+
     feature_dates: list[str] = []
     if args.backfill_features:
         feature_dates = selected_market_dates(
@@ -573,6 +713,10 @@ def main() -> int:
     policy_asof = str(args.policy_asof or "").strip()
     if not policy_asof and feature_dates:
         policy_asof = feature_dates[-1]
+    if not policy_asof and evaluation_calendar is not None:
+        with evaluation_calendar.open("r", encoding="utf-8-sig", newline="") as handle:
+            policy_dates = [str(row.get("asof_date") or "") for row in csv.DictReader(handle)]
+        policy_asof = policy_dates[-1]
 
     feature_steps = feature_backfill_steps(dates=feature_dates, python=python, cadence=args.feature_cadence)
     daily_publish_steps: list[tuple[str, list[str]]] = []
@@ -634,6 +778,18 @@ def main() -> int:
                 args.membership_mode,
                 "--snapshot-root",
                 str(weekly_snapshot_root),
+                "--scoring-mode",
+                args.scoring_mode,
+                *(
+                    ["--score-model-version", str(args.score_model_version).strip(), "--research-candidate"]
+                    if research_label
+                    else []
+                ),
+                *(
+                    ["--evaluation-calendar", str(evaluation_calendar)]
+                    if evaluation_calendar is not None
+                    else []
+                ),
                 *(
                     ["--allow-overwrite"]
                     if args.allow_overwrite_snapshots
@@ -662,6 +818,11 @@ def main() -> int:
                 args.weekly_selection,
                 "--snapshot-root",
                 str(weekly_snapshot_root),
+                *(
+                    ["--evaluation-calendar", str(evaluation_calendar)]
+                    if evaluation_calendar is not None
+                    else []
+                ),
                 "--forward-days",
                 str(args.forward_days),
                 "--embargo-days",
@@ -697,6 +858,14 @@ def main() -> int:
                 str(calibration_dir),
                 "--trials",
                 str(args.trials),
+                "--sampler",
+                args.optuna_sampler,
+                "--selection-metric",
+                args.selection_metric,
+                "--top-quantile",
+                str(args.top_quantile),
+                "--min-positions",
+                str(args.min_positions),
                 "--allow-overwrite",
             ],
         ),
@@ -711,6 +880,10 @@ def main() -> int:
                 str(calibration_summary),
                 "--output-dir",
                 str(backtest_dir),
+                "--top-quantile",
+                str(args.top_quantile),
+                "--min-positions",
+                str(args.min_positions),
                 "--allow-overwrite",
             ],
         ),

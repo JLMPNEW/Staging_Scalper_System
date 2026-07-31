@@ -1,0 +1,40 @@
+paths:
+  database_path: "db/portfolio_layer.sqlite"
+  output_dir: "output"
+  cache_dir: "output/cache"
+  macro_serving_db_path: "macro.sqlite"
+runtime:
+  sqlite_timeout_sec: 30.0
+score_contract:
+  contract_version: "stocks_scores_v1"
+  sector_output_root: "s"
+  staleness_tolerance_days: 10
+  min_successful_sectors: 2
+  native_score_range: {min: 0.0, max: 100.0}
+  max_abs_expected_alpha: 1.0
+  rating_bands: {strong_buy: 90.0, buy: 70.0, hold: 40.0, reduce: 20.0, avoid: 0.0}
+  sectors:
+    - model_family: machinery
+      adapter: industrial_family
+      enabled: true
+      required: true
+      staleness_tolerance_days: 3
+      sector: "Industrials"
+      industry: "Machinery"
+      industry_aggregate: "Machinery"
+      file_mode: dated
+      file_path: "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv"
+      require_oos_score_valid: true
+      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}
+    - model_family: med_devices
+      adapter: med_devices
+      enabled: true
+      required: true
+      staleness_tolerance_days: 3
+      sector: "Health Care"
+      industry: "Health Care Equipment"
+      industry_aggregate: "Health Care Equipment & Services"
+      file_mode: dated
+      file_path: "med_devices/{yyyy-mm-dd}/med_device_daily_composite_scores.csv"
+      require_oos_score_valid: true
+      calibration: {neutral: 50.0, scale: 50.0, expected_alpha_at_full: 0.15}

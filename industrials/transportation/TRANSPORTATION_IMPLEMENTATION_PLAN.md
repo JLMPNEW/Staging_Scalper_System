@@ -1,6 +1,6 @@
 # Industrials Transportation Implementation Plan
 
-Status: foundation, historical raw-data/disclosure loads, and frozen PIT feature panel implemented; positioning, OOS calibration, orchestration, and promotion pending  
+Status: foundation, historical and current data loads, positioning, frozen PIT/v3 panels, bounded walk-forward research calibration, current refresh orchestration, portfolio shadow, and DP16 monitoring implemented; production promotion intentionally not granted
 Model family: `transportation`  
 Implementation root: `industrials/transportation`  
 Shared infrastructure root: `industrials`  
@@ -44,7 +44,8 @@ intentionally disabled.
 | Shadow rank publication | PASS in shared DB: deterministic 112-row rank contract and hash manifest |
 | Portfolio adapter execution | PASS: 112 rows ingested, zero investable/OOS rows |
 | Regression safety | PASS: 151 industrials/portfolio tests plus Ruff |
-| Production eligibility | NOT GRANTED: positioning, sealed OOS calibration, orchestration, and explicit promotion remain |
+| Current refresh through 2026-07-30 | PASS: all 112 active prices and exact-date feature families populated; 160-name bounded disclosure status complete |
+| Production eligibility | NOT GRANTED: the generic model still requires its separate absolute OOS, portfolio-risk, capacity, concentration, and governance promotion contract |
 
 The six price-start reviews and ten SEC/reporting reviews are resolved. The bounded scan and
 mature-cohort scale gates passed, the checkpointed historical parse reached exact 100% eligible
@@ -52,9 +53,10 @@ filing coverage, and the active-plus-inactive PIT feature panel is hash-frozen. 
 availability is conservative: period-ambiguous growth, subjective milestones, and multi-value
 conflicts remain review-required, and an SEC filing is unavailable before its filing date even
 when its UTC acceptance timestamp falls on the prior calendar day. The next research batch may
-define and run walk-forward OOS calibration only against this frozen panel, after positioning
-scope and the return/cost/training contracts are explicitly frozen. Production still requires
-net-of-cost backtests, daily orchestration, and reviewed promotion.
+not reopen the completed historical parse or frozen calibration merely to refresh current data.
+The 2026-07-30 current refresh and current-only v3 panel are complete. Production still requires
+a separate generic-model OOS and portfolio promotion contract; DP16 first permits a new
+outcome-blind signal on 2026-07-31 once that completed market date is actually available.
 
 ## 1. Objective
 

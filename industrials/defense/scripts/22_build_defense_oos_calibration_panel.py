@@ -70,6 +70,8 @@ PANEL_FIELDS = [
     "market_cap",
     "avg_dollar_volume_60d",
     *PILLAR_SCORE_FIELDS,
+    "defense_budget_backlog_quality",
+    "defense_budget_backlog_status",
     "source_snapshot_asof_date",
     "price_data_asof_date",
     "market_feature_asof_date",
@@ -137,6 +139,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cadence", choices=["available", "weekly"], default="available")
     parser.add_argument("--weekly-start-date", default="", help="Weekly bucket anchor date when --cadence weekly.")
     parser.add_argument("--weekly-selection", choices=["first", "last"], default="last")
+    parser.add_argument(
+        "--evaluation-calendar",
+        type=Path,
+        default=None,
+        help="Frozen one-column asof_date CSV. Panel dates must match it exactly.",
+    )
     parser.add_argument("--allow-overwrite", action="store_true")
     parser.add_argument("--include-review-rows", action="store_true")
     return parser.parse_args()
@@ -195,6 +203,23 @@ def filter_weekly_snapshot_paths(
         selection=weekly_selection,
     )
     return [by_date[asof] for asof in selected]
+
+
+def read_evaluation_calendar(path: Path) -> list[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Evaluation calendar does not exist: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    dates = [str(row.get("asof_date") or "").strip() for row in rows]
+    if not dates or any(not value for value in dates):
+        raise ValueError(f"Evaluation calendar must contain nonblank asof_date rows: {path}")
+    normalized = [
+        parse_required_date(value, field="evaluation_calendar.asof_date").isoformat()
+        for value in dates
+    ]
+    if normalized != sorted(set(normalized)):
+        raise ValueError(f"Evaluation calendar dates must be unique and ascending: {path}")
+    return normalized
 
 
 def load_snapshot(path: Path) -> SnapshotArtifact:
@@ -483,6 +508,12 @@ def compose_panel_rows(
             }
             for field in PILLAR_SCORE_FIELDS:
                 record[field] = str(source_row.get(field) or "")
+            record["defense_budget_backlog_quality"] = str(
+                source_row.get("defense_budget_backlog_quality") or ""
+            )
+            record["defense_budget_backlog_status"] = str(
+                source_row.get("defense_budget_backlog_status") or ""
+            )
             out.append(record)
     return out, sorted(set(source_modes))
 
@@ -549,7 +580,22 @@ def main() -> int:
     if benchmark_ticker != "XAR":
         raise ValueError(f"Defense calibration benchmark must be XAR unless the contract is updated, got {benchmark_ticker!r}")
     snapshot_paths = snapshot_dirs(snapshot_root, asof=args.asof, start_date=args.start_date, end_date=args.end_date)
-    if args.cadence == "weekly":
+    evaluation_calendar = (
+        args.evaluation_calendar.expanduser().resolve()
+        if args.evaluation_calendar
+        else None
+    )
+    evaluation_dates: list[str] = []
+    if evaluation_calendar is not None:
+        evaluation_dates = read_evaluation_calendar(evaluation_calendar)
+        by_date = {str(snapshot_date(path) or ""): path for path in snapshot_paths}
+        missing_dates = [asof for asof in evaluation_dates if asof not in by_date]
+        if missing_dates:
+            raise ValueError(
+                f"Snapshot root is missing frozen evaluation-calendar dates: {missing_dates[:20]}"
+            )
+        snapshot_paths = [by_date[asof] for asof in evaluation_dates]
+    elif args.cadence == "weekly":
         snapshot_paths = filter_weekly_snapshot_paths(
             snapshot_paths,
             weekly_start_date=args.weekly_start_date,
@@ -558,6 +604,26 @@ def main() -> int:
     snapshots = [load_snapshot(path) for path in snapshot_paths]
     if not snapshots:
         raise ValueError(f"No sealed defense rank snapshots found under {snapshot_root}")
+    if evaluation_dates and [snapshot.asof_date for snapshot in snapshots] != evaluation_dates:
+        raise ValueError("Loaded snapshot dates do not exactly match the frozen evaluation calendar")
+    score_model_versions = {
+        str(snapshot.manifest.get("score_model_version") or "")
+        for snapshot in snapshots
+    }
+    scoring_modes = {
+        str(snapshot.manifest.get("scoring_mode") or "baseline")
+        for snapshot in snapshots
+    }
+    research_candidate_values = {
+        bool(snapshot.manifest.get("research_candidate", False))
+        for snapshot in snapshots
+    }
+    if len(score_model_versions) != 1 or "" in score_model_versions:
+        raise ValueError(f"Source snapshots mix score_model_version values: {sorted(score_model_versions)}")
+    if len(scoring_modes) != 1:
+        raise ValueError(f"Source snapshots mix scoring modes: {sorted(scoring_modes)}")
+    if len(research_candidate_values) != 1:
+        raise ValueError("Source snapshots mix research-candidate and production/baseline artifacts")
 
     tickers = [benchmark_ticker]
     for snapshot in snapshots:
@@ -628,6 +694,8 @@ def main() -> int:
         "snapshot_cadence": args.cadence,
         "weekly_start_date": args.weekly_start_date if args.cadence == "weekly" else "",
         "weekly_selection": args.weekly_selection if args.cadence == "weekly" else "",
+        "evaluation_calendar_path": str(evaluation_calendar or ""),
+        "evaluation_calendar_sha256": sha256_file(evaluation_calendar) if evaluation_calendar else "",
         "snapshot_count": len(snapshot_dates),
         "snapshot_start_date": snapshot_dates[0],
         "snapshot_end_date": snapshot_dates[-1],
@@ -636,6 +704,9 @@ def main() -> int:
         "embargoed_snapshots": sum(1 for value in split_map.values() if value == "embargo"),
         "benchmark_ticker": benchmark_ticker,
         "price_source_order": sources,
+        "score_model_version": next(iter(score_model_versions)),
+        "scoring_mode": next(iter(scoring_modes)),
+        "research_candidate": next(iter(research_candidate_values)),
         "panel_rows": len(panel_rows),
         "eligible_rows": eligible_rows,
         "return_available_rows": return_available_rows,
@@ -655,6 +726,11 @@ def main() -> int:
                 "rank_manifest_path": str(snapshot.manifest_path),
                 "rank_manifest_sha256": snapshot.manifest_sha256,
                 "rank_rows": len(snapshot.rows),
+                "score_model_version": str(snapshot.manifest.get("score_model_version") or ""),
+                "scoring_mode": str(snapshot.manifest.get("scoring_mode") or "baseline"),
+                "research_candidate": bool(snapshot.manifest.get("research_candidate", False)),
+                "shadow_only": bool(snapshot.manifest.get("shadow_only", False)),
+                "production_promoted": bool(snapshot.manifest.get("production_promoted", False)),
             }
             for snapshot in snapshots
         ],

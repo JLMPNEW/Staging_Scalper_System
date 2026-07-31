@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -29,6 +30,16 @@ def rows(path: Path) -> list[dict[str, str]]:
 def load_script(name: str):
     path = INDUSTRIALS_ROOT / "transportation" / "scripts" / name
     spec = importlib.util.spec_from_file_location(f"transportation_{name.replace('.', '_')}", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_shared_yahoo_script():
+    path = INDUSTRIALS_ROOT / "scripts" / "03_sync_industrials_yahoo_adjusted_prices.py"
+    spec = importlib.util.spec_from_file_location("shared_yahoo_session_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -170,6 +181,65 @@ def test_shared_yahoo_loader_uses_family_membership_not_global_company_activity(
     tickers = {job.ticker for job in jobs}
     assert len(tickers) == 112
     assert "FLY" not in tickers
+
+
+def test_yahoo_final_tick_one_second_before_session_end_is_complete() -> None:
+    module = load_shared_yahoo_script()
+    bar = module.YahooBar(
+        ticker="XTN",
+        bar_date="2026-07-30",
+        source_id="yahoo_finance_adjusted",
+        open=111.0,
+        high=112.0,
+        low=109.0,
+        close=109.36,
+        adj_close=109.36,
+        volume=21_000.0,
+        dividend_amount=None,
+        split_factor=None,
+        price_adjustment="adjusted_close",
+        is_adjusted=1,
+    )
+    closed_meta = {
+        "regularMarketTime": 199,
+        "currentTradingPeriod": {"regular": {"start": 100, "end": 200}},
+    }
+    assert module.without_unclosed_trailing_bar([bar], 150, closed_meta) == [bar]
+    payload = json.dumps({"chart": {"result": [{"meta": closed_meta}]}})
+    assert module.cached_payload_stale_reason(payload) is None
+
+    open_meta = {
+        "regularMarketTime": 198,
+        "currentTradingPeriod": {"regular": {"start": 100, "end": 200}},
+    }
+    assert module.without_unclosed_trailing_bar([bar], 150, open_meta) == []
+    payload = json.dumps({"chart": {"result": [{"meta": open_meta}]}})
+    assert (
+        module.cached_payload_stale_reason(payload)
+        == "intraday_payload_for_completed_session"
+    )
+
+
+def test_explicit_transportation_benchmarks_override_legacy_secondary_defaults() -> None:
+    builder_path = (
+        INDUSTRIALS_ROOT / "scripts" / "05_build_industrials_market_features.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "shared_transportation_benchmark_mapping_test",
+        builder_path,
+    )
+    assert spec and spec.loader
+    builder = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = builder
+    spec.loader.exec_module(builder)
+    benchmarks, primary, secondary = builder.resolve_benchmark_mapping(
+        load_yaml(CONFIG_PATH),
+        benchmark_override="IYT,XTN,SPY",
+        primary_override="IYT",
+    )
+    assert benchmarks == ["IYT", "XTN", "SPY"]
+    assert primary == "IYT"
+    assert secondary == ["XTN", "SPY"]
 
 
 def test_portfolio_layer_has_optional_transportation_shadow_source() -> None:

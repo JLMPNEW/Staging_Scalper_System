@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any, Literal
 from xml.etree import ElementTree as ET
+from zipfile import BadZipFile, ZipFile
 
 
 MACHINERY_FOOTNOTE_REPORT_KEYWORDS = (
@@ -34,7 +35,7 @@ class DocumentText:
 
 
 def filing_summary_document_name(index_payload: dict[str, Any]) -> str:
-    raw_items = ((index_payload.get("directory") or {}).get("item") or [])
+    raw_items = (index_payload.get("directory") or {}).get("item") or []
     for item in raw_items:
         if not isinstance(item, dict):
             continue
@@ -53,25 +54,17 @@ def filing_summary_report_documents(
         root = ET.fromstring(filing_summary_xml)
     except ET.ParseError:
         return set()
-    normalized_keywords = tuple(
-        re.sub(r"\s+", " ", keyword.strip().lower())
-        for keyword in keywords
-        if keyword.strip()
-    )
+    normalized_keywords = tuple(re.sub(r"\s+", " ", keyword.strip().lower()) for keyword in keywords if keyword.strip())
     selected: set[str] = set()
     for report in root.iter():
         if report.tag.rsplit("}", 1)[-1].lower() != "report":
             continue
-        fields = {
-            child.tag.rsplit("}", 1)[-1].lower(): str(child.text or "").strip()
-            for child in report
-        }
+        fields = {child.tag.rsplit("}", 1)[-1].lower(): str(child.text or "").strip() for child in report}
         document_name = fields.get("htmlfilename", "")
         if not document_name.lower().endswith((".htm", ".html", ".xhtml")):
             continue
         description = " ".join(
-            fields.get(field, "")
-            for field in ("shortname", "longname", "menucategory", "role")
+            fields.get(field, "") for field in ("shortname", "longname", "menucategory", "role")
         ).lower()
         description = re.sub(r"\s+", " ", description)
         if any(keyword in description for keyword in normalized_keywords):
@@ -115,6 +108,35 @@ def _pypdf_text_unbounded(payload: bytes, *, max_pages: int) -> DocumentText:
     return DocumentText(text, "pdf_pypdf", page_count=page_count)
 
 
+def _pymupdf_text_unbounded(payload: bytes, *, max_pages: int) -> DocumentText:
+    try:
+        import pymupdf  # type: ignore[import-not-found]
+    except ImportError:
+        return DocumentText(
+            "",
+            "pdf_pymupdf_unavailable",
+            warning="pymupdf_not_installed",
+        )
+    pages: list[str] = []
+    try:
+        with pymupdf.open(stream=payload, filetype="pdf") as document:
+            page_count = document.page_count
+            limit = min(page_count, max_pages) if max_pages > 0 else page_count
+            for page_number in range(limit):
+                pages.append(document.load_page(page_number).get_text("text"))
+    except Exception as exc:
+        return DocumentText(
+            "",
+            "pdf_pymupdf_failed",
+            warning=f"{type(exc).__name__}:{exc}",
+        )
+    return DocumentText(
+        "\n\n".join(pages).strip(),
+        "pdf_pymupdf_targeted_recovery",
+        page_count=page_count,
+    )
+
+
 def _ocr_pdf_text_unbounded(payload: bytes, *, max_pages: int) -> DocumentText:
     try:
         import pymupdf  # type: ignore[import-not-found]
@@ -148,17 +170,18 @@ def _ocr_pdf_text_unbounded(payload: bytes, *, max_pages: int) -> DocumentText:
 
 
 def _pdf_worker(
-    method: Literal["pypdf", "ocr"],
+    method: Literal["pypdf", "pymupdf", "ocr"],
     payload: bytes,
     max_pages: int,
     sender: Any,
 ) -> None:
     try:
-        result = (
-            _pypdf_text_unbounded(payload, max_pages=max_pages)
-            if method == "pypdf"
-            else _ocr_pdf_text_unbounded(payload, max_pages=max_pages)
-        )
+        if method == "pypdf":
+            result = _pypdf_text_unbounded(payload, max_pages=max_pages)
+        elif method == "pymupdf":
+            result = _pymupdf_text_unbounded(payload, max_pages=max_pages)
+        else:
+            result = _ocr_pdf_text_unbounded(payload, max_pages=max_pages)
         sender.send(result)
     except BaseException as exc:  # pragma: no cover - protects the parent from worker failures
         sender.send(
@@ -173,18 +196,18 @@ def _pdf_worker(
 
 
 def _bounded_pdf_extract(
-    method: Literal["pypdf", "ocr"],
+    method: Literal["pypdf", "pymupdf", "ocr"],
     payload: bytes,
     *,
     max_pages: int,
     timeout_sec: float,
 ) -> DocumentText:
     if timeout_sec <= 0:
-        return (
-            _pypdf_text_unbounded(payload, max_pages=max_pages)
-            if method == "pypdf"
-            else _ocr_pdf_text_unbounded(payload, max_pages=max_pages)
-        )
+        if method == "pypdf":
+            return _pypdf_text_unbounded(payload, max_pages=max_pages)
+        if method == "pymupdf":
+            return _pymupdf_text_unbounded(payload, max_pages=max_pages)
+        return _ocr_pdf_text_unbounded(payload, max_pages=max_pages)
 
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
@@ -254,6 +277,21 @@ def _bounded_pdf_extract(
     return DocumentText("", f"pdf_{method}_worker_failed", warning="worker_returned_no_result")
 
 
+def extract_pdf_text_pymupdf(
+    payload: bytes,
+    *,
+    max_pages: int = 250,
+    extraction_timeout_sec: float = 30.0,
+) -> DocumentText:
+    """Targeted local fallback for already-dispositioned PDF limitations."""
+    return _bounded_pdf_extract(
+        "pymupdf",
+        payload,
+        max_pages=max_pages,
+        timeout_sec=extraction_timeout_sec,
+    )
+
+
 def extract_pdf_text(
     payload: bytes,
     *,
@@ -269,11 +307,7 @@ def extract_pdf_text(
         timeout_sec=extraction_timeout_sec,
     )
     if len(direct.text.strip()) >= minimum_text_characters or not enable_ocr:
-        if (
-            not enable_ocr
-            and len(direct.text.strip()) < minimum_text_characters
-            and not direct.warning
-        ):
+        if not enable_ocr and len(direct.text.strip()) < minimum_text_characters and not direct.warning:
             # An image-only PDF "succeeds" in pypdf with empty text. Without a
             # warning the adapter emits no evidence at all and the document is
             # mislabeled as issuer non-disclosure instead of PARSER_FAILURE.
@@ -302,6 +336,70 @@ def extract_pdf_text(
     return direct
 
 
+def extract_xlsx_text(payload: bytes) -> DocumentText:
+    try:
+        from openpyxl import load_workbook  # type: ignore[import-not-found]
+    except ImportError:
+        return DocumentText(
+            "",
+            "xlsx_unavailable",
+            warning="openpyxl_not_installed",
+        )
+    try:
+        workbook = load_workbook(
+            BytesIO(payload),
+            read_only=True,
+            data_only=True,
+        )
+        lines: list[str] = []
+        for worksheet in workbook.worksheets:
+            lines.append(f"[Worksheet: {worksheet.title}]")
+            for row in worksheet.iter_rows(values_only=True):
+                values = [str(value).strip() for value in row if value is not None and str(value).strip()]
+                if values:
+                    lines.append("\t".join(values))
+        workbook.close()
+    except Exception as exc:
+        return DocumentText(
+            "",
+            "xlsx_openpyxl_failed",
+            warning=f"{type(exc).__name__}:{exc}",
+        )
+    return DocumentText("\n".join(lines), "xlsx_openpyxl")
+
+
+def extract_docx_text(payload: bytes) -> DocumentText:
+    try:
+        with ZipFile(BytesIO(payload)) as archive:
+            document_xml = archive.read("word/document.xml")
+    except (BadZipFile, KeyError, OSError) as exc:
+        return DocumentText(
+            "",
+            "docx_zip_failed",
+            warning=f"{type(exc).__name__}:{exc}",
+        )
+    try:
+        root = ET.fromstring(document_xml)
+    except ET.ParseError as exc:
+        return DocumentText(
+            "",
+            "docx_xml_failed",
+            warning=f"{type(exc).__name__}:{exc}",
+        )
+    paragraphs: list[str] = []
+    for paragraph in root.iter():
+        if paragraph.tag.rsplit("}", 1)[-1].lower() != "p":
+            continue
+        text = " ".join(
+            str(node.text or "").strip()
+            for node in paragraph.iter()
+            if node.tag.rsplit("}", 1)[-1].lower() == "t" and str(node.text or "").strip()
+        )
+        if text:
+            paragraphs.append(text)
+    return DocumentText("\n".join(paragraphs), "docx_xml")
+
+
 def extract_document_text(
     payload: bytes,
     *,
@@ -313,6 +411,17 @@ def extract_document_text(
     pdf_extraction_timeout_sec: float = 30.0,
 ) -> DocumentText:
     suffix = document_name.lower().rsplit(".", 1)[-1] if "." in document_name else ""
+    normalized_content_type = content_type.lower()
+    if suffix == "xlsx" or "spreadsheetml" in normalized_content_type:
+        return extract_xlsx_text(payload)
+    if suffix == "docx" or (payload.startswith(b"PK") and "msword" in normalized_content_type):
+        return extract_docx_text(payload)
+    if suffix == "doc" and payload.startswith(b"\xd0\xcf\x11\xe0"):
+        return DocumentText(
+            "",
+            "legacy_word_binary_requires_conversion",
+            warning="legacy_word_binary_requires_offline_conversion",
+        )
     if suffix == "pdf" or "application/pdf" in content_type.lower() or payload.startswith(b"%PDF-"):
         if max_pdf_bytes > 0 and len(payload) > max_pdf_bytes:
             return DocumentText(

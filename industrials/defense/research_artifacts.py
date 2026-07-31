@@ -231,80 +231,294 @@ PRODUCTION_PROMOTION_STATUS = "production_oos_validated"
 PRODUCTION_PROMOTION_METHOD = "weekly_pit_panel_validation_ic_holdout_backtest"
 PRODUCTION_SCORING_CONTRACT_VERSION = "tech_family_final_rank_table_v1_production"
 LOCK_CONFIG_PREFIX = "oos_calibration_standards.families.defense"
+PRODUCTION_LOCK_REGISTRY_FIELDS = [
+    "lock_id",
+    "effective_from",
+    "effective_to",
+    "lock_date",
+    "train_start_date",
+    "train_end_date",
+    "scoring_mode",
+    "score_model_version",
+    "validation_method",
+    "decision_manifest_path",
+    "decision_manifest_sha256",
+    "enabled",
+    "created_at_utc",
+]
 
 
-def load_production_lock(config: dict[str, Any], *, base_dir: Path) -> dict[str, Any] | None:
-    """Sealed production-calibration lock state for defense, or None while unlocked.
+def _validated_production_lock(
+    *,
+    lock_id: str,
+    effective_from_raw: str,
+    effective_to_raw: str,
+    lock_date_raw: str,
+    train_start_raw: str,
+    train_end_raw: str,
+    scoring_mode: str,
+    score_model_version: str,
+    validation_method: str,
+    decision_path: Path,
+    expected_decision_sha256: str = "",
+) -> dict[str, Any]:
+    effective_from = parse_required_date(
+        effective_from_raw,
+        field=f"{lock_id}.effective_from",
+    )
+    effective_to = (
+        parse_required_date(effective_to_raw, field=f"{lock_id}.effective_to")
+        if effective_to_raw
+        else None
+    )
+    lock_date = parse_required_date(lock_date_raw, field=f"{lock_id}.lock_date")
+    train_start = parse_required_date(
+        train_start_raw,
+        field=f"{lock_id}.train_start_date",
+    )
+    train_end = parse_required_date(
+        train_end_raw,
+        field=f"{lock_id}.train_end_date",
+    )
+    if train_end < train_start or lock_date < train_end or effective_from < lock_date:
+        raise ValueError(
+            f"Defense lock {lock_id!r} dates out of order: train "
+            f"{train_start}..{train_end}, lock {lock_date}, effective "
+            f"{effective_from}..{effective_to or 'open'}"
+        )
+    if effective_to is not None and effective_to < effective_from:
+        raise ValueError(
+            f"Defense lock {lock_id!r} effective_to precedes effective_from"
+        )
+    if scoring_mode not in {"baseline", "specialized_v1"}:
+        raise ValueError(
+            f"Defense lock {lock_id!r} has unsupported scoring_mode={scoring_mode!r}"
+        )
+    if not score_model_version:
+        raise ValueError(f"Defense lock {lock_id!r} has no score_model_version")
+    if not decision_path.is_file():
+        raise FileNotFoundError(
+            f"Defense lock {lock_id!r} decision manifest not found: {decision_path}"
+        )
+    decision_sha256 = sha256_file(decision_path)
+    if expected_decision_sha256 and decision_sha256 != expected_decision_sha256.lower():
+        raise ValueError(
+            f"Defense lock {lock_id!r} decision-manifest hash mismatch: "
+            f"expected {expected_decision_sha256.lower()} actual {decision_sha256}"
+        )
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    if decision.get("promoted") is not True or str(decision.get("status") or "") != "pass":
+        raise ValueError(
+            f"Promotion decision at {decision_path} is not a passing promotion"
+        )
+    if str(decision.get("asof_date") or "") != effective_from.isoformat():
+        raise ValueError(
+            f"Promotion decision asof {decision.get('asof_date')!r} does not "
+            f"match effective_from {effective_from}"
+        )
+    payload = decision.get("promotion_payload") or {}
+    decision_mode = str(
+        decision.get("scoring_mode") or payload.get("scoring_mode") or ""
+    )
+    decision_version = str(
+        decision.get("score_model_version")
+        or payload.get("score_model_version")
+        or ""
+    )
+    decision_lock_id = str(
+        decision.get("lock_id") or payload.get("lock_id") or ""
+    )
+    if decision_mode and decision_mode != scoring_mode:
+        raise ValueError(
+            f"Defense lock {lock_id!r} scoring_mode disagrees with decision "
+            f"manifest: {scoring_mode!r} != {decision_mode!r}"
+        )
+    if decision_version and decision_version != score_model_version:
+        raise ValueError(
+            f"Defense lock {lock_id!r} score_model_version disagrees with "
+            f"decision manifest: {score_model_version!r} != {decision_version!r}"
+        )
+    if decision_lock_id and decision_lock_id != lock_id:
+        raise ValueError(
+            f"Defense lock id disagrees with decision manifest: "
+            f"{lock_id!r} != {decision_lock_id!r}"
+        )
+    raw_weights = payload.get("weights") or {}
+    if not isinstance(raw_weights, dict) or not raw_weights:
+        raise ValueError(
+            f"Promotion decision at {decision_path} carries no promoted weights"
+        )
+    weights = normalize_weights(
+        {str(key): float(value) for key, value in raw_weights.items()}
+    )
+    return {
+        "lock_id": lock_id,
+        "lock_date": lock_date.isoformat(),
+        "production_start_date": effective_from.isoformat(),
+        "effective_from": effective_from.isoformat(),
+        "effective_to": effective_to.isoformat() if effective_to else "",
+        "train_start_date": train_start.isoformat(),
+        "train_end_date": train_end.isoformat(),
+        "weights": weights,
+        "scoring_mode": scoring_mode,
+        "score_model_version": score_model_version,
+        "validation_method": validation_method or PRODUCTION_PROMOTION_METHOD,
+        "decision_manifest_path": str(decision_path),
+        "decision_manifest_sha256": decision_sha256,
+    }
 
-    Fail-closed contract: a blank or TBD_* calibration_lock_date means NOT locked
-    (publishers keep the original shadow stamping). Once the lock date is a real date,
-    every companion key AND the sealed scripts/27 promotion decision manifest must
-    exist and agree — a locked config without its evidence artifact is an error,
-    never a silent fallback to shadow stamps or default weights.
+
+def load_production_lock(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the effective sealed defense model lock, or None before launch.
+
+    The effective-dated registry is authoritative when configured. Its ranges
+    must not overlap and every row pins the immutable promotion-decision hash.
+    The legacy single-lock keys remain a compatibility fallback only.
     """
     from industrials.core.config import cfg_get, resolve_path
 
     def read(name: str) -> str:
         return str(cfg_get(config, f"{LOCK_CONFIG_PREFIX}.{name}", "") or "").strip()
 
+    registry_raw = read("production_lock_registry_csv")
+    if registry_raw:
+        registry_path = resolve_path(registry_raw, base_dir=base_dir)
+        if not registry_path.is_file():
+            raise FileNotFoundError(
+                f"Configured defense production lock registry not found: {registry_path}"
+            )
+        with registry_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if list(reader.fieldnames or []) != PRODUCTION_LOCK_REGISTRY_FIELDS:
+                raise ValueError(
+                    f"Defense production lock registry header mismatch: {registry_path}"
+                )
+            raw_rows = [
+                {str(key): str(value or "").strip() for key, value in row.items()}
+                for row in reader
+                if str(row.get("enabled") or "").strip().lower()
+                in {"1", "true", "yes", "y"}
+            ]
+        if not raw_rows:
+            return None
+        seen_ids: set[str] = set()
+        ordered: list[tuple[date, date | None, dict[str, str]]] = []
+        for row in raw_rows:
+            lock_id = row["lock_id"]
+            if not lock_id or lock_id in seen_ids:
+                raise ValueError(
+                    f"Defense production lock registry has blank/duplicate "
+                    f"lock_id={lock_id!r}"
+                )
+            seen_ids.add(lock_id)
+            effective_from = parse_required_date(
+                row["effective_from"],
+                field=f"{lock_id}.effective_from",
+            )
+            effective_to = (
+                parse_required_date(
+                    row["effective_to"],
+                    field=f"{lock_id}.effective_to",
+                )
+                if row["effective_to"]
+                else None
+            )
+            if effective_to is not None and effective_to < effective_from:
+                raise ValueError(
+                    f"Defense lock {lock_id!r} effective range is reversed"
+                )
+            ordered.append((effective_from, effective_to, row))
+        ordered.sort(key=lambda item: item[0])
+        for index, (effective_from, effective_to, row) in enumerate(ordered):
+            if index == 0:
+                continue
+            previous_from, previous_to, previous = ordered[index - 1]
+            if previous_to is None or previous_to >= effective_from:
+                raise ValueError(
+                    "Defense production lock ranges overlap: "
+                    f"{previous['lock_id']}={previous_from}.."
+                    f"{previous_to or 'open'} and "
+                    f"{row['lock_id']}={effective_from}.."
+                    f"{effective_to or 'open'}"
+                )
+        selected: dict[str, str] | None
+        if asof:
+            target = parse_required_date(asof, field="production lock asof")
+            matches = [
+                row
+                for effective_from, effective_to, row in ordered
+                if effective_from <= target
+                and (effective_to is None or target <= effective_to)
+            ]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Multiple defense production locks match asof={asof}"
+                )
+            selected = matches[0] if matches else None
+        else:
+            selected = ordered[-1][2]
+        if selected is None:
+            return None
+        return _validated_production_lock(
+            lock_id=selected["lock_id"],
+            effective_from_raw=selected["effective_from"],
+            effective_to_raw=selected["effective_to"],
+            lock_date_raw=selected["lock_date"],
+            train_start_raw=selected["train_start_date"],
+            train_end_raw=selected["train_end_date"],
+            scoring_mode=selected["scoring_mode"],
+            score_model_version=selected["score_model_version"],
+            validation_method=selected["validation_method"],
+            decision_path=resolve_path(
+                selected["decision_manifest_path"],
+                base_dir=base_dir,
+            ),
+            expected_decision_sha256=selected["decision_manifest_sha256"],
+        )
+
     lock_raw = read("calibration_lock_date")
     if not lock_raw or lock_raw.upper().startswith("TBD"):
         return None
-    lock_date = parse_required_date(lock_raw, field="calibration_lock_date")
     required = {
         "calibration_production_start_date": read("calibration_production_start_date"),
         "calibration_train_start_date": read("calibration_train_start_date"),
         "calibration_train_end_date": read("calibration_train_end_date"),
-        "production_promotion_decision_manifest": read("production_promotion_decision_manifest"),
+        "production_promotion_decision_manifest": read(
+            "production_promotion_decision_manifest"
+        ),
     }
-    missing = sorted(name for name, value in required.items() if not value or value.upper().startswith("TBD"))
+    missing = sorted(
+        name
+        for name, value in required.items()
+        if not value or value.upper().startswith("TBD")
+    )
     if missing:
         raise ValueError(
-            f"{LOCK_CONFIG_PREFIX}.calibration_lock_date is set ({lock_date}) but companion keys "
-            f"are missing/TBD: {missing}"
+            f"{LOCK_CONFIG_PREFIX}.calibration_lock_date is set ({lock_raw}) but "
+            f"companion keys are missing/TBD: {missing}"
         )
-    production_start = parse_required_date(
-        required["calibration_production_start_date"],
-        field="calibration_production_start_date",
+    return _validated_production_lock(
+        lock_id="legacy_single_lock",
+        effective_from_raw=required["calibration_production_start_date"],
+        effective_to_raw="",
+        lock_date_raw=lock_raw,
+        train_start_raw=required["calibration_train_start_date"],
+        train_end_raw=required["calibration_train_end_date"],
+        scoring_mode="baseline",
+        score_model_version=read("calibration_provenance_version")
+        or "defense_shadow_v0.1.0",
+        validation_method=read("calibration_validation_method")
+        or PRODUCTION_PROMOTION_METHOD,
+        decision_path=resolve_path(
+            required["production_promotion_decision_manifest"],
+            base_dir=base_dir,
+        ),
     )
-    train_start = parse_required_date(required["calibration_train_start_date"], field="calibration_train_start_date")
-    train_end = parse_required_date(required["calibration_train_end_date"], field="calibration_train_end_date")
-    if train_end < train_start or lock_date < train_end or production_start < lock_date:
-        raise ValueError(
-            f"Defense lock dates out of order: train {train_start}..{train_end}, "
-            f"lock {lock_date}, production start {production_start}"
-        )
-    decision_path = resolve_path(required["production_promotion_decision_manifest"], base_dir=base_dir)
-    if not decision_path.exists():
-        raise FileNotFoundError(
-            f"Configured production promotion decision manifest not found: {decision_path} "
-            "(the lock date is set; the sealed scripts/27 evidence must exist)"
-        )
-    decision = json.loads(decision_path.read_text(encoding="utf-8"))
-    if decision.get("promoted") is not True or str(decision.get("status") or "") != "pass":
-        raise ValueError(f"Promotion decision at {decision_path} is not a passing promotion")
-    if str(decision.get("asof_date") or "") != production_start.isoformat():
-        raise ValueError(
-            f"Promotion decision asof {decision.get('asof_date')!r} does not match configured "
-            f"calibration_production_start_date {production_start}"
-        )
-    payload = decision.get("promotion_payload") or {}
-    raw_weights = payload.get("weights") or {}
-    if not isinstance(raw_weights, dict) or not raw_weights:
-        raise ValueError(f"Promotion decision at {decision_path} carries no promoted weights")
-    weights = normalize_weights({str(key): float(value) for key, value in raw_weights.items()})
-    validation_method = read("calibration_validation_method") or PRODUCTION_PROMOTION_METHOD
-    return {
-        "lock_date": lock_date.isoformat(),
-        "production_start_date": production_start.isoformat(),
-        "train_start_date": train_start.isoformat(),
-        "train_end_date": train_end.isoformat(),
-        "weights": weights,
-        "validation_method": validation_method,
-        "decision_manifest_path": str(decision_path),
-        "decision_manifest_sha256": sha256_file(decision_path),
-    }
-
 
 def lock_mode_for_asof(lock: dict[str, Any] | None, asof: str) -> str:
     """shadow (not locked) | pre_lock (locked, asof before production start) | production."""

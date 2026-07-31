@@ -95,6 +95,7 @@ RAW_FEATURE_FIELDS = [
     "cash_conversion_cycle_change",
     "net_debt_to_ebitda",
     "negative_ebitda_leverage_flag",
+    "negative_profit_valuation_flag",
     "interest_coverage",
     "cash_burn_ttm_usd",
     "cash_runway_years",
@@ -572,6 +573,17 @@ def _is_development_row(row: dict[str, Any]) -> bool:
     return cohort == "development_stage_emerging_machinery" or stage == "development_stage"
 
 
+def _apply_negative_profit_valuation_cap(
+    score: float,
+    row: Mapping[str, Any],
+    *,
+    cap: float,
+) -> float:
+    if _float(row.get("negative_profit_valuation_flag")) == 1.0:
+        return min(score, cap)
+    return score
+
+
 def _development_score(row: dict[str, Any]) -> float:
     stage = str(row.get("development_stage") or "").lower()
     if _is_development_row(row):
@@ -582,16 +594,29 @@ def _development_score(row: dict[str, Any]) -> float:
         elif _float(row.get("cash_burn_ttm_usd")) == 0.0:
             observations.append(80.0)
         capital_raise_dependence = _float(row.get("capital_raise_dependence"))
+        partial_capital_raise_coverage = (
+            "capital_raise_proceeds_partial_component_coverage"
+            in {
+                token.strip()
+                for token in str(row.get("canonical_quality") or "").split(";")
+            }
+        )
         if capital_raise_dependence is not None:
-            observations.append(
-                75.0
-                if capital_raise_dependence <= 0.25
-                else 55.0
-                if capital_raise_dependence <= 0.75
-                else 35.0
-                if capital_raise_dependence <= 1.5
-                else 15.0
-            )
+            if partial_capital_raise_coverage:
+                if capital_raise_dependence > 1.5:
+                    observations.append(15.0)
+                elif capital_raise_dependence > 0.75:
+                    observations.append(35.0)
+            else:
+                observations.append(
+                    75.0
+                    if capital_raise_dependence <= 0.25
+                    else 55.0
+                    if capital_raise_dependence <= 0.75
+                    else 35.0
+                    if capital_raise_dependence <= 1.5
+                    else 15.0
+                )
         dilution = _float(row.get("diluted_shares_yoy_growth"))
         if dilution is not None:
             observations.append(75.0 if dilution <= 0.05 else 55.0 if dilution <= 0.15 else 30.0 if dilution <= 0.30 else 10.0)
@@ -637,6 +662,7 @@ def build_scoring_feature_rows(
     min_score_confidence: float,
     max_staleness_days: int,
     min_avg_dollar_volume: float,
+    negative_profit_valuation_score_cap: float = 25.0,
 ) -> list[dict[str, str]]:
     asof = parse_asof(asof)
     memberships = _membership_rows(conn, asof=asof)
@@ -662,6 +688,10 @@ def build_scoring_feature_rows(
         source_priority=positioning_source_priority,
     )
     weights = _validate_weights(component_weights)
+    if not 0.0 <= negative_profit_valuation_score_cap <= NEUTRAL_SCORE:
+        raise ValueError(
+            "negative_profit_valuation_score_cap must be between 0 and 50"
+        )
     combined: list[dict[str, Any]] = []
     for membership in memberships:
         ticker = str(membership["ticker"])
@@ -769,6 +799,11 @@ def build_scoring_feature_rows(
         for component, metrics in COMPONENT_METRICS.items():
             available = [scores[metric] for metric in metrics if metric in scores]
             row[component] = sum(available) / len(available) if available else NEUTRAL_SCORE
+        row["valuation_score"] = _apply_negative_profit_valuation_cap(
+            float(row["valuation_score"]),
+            row,
+            cap=negative_profit_valuation_score_cap,
+        )
         row["development_stage_risk_score"] = _development_score(row)
         # Development-stage risk is a transparent risk-control modifier rather than a separate weight.
         row["risk_control_score"] = 0.8 * float(row["risk_control_score"]) + 0.2 * float(
@@ -907,6 +942,16 @@ def survivorship_sidecar(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         eligible = str(row.get("rank_ready_flag") or "0") == "1"
         row.update(
             {
+                "portfolio_universe_eligible_flag": "",
+                "portfolio_selection_policy": "",
+                "portfolio_sleeve_selected_flag": "",
+                "portfolio_sleeve_target_weight": "",
+                "portfolio_candidate_gate": "0",
+                "portfolio_candidate_status": "shadow_only",
+                "portfolio_candidate_reason": "shadow_only_oos_calibration_not_available",
+                "oos_score_valid_flag": "0",
+                "oos_score_asof_date": "",
+                "oos_invalid_reason": "shadow_pre_oos_calibration",
                 "research_calibration_input_eligible_flag": "1" if eligible else "0",
                 "research_calibration_reason": "ok" if eligible else str(row.get("rank_ready_reason") or "not_rank_ready"),
                 "calibration_sample_role": "pre_lock_research" if eligible else "excluded",
@@ -992,10 +1037,22 @@ def validate_rank_rows(
                 errors.append(
                     f"{ticker}: selected production row is not universe eligible"
                 )
-            if oos_valid != universe_eligible:
+            if universe_eligible == "1" and oos_valid != "1":
                 errors.append(
-                    f"{ticker}: production OOS/universe eligibility mismatch"
+                    f"{ticker}: production universe eligibility requires OOS validity"
                 )
+            if oos_valid == "1" and universe_eligible == "0":
+                if (
+                    row.get("portfolio_candidate_reason")
+                    != "development_stage_core_sleeve_excluded"
+                    or row.get("research_calibration_input_eligible_flag")
+                    != "1"
+                    or row.get("calibration_sample_role") != "strict_oos"
+                ):
+                    errors.append(
+                        f"{ticker}: OOS-valid core-sleeve exclusion lacks "
+                        "development-stage research provenance"
+                    )
         try:
             ranks.append(int(str(row.get("final_rank") or "")))
         except ValueError:
@@ -1192,6 +1249,13 @@ def publish_dashboard(
         ),
         "production_policy_active": production_policy_active,
         "activation_metadata": dict(activation_metadata or {}),
+        "selected_sleeve_count": sum(
+            str(row.get("portfolio_sleeve_selected_flag") or "") == "1"
+            for row in rows
+        )
+        if production_policy_active
+        else 0,
+        "sidecar_retained_shadow": production_policy_active,
         "sidecar_calibration_eligible_count": sum(
             str(row.get("stage11_calibration_input_eligible_flag") or "") == "1" for row in sidecar_rows
         ),

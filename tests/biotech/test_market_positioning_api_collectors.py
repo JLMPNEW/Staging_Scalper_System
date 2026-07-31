@@ -47,6 +47,8 @@ def test_normalize_ibkr_fee_rate_rejects_unknown_unit() -> None:
 
 
 def test_ibkr_shortable_generic_tick_uses_streaming_request(monkeypatch, tmp_path) -> None:
+    capture_date = date.today()
+
     class FakeContract:
         conId = 123
 
@@ -54,7 +56,7 @@ def test_ibkr_shortable_generic_tick_uses_streaming_request(monkeypatch, tmp_pat
         shortableShares = 5000.0
 
     class FakeBar:
-        date = date(2026, 7, 17)
+        date = capture_date
         close = 0.01
 
     class FakeIB:
@@ -118,8 +120,8 @@ def test_ibkr_shortable_generic_tick_uses_streaming_request(monkeypatch, tmp_pat
         sync_ibkr_borrow_availability(
             conn,
             tickers_csv=universe,
-            history_start_date=date(2026, 7, 10),
-            end_date=date(2026, 7, 17),
+            history_start_date=capture_date,
+            end_date=capture_date,
             snapshot_wait_sec=0.0,
             sleep_sec=0.0,
             batch_size=500,
@@ -136,6 +138,8 @@ def test_ibkr_shortable_generic_tick_uses_streaming_request(monkeypatch, tmp_pat
 
 
 def test_ibkr_streaming_batch_limit_and_failure_cleanup(monkeypatch, tmp_path) -> None:
+    capture_date = date.today()
+
     assert bounded_streaming_batch_size(0) == 1
     assert bounded_streaming_batch_size(50) == 50
     assert bounded_streaming_batch_size(100) == 90
@@ -145,7 +149,7 @@ def test_ibkr_streaming_batch_limit_and_failure_cleanup(monkeypatch, tmp_path) -
         conId = 123
 
     class FakeBar:
-        date = date(2026, 7, 17)
+        date = capture_date
         close = 0.01
 
     class FakeIB:
@@ -201,8 +205,8 @@ def test_ibkr_streaming_batch_limit_and_failure_cleanup(monkeypatch, tmp_path) -
             sync_ibkr_borrow_availability(
                 conn,
                 tickers_csv=universe,
-                history_start_date=date(2026, 7, 10),
-                end_date=date(2026, 7, 17),
+                history_start_date=capture_date,
+                end_date=capture_date,
                 snapshot_wait_sec=0.0,
                 sleep_sec=0.0,
             )

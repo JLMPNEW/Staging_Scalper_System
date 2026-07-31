@@ -37,6 +37,7 @@ from dedicated_parser.runtime import (
     execute_plan,
     validate_provider_dependencies,
 )
+from dedicated_parser.source_manifest import load_source_manifest
 from dedicated_parser.storage import (
     connect_database,
     finish_run,
@@ -85,6 +86,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tickers", default="")
     parser.add_argument("--ticker-cohort", type=Path, default=None)
     parser.add_argument("--accessions", default="")
+    parser.add_argument(
+        "--source-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Sealed document-level CSV. When supplied, ticker/accession scope "
+            "comes from the manifest and planning fails on missing, extra, or "
+            "hash-mismatched documents."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=default_worker_count())
     parser.add_argument("--max-filings-per-ticker", type=int, default=8)
     parser.add_argument("--max-documents-per-filing", type=int, default=16)
@@ -366,6 +377,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             "--tickers": bool(args.tickers),
             "--ticker-cohort": args.ticker_cohort is not None,
             "--accessions": bool(args.accessions),
+            "--source-manifest": args.source_manifest is not None,
             "--require-complete-cache": args.require_complete_cache,
         }
         invalid = [name for name, enabled in incompatible.items() if enabled]
@@ -377,6 +389,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--cache-dir is required unless --reassess-run-id is used")
     if args.tickers and args.ticker_cohort is not None:
         raise ValueError("--tickers and --ticker-cohort are mutually exclusive")
+    if args.source_manifest is not None and any((args.tickers, args.ticker_cohort is not None, args.accessions)):
+        raise ValueError("--source-manifest cannot be combined with --tickers, --ticker-cohort, or --accessions")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -384,8 +398,15 @@ def main(argv: list[str] | None = None) -> int:
     _validate_args(args)
     registry = load_registry(args.adapter)
     _export_policy_corpus(registry)
-    tickers = load_cohort_tickers(args.ticker_cohort) if args.ticker_cohort is not None else _ticker_list(args.tickers)
-    accessions = _accession_list(args.accessions)
+    source_manifest = load_source_manifest(args.source_manifest) if args.source_manifest is not None else None
+    tickers = (
+        list(source_manifest.tickers)
+        if source_manifest is not None
+        else load_cohort_tickers(args.ticker_cohort)
+        if args.ticker_cohort is not None
+        else _ticker_list(args.tickers)
+    )
+    accessions = list(source_manifest.accessions) if source_manifest is not None else _accession_list(args.accessions)
 
     if args.reassess_run_id:
         with closing(connect_database(args.db)) as conn, conn:
@@ -448,6 +469,17 @@ def main(argv: list[str] | None = None) -> int:
                 max_documents_per_filing=args.max_documents_per_filing,
                 force=args.force,
                 all_metrics=args.all_metrics,
+                document_scope=(source_manifest.documents if source_manifest is not None else None),
+                direct_filings=(
+                    source_manifest.direct_filings
+                    if source_manifest is not None and source_manifest.direct_document_mode
+                    else None
+                ),
+                direct_documents=(
+                    source_manifest.direct_documents
+                    if source_manifest is not None and source_manifest.direct_document_mode
+                    else None
+                ),
             )
             if cache_audit.missing_cache_accessions:
                 payload = {
@@ -480,6 +512,21 @@ def main(argv: list[str] | None = None) -> int:
             max_pdf_pages=args.max_pdf_pages,
             max_pdf_bytes=args.max_pdf_bytes,
             pdf_extraction_timeout_seconds=(args.pdf_extraction_timeout_seconds),
+            document_scope=(source_manifest.documents if source_manifest is not None else None),
+            direct_filings=(
+                source_manifest.direct_filings
+                if source_manifest is not None and source_manifest.direct_document_mode
+                else None
+            ),
+            direct_documents=(
+                source_manifest.direct_documents
+                if source_manifest is not None and source_manifest.direct_document_mode
+                else None
+            ),
+            metric_scope=(
+                source_manifest.metric_scope if source_manifest is not None and source_manifest.metric_scope else None
+            ),
+            catalog_documents_enabled=not args.plan_only,
         )
         plan_payload = _plan_summary_payload(summary)
         plan_payload["execution_scope"] = {
@@ -491,6 +538,20 @@ def main(argv: list[str] | None = None) -> int:
             "enable_arelle": not bool(args.disable_arelle),
             "enable_edgartools": not bool(args.disable_edgartools),
             "enable_pdf_ocr": bool(args.enable_pdf_ocr),
+            "max_pdf_pages": int(args.max_pdf_pages),
+            "max_pdf_bytes": int(args.max_pdf_bytes),
+            "pdf_extraction_timeout_seconds": float(args.pdf_extraction_timeout_seconds),
+            "source_manifest": (
+                {
+                    "path": str(source_manifest.path),
+                    "sha256": source_manifest.content_sha256,
+                    "row_count": source_manifest.row_count,
+                    "direct_document_mode": (source_manifest.direct_document_mode),
+                    "metric_scoped_filing_count": len(source_manifest.metric_scope),
+                }
+                if source_manifest is not None
+                else None
+            ),
         }
         if args.plan_only:
             payload = {

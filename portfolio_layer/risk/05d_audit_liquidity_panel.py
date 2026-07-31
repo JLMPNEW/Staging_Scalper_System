@@ -37,7 +37,10 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
-from portfolio_layer.risk.liquidity import finite_float  # noqa: E402
+from portfolio_layer.risk.liquidity import (  # noqa: E402
+    finite_float,
+    validate_snapshot_requested_tickers,
+)
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -204,15 +207,8 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
         except (OSError, json.JSONDecodeError):
             universe_source = ""
     requested = meta.get("requested_tickers") if isinstance(meta, dict) else None
-    if requested is not None:
-        if not isinstance(requested, list):
-            raise ValueError("spread_snapshot_meta.requested_tickers must be a list")
-        expected = {str(ticker).strip().upper() for ticker in requested if str(ticker).strip()}
-        if len(expected) != len(requested):
-            raise ValueError("spread_snapshot_meta.requested_tickers contains blank or duplicate tickers")
-        return expected
     if "stocks_scores.csv:investable_eligible" in universe_source or "investable_scores" in universe_source:
-        return scores
+        return validate_snapshot_requested_tickers(scores, requested)
     # 05c's trade-list / target-weights universe modes (including the "auto:" prefixed variants):
     # the snapshot legitimately covers only traded/held names, so that is the expected universe.
     if "trade_list" in universe_source:
@@ -223,12 +219,13 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
             artifact_keys=("trade_list.csv",),
         )
         if trade_rows:
-            return {
+            expected = {
                 ticker
                 for ticker, r in trade_rows.items()
                 if str(r.get("ticker", "")).strip()
                 and _safe_float(r.get("trade_notional"), 0.0) > 0
             }
+            return validate_snapshot_requested_tickers(expected, requested)
     if "target_weights" in universe_source:
         target_rows = _sealed_optional_map(
             run_dir,
@@ -237,16 +234,17 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
             artifact_keys=("target_weights.csv",),
         )
         if target_rows:
-            return {
+            expected = {
                 ticker
                 for ticker, r in target_rows.items()
                 if ticker != "CASH"
                 and _safe_float(r.get("weight"), 0.0) > 0
             }
+            return validate_snapshot_requested_tickers(expected, requested)
 
     coverage_path = run_dir / "risk" / "risk_coverage.csv"
     if not coverage_path.exists():
-        return scores
+        return validate_snapshot_requested_tickers(scores, requested)
 
     coverage = {
         str(r.get("ticker", "")).strip().upper()
@@ -258,7 +256,7 @@ def _expected_liquidity_universe(run_dir: Path) -> set[str]:
             and str(r.get("risk_eligible", "")).strip() == "1"
         )
     }
-    return scores & coverage
+    return validate_snapshot_requested_tickers(scores & coverage, requested)
 
 
 def _read_spread_snapshot(path: Path) -> dict[str, dict[str, str]]:

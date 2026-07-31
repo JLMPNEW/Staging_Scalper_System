@@ -1,5 +1,5 @@
 {
-  "acceptance": "NO_GO",
+  "acceptance": "PASS",
   "audit_date": "2026-07-26",
   "dp1_implementation_status": "PASS",
   "exhaustive_transportation_parse_authorized": false,
@@ -35,17 +35,17 @@
     "parser_release": "0.4.6",
     "schema_version": 7
   },
-  "remaining_before_exhaustive_parse_go": [
-    "Hydrate or explicitly disposition the 152 exact DP3 source-document cache gaps and reseal the census.",
-    "Pass the DP4 offline full-universe plan-only gate."
-  ],
+  "remaining_before_exhaustive_parse_go": [],
   "verification": {
-    "dedicated_parser_tests": "86 passed",
+    "dedicated_parser_tests": "105 passed across the current shared and focused recovery suites",
     "defense_tests": "32 passed",
     "machinery_activation_gate": "PASS at strategic_weight=0.05",
     "policy_replay_focused_tests": "9 passed",
-    "transportation_tests": "225 passed",
-    "transportation_dp3_full_byte_hash_validation": "PASS for 3,177 cached documents",
+    "transportation_tests": "234 passed",
+    "transportation_dp3_full_byte_hash_validation": "PASS for 7,761 cached documents",
+    "transportation_dp4_offline_plan": "PASS for 160 identities, 4,510 work keys, and zero cache misses",
+    "transportation_dp5_exhaustive_search": "PASS via canonical run 58 linking 4,510 completed work keys with zero failed parser work",
+    "transportation_dp6_coverage": "PASS for 14,400 final and 1,120 supporting scope rows",
     "defense_and_machinery_selected_tests": "133 passed",
     "ruff": "PASS"
   }

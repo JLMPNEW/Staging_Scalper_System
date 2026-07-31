@@ -1311,8 +1311,12 @@ scoring:
     sentiment_catalyst: 0.100000
   ic_tilted_composite:
     enabled: true
-    mode: "replace_raw"
-    allow_production_replace: true
+    # Phase-1 factor-validation safety lock: continue calculating and publishing the
+    # IC-tilted score, but do not let legacy overlap-unadjusted inference replace the
+    # production composite. Re-enable only from a reviewed factor_validation_v1 artifact.
+    mode: "shadow"
+    allow_production_replace: false
+    phase1_safety_lock: true
     source_csv: "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv"
     horizon_days: 120
     ic_metric: "net_spearman_ic_excess"

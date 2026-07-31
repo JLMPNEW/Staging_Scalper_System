@@ -14,6 +14,12 @@ from typing import Any
 
 from technology.core.config import cfg_get, load_yaml, resolve_path
 from technology.core.logging_utils import configure_utc_logging
+from technology.core.measurement_diagnostics import (
+    SubfeatureSpec,
+    load_pit_measurement_features,
+    validate_measurement_diagnostics,
+    write_measurement_diagnostics,
+)
 from technology.core.scoring_features import (
     COMPONENT_SPECS,
     SUBFEATURE_SPECS,
@@ -60,6 +66,10 @@ class SignalDiagnosticsSettings:
     default_calibrated_config_key: str
     default_price_source_config_key: str = ""
     default_excluded_subfeatures: list[str] = field(default_factory=list)
+    measurement_subfeatures: list[SubfeatureSpec] = field(
+        default_factory=list
+    )
+    measurement_metric_version: str = ""
 
 
 def parse_date(raw: object) -> date | None:
@@ -856,7 +866,15 @@ def configured_subfeature_specs(config: dict[str, Any], settings: SignalDiagnost
         excluded.update(item.strip() for item in raw_excluded.split(",") if item.strip())
     elif isinstance(raw_excluded, (list, tuple)):
         excluded.update(str(item).strip() for item in raw_excluded if str(item).strip())
-    return [spec for spec in SUBFEATURE_SPECS if spec[0] not in excluded]
+    specs = [
+        spec for spec in SUBFEATURE_SPECS if spec[0] not in excluded
+    ]
+    names = {spec[0] for spec in specs}
+    for spec in settings.measurement_subfeatures:
+        if spec[0] not in excluded and spec[0] not in names:
+            specs.append(spec)
+            names.add(spec[0])
+    return specs
 
 
 def parse_run_args(settings: SignalDiagnosticsSettings) -> argparse.Namespace:
@@ -910,6 +928,9 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
     short_change_days = int(cfg_get(config, "positioning_import.lookback_days.short_change", 92))
     price_sources = configured_price_source_ids(config, settings)
     subfeature_specs = configured_subfeature_specs(config, settings)
+    measurement_names = {
+        spec[0] for spec in settings.measurement_subfeatures
+    }
     excluded_raw = {spec[0] for spec in SUBFEATURE_SPECS if spec not in subfeature_specs}
     component_specs = component_specs_from_config(config, calibrated_config_key, excluded_raw)
 
@@ -976,6 +997,20 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
             market_positioning_source=mp_source,
             short_change_days=short_change_days,
         )
+        (
+            measurement_features,
+            measurement_birthdates,
+            measurement_birth_rows,
+        ) = load_pit_measurement_features(
+            conn,
+            model_family=model_family,
+            metric_version=settings.measurement_metric_version,
+            metric_names=measurement_names,
+            start_date=start,
+            end_date=end,
+        )
+        signal_birthdates.update(measurement_birthdates)
+        signal_birthdate_rows.extend(measurement_birth_rows)
 
     max_h = max(horizons)
     start_idx = bisect_right(bench.dates, start)
@@ -1018,6 +1053,9 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
             feats.update(financial_subfeatures(fin_rows.get(ticker, []), asof_iso))
             reprice_valuation(feats, series, asof)
             feats.update(positioning_subfeatures(ticker, asof_iso, form4=form4, inst=inst, short=short, borrow=borrow))
+            feats.update(
+                measurement_features.get((ticker, asof_iso), {})
+            )
             apply_signal_birthdates(feats, signal_birthdates, asof)
             feats["ticker"] = ticker
             feats["calibration_cohort_id"] = cohort_by_ticker.get(ticker, "")
@@ -1069,6 +1107,7 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
                 "ticker": row["ticker"],
                 "calibration_cohort_id": row.get("calibration_cohort_id", ""),
                 "beta_to_benchmark": row.get("beta_to_benchmark"),
+                "benchmark_trailing_252d": bench.ret(panel_idx, 252),
             }
             for raw_key, _score_key, _higher_is_better, _valid in subfeature_specs:
                 panel_row[raw_key] = row.get(raw_key)
@@ -1203,6 +1242,35 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
         },
         "multi_source_ticker_count": sum(1 for series in prices.values() if len(series.available_source_ids) > 1),
     }
+    if settings.measurement_subfeatures:
+        raw_component_weights = cfg_get(
+            config,
+            f"{calibrated_config_key}.component_weights",
+            {},
+        )
+        component_weights = {
+            str(component): float(weight)
+            for component, weight in (
+                raw_component_weights.items()
+                if isinstance(raw_component_weights, dict)
+                else []
+            )
+        }
+        summary["measurement_only_diagnostics"] = (
+            write_measurement_diagnostics(
+                output_dir=output_dir,
+                panel_rows=panel_rows,
+                measurement_specs=settings.measurement_subfeatures,
+                all_specs=subfeature_specs,
+                component_specs=component_specs,
+                component_weights=component_weights,
+                horizons=horizons,
+                step=step,
+                min_cross_section=min_cross_section,
+                min_t_stat=min_t,
+                metric_version=settings.measurement_metric_version,
+            )
+        )
 
     write_csv(output_dir / "signal_panel.csv", panel_rows)
     write_csv(output_dir / "panel_coverage.csv", coverage_rows)
@@ -1313,6 +1381,15 @@ def validate_signal_diagnostics_outputs(settings: SignalDiagnosticsSettings) -> 
                 errors.append(f"Usable panel rows too low: {summary.get('usable_panel_rows')}")
         except json.JSONDecodeError as exc:
             errors.append(f"Invalid stage8a_summary.json: {exc}")
+    if settings.measurement_subfeatures:
+        errors.extend(
+            validate_measurement_diagnostics(
+                output_dir,
+                expected_metric_version=(
+                    settings.measurement_metric_version
+                ),
+            )
+        )
 
     if errors:
         for error in errors:

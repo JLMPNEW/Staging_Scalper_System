@@ -1,0 +1,58 @@
+{
+  "artifact_family": "machinery_fixed_confirmatory_protocol",
+  "benchmark_ticker": "XLI",
+  "candidate_id": "equal_components",
+  "candidate_origin": "selected_from_machinery_oos_v1.3.0_not_independent_confirmation",
+  "component_fields": [
+    "quality_score",
+    "growth_score",
+    "valuation_score",
+    "risk_control_score",
+    "market_behavior_score",
+    "positioning_score",
+    "industrial_cycle_score",
+    "orders_backlog_score",
+    "capex_cycle_score"
+  ],
+  "confirmation_policy": {
+    "first_signal_date": "2026-07-30",
+    "minimum_non_overlapping_63d_windows": 4,
+    "outcome_access": "forbidden_by_signal_capture_implementation",
+    "outcome_evaluation_requires_separate_approved_protocol": true,
+    "pre_freeze_lockbox_end_date": "2026-07-29",
+    "pre_freeze_lockbox_start_date": "2026-01-01",
+    "recommended_final_review_not_before": "2027-07-30",
+    "sequential_peeking_permitted": false,
+    "signal_cadence": "daily_capture_weekly_evaluation"
+  },
+  "evaluation_contract": {
+    "horizons_trading_days": [
+      21,
+      63
+    ],
+    "minimum_cross_section": 30,
+    "minimum_positions": 10,
+    "production_universe_policy": "operating_only",
+    "return_basis": "next_session_open_execution_excess",
+    "top_quantile": 0.2,
+    "turnover_cost_bps": 20.0
+  },
+  "freeze_date": "2026-07-29",
+  "model_family": "machinery",
+  "optimizer_enabled": false,
+  "origin_candidate_registry_sha256": "fa5b90997fe1a88806467610c3445f655bb0657e0d228f13a2aada5d93a49e7e",
+  "origin_protocol_version": "machinery_oos_v1.3.0",
+  "protocol_version": "machinery_oos_v1.4.0",
+  "specification_count": 1,
+  "weights": {
+    "capex_cycle_score": 0.1,
+    "growth_score": 0.1166666666666667,
+    "industrial_cycle_score": 0.1166666666666667,
+    "market_behavior_score": 0.1166666666666667,
+    "orders_backlog_score": 0.1,
+    "positioning_score": 0.1,
+    "quality_score": 0.1166666666666667,
+    "risk_control_score": 0.1166666666666667,
+    "valuation_score": 0.1166666666666667
+  }
+}
