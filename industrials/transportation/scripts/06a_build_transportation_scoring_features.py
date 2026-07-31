@@ -14,7 +14,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from industrials.core.config import cfg_get, family_config, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect, init_db  # noqa: E402
-from industrials.transportation.contracts import write_manifest, write_scoring_rows  # noqa: E402
+from industrials.transportation.contracts import (  # noqa: E402
+    file_sha256,
+    write_manifest,
+    write_scoring_rows,
+)
 from industrials.transportation.financial_contract import load_metric_registry  # noqa: E402
 from industrials.transportation.scoring import build_scoring_rows  # noqa: E402
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG, MODEL_FAMILY  # noqa: E402
@@ -59,6 +63,10 @@ def main() -> int:
     )
     registry_version, definitions = load_metric_registry(registry_path)
     weights = {str(key): float(value) for key, value in scoring["component_weights"].items()}
+    overlay_weights = {
+        str(key): float(value)
+        for key, value in (scoring.get("specialized_overlay_weights") or {}).items()
+    }
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))) as conn:
         init_db(conn)
         rows = build_scoring_rows(
@@ -73,6 +81,7 @@ def main() -> int:
             minimum_avg_dollar_volume=float(scoring["minimum_avg_dollar_volume_60d"]),
             minimum_score_confidence=float(scoring["minimum_score_confidence"]),
             minimum_specialized_coverage=float(scoring["minimum_specialized_coverage"]),
+            specialized_overlay_weights=overlay_weights,
         )
     write_scoring_rows(output_path, rows)
     manifest = {
@@ -83,7 +92,20 @@ def main() -> int:
         "rank_ready_count": sum(row["rank_ready_flag"] == "1" for row in rows),
         "blocked_count": sum(row["rank_ready_flag"] == "0" for row in rows),
         "metric_registry_version": registry_version,
+        "score_construction_mode": str(
+            scoring.get("score_construction_mode")
+            or "generic_baseline_with_bounded_overlays"
+        ),
+        "specialized_overlay_weights": overlay_weights,
+        "specialized_overlay_active": any(
+            weight > 0.0 for weight in overlay_weights.values()
+        ),
         "output_csv": str(output_path),
+        "output_artifact": {
+            "path": str(output_path),
+            "sha256": file_sha256(output_path),
+            "row_count": len(rows),
+        },
     }
     write_manifest(output_path.with_suffix(".manifest.json"), manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True))

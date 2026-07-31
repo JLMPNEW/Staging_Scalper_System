@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -797,6 +798,44 @@ def _holdout_decisions(
     return output
 
 
+def _git_source_control(*paths: Path) -> dict[str, Any]:
+    relative_paths = [
+        path.resolve().relative_to(PROJECT_ROOT).as_posix()
+        for path in paths
+    ]
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    for relative_path in relative_paths:
+        subprocess.run(
+            ["git", "ls-files", "--error-unmatch", relative_path],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--", *relative_paths],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if dirty:
+        raise ValueError(
+            "calibration source paths must be committed before execution="
+            f"{dirty.splitlines()}"
+        )
+    return {
+        "git_commit_sha": head,
+        "tracked_paths": relative_paths,
+        "worktree_clean_for_paths": True,
+    }
+
 def main() -> int:
     args = parse_args()
     generator_path = Path(__file__).resolve()
@@ -965,6 +1004,12 @@ def main() -> int:
     }
     generator_hash = sha256(generator_path)
     module_hash = sha256(module_path)
+    source_control = _git_source_control(
+        generator_path,
+        module_path,
+        config_path,
+        registry_path,
+    )
     if not args.allow_overwrite and _existing_valid(
         manifest_path=manifest_path,
         output_paths=output_paths,
@@ -1160,6 +1205,7 @@ def main() -> int:
             "calibration_module_path": str(module_path),
             "calibration_module_sha256": module_hash,
         },
+        "source_control": source_control,
         "operations": {
             "calibration_invocations": 1,
             "database_writes": 0,

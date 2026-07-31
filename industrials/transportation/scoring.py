@@ -203,6 +203,7 @@ def build_scoring_rows(
     minimum_avg_dollar_volume: float,
     minimum_score_confidence: float,
     minimum_specialized_coverage: float,
+    specialized_overlay_weights: dict[str, float] | None = None,
 ) -> list[dict[str, str]]:
     members = load_members(conn, asof=asof, active_source_id=active_source_id)
     if not members:
@@ -213,9 +214,47 @@ def build_scoring_rows(
         sum(component_weights.values()), 1.0, abs_tol=1e-9
     ):
         raise ValueError("component_weights must be non-negative and sum to 1")
+    overlay_weights = {
+        str(metric_id): float(weight)
+        for metric_id, weight in (specialized_overlay_weights or {}).items()
+    }
+    if any(weight < 0.0 or weight > 1.0 for weight in overlay_weights.values()):
+        raise ValueError("specialized overlay weights must be within 0..1")
+    definitions_by_id = {definition.metric_id: definition for definition in definitions}
+    unknown_overlays = sorted(set(overlay_weights) - set(definitions_by_id))
+    if unknown_overlays:
+        raise ValueError(f"unknown specialized overlay metrics={unknown_overlays}")
+    non_specialized_overlays = sorted(
+        metric_id
+        for metric_id, weight in overlay_weights.items()
+        if weight > 0.0 and not definitions_by_id[metric_id].specialized
+    )
+    if non_specialized_overlays:
+        raise ValueError(
+            "positive overlay weights require specialized metrics="
+            f"{non_specialized_overlays}"
+        )
+    generic_definitions = [
+        definition for definition in definitions if not definition.specialized
+    ]
+    if not generic_definitions:
+        raise ValueError("generic scoring definition set is empty")
+    overlay_active = any(weight > 0.0 for weight in overlay_weights.values())
     policies = load_eligibility_policy(policy_path, asof=asof)
     metric_rows = load_metric_rows(conn, asof=asof)
-    percentiles = metric_percentiles(members, definitions, metric_rows)
+    # Use the same direction-adjusted percentile engine for the frozen generic
+    # baseline and any explicitly activated bounded overlay. Optional
+    # specialized metrics with zero weights never enter component averages.
+    percentile_definitions = generic_definitions + [
+        definitions_by_id[metric_id]
+        for metric_id, weight in overlay_weights.items()
+        if weight > 0.0
+    ]
+    percentiles = metric_percentiles(
+        members,
+        list(dict.fromkeys(percentile_definitions)),
+        metric_rows,
+    )
     output: list[dict[str, str]] = []
     for member in members:
         ticker = str(member["ticker"])
@@ -266,16 +305,30 @@ def build_scoring_rows(
             if statuses[definition.metric_id] in OBSERVED_STATUSES
             and _number(rows_for_ticker.get(definition.metric_id, {}).get("metric_value")) is not None
         }
+        observed = [
+            definition for definition in applicable if definition.metric_id in values
+        ]
+        generic_applicable = [
+            definition for definition in applicable if not definition.specialized
+        ]
         required = [definition for definition in applicable if definition.required_for_rank]
         specialized = [definition for definition in applicable if definition.specialized]
-        observed = [definition for definition in applicable if definition.metric_id in values]
+        generic_observed = [
+            definition
+            for definition in generic_applicable
+            if definition.metric_id in values
+        ]
         required_observed = [definition for definition in required if definition.metric_id in values]
         specialized_observed = [definition for definition in specialized if definition.metric_id in values]
         specialized_coverage = len(specialized_observed) / len(specialized) if specialized else 1.0
         component_values: dict[str, float] = {}
         component_coverage: dict[str, dict[str, int]] = {}
         for component, field in COMPONENT_FIELD.items():
-            component_metrics = [item for item in applicable if item.component == component]
+            component_metrics = [
+                item
+                for item in generic_applicable
+                if item.component == component
+            ]
             available_scores: list[float] = []
             ticker_percentiles = percentiles.get(ticker, {})
             for item in component_metrics:
@@ -295,7 +348,30 @@ def build_scoring_rows(
         ]
         total_weight = sum(weight for _, weight in weighted)
         final_score = sum(value * weight for value, weight in weighted) / total_weight if total_weight else 0.0
-        availability_fraction = len(observed) / len(applicable) if applicable else 0.0
+        active_overlay_metrics = [
+            definition
+            for definition in specialized
+            if overlay_weights.get(definition.metric_id, 0.0) > 0.0
+        ]
+        if len(active_overlay_metrics) > 1:
+            raise ValueError(
+                f"{ticker}: multiple active specialized overlays apply="
+                f"{sorted(item.metric_id for item in active_overlay_metrics)}"
+            )
+        if active_overlay_metrics:
+            overlay = active_overlay_metrics[0]
+            overlay_percentile = percentiles.get(ticker, {}).get(overlay.metric_id)
+            if overlay_percentile is not None:
+                weight = overlay_weights[overlay.metric_id]
+                final_score = (
+                    (1.0 - weight) * final_score
+                    + weight * overlay_percentile
+                )
+        availability_fraction = (
+            len(generic_observed) / len(generic_applicable)
+            if generic_applicable
+            else 0.0
+        )
         required_fraction = len(required_observed) / len(required) if required else 1.0
         profile_factor = max(0.0, min(1.0, financial_confidence or 0.0))
         market_factor = 1.0 if str(market.get("market_data_quality") or "") == "complete" else 0.5
@@ -316,7 +392,7 @@ def build_scoring_rows(
         missing_required = sorted(item.metric_id for item in required if item.metric_id not in values)
         if missing_required:
             reasons.append("missing_required_metrics:" + ",".join(missing_required))
-        if specialized_coverage < minimum_specialized_coverage:
+        if overlay_active and specialized_coverage < minimum_specialized_coverage:
             reasons.append(f"specialized_coverage_below_{minimum_specialized_coverage:.2f}")
         if score_confidence < minimum_score_confidence:
             reasons.append(f"score_confidence_below_{minimum_score_confidence:.2f}")
@@ -380,8 +456,8 @@ def build_scoring_rows(
             "minimum_financial_confidence": _fmt(minimum_financial_confidence),
             "policy_valid_from": policy.get("valid_from", ""),
             "policy_gate_status": "pass" if policy_pass else "blocked",
-            "score_input_available_count": len(observed),
-            "score_input_total_count": len(applicable),
+            "score_input_available_count": len(generic_observed),
+            "score_input_total_count": len(generic_applicable),
             "score_confidence": _fmt(score_confidence),
             "final_score": _fmt(max(0.0, min(100.0, final_score))),
             "rank_ready_flag": int(rank_ready),

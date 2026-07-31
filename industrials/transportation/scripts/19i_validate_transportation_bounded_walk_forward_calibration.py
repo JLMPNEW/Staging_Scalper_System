@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -424,6 +425,48 @@ def main() -> int:
         ):
             errors.append(f"generator lineage mismatch={path_key}")
 
+    source_control = manifest.get("source_control") or {}
+    commit_sha = str(source_control.get("git_commit_sha") or "")
+    tracked_paths = [
+        str(path) for path in source_control.get("tracked_paths") or []
+    ]
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        errors.append(f"unable to resolve calibration git lineage={error}")
+        head = ""
+    if (
+        not commit_sha
+        or commit_sha != head
+        or source_control.get("worktree_clean_for_paths") is not True
+        or not tracked_paths
+    ):
+        errors.append("calibration source-control lineage mismatch")
+    for relative_path in tracked_paths:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", relative_path],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if tracked.returncode != 0:
+            errors.append(f"untracked calibration source={relative_path}")
+    if tracked_paths:
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--", *tracked_paths],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if dirty:
+            errors.append("calibration source paths changed after execution")
     if errors and not observations_path.is_file():
         observations: list[dict[str, str]] = []
         periods: list[dict[str, str]] = []

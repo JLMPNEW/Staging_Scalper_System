@@ -199,9 +199,21 @@ model_families:
       validation_output_json: "../output/industrials/transportation/stage6/transportation_scoring_validation.json"
       dashboard_root: "../output/industrials/transportation/dashboard"
       output_column_map: "transportation/data/transportation_output_column_map.yaml"
+      # The bounded walk-forward calibration retained every specialized overlay
+      # at zero. Current scoring must therefore reproduce the generic-only
+      # baseline exactly; specialized evidence remains visible for research and
+      # coverage reporting but cannot affect scores or rank readiness.
+      score_construction_mode: generic_baseline_with_bounded_overlays
+      specialized_overlay_weights:
+        fleet_utilization: 0.00
+        operating_ratio: 0.00
+        load_factor_or_utilization: 0.00
+      calibration_candidate_metric_map:
+        passenger_load_factor: load_factor_or_utilization
       max_staleness_days: 7
       minimum_avg_dollar_volume_60d: 1000000
       minimum_score_confidence: 0.35
+      # Enforced only when at least one bounded specialized overlay is active.
       minimum_specialized_coverage: 0.15
       score_model_version: transportation_shadow_score_v1
       model_version: transportation_model_v1_shadow

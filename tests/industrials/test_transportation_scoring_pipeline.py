@@ -260,6 +260,85 @@ def test_specialized_metric_and_scoring_contract_is_complete(
     assert score_validator.main() == 0
 
 
+def test_zero_overlay_scoring_is_invariant_to_optional_specialized_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "transportation.sqlite"
+    seed_complete_inputs(db_path)
+    _, baseline_csv = run_feature_pipeline(db_path, tmp_path / "baseline", monkeypatch)
+    baseline = {row["ticker"]: row for row in read_rows(baseline_csv)}
+    config = load_yaml(CONFIG_PATH)
+    registry_path = (
+        INDUSTRIALS_ROOT
+        / family_config(config, "transportation")["financial"]["metric_registry"]
+    )
+    registry = load_yaml(registry_path)
+    optional_specialized = sorted(
+        str(metric["metric_id"])
+        for metric in registry["metrics"]
+        if metric.get("specialized") and not metric.get("required_for_rank")
+    )
+    assert optional_specialized
+    placeholders = ",".join("?" for _ in optional_specialized)
+    with connect(db_path) as conn:
+        conn.execute(
+            f"""
+            UPDATE feature_financial_metric_availability
+            SET availability_status='NOT_DISCLOSED', metric_value=NULL,
+                status_reason='zero_overlay_invariance_test'
+            WHERE model_family='transportation' AND asof_date=?
+              AND metric_name IN ({placeholders})
+            """,
+            (ASOF, *optional_specialized),
+        )
+    rescored_csv = tmp_path / "rescored" / "scoring.csv"
+    score_builder = load_script("06a_build_transportation_scoring_features.py")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "score_builder.py",
+            "--db",
+            str(db_path),
+            "--asof",
+            ASOF,
+            "--output-csv",
+            str(rescored_csv),
+        ],
+    )
+    assert score_builder.main() == 0
+    rescored = {row["ticker"]: row for row in read_rows(rescored_csv)}
+    invariant_fields = (
+        "final_score",
+        "market_trend_score",
+        "quality_score",
+        "growth_score",
+        "valuation_score",
+        "operating_efficiency_score",
+        "capital_risk_score",
+        "score_confidence",
+        "rank_ready_flag",
+        "rank_ready_reason",
+    )
+    assert baseline.keys() == rescored.keys()
+    for ticker in baseline:
+        assert {field: baseline[ticker][field] for field in invariant_fields} == {
+            field: rescored[ticker][field] for field in invariant_fields
+        }
+        assert "specialized_coverage_below" not in rescored[ticker]["rank_ready_reason"]
+    manifest = json.loads(
+        rescored_csv.with_suffix(".manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["score_construction_mode"] == (
+        "generic_baseline_with_bounded_overlays"
+    )
+    assert manifest["specialized_overlay_active"] is False
+    assert all(
+        float(weight) == 0.0
+        for weight in manifest["specialized_overlay_weights"].values()
+    )
+
 def test_missing_required_metric_blocks_instead_of_neutral_fill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
