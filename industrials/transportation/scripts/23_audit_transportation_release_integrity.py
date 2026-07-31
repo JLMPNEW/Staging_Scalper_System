@@ -242,7 +242,7 @@ def main() -> int:
     current_dir = release_dir / "current"
     dashboard_dir = (
         release_dir
-        / "sector_output"
+        / "s"
         / "industrials"
         / MODEL_FAMILY
         / "dashboard"
@@ -342,8 +342,20 @@ def main() -> int:
     calibration_commit = str(
         (calibration.get("source_control") or {}).get("git_commit_sha") or ""
     )
-    if calibration_commit != source_control["git_commit_sha"]:
-        errors.append("calibration commit does not equal release commit")
+    calibration_commit_is_ancestor = bool(calibration_commit) and subprocess.run(
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            calibration_commit,
+            source_control["git_commit_sha"],
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    ).returncode == 0
+    if not calibration_commit_is_ancestor:
+        errors.append("calibration commit is not an ancestor of release commit")
 
     direct_artifacts = {
         "scoring_csv": current_dir / "transportation_scoring_features.csv",

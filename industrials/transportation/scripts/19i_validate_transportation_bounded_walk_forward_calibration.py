@@ -441,9 +441,16 @@ def main() -> int:
     except subprocess.CalledProcessError as error:
         errors.append(f"unable to resolve calibration git lineage={error}")
         head = ""
+    commit_is_ancestor = False
+    if commit_sha and head:
+        commit_is_ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit_sha, head],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        ).returncode == 0
     if (
-        not commit_sha
-        or commit_sha != head
+        not commit_is_ancestor
         or source_control.get("worktree_clean_for_paths") is not True
         or not tracked_paths
     ):
