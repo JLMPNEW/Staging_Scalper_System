@@ -474,16 +474,20 @@ def main() -> int:
         source_specs = (
             (
                 "form4",
-                str(event_cfg.get("form4_database_path", "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}")),
+                str(event_cfg.get("form4_database_path", "")).strip(),
                 _form4_items,
             ),
             (
                 "biotech_guidance",
-                str(event_cfg.get("biotech_database_path", "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite")),
+                str(event_cfg.get("biotech_database_path", "")).strip(),
                 _guidance_items,
             ),
         )
         for source_name, configured_path, loader in source_specs:
+            if not configured_path:
+                raise ValueError(
+                    f"expectations_monitor.events path is required for {source_name}"
+                )
             path = resolve_path(configured_path, base_dir=config_path.parent)
             try:
                 rows = loader(

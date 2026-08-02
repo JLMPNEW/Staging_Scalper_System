@@ -27,7 +27,10 @@ from portfolio_layer.core.contracts import (  # noqa: E402
     write_csv,
     write_manifest,
 )
-from portfolio_layer.core.paths import ensure_not_prod_path  # noqa: E402
+from portfolio_layer.core.paths import (  # noqa: E402
+    ensure_not_prod_path,
+    resolve_runtime_paths,
+)
 from portfolio_layer.expectations_monitor.monitor_common import (  # noqa: E402
     connect_monitor_db,
 )
@@ -476,6 +479,7 @@ def main() -> int:
     config_path = args.config.resolve()
     entitlements_path = args.entitlements.resolve()
     config = load_yaml(config_path)
+    paths = resolve_runtime_paths(config, config_path)
     monitor_cfg = cfg_get(config, 'expectations_monitor', {})
     if not isinstance(monitor_cfg, dict):
         raise ValueError('expectations_monitor config must be a mapping')
@@ -584,15 +588,13 @@ def main() -> int:
     output_dir = (
         args.output_dir.resolve()
         if args.output_dir
-        else PACKAGE_ROOT
-        / 'output'
+        else paths.output_dir
         / 'provider_capture_sessions'
         / args.as_of.isoformat()
         / f'{session_base}-{invocation}'
     )
     provider_run_root = (
-        PACKAGE_ROOT
-        / 'output'
+        paths.output_dir
         / 'provider_capture_runs'
         / date_slug
         / plan_digest[:12]

@@ -203,6 +203,15 @@ def main() -> int:
     monitor_cfg = cfg_get(config, "expectations_monitor", {})
     if not isinstance(monitor_cfg, dict):
         raise ValueError("expectations_monitor config must be a mapping")
+    state_cfg = monitor_cfg.get("state_model", {})
+    if not isinstance(state_cfg, dict):
+        raise ValueError("expectations_monitor.state_model must be a mapping")
+    if state_cfg.get("policy_version") != "expectations_state_model_v1":
+        raise ValueError("expectations_state_model_v1 config is required")
+    if state_cfg.get("upgrades_require_dwell_or_confirmation") is not True:
+        raise ValueError("State upgrade policy must remain fail-closed")
+    if state_cfg.get("broken_requires_confirmed_thesis_break") is not True:
+        raise ValueError("Broken-state evidence policy must remain fail-closed")
     input_dir = (
         args.input_dir
         or paths.output_dir

@@ -88,21 +88,30 @@ def _policy(config: dict[str, Any]) -> dict[str, Any]:
     raw = cfg_get(config, "optimizer.monitor_entry_policy", {})
     if not isinstance(raw, dict):
         raise ValueError("optimizer.monitor_entry_policy must be a mapping")
-    if raw.get("policy_version") != "monitor_optimizer_entry_v1":
+    if raw.get("policy_version") != "monitor_optimizer_entry_v2":
         raise ValueError("optimizer.monitor_entry_policy policy_version is not frozen")
     if raw.get("enabled_in_production") is not True:
         raise ValueError("optimizer.monitor_entry_policy must be enabled_in_production")
     entry_states = [str(value).strip() for value in raw.get("entry_states", [])]
+    entry_action_states = [
+        str(value).strip() for value in raw.get("entry_action_states", [])
+    ]
     retention_states = [
         str(value).strip() for value in raw.get("retention_states", [])
     ]
     if set(entry_states) != {"green", "stable"}:
         raise ValueError("optimizer entry_states must be exactly green and stable")
+    if set(entry_action_states) != {"buy_candidate", "add_candidate", "hold"}:
+        raise ValueError(
+            "optimizer entry_action_states must be exactly buy_candidate, "
+            "add_candidate, and hold"
+        )
     if set(retention_states) != {"green", "stable", "watch"}:
         raise ValueError(
             "optimizer retention_states must be exactly green, stable, and watch"
         )
     raw["entry_states"] = entry_states
+    raw["entry_action_states"] = entry_action_states
     raw["retention_states"] = retention_states
     raw["blocking_escalation_flags"] = sorted(
         {str(value).strip() for value in raw.get("blocking_escalation_flags", [])}
@@ -125,6 +134,7 @@ def build_overlay_rows(
     scores = _keyed(score_rows, label="stocks_scores")
     states = _keyed(state_rows, label="expectations_state")
     entry_states = set(policy["entry_states"])
+    entry_action_states = set(policy["entry_action_states"])
     retention_states = set(policy["retention_states"])
     blocking_flags = set(policy["blocking_escalation_flags"])
     rows: list[dict[str, Any]] = []
@@ -174,6 +184,9 @@ def build_overlay_rows(
         elif internal_state not in entry_states:
             entry_eligible = 0
             reason = f"internal_state_blocked:{internal_state or 'missing'}"
+        elif action_state not in entry_action_states:
+            entry_eligible = 0
+            reason = f"action_state_blocked:{action_state or 'missing'}"
         elif active_blockers:
             entry_eligible = 0
             reason = f"blocking_flags:{','.join(active_blockers)}"
@@ -247,6 +260,7 @@ def build_overlay_rows(
                     not row["optimizer_entry_eligible"]
                     or (
                         row["internal_state"] in entry_states
+                        and row["action_state"] in entry_action_states
                         and row["market_data_status"] == "current"
                         and row["blocking_flags_json"] == "[]"
                     )
@@ -254,7 +268,10 @@ def build_overlay_rows(
                 )
                 else "FAIL"
             ),
-            "detail": "entry requires green/stable, current market data, and no blocker",
+            "detail": (
+                "entry requires green/stable internal state, buy/add/hold action, "
+                "current market data, and no blocker"
+            ),
         },
         {
             "check": "retention_policy_preserves_watch_or_missing",
@@ -282,6 +299,7 @@ def _row_digest(rows: list[dict[str, Any]]) -> str:
 def run_selftest() -> None:
     policy = {
         "entry_states": ["green", "stable"],
+        "entry_action_states": ["buy_candidate", "add_candidate", "hold"],
         "retention_states": ["green", "stable", "watch"],
         "blocking_escalation_flags": ["R6", "PROVIDER_CONFLICT"],
         "minimum_investable_state_coverage_fraction": 0.5,
@@ -319,6 +337,24 @@ def run_selftest() -> None:
     assert keyed["BADFLAG"]["optimizer_entry_eligible"] == 0
     assert keyed["MISSING"]["optimizer_entry_eligible"] == 0
     assert keyed["MISSING"]["optimizer_retention_eligible"] == 1
+    action_watch = dict(states[1])
+    action_watch["ticker"] = "ACTION_WATCH"
+    action_watch["action_state"] = "watch"
+    action_rows, action_checks = build_overlay_rows(
+        [
+            {
+                "ticker": "ACTION_WATCH",
+                "investable_eligible": "1",
+                "source_pipeline": "x",
+            }
+        ],
+        [action_watch],
+        run_as_of="2026-07-31",
+        policy=policy,
+    )
+    assert action_rows[0]["optimizer_entry_eligible"] == 0
+    assert action_rows[0]["policy_reason"] == "action_state_blocked:watch"
+    assert all(check["status"] == "PASS" for check in action_checks)
     assert all(check["status"] == "PASS" for check in checks)
     print("monitor optimizer eligibility overlay selftest: PASS")
 

@@ -247,174 +247,172 @@ def build_evaluations(
         resolution_options = resolutions.get((ticker, report_text), [])
         period_ends = {str(row['fiscal_period_end']) for row in resolution_options}
         resolution = resolution_options[0] if len(period_ends) == 1 else None
-        for provider in ('alpha_vantage', 'fmp'):
-            if provider != outcome_provider:
-                continue
-            reasons: list[str] = []
-            if not int(outcome.get('evaluation_eligible', 0)):
-                raw_reasons = str(outcome.get('ineligibility_reasons', '')).strip()
-                reasons.extend(
-                    reason for reason in raw_reasons.split(',') if reason
-                )
-                if not raw_reasons:
-                    reasons.append('actual_outcome_not_evaluation_eligible')
-            if actual_conflict:
-                reasons.append('actual_value_conflict')
-            if not resolution_options:
-                reasons.append('exact_fiscal_period_resolution_missing')
-            elif len(period_ends) != 1:
-                reasons.append('exact_fiscal_period_resolution_conflict')
-            fiscal_period_end = str(resolution['fiscal_period_end']) if resolution else ''
-            forecast_rows = snapshots.get(
-                (provider, ticker, metric, fiscal_period_end), []
+        provider = outcome_provider
+        reasons: list[str] = []
+        if not int(outcome.get('evaluation_eligible', 0)):
+            raw_reasons = str(outcome.get('ineligibility_reasons', '')).strip()
+            reasons.extend(
+                reason for reason in raw_reasons.split(',') if reason
             )
-            forecast = _latest_before(
-                forecast_rows,
-                report_date=report_date,
-                timezone_name=timezone_name,
-            )
-            if forecast is None:
-                reasons.append('strict_pre_report_forecast_missing')
-            canonical = canonicalize_snapshot(forecast) if forecast is not None else None
-            if canonical is not None and canonical.quality_status == 'FAIL':
-                reasons.extend(canonical.quality_reasons)
-            forecast_available = str(forecast['available_at_utc']) if forecast else ''
-            zone = ZoneInfo(timezone_name)
-            forecast_local_date = (
-                _aware(forecast_available).astimezone(zone).date()
-                if forecast_available
-                else None
-            )
-            lead_days = (
-                float((report_date - forecast_local_date).days)
-                if forecast_local_date is not None
-                else None
-            )
-            if lead_days is not None and lead_days > maximum_age:
-                reasons.append('forecast_age_exceeds_policy')
+            if not raw_reasons:
+                reasons.append('actual_outcome_not_evaluation_eligible')
+        if actual_conflict:
+            reasons.append('actual_value_conflict')
+        if not resolution_options:
+            reasons.append('exact_fiscal_period_resolution_missing')
+        elif len(period_ends) != 1:
+            reasons.append('exact_fiscal_period_resolution_conflict')
+        fiscal_period_end = str(resolution['fiscal_period_end']) if resolution else ''
+        forecast_rows = snapshots.get(
+            (provider, ticker, metric, fiscal_period_end), []
+        )
+        forecast = _latest_before(
+            forecast_rows,
+            report_date=report_date,
+            timezone_name=timezone_name,
+        )
+        if forecast is None:
+            reasons.append('strict_pre_report_forecast_missing')
+        canonical = canonicalize_snapshot(forecast) if forecast is not None else None
+        if canonical is not None and canonical.quality_status == 'FAIL':
+            reasons.extend(canonical.quality_reasons)
+        forecast_available = str(forecast['available_at_utc']) if forecast else ''
+        zone = ZoneInfo(timezone_name)
+        forecast_local_date = (
+            _aware(forecast_available).astimezone(zone).date()
+            if forecast_available
+            else None
+        )
+        lead_days = (
+            float((report_date - forecast_local_date).days)
+            if forecast_local_date is not None
+            else None
+        )
+        if lead_days is not None and lead_days > maximum_age:
+            reasons.append('forecast_age_exceeds_policy')
 
-            basis = None
-            if forecast is not None:
-                available_bases = [
-                    row
-                    for row in bases.get((provider, ticker, metric), [])
-                    if str(row['available_at_utc']) <= forecast_available
-                ]
-                if available_bases:
-                    basis = max(
-                        available_bases, key=lambda row: str(row['available_at_utc'])
-                    )
-            if basis is None:
-                reasons.append('metric_basis_missing_at_forecast_cutoff')
-            elif not int(basis['comparison_eligible']):
-                reasons.append('metric_basis_not_comparison_eligible')
-            if (
-                basis is not None
-                and str(outcome['reporting_currency'])
-                and str(basis['reporting_currency'])
-                and str(outcome['reporting_currency']) != str(basis['reporting_currency'])
-            ):
-                reasons.append('actual_forecast_currency_mismatch')
+        basis = None
+        if forecast is not None:
+            available_bases = [
+                row
+                for row in bases.get((provider, ticker, metric), [])
+                if str(row['available_at_utc']) <= forecast_available
+            ]
+            if available_bases:
+                basis = max(
+                    available_bases, key=lambda row: str(row['available_at_utc'])
+                )
+        if basis is None:
+            reasons.append('metric_basis_missing_at_forecast_cutoff')
+        elif not int(basis['comparison_eligible']):
+            reasons.append('metric_basis_not_comparison_eligible')
+        if (
+            basis is not None
+            and str(outcome['reporting_currency'])
+            and str(basis['reporting_currency'])
+            and str(outcome['reporting_currency']) != str(basis['reporting_currency'])
+        ):
+            reasons.append('actual_forecast_currency_mismatch')
 
-            forecast_value = (
-                float(canonical.estimate_average)
-                if canonical is not None and canonical.estimate_average is not None
-                else None
+        forecast_value = (
+            float(canonical.estimate_average)
+            if canonical is not None and canonical.estimate_average is not None
+            else None
+        )
+        actual_value = float(outcome['actual_value'])
+        eligible = not reasons and forecast_value is not None
+        error_value = None
+        if eligible:
+            assert forecast_value is not None
+            error_value = forecast_value - actual_value
+        absolute_error = abs(error_value) if error_value is not None else None
+        floor = float(relative_floors[metric])
+        normalized_error = (
+            absolute_error / max(abs(actual_value), floor)
+            if absolute_error is not None
+            else None
+        )
+        status = 'eligible' if eligible else 'ineligible'
+        candidate = {
+            'evaluation_cycle': evaluation_cycle,
+            'estimate_provider': provider,
+            'ticker': ticker,
+            'metric': metric,
+            'canonical_period': 'quarterly',
+            'report_date': report_text,
+            'fiscal_period_end': fiscal_period_end,
+            'snapshot_id': str(forecast['snapshot_id']) if forecast else '',
+            'outcome_id': str(outcome['outcome_id']),
+            'resolution_id': str(resolution['resolution_id']) if resolution else '',
+            'basis_snapshot_id': str(basis['basis_snapshot_id']) if basis else '',
+            'forecast_available_at_utc': forecast_available,
+            'outcome_available_at_utc': str(outcome['available_at_utc']),
+            'forecast_lead_days': '' if lead_days is None else lead_days,
+            'forecast_value': '' if forecast_value is None else forecast_value,
+            'actual_value': actual_value,
+            'evaluation_status': status,
+            'ineligibility_reasons': ','.join(dict.fromkeys(reasons)),
+            'error_value': '' if error_value is None else error_value,
+            'absolute_error': '' if absolute_error is None else absolute_error,
+            'normalized_absolute_error': (
+                '' if normalized_error is None else normalized_error
+            ),
+        }
+        candidates.append(candidate)
+        if (
+            forecast is None
+            or resolution is None
+            or forecast_value is None
+            or lead_days is None
+        ):
+            continue
+        linked_at = max(
+            value
+            for value in (
+                forecast_available,
+                str(outcome['available_at_utc']),
+                str(resolution['available_at_utc']),
+                str(basis['available_at_utc']) if basis else '',
             )
-            actual_value = float(outcome['actual_value'])
-            eligible = not reasons and forecast_value is not None
-            error_value = None
-            if eligible:
-                assert forecast_value is not None
-                error_value = forecast_value - actual_value
-            absolute_error = abs(error_value) if error_value is not None else None
-            floor = float(relative_floors[metric])
-            normalized_error = (
-                absolute_error / max(abs(actual_value), floor)
-                if absolute_error is not None
-                else None
+            if value
+        )
+        link = {
+            'snapshot_id': str(forecast['snapshot_id']),
+            'outcome_id': str(outcome['outcome_id']),
+            'resolution_id': str(resolution['resolution_id']),
+            'evaluation_cycle': evaluation_cycle,
+            'basis_snapshot_id': str(basis['basis_snapshot_id']) if basis else '',
+            'estimate_provider': provider,
+            'ticker': ticker,
+            'metric': metric,
+            'canonical_period': 'quarterly',
+            'report_date': report_text,
+            'fiscal_period_end': fiscal_period_end,
+            'linked_at_utc': linked_at,
+            'forecast_available_at_utc': forecast_available,
+            'outcome_available_at_utc': str(outcome['available_at_utc']),
+            'cutoff_policy': cutoff_policy,
+            'forecast_lead_days': lead_days,
+            'forecast_value': forecast_value,
+            'actual_value': actual_value,
+            'evaluation_status': status,
+            'ineligibility_reasons': candidate['ineligibility_reasons'],
+            'error_value': error_value,
+            'absolute_error': absolute_error,
+            'normalized_absolute_error': normalized_error,
+        }
+        identity = {
+            field: link[field]
+            for field in (
+                'snapshot_id',
+                'outcome_id',
+                'resolution_id',
+                'evaluation_cycle',
             )
-            status = 'eligible' if eligible else 'ineligible'
-            candidate = {
-                'evaluation_cycle': evaluation_cycle,
-                'estimate_provider': provider,
-                'ticker': ticker,
-                'metric': metric,
-                'canonical_period': 'quarterly',
-                'report_date': report_text,
-                'fiscal_period_end': fiscal_period_end,
-                'snapshot_id': str(forecast['snapshot_id']) if forecast else '',
-                'outcome_id': str(outcome['outcome_id']),
-                'resolution_id': str(resolution['resolution_id']) if resolution else '',
-                'basis_snapshot_id': str(basis['basis_snapshot_id']) if basis else '',
-                'forecast_available_at_utc': forecast_available,
-                'outcome_available_at_utc': str(outcome['available_at_utc']),
-                'forecast_lead_days': '' if lead_days is None else lead_days,
-                'forecast_value': '' if forecast_value is None else forecast_value,
-                'actual_value': actual_value,
-                'evaluation_status': status,
-                'ineligibility_reasons': ','.join(dict.fromkeys(reasons)),
-                'error_value': '' if error_value is None else error_value,
-                'absolute_error': '' if absolute_error is None else absolute_error,
-                'normalized_absolute_error': (
-                    '' if normalized_error is None else normalized_error
-                ),
-            }
-            candidates.append(candidate)
-            if (
-                forecast is None
-                or resolution is None
-                or forecast_value is None
-                or lead_days is None
-            ):
-                continue
-            linked_at = max(
-                value
-                for value in (
-                    forecast_available,
-                    str(outcome['available_at_utc']),
-                    str(resolution['available_at_utc']),
-                    str(basis['available_at_utc']) if basis else '',
-                )
-                if value
-            )
-            link = {
-                'snapshot_id': str(forecast['snapshot_id']),
-                'outcome_id': str(outcome['outcome_id']),
-                'resolution_id': str(resolution['resolution_id']),
-                'evaluation_cycle': evaluation_cycle,
-                'basis_snapshot_id': str(basis['basis_snapshot_id']) if basis else '',
-                'estimate_provider': provider,
-                'ticker': ticker,
-                'metric': metric,
-                'canonical_period': 'quarterly',
-                'report_date': report_text,
-                'fiscal_period_end': fiscal_period_end,
-                'linked_at_utc': linked_at,
-                'forecast_available_at_utc': forecast_available,
-                'outcome_available_at_utc': str(outcome['available_at_utc']),
-                'cutoff_policy': cutoff_policy,
-                'forecast_lead_days': lead_days,
-                'forecast_value': forecast_value,
-                'actual_value': actual_value,
-                'evaluation_status': status,
-                'ineligibility_reasons': candidate['ineligibility_reasons'],
-                'error_value': error_value,
-                'absolute_error': absolute_error,
-                'normalized_absolute_error': normalized_error,
-            }
-            identity = {
-                field: link[field]
-                for field in (
-                    'snapshot_id',
-                    'outcome_id',
-                    'resolution_id',
-                    'evaluation_cycle',
-                )
-            }
-            link['link_id'] = _digest(identity)
-            link['normalized_sha256'] = _digest(link)
-            links.append(link)
+        }
+        link['link_id'] = _digest(identity)
+        link['normalized_sha256'] = _digest(link)
+        links.append(link)
     return candidates, links
 
 

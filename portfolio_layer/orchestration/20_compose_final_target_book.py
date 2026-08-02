@@ -239,19 +239,29 @@ def main() -> int:  # noqa: C901
     run_dir = runs_root / run_as_of
 
     out_dir = run_dir / "final"
-    weights_path = out_dir / "final_target_weights.csv"
-    manifest_path = out_dir / "final_weights_manifest.json"
+    weights_name = (
+        "bootstrap_target_weights.csv"
+        if args.monitor_bootstrap
+        else "final_target_weights.csv"
+    )
+    manifest_name = (
+        "bootstrap_final_weights_manifest.json"
+        if args.monitor_bootstrap
+        else "final_weights_manifest.json"
+    )
+    weights_path = out_dir / weights_name
+    manifest_path = out_dir / manifest_name
     enriched_path = out_dir / "final_target_book.csv"
     enriched_manifest_path = out_dir / "final_manifest.json"
+    guarded_outputs = [weights_path, manifest_path]
+    if not args.monitor_bootstrap:
+        guarded_outputs.extend([enriched_path, enriched_manifest_path])
     try:
-        fail_if_exists(
-            [weights_path, manifest_path, enriched_path, enriched_manifest_path],
-            force=args.force,
-        )
+        fail_if_exists(guarded_outputs, force=args.force)
     except FileExistsError as exc:
         LOGGER.error("%s", exc)
         return 1
-    if args.force:
+    if args.force and not args.monitor_bootstrap:
         # Recomputed target weights invalidate the downstream human/reporting view.
         enriched_path.unlink(missing_ok=True)
         enriched_manifest_path.unlink(missing_ok=True)
@@ -544,11 +554,16 @@ def main() -> int:  # noqa: C901
     out_dir.mkdir(parents=True, exist_ok=True)
     write_csv(weights_path, WEIGHT_FIELDS, rows)
     manifest_payload = {
-        "stage": "stage12a_final_target_weights",
+        "stage": (
+            "stage12a_monitor_bootstrap_target"
+            if args.monitor_bootstrap
+            else "stage12a_final_target_weights"
+        ),
         "generated_at": utc_now(),
         "run_as_of": run_as_of,
         "acceptance": acceptance,
         "deployable": acceptance == "PASS" and not args.monitor_bootstrap,
+        "book_role": "monitor_bootstrap" if args.monitor_bootstrap else "deployable_final",
         "base_layer": base_name,
         "governor_multiplier_observed": multiplier,
         "governor_multiplier_applied": applied_multiplier,
@@ -578,7 +593,7 @@ def main() -> int:  # noqa: C901
             ),
         },
         "files": {
-            "final_target_weights.csv": {
+            weights_name: {
                 "sha256": sha256_file(weights_path),
                 "rows": len(rows),
             },

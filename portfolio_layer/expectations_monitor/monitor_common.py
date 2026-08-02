@@ -163,6 +163,11 @@ CREATE TABLE IF NOT EXISTS provider_estimate_snapshots (
 CREATE INDEX IF NOT EXISTS ix_provider_estimate_snapshot_lookup
 ON provider_estimate_snapshots(provider, ticker, fetched_at_utc, estimate_type);
 
+CREATE INDEX IF NOT EXISTS ix_provider_estimate_revision_history
+ON provider_estimate_snapshots(
+    provider, ticker, estimate_type, fiscal_period_end, available_at_utc
+);
+
 CREATE TABLE IF NOT EXISTS provider_snapshot_dependencies (
     artifact_path TEXT NOT NULL,
     artifact_sha256 TEXT NOT NULL,

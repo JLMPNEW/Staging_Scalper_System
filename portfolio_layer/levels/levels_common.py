@@ -12,8 +12,27 @@ import numpy as np
 import pandas as pd
 
 
-VALUATION_CONTRACT_VERSION = "sector_valuation_inputs_v2"
-LEVELS_MODEL_VERSION = "advisory_long_levels_v2_raw_nominal"
+VALUATION_CONTRACT_VERSION = "sector_valuation_inputs_v3"
+LEVELS_MODEL_VERSION = "advisory_long_levels_v3_raw_nominal"
+LEVEL_RESOLUTION_VERSION = "level_resolution_v2"
+SUPPORTED_VALUATION_METHODS = {
+    "eps_multiple",
+    "fcf_yield",
+    "fcf_yield_ttm",
+    "ev_ebitda",
+    "sector_specialist",
+}
+DIRECT_MARKET_PRICE_FIELDS = {
+    "latest_price",
+    "latest_close",
+    "market_price",
+    "market_reference",
+    "close",
+    "adjusted_close",
+    "adj_close",
+}
+FCF_YIELD_FIELDS = {"fcf_yield_ttm", "fcf_yield"}
+FCF_RECONSTRUCTION_MARKER = "transform:fcf_yield_times_same_row_price"
 VALUATION_FIELDS = [
     "as_of_date", "available_at_utc", "ticker", "source_pipeline", "company_type",
     "currency", "fiscal_period_end", "revenue_forward", "eps_forward", "fcf_forward",
@@ -22,7 +41,8 @@ VALUATION_FIELDS = [
     "sector_valuation_low", "sector_valuation_base", "sector_valuation_high",
     "sector_valuation_method", "sector_valuation_confidence",
     "sector_valuation_available_at_utc",
-    "normalized_cyclical_flag", "method_allowlist", "avg_dollar_volume_60d",
+    "normalized_cyclical_flag", "method_allowlist", "valuation_input_lineage_json",
+    "avg_dollar_volume_60d",
     "avg_dollar_volume_source",
     "next_catalyst_date", "next_catalyst_type",
     "input_freshness_json", "source_artifact_path", "source_artifact_sha256",
@@ -106,6 +126,14 @@ CREATE TABLE IF NOT EXISTS level_resolution_ledger (
     touched_flag INTEGER NOT NULL CHECK (touched_flag IN (0,1)),
     maximum_favorable_excursion REAL NOT NULL,
     maximum_adverse_excursion REAL NOT NULL,
+    resolution_schema_version TEXT NOT NULL DEFAULT 'level_resolution_v1',
+    resolution_status TEXT NOT NULL DEFAULT 'resolved_legacy_v1',
+    first_executable_fill_date TEXT NOT NULL DEFAULT '',
+    entry_price_assumption TEXT NOT NULL DEFAULT '{}',
+    forward_returns_by_horizon TEXT NOT NULL DEFAULT '{}',
+    spread_and_cost_assumptions TEXT NOT NULL DEFAULT '{}',
+    expectations_state_changes TEXT NOT NULL DEFAULT '[]',
+    event_occurrences TEXT NOT NULL DEFAULT '[]',
     resolution_available_at_utc TEXT NOT NULL
 );
 CREATE TRIGGER IF NOT EXISTS level_resolution_no_delete
@@ -115,6 +143,29 @@ END;
 CREATE TRIGGER IF NOT EXISTS level_resolution_no_update
 BEFORE UPDATE ON level_resolution_ledger BEGIN
     SELECT RAISE(ABORT, 'level resolution ledger is append-only');
+END;
+
+CREATE TABLE IF NOT EXISTS level_retirement_ledger (
+    row_sequence INTEGER PRIMARY KEY CHECK (row_sequence > 0),
+    previous_row_sha256 TEXT NOT NULL,
+    row_sha256 TEXT NOT NULL UNIQUE,
+    publication_row_sha256 TEXT NOT NULL UNIQUE,
+    level_id TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    published_as_of TEXT NOT NULL,
+    band_type TEXT NOT NULL,
+    retired_through TEXT NOT NULL,
+    last_market_date TEXT NOT NULL,
+    retirement_reason TEXT NOT NULL,
+    retirement_available_at_utc TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS level_retirement_no_delete
+BEFORE DELETE ON level_retirement_ledger BEGIN
+    SELECT RAISE(ABORT, 'level retirement ledger is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS level_retirement_no_update
+BEFORE UPDATE ON level_retirement_ledger BEGIN
+    SELECT RAISE(ABORT, 'level retirement ledger is append-only');
 END;
 """
 
@@ -152,6 +203,58 @@ def first_number(row: dict[str, Any], names: tuple[str, ...]) -> float | None:
         if value is not None:
             return value
     return None
+
+
+def first_number_with_source(
+    row: dict[str, Any], names: tuple[str, ...]
+) -> tuple[float | None, str]:
+    for name in names:
+        value = optional_float(row.get(name))
+        if value is not None:
+            return value, name
+    return None, ""
+
+
+def valuation_lineage_errors(row: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    try:
+        methods_raw = json.loads(str(row.get("method_allowlist", "[]")))
+        lineage_raw = json.loads(
+            str(row.get("valuation_input_lineage_json", "{}"))
+        )
+    except (TypeError, json.JSONDecodeError):
+        return ["invalid_valuation_lineage_json"]
+    if not isinstance(methods_raw, list) or not isinstance(lineage_raw, dict):
+        return ["invalid_valuation_lineage_shape"]
+    methods = {str(value) for value in methods_raw}
+    if not methods <= SUPPORTED_VALUATION_METHODS:
+        errors.append("unsupported_valuation_method")
+    if set(lineage_raw) != methods:
+        errors.append("method_lineage_mismatch")
+    for method, raw_fields in lineage_raw.items():
+        if not isinstance(raw_fields, list) or not raw_fields:
+            errors.append(f"missing_method_lineage:{method}")
+            continue
+        fields = {str(value).strip() for value in raw_fields}
+        if "" in fields:
+            errors.append(f"blank_method_lineage:{method}")
+        market_fields = fields & DIRECT_MARKET_PRICE_FIELDS
+        reconstructed_ttm = (
+            method == "fcf_yield_ttm"
+            and FCF_RECONSTRUCTION_MARKER in fields
+            and bool(fields & FCF_YIELD_FIELDS)
+            and bool(market_fields)
+        )
+        if market_fields and not reconstructed_ttm:
+            errors.append(f"direct_market_price_input:{method}")
+        if (
+            method == "fcf_yield_ttm"
+            and not reconstructed_ttm
+            and not fields
+            & {"fcf_per_share_ttm", "free_cash_flow_per_share_ttm"}
+        ):
+            errors.append("ttm_fcf_missing_valid_numerator_source")
+    return errors
 
 
 def _source_date(value: str) -> date:
@@ -226,36 +329,57 @@ def build_valuation_contract_row(
     source_time_missing = not source_time
     parsed_source_date = _source_date(source_time) if source_time else date.max
     pit_available = bool(source_time) and parsed_source_date <= as_of_date
-    revenue = first_number(raw, ("revenue_forward", "revenue_ntm", "forward_revenue_midpoint"))
-    eps = first_number(raw, ("eps_forward", "eps_ntm", "forward_eps_midpoint"))
-    fcf = first_number(raw, ("fcf_forward", "free_cash_flow_forward"))
-    ebitda = first_number(raw, ("ebitda_forward", "ebitda_ntm", "forward_ebitda_midpoint"))
-    net_debt = first_number(raw, ("net_debt", "net_debt_usd"))
-    senior_claims = first_number(raw, ("senior_claims", "senior_claims_usd"))
-    shares = first_number(
+    revenue, _revenue_source = first_number_with_source(
+        raw, ("revenue_forward", "revenue_ntm", "forward_revenue_midpoint")
+    )
+    eps, eps_source = first_number_with_source(
+        raw, ("eps_forward", "eps_ntm", "forward_eps_midpoint")
+    )
+    fcf, fcf_source = first_number_with_source(
+        raw, ("fcf_forward", "free_cash_flow_forward")
+    )
+    ebitda, ebitda_source = first_number_with_source(
+        raw, ("ebitda_forward", "ebitda_ntm", "forward_ebitda_midpoint")
+    )
+    net_debt, net_debt_source = first_number_with_source(
+        raw, ("net_debt", "net_debt_usd")
+    )
+    senior_claims, senior_claims_source = first_number_with_source(
+        raw, ("senior_claims", "senior_claims_usd")
+    )
+    shares, shares_source = first_number_with_source(
         raw,
         (
             "diluted_shares", "current_shares_outstanding",
             "diluted_weighted_average_shares",
         ),
     )
-    fcf_yield_ttm = first_number(raw, ("fcf_yield_ttm", "fcf_yield"))
-    latest_price = first_number(raw, ("latest_price", "latest_close"))
-    fcf_per_share_ttm: float | None = None
+    fcf_yield_ttm, fcf_yield_source = first_number_with_source(
+        raw, ("fcf_yield_ttm", "fcf_yield")
+    )
+    fcf_per_share_ttm, fcf_per_share_source = first_number_with_source(
+        raw, ("fcf_per_share_ttm", "free_cash_flow_per_share_ttm")
+    )
+    latest_price, latest_price_source = first_number_with_source(
+        raw, ("latest_price", "latest_close")
+    )
     ttm_pipelines = {
         str(value).strip()
-        for value in policy.get(
-            "ttm_fcf_reconstruction_pipelines",
-            ("semiconductors", "software_infrastructure", "technology_hardware"),
-        )
+        for value in policy.get("ttm_fcf_reconstruction_pipelines", [])
         if str(value).strip()
     }
     max_fcf_yield = optional_float(policy.get("maximum_source_fcf_yield", 1.0))
-    allow_ttm_fcf = bool(policy.get("allow_ttm_fcf_per_share_reconstruction", True))
+    allow_ttm_reconstruction = bool(
+        policy.get("allow_ttm_fcf_per_share_reconstruction", False)
+    )
     price_available = str(raw.get("price_data_asof_date", "")).strip() or source_time
-    price_pit_available = _source_date(price_available) <= as_of_date
+    price_pit_available = (
+        bool(price_available) and _source_date(price_available) <= as_of_date
+    )
+    ttm_reconstructed = False
     if (
-        allow_ttm_fcf
+        fcf_per_share_ttm is None
+        and allow_ttm_reconstruction
         and source_pipeline in ttm_pipelines
         and price_pit_available
         and fcf_yield_ttm is not None
@@ -263,9 +387,8 @@ def build_valuation_contract_row(
         and latest_price is not None
         and latest_price > 0
     ):
-        # The published yield is FCF/share divided by the same-row price. Multiplying
-        # by that price reconstructs the economic numerator; price is not an anchor.
         fcf_per_share_ttm = fcf_yield_ttm * latest_price
+        ttm_reconstructed = True
 
     specialist_low = first_number(raw, ("sector_valuation_low",))
     specialist_base = first_number(raw, ("sector_valuation_base",))
@@ -338,7 +461,42 @@ def build_valuation_contract_row(
         methods.append("ev_ebitda")
     if specialist_valid:
         methods.append("sector_specialist")
+    lineage: dict[str, list[str]] = {}
+    if "eps_multiple" in methods:
+        lineage["eps_multiple"] = [eps_source, "config:pe"]
+    if "fcf_yield" in methods:
+        lineage["fcf_yield"] = [fcf_source, shares_source, "config:fcf_yield"]
+    if "fcf_yield_ttm" in methods:
+        lineage["fcf_yield_ttm"] = (
+            [
+                fcf_yield_source,
+                latest_price_source,
+                FCF_RECONSTRUCTION_MARKER,
+                "config:fcf_yield",
+            ]
+            if ttm_reconstructed
+            else [fcf_per_share_source, "config:fcf_yield"]
+        )
+    if "ev_ebitda" in methods:
+        lineage["ev_ebitda"] = [
+            ebitda_source,
+            net_debt_source,
+            senior_claims_source,
+            shares_source,
+            "config:ev_ebitda",
+        ]
+    if "sector_specialist" in methods:
+        lineage["sector_specialist"] = [
+            "sector_valuation_low",
+            "sector_valuation_base",
+            "sector_valuation_high",
+            "sector_valuation_method",
+        ]
     effective_available = source_time
+    if ttm_reconstructed and _source_instant(price_available) >= _source_instant(
+        effective_available
+    ):
+        effective_available = price_available
     if (
         specialist_valid
         and _source_instant(specialist_available) >= _source_instant(source_time)
@@ -382,6 +540,7 @@ def build_valuation_contract_row(
             in {"1", "1.0", "true", "yes"}
         ),
         "method_allowlist": canonical_json(methods),
+        "valuation_input_lineage_json": canonical_json(lineage),
         "avg_dollar_volume_60d": first_number(
             raw, ("avg_dollar_volume_60d", "median_addv20")
         ),
@@ -658,6 +817,14 @@ def market_structure(frame: pd.DataFrame) -> dict[str, float | str | None]:
         .dropna()
         .iloc[-63:]
     )
+    tail60_dollar_volume = (
+        (close * volume).dropna().iloc[-60:]
+    )
+    avg_dollar_volume_60d = (
+        float(tail60_dollar_volume.mean())
+        if len(tail60_dollar_volume) == 60
+        else None
+    )
     volume_weighted = (
         float((tail63["close"] * tail63["volume"]).sum() / tail63["volume"].sum())
         if not tail63.empty and float(tail63["volume"].sum()) > 0
@@ -715,6 +882,7 @@ def market_structure(frame: pd.DataFrame) -> dict[str, float | str | None]:
         "price_basis": "raw_unadjusted_nominal",
         "latest_price": latest,
         "volume_weighted_daily_price_63": volume_weighted,
+        "avg_dollar_volume_60d": avg_dollar_volume_60d,
         "ma50": ma50,
         "ma200": ma200,
         "atr20": atr20,
@@ -732,6 +900,31 @@ def market_structure(frame: pd.DataFrame) -> dict[str, float | str | None]:
     }
 
 
+def _ensure_level_schema_migrations(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(level_resolution_ledger)")
+    }
+    additions = {
+        "resolution_schema_version": (
+            "TEXT NOT NULL DEFAULT 'level_resolution_v1'"
+        ),
+        "resolution_status": "TEXT NOT NULL DEFAULT 'resolved_legacy_v1'",
+        "first_executable_fill_date": "TEXT NOT NULL DEFAULT ''",
+        "entry_price_assumption": "TEXT NOT NULL DEFAULT '{}'",
+        "forward_returns_by_horizon": "TEXT NOT NULL DEFAULT '{}'",
+        "spread_and_cost_assumptions": "TEXT NOT NULL DEFAULT '{}'",
+        "expectations_state_changes": "TEXT NOT NULL DEFAULT '[]'",
+        "event_occurrences": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    with conn:
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE level_resolution_ledger ADD COLUMN {name} {definition}"
+                )
+
+
 def connect_levels_db(path: Path, *, timeout_sec: float) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=timeout_sec)
@@ -739,6 +932,7 @@ def connect_levels_db(path: Path, *, timeout_sec: float) -> sqlite3.Connection:
     conn.execute(f"PRAGMA busy_timeout={int(timeout_sec * 1000)}")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(LEVEL_SCHEMA_SQL)
+    _ensure_level_schema_migrations(conn)
     with conn:
         conn.execute(
             """
@@ -896,11 +1090,28 @@ def append_level_resolutions(
     previous = str(last["row_sha256"]) if last is not None else "0" * 64
     inserted = 0
     duplicates = 0
+    legacy_fields = (
+        "publication_row_sha256", "level_id", "ticker", "published_as_of",
+        "band_type", "resolved_through", "first_touch_date",
+        "trading_days_to_touch", "touched_flag", "maximum_favorable_excursion",
+        "maximum_adverse_excursion",
+    )
+    v2_fields = (
+        *legacy_fields,
+        "resolution_schema_version", "resolution_status",
+        "first_executable_fill_date", "entry_price_assumption",
+        "forward_returns_by_horizon", "spread_and_cost_assumptions",
+        "expectations_state_changes", "event_occurrences",
+    )
     columns = (
         "row_sequence", "previous_row_sha256", "row_sha256", "publication_row_sha256",
         "level_id", "ticker", "published_as_of", "band_type", "resolved_through",
         "first_touch_date", "trading_days_to_touch", "touched_flag",
         "maximum_favorable_excursion", "maximum_adverse_excursion",
+        "resolution_schema_version", "resolution_status",
+        "first_executable_fill_date", "entry_price_assumption",
+        "forward_returns_by_horizon", "spread_and_cost_assumptions",
+        "expectations_state_changes", "event_occurrences",
         "resolution_available_at_utc",
     )
     with conn:
@@ -915,18 +1126,17 @@ def append_level_resolutions(
                 "SELECT * FROM level_resolution_ledger WHERE publication_row_sha256=?",
                 (publication_sha,),
             ).fetchone()
-            expected = {
-                key: raw[key]
-                for key in (
-                    "publication_row_sha256", "level_id", "ticker", "published_as_of",
-                    "band_type", "resolved_through", "first_touch_date",
-                    "trading_days_to_touch", "touched_flag", "maximum_favorable_excursion",
-                    "maximum_adverse_excursion",
-                )
-            }
+            expected = {key: raw[key] for key in v2_fields}
             if existing is not None:
-                actual = {key: existing[key] for key in expected}
-                if actual != expected:
+                existing_version = str(existing["resolution_schema_version"])
+                compare_fields = (
+                    v2_fields
+                    if existing_version == LEVEL_RESOLUTION_VERSION
+                    else legacy_fields
+                )
+                actual = {key: existing[key] for key in compare_fields}
+                expected_existing = {key: expected[key] for key in compare_fields}
+                if actual != expected_existing:
                     raise RuntimeError(
                         f"First-write-wins level resolution drift for {raw['level_id']}"
                     )
@@ -961,24 +1171,133 @@ def verify_level_resolution_chain(conn: sqlite3.Connection) -> list[str]:
     for row in conn.execute(
         "SELECT * FROM level_resolution_ledger ORDER BY row_sequence"
     ).fetchall():
+        legacy_fields = (
+            "publication_row_sha256", "level_id", "ticker", "published_as_of",
+            "band_type", "resolved_through", "first_touch_date",
+            "trading_days_to_touch", "touched_flag", "maximum_favorable_excursion",
+            "maximum_adverse_excursion",
+        )
+        v2_fields = (
+            *legacy_fields,
+            "resolution_schema_version", "resolution_status",
+            "first_executable_fill_date", "entry_price_assumption",
+            "forward_returns_by_horizon", "spread_and_cost_assumptions",
+            "expectations_state_changes", "event_occurrences",
+        )
+        fields = (
+            v2_fields
+            if str(row["resolution_schema_version"]) == LEVEL_RESOLUTION_VERSION
+            else (*legacy_fields, "resolution_available_at_utc")
+        )
         payload = {
             "row_sequence": int(row["row_sequence"]),
-            **{
-                key: row[key]
-                for key in (
-                    "publication_row_sha256", "level_id", "ticker", "published_as_of",
-                    "band_type", "resolved_through", "first_touch_date",
-                    "trading_days_to_touch", "touched_flag", "maximum_favorable_excursion",
-                    "maximum_adverse_excursion", "resolution_available_at_utc",
-                )
-            },
+            **{key: row[key] for key in fields},
         }
+        if fields == v2_fields:
+            payload["resolution_available_at_utc"] = row[
+                "resolution_available_at_utc"
+            ]
         if int(row["row_sequence"]) != expected_sequence:
             errors.append(f"resolution_sequence_gap:{expected_sequence}")
         if str(row["previous_row_sha256"]) != previous:
             errors.append(f"resolution_previous_hash_mismatch:{expected_sequence}")
         if digest({"previous_row_sha256": previous, **payload}) != str(row["row_sha256"]):
             errors.append(f"resolution_row_hash_mismatch:{expected_sequence}")
+        previous = str(row["row_sha256"])
+        expected_sequence += 1
+    return errors
+
+
+def append_level_retirements(
+    conn: sqlite3.Connection, rows: list[dict[str, Any]]
+) -> tuple[int, int]:
+    last = conn.execute(
+        "SELECT row_sequence,row_sha256 FROM level_retirement_ledger "
+        "ORDER BY row_sequence DESC LIMIT 1"
+    ).fetchone()
+    sequence = int(last["row_sequence"]) if last is not None else 0
+    previous = str(last["row_sha256"]) if last is not None else "0" * 64
+    identity_fields = (
+        "publication_row_sha256", "level_id", "ticker", "published_as_of",
+        "band_type", "retired_through", "last_market_date",
+        "retirement_reason",
+    )
+    fields = (*identity_fields, "retirement_available_at_utc")
+    columns = ("row_sequence", "previous_row_sha256", "row_sha256", *fields)
+    inserted = 0
+    duplicates = 0
+    with conn:
+        for raw in sorted(
+            rows,
+            key=lambda value: (
+                str(value["published_as_of"]),
+                str(value["ticker"]),
+                str(value["band_type"]),
+            ),
+        ):
+            publication_sha = str(raw["publication_row_sha256"])
+            existing = conn.execute(
+                "SELECT * FROM level_retirement_ledger "
+                "WHERE publication_row_sha256=?",
+                (publication_sha,),
+            ).fetchone()
+            expected = {key: raw[key] for key in identity_fields}
+            if existing is not None:
+                actual = {key: existing[key] for key in identity_fields}
+                if actual != expected:
+                    raise RuntimeError(
+                        f"First-write-wins level retirement drift for {raw['level_id']}"
+                    )
+                duplicates += 1
+                continue
+            sequence += 1
+            payload = {
+                "row_sequence": sequence,
+                **expected,
+                "retirement_available_at_utc": str(
+                    raw["retirement_available_at_utc"]
+                ),
+            }
+            row_hash = digest({"previous_row_sha256": previous, **payload})
+            values = {
+                **payload,
+                "previous_row_sha256": previous,
+                "row_sha256": row_hash,
+            }
+            conn.execute(
+                f"INSERT INTO level_retirement_ledger({','.join(columns)}) "
+                f"VALUES ({','.join('?' for _ in columns)})",
+                tuple(values[column] for column in columns),
+            )
+            previous = row_hash
+            inserted += 1
+    return inserted, duplicates
+
+
+def verify_level_retirement_chain(conn: sqlite3.Connection) -> list[str]:
+    errors: list[str] = []
+    previous = "0" * 64
+    expected_sequence = 1
+    fields = (
+        "publication_row_sha256", "level_id", "ticker", "published_as_of",
+        "band_type", "retired_through", "last_market_date",
+        "retirement_reason", "retirement_available_at_utc",
+    )
+    for row in conn.execute(
+        "SELECT * FROM level_retirement_ledger ORDER BY row_sequence"
+    ).fetchall():
+        payload = {
+            "row_sequence": int(row["row_sequence"]),
+            **{key: row[key] for key in fields},
+        }
+        if int(row["row_sequence"]) != expected_sequence:
+            errors.append(f"retirement_sequence_gap:{expected_sequence}")
+        if str(row["previous_row_sha256"]) != previous:
+            errors.append(f"retirement_previous_hash_mismatch:{expected_sequence}")
+        if digest({"previous_row_sha256": previous, **payload}) != str(
+            row["row_sha256"]
+        ):
+            errors.append(f"retirement_row_hash_mismatch:{expected_sequence}")
         previous = str(row["row_sha256"])
         expected_sequence += 1
     return errors

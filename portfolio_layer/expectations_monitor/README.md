@@ -1,15 +1,20 @@
 # Expectations Monitor
 
-Implementation status: Increment 0, the Increment 1 data foundation, read-only pending-order
-capture, and the sealed daily monitor orchestrator are complete. FMP Premium and Alpha Vantage
-Premium were tested on the same sealed 50-symbol universe. The sealed
-2026-07-24 monitor universe contains 1,147 names across Tiers 0/1/2. Append-only normalized
+Implementation status: the monitor foundation, read-only pending-order capture, authoritative-event
+ingestion, market signals, state engine, prospective outcome plumbing, shared OHLCV, long-only
+levels engine, provider diagnostics, and sealed daily monitor orchestrator are complete. FMP Premium
+and Alpha Vantage Premium were tested on the same sealed 50-symbol universe. Append-only normalized
 provider snapshots, exact dependency lineage, and provider/date purge controls are operational.
 The first retained 50-symbol cycle stored 2,992 Alpha rows and 498 FMP rows with no raw payloads,
-duplicate IDs, credential leakage, or provider/normalization errors. State scoring, transitions,
-and valuation levels are not implemented. The output contract is advisory states only; broker
-execution is permanently prohibited. Static broker mode is the default and reads the local Activity
-Statement chain without connecting to IB.
+duplicate IDs, credential leakage, or provider/normalization errors. The output contract remains
+advisory states and price levels only; broker execution is permanently prohibited. Static broker
+mode is the default and reads the local Activity Statement chain without connecting to IB.
+
+Historical report repair may run script 50 with `--skip-provider-capture`. This never fabricates or
+backdates provider observations: it evaluates only snapshots already available by the requested
+as-of date. An exact, lineage-verified Tier-0/1 provider-coverage failure is sealed as `DEFERRED` at
+the parent level because provider data is shadow-only; every other provider-diagnostic failure
+remains fatal.
 
 FMP and Alpha Vantage are never averaged. `41_validate_provider_estimate_semantics.py` validates
 each provider independently. `42_reconcile_provider_estimates.py` compares only exact canonical
@@ -176,12 +181,26 @@ python portfolio_layer/expectations_monitor/42_reconcile_provider_estimates.py `
   --universe-as-of 2026-07-24
 ```
 
+For current runs, script 39 reads `final/bootstrap_target_weights.csv` and its dedicated
+`bootstrap_final_weights_manifest.json`. The deployable `final_target_weights.csv` is written only
+after monitor filtering. Keeping these artifacts separate prevents the final book from invalidating
+the monitor universe's sealed source lineage.
+
 The snapshot command sends only provider-required endpoint, ticker, and authentication fields. It
 does not send implementation details, policies, portfolio artifacts, scores, weights, or holdings.
 
 ## Tiered Capture, Basis, and Outcomes
 
-The provider evidence foundation is implemented in scripts 43-48:
+Current estimate/revision polling has moved to `../provider_ingestion/capture.py` and
+`db/provider_observations.sqlite`. The independent service records request start, response receipt,
+first actionable trading date, unchanged checks, content versions, and interval-censored changes.
+It refuses historical current-snapshot calls. The daily monitor automatically skips legacy
+estimate capture and attaches the independent store read-only; diagnostics also require
+`effective_trading_date <= as_of`. See `../provider_ingestion/README.md` for schedules, commands,
+migration, and validation contracts.
+
+The remaining basis/outcome evidence foundation is implemented in scripts 43-48. Script 43 is
+retained for legacy reproducibility but is no longer the configured estimate network owner:
 
 - `43_run_provider_capture_schedule.py` reads one sealed monitor universe, processes event names
   first, then Tier 0, Tier 1, and scheduled Tier 2 names in deterministic batches no larger than
@@ -213,6 +232,10 @@ The provider evidence foundation is implemented in scripts 43-48:
 
 No raw provider payload is retained. Provider requests contain only endpoint, ticker, and
 authentication. No implementation, policy, score, weight, holding, or order data is sent.
+
+The exact deferred provider-signal and outcome-calibration work is maintained in
+`../MONITOR_PROVIDER_SIGNALS_AMENDMENT_2026-08-02.md`. Each item names its target modules, required
+data, activation evidence, current blocker, and production-effect boundary.
 
 ```powershell
 # Preview the real sealed universe without calling a provider.
@@ -264,7 +287,7 @@ PASS, a PASS child manifest, and exact output hashes.
 
 ## Daily Orchestration and Pending Orders
 
-Scripts 49 and 50 complete the operational shell around the provider foundation:
+Scripts 49, 49a, and 50 complete the operational shell around the provider foundation:
 
 - `49_snapshot_ib_pending_orders.py` has explicit `static` and `live` modes. Static mode selects the
   latest non-stale `IB_reports/U*.csv` Activity Statement and makes no IB connection. Because an
@@ -272,10 +295,17 @@ Scripts 49 and 50 complete the operational shell around the provider foundation:
   it returns `PASS_WITH_DEFERRED` rather than falsely claiming there are no pending orders. Live mode
   connects to the configured real-account TWS port with `readonly=True`, captures open orders, hashes
   the account ID, and refuses historical backfill. `--replay-csv` supports deterministic testing.
+- `49a_build_provider_diagnostics.py` publishes provider-separated estimate-revision, uncertainty,
+  analyst-count, coverage/staleness, earnings-date drift, and fiscal-alignment diagnostics. Tier 0/1
+  fresh-coverage failures fail the diagnostic child and raise an operational alert. While all
+  provider economics remain disabled, the parent records that child as `DEFERRED` and continues
+  independent SEC/market/holdings monitoring.
 - `50_run_expectations_monitor_daily.py` validates the sealed universe and source hashes, runs or
   resumes deterministic provider batches, independently validates and reconciles every completed
   cycle, runs or reuses the earnings-event cycle, and seals all child manifests under one parent.
-  Parent idempotency verifies every output and child-manifest hash.
+  Parent idempotency verifies every output and child-manifest hash. Historical report repair may
+  use `--skip-provider-capture`; diagnostics still query the local store at the historical PIT
+  cutoff and no newly fetched observation is backdated.
 - Provider semantics, pending orders, and authoritative SEC/issuer events are explicit readiness
   dependencies. A deferred dependency produces `PASS_WITH_DEFERRED`, never action authorization.
 - Provider requests remain limited to endpoint, ticker, and authentication fields. The orchestrator
@@ -293,13 +323,18 @@ python portfolio_layer/expectations_monitor/50_run_expectations_monitor_daily.py
 python portfolio_layer/expectations_monitor/50_run_expectations_monitor_daily.py `
   --as-of 2026-07-31 --tiers tier1
 
+# Rebuild a historical report without making redundant live provider calls.
+python portfolio_layer/expectations_monitor/50_run_expectations_monitor_daily.py `
+  --as-of 2026-07-31 --universe-as-of 2026-07-31 `
+  --skip-provider-capture --skip-event-cycle --force
+
 # Validate the read-only IB collector without connecting to IB.
 python portfolio_layer/expectations_monitor/49_snapshot_ib_pending_orders.py --selftest
 ```
 
-The accepted 2026-07-31 parent run processed six Tier 1 cycles, passed all twelve semantic and
-reconciliation children, reused the sealed earnings-event cycle, and returned
-`PASS_WITH_DEFERRED`. It sealed 14 child manifests with zero independently recomputed hash
-failures in the pre-static run; the static-source run adds the sealed broker-source child. State
-publication remains disabled while readiness dependencies are incomplete. The current v2 field is
-`state_publication_authorized=false`; `broker_execution_prohibited=true` is permanent.
+The corrected 2026-07-31 historical parent returns `PASS_WITH_DEFERRED`. Provider diagnostics retain
+their sealed `FAIL` because Alpha Vantage and FMP Tier 0/1 coverage was incomplete by the July 31
+PIT cutoff; later captures were not backdated. Independent market, authoritative-event, state, and
+level validation passed. State publication remains disabled while readiness dependencies are
+incomplete. The current v2 field is `state_publication_authorized=false`;
+`broker_execution_prohibited=true` is permanent.

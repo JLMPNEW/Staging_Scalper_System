@@ -8,10 +8,7 @@ DEPENDENCIES: dict[str, set[str]] = {
     "scores": {"risk", "optimizer", "costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "risk": {"optimizer", "costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "liquidity": {"risk", "costs", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
-    # Rotation and macro are parallel inputs derived from Stage 1/2, not optimizer
-    # consumers. Keeping them here caused a filtered Stage-3 rerun to delete valid
-    # same-date independent evidence.
-    "optimizer": {"costs", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
+    "optimizer": {"costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "costs": {"blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "rotation": {"blacklitterman", "sleeves", "exits", "final"},
     "macro": {"blacklitterman", "sleeves", "exits", "final"},

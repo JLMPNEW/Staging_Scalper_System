@@ -170,10 +170,15 @@ Escalation rules (fire regardless of score; recorded in `state_transitions.rule_
 | R5 | `rel_weakness_5d_20d` AND `estimate_revision_down` both active | suspend adds (≥ watch) |
 | R6 | any negative material event on a Tier 1/holding name | `rerank_tier1` alert (immediate, not next monthly) |
 
-## 5. Database schema (new SQLite: `db/expectations_monitor.sqlite`)
+## 5. Database schema
 
-Separate DB from `portfolio_layer.sqlite`: this store is continuously appended by pollers and must
-not contend with run-scoped pipeline writes. All timestamps UTC ISO-8601; PIT columns everywhere.
+Monitor state remains in `db/expectations_monitor.sqlite`, separate from
+`portfolio_layer.sqlite`. Current FMP/Alpha estimate polling is additionally isolated in
+`db/provider_observations.sqlite`; scheduled capture jobs are its only network writers, while the
+monitor attaches it read-only. This prevents historical report reruns from calling current-snapshot
+endpoints or backdating revisions. All timestamps are UTC ISO-8601 and PIT columns are mandatory.
+The independent-store schema and operating contract are documented in
+`../provider_ingestion/README.md`.
 
 ```sql
 CREATE TABLE monitor_universe (          -- refreshed from each sealed Stage 1 run
@@ -318,6 +323,7 @@ expectations_monitor/
   47_link_provider_forecasts_to_outcomes.py
   48_run_provider_earnings_event_cycle.py
   49_snapshot_ib_pending_orders.py     # static file or read-only live IB; never order APIs
+  49a_build_provider_diagnostics.py    # revisions, uncertainty, coverage, calendar/fiscal QA
   50_run_expectations_monitor_daily.py # standing entry point
   51_build_monitor_ohlcv.py            # Yahoo -> read-only IB -> Tiingo source surface
   52_validate_monitor_ohlcv.py         # independent finality/coverage/hash validator

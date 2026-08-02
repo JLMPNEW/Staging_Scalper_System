@@ -6,11 +6,12 @@ Latest amendments:
 
 - `MONITOR_LEVELS_PROVIDER_AMENDMENT_2026-07-31.md`
 - `MONITOR_LEVELS_RETENTION_AMENDMENT_2026-07-31.md`
+- `MONITOR_PROVIDER_SIGNALS_AMENDMENT_2026-08-02.md`
 
 The 2026-07-31 amendments override Sections 2, 3, 16, and 17 where provider status, provider
 selection, retention policy, coverage tiers, or implementation sequencing conflict.
 
-Implementation status (2026-07-31):
+Implementation status (2026-08-02):
 
 - Increment 0 provider preflight is implemented under `expectations_monitor/`.
 - `FMP_API_KEY`, `TIINGO_API_KEY`, `ALPHAVANTAGE_API_KEY`, and the separate
@@ -32,6 +33,10 @@ Implementation status (2026-07-31):
 - Increment 1 monitor foundation is operational: the isolated SQLite schema, writer lock,
   deterministic tier builder, sealed portfolio-universe synchronizer, append-only normalized
   estimate store, exact dependency lineage, and controlled purge path are implemented.
+- The monitor universe is sourced from the separately sealed bootstrap book
+  (`final/bootstrap_target_weights.csv` plus `bootstrap_final_weights_manifest.json`). The
+  post-monitor deployable book uses different artifacts. A final-book rebuild therefore cannot
+  invalidate the monitor universe by overwriting its source.
 - The sealed 2026-07-24 universe contains 1,147 names: 62 Tier 0, 292 Tier 1, and 793 Tier 2.
 - The first 50-symbol provisional snapshot cycle completed with zero provider/normalization errors:
   Alpha 40/50 and FMP 50/50; no raw payloads were retained.
@@ -65,6 +70,15 @@ Implementation status (2026-07-31):
   returned `PASS_WITH_DEFERRED`, with six cycles, 14 hash-valid child manifests, and
   state publication disabled. The monitor enforces seven advisory states, human-only `exit_review`,
   and a permanent source-scan gate against executable IB order API methods.
+- Historical repair supports `--skip-provider-capture`: no provider calls or backdated observations
+  are allowed, and PIT diagnostics consume only locally retained snapshots. An exact sealed
+  Tier-0/1 provider-coverage shortfall may defer the parent run because provider signals are
+  shadow-only; all other diagnostic or lineage failures remain fatal.
+- The frozen production entry overlay is `monitor_optimizer_entry_v2`. New entries require both an
+  internal state in `{green, stable}` and an action state in `{buy_candidate, add_candidate, hold}`,
+  with no blocking escalation or market-unavailable flag. Existing holdings may be retained in
+  `{green, stable, watch}`; retention is not permission to open a new position. Excluded holdings
+  remain visible as zero-weight informational rows in the enriched final book.
 - The estimate-basis contract is implemented. FMP statement currency is retained separately from
   provider estimate semantics, so an observed USD reporting currency cannot authorize an EPS or
   revenue comparison by itself. Provider currency, units, split basis, and EPS definition remain
@@ -674,14 +688,14 @@ Definition of done:
 
 ### Increment 7 - Shared OHLCV and valuation contracts
 
-Status as of 2026-08-01: OHLCV and valuation contract v2 are implemented. Valuation inputs are read
+Status as of 2026-08-02: OHLCV and valuation contract v2 are implemented. Valuation inputs are read
 from `portfolio_layer/output/runs/<date>/raw/*_scores.csv`, never from mutable sector dashboards,
 and each copy must match its exact Stage 1 manifest hash. The shared adapter may recover trailing
 FCF/share from a same-row decimal FCF yield and price for three explicitly configured tech pipelines;
 the recovered cash-flow numerator, not price, is the anchor. Sector-specialist methods require an
 allowlisted method plus PIT low/base/high/confidence fields. Missing inputs remain explicit per-name
-invalid contracts and do not block unrelated valid names. July 31 has intentionally not yet been
-rerun under v2.
+invalid contracts and do not block unrelated valid names. July 31 has been rebuilt under v2/v3 and
+independently validated.
 
 Deliver:
 
@@ -725,8 +739,11 @@ Definition of done:
 
 ### Increment 8 - Long-only levels engine
 
-Status: implemented 2026-07-31 in scripts 60-64, including immutable publication and separate
-120-session resolution ledgers. Runs with no active validated levels seal PASS_WITH_DEFERRED.
+Status: implemented and rebuilt for 2026-07-31 in scripts 60-64, including immutable publication
+and separate 120-session resolution ledgers. Runs with no active validated levels seal
+`PASS_WITH_DEFERRED`. Cross-model historical restatements do not rewrite immutable prospective
+evidence: the prior publication is preserved, the restatement is reported, and same-model economic
+drift remains a hard failure.
 
 Deliver:
 
@@ -755,7 +772,7 @@ Deliver:
 - explicit retain/revise/reject recommendation.
 
 No automatic execution is authorized. Optimizer feedback is limited to the separately sealed,
-fail-closed `monitor_optimizer_entry_v1` policy described in the Stage 3 contract.
+fail-closed `monitor_optimizer_entry_v2` policy described in the Stage 3 contract.
 
 ## 17. Immediate next steps
 
@@ -766,9 +783,14 @@ fail-closed `monitor_optimizer_entry_v1` policy described in the Stage 3 contrac
    2026-07-31; run Tier 2 on Fridays after confirming the weekly request budget. Explicit provider
    `EMPTY` rows are coverage evidence, not fabricated estimates. Never backfill current consensus
    snapshots as historical vintages.
-3. Use `50_run_expectations_monitor_daily.py` as the standing monitor entry point. It owns the
-   scheduler, per-cycle semantic/reconciliation validation, and script-48 event sequence, and keeps
-   incomplete dependencies visible as `PASS_WITH_DEFERRED` rather than hiding them.
+3. Use `provider_ingestion/capture.py` as the only owner of current FMP/Alpha estimate network
+   calls. Run its short-lived Sunday, premarket, priority-refresh, and post-close tasks under the
+   schedule in `config.yaml`; missed tasks run current-only and are never replayed as historical
+   observations. Use `50_run_expectations_monitor_daily.py` as the standing read-only consumer and
+   monitor entry point. It automatically skips legacy estimate capture when the independent owner
+   is enabled, reads only PIT/effective observations, and keeps incomplete dependencies visible as
+   `PASS_WITH_DEFERRED` rather than hiding them. Script 48 continues to own the separately scoped
+   actual-outcome/fiscal event cycle until that ledger receives its own migration.
 4. Keep `pending_orders.source_mode: static` for file-only operation. If current pending orders are
    required, change it to `live`, confirm the real-account TWS API port/account, run script 49
    read-only, and verify pending-only names enter Tier 0 before enabling `require_pending_orders`.
@@ -782,9 +804,17 @@ fail-closed `monitor_optimizer_entry_v1` policy described in the Stage 3 contrac
    shares. Three tech pipelines may additionally use the configured `fcf_yield_ttm` reconstruction.
    Missing methods isolate that name; they do not suspend ranges for covered names.
 6. After outcomes mature, implement provider-by-sector accuracy and conformal boundary calibration.
-   Until then, no central provider preference and no buy/add/trim/sell action is authorized.
+   Until then, no central provider preference and no provider-derived buy/add/trim/sell action is
+   authorized. The complete deferred implementation register and activation tests are in
+   `MONITOR_PROVIDER_SIGNALS_AMENDMENT_2026-08-02.md`.
 
 Implemented evidence as of 2026-07-31:
+
+- Independent estimate ingestion: `db/provider_observations.sqlite` contains 262,749 migrated
+  observations, 79,358 distinct normalized versions, and 5,085 interval-censored changes across
+  71 immutable legacy cycles. Exact observation parity and the append-order hash chain validate.
+  The authoritative legacy annotation table identifies 58 cycles whose embedded portfolio date
+  differs from the actual capture date; none is backdated.
 
 - Tier 1: 292 names, six accepted batches, 876 endpoint-symbol requests, 715 available, 161 explicit
   empty coverage, zero hard errors; every semantic and reconciliation run PASS.
@@ -802,8 +832,8 @@ Implemented evidence as of 2026-07-31:
 - Fully automated peer/customer/supplier graph.
 - LLM-only material-event decisions.
 - Automated order placement from levels.
-- Any optimizer feedback from levels, action labels, or monitor fields other than the frozen
-  `monitor_optimizer_entry_v1` eligibility overlay.
+- Any optimizer feedback from levels or provider-derived signals other than the frozen
+  `monitor_optimizer_entry_v2` eligibility overlay.
 - Systematic short entry levels.
 - Claims that a prevented action is causal realized alpha.
 

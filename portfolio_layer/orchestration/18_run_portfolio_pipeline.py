@@ -187,6 +187,12 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
         ("macro", "21_build_macro_contract.py", None),
         ("macro", "22_validate_macro_contract.py", "macro/macro_manifest.json"),
     ],
+    # Rebuild only the run-dir macro contract after the monitor-filtered
+    # optimizer changes. Raw/serving databases were already refreshed by macro.
+    "macro_contract": [
+        ("macro", "21_build_macro_contract.py", None),
+        ("macro", "22_validate_macro_contract.py", "macro/macro_manifest.json"),
+    ],
     "bl": [
         ("blacklitterman", "23_build_bl_inputs.py", None),
         ("blacklitterman", "24_run_bl_optimizer.py", None),
@@ -260,7 +266,7 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
         (
             "orchestration",
             "20_compose_final_target_book.py",
-            "final/final_weights_manifest.json",
+            "final/bootstrap_final_weights_manifest.json",
         ),
     ],
     "final_report": [
@@ -286,13 +292,13 @@ DEFAULT_CADENCES = {
     "tactical": [
         "scores", "risk", "optimizer", "costs", "rotation", "governor",
         "bootstrap_final", "earnings", "monitor", "monitor_filter",
-        "governor", "final", "final_report",
+        "rotation", "macro_contract", "governor", "final", "final_report",
     ],
     "strategic": [
         "scores", "risk", "optimizer", "costs", "rotation", "macro", "governor",
-        "bootstrap_final", "earnings", "monitor", "monitor_filter", "bl",
-        "sleeves", "ledger", "exits", "payout", "governor", "final",
-        "final_report",
+        "bootstrap_final", "earnings", "monitor", "monitor_filter", "rotation",
+        "macro_contract", "bl", "sleeves", "ledger", "exits", "payout",
+        "governor", "final", "final_report",
     ],
 }
 MACRO_REFRESH_SCRIPTS = {"20a_run_macro_raw.py", "20_run_macro_serving.py"}
@@ -363,6 +369,14 @@ def parse_args() -> argparse.Namespace:
             "the remote provider is unavailable; never enabled implicitly."
         ),
     )
+    p.add_argument(
+        "--historical-catchup",
+        action="store_true",
+        help=(
+            "Mark a past-date recovery run and suppress current provider event endpoints. "
+            "Point-in-time observations already in the independent store remain consumable."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="Print the plan without executing.")
     p.add_argument("--continue-on-fail", action="store_true",
                    help="Keep running later groups after a failure (default: stop).")
@@ -386,6 +400,11 @@ def script_args(
         flags.extend(("--reuse-existing-panel", "--reuse-price-cache"))
     if script == "20_run_macro_serving.py":
         flags.append("--refresh-industry-stock-foreign")
+    if (
+        script == "50_run_expectations_monitor_daily.py"
+        and getattr(args, "historical_catchup", False)
+    ):
+        flags.append("--skip-event-cycle")
     if script == "09_run_portfolio_optimizer.py":
         flags.extend(
             (
@@ -591,6 +610,7 @@ def run_pipeline() -> int:  # noqa: C901
                 "active_group": active_group,
                 "force": bool(args.force),
                 "reuse_risk_price_data": bool(args.reuse_risk_price_data),
+                "historical_catchup": bool(args.historical_catchup),
                 "steps": steps,
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 # Freeze provenance at process start. Re-reading these files for every

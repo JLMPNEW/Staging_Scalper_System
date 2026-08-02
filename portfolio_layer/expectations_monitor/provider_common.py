@@ -58,6 +58,7 @@ class ProviderPayloadResult:
     capability: str
     symbol: str
     requested_at_utc: str
+    response_received_at_utc: str
     status: str
     http_status: int | None
     elapsed_ms: int
@@ -217,14 +218,15 @@ def fetch_capability_payload(
     """Fetch one provider payload in memory without logging or persisting its content."""
     import hashlib
 
-    requested_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    initial_requested_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     env_name, key = provider_key(provider_config)
     if key is None:
         return ProviderPayloadResult(
             provider,
             capability,
             symbol,
-            requested_at,
+            initial_requested_at,
+            initial_requested_at,
             "KEY_MISSING",
             None,
             0,
@@ -247,6 +249,7 @@ def fetch_capability_payload(
     required_fields = [str(value) for value in required] if isinstance(required, list) else []
     last_result: ProviderPayloadResult | None = None
     for attempt in range(max_retries + 1):
+        requested_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         started = time.monotonic()
         try:
             response = requests.get(
@@ -257,11 +260,13 @@ def fetch_capability_payload(
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
+            received_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             result = ProviderPayloadResult(
                 provider,
                 capability,
                 symbol,
                 requested_at,
+                received_at,
                 "REQUEST_ERROR",
                 None,
                 int((time.monotonic() - started) * 1000),
@@ -279,12 +284,14 @@ def fetch_capability_payload(
             return result
         body = response.content[: max_response_bytes + 1]
         elapsed = int((time.monotonic() - started) * 1000)
+        received_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         if len(body) > max_response_bytes:
             return ProviderPayloadResult(
                 provider,
                 capability,
                 symbol,
                 requested_at,
+                received_at,
                 "RESPONSE_TOO_LARGE",
                 int(response.status_code),
                 elapsed,
@@ -303,6 +310,7 @@ def fetch_capability_payload(
                 capability,
                 symbol,
                 requested_at,
+                received_at,
                 "NON_JSON_RESPONSE",
                 int(response.status_code),
                 elapsed,
@@ -324,6 +332,7 @@ def fetch_capability_payload(
                 capability,
                 symbol,
                 requested_at,
+                received_at,
                 status,
                 int(response.status_code),
                 elapsed,

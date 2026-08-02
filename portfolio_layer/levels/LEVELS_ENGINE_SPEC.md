@@ -119,6 +119,7 @@ sector_valuation_confidence
 sector_valuation_available_at_utc
 normalized_cyclical_flag
 method_allowlist
+valuation_input_lineage_json
 input_freshness_json
 source_artifact_sha256
 valuation_contract_version
@@ -128,12 +129,13 @@ Sector adapters may add specialist inputs, but shared code never guesses their m
 include probability-weighted pipeline value for biotech, backlog/cycle normalization for defense or
 machinery, and cohort-specific profitability rules.
 
-The v2 shared adapter supports two additional, explicit paths:
+The v3 shared adapter supports two additional, explicit paths:
 
-- `fcf_yield_ttm`: only configured tech pipelines may reconstruct trailing FCF/share as the product
-  of a same-row published decimal FCF yield and same-row price. The price is discarded and never
-  becomes the valuation anchor; the recovered cash-flow numerator is divided by the configured
-  required yield. Percentage-scaled, non-positive, excessive, or non-allowlisted inputs fail closed.
+- `fcf_yield_ttm`: accepts either a positive, explicitly published PIT `fcf_per_share_ttm` or a
+  governed reconstruction from same-row `FCF_TTM / market_cap` yield and price for allowlisted
+  pipelines. The latter algebraically recovers FCF/share; it does not use price as a standalone
+  fair-value anchor. The exact transformation is sealed in `valuation_input_lineage_json`.
+  Blank, mismatched, unsupported, future-dated, or any other market-price lineage fails validation.
 - `sector_specialist`: the sector must publish ordered positive low/base/high values, a confidence
   in `[0,1]`, an allowlisted method identity, and a PIT availability timestamp. Partial, future-dated,
   or unapproved specialist fields invalidate that name rather than being silently ignored.
@@ -369,6 +371,11 @@ event_occurrences
 resolution_available_at_utc
 ```
 
+Forward returns are explicitly labeled gross of transaction costs until a sealed executable-spread
+source exists. The configured commission and spread status are stored with each resolution. A
+publication that cannot obtain enough post-publication market history by the configured expiry is
+written to the separate append-only `level_retirement_ledger`; it cannot remain unresolved forever.
+
 The ledger uses hash-chained rows, a writer lock, monotone sequence numbers, and first-write-wins
 semantics. Rebuilding historical artifacts cannot create prospective evidence.
 
@@ -383,9 +390,12 @@ Hard gates:
 5. Execution zones never exceed the long-entry ceiling.
 6. Invalid valuation methods are excluded with explicit reasons.
 7. OHLCV is split-consistent; future bars and partial current-session bars are rejected.
-8. All values are finite, dimensionally consistent, and currency/share-basis aligned.
-9. Deterministic rebuild reproduces every component and final level.
-10. Outcome-ledger integrity and manifest/code hashes verify.
+8. The validator independently opens the sealed OHLCV panel and recomputes market structure,
+   60-session mean dollar volume, company-type base margin, penalties, ceilings, and all bands.
+9. Valuation methods have explicit non-market-price input lineage.
+10. All values are finite, dimensionally consistent, and currency/share-basis aligned.
+11. Deterministic rebuild reproduces every component and final level.
+12. Outcome-ledger integrity and manifest/code hashes verify.
 11. Stage 1, optimizer, final target book, and broker ledger remain byte-unchanged.
 12. Provider outages produce explicit coverage flags and cannot fabricate fresh events or estimates.
 
@@ -463,21 +473,26 @@ levels/
   60_build_valuation_inputs.py     # Stage 1-sealed sector source -> fail-closed PIT contract
   61_build_levels.py               # intrinsic ranges, margin of safety, market zones, states
   62_validate_levels.py            # independent recompute, ceiling, lineage, no-order gates
-  63_update_level_outcomes.py      # immutable publications + separate 120-session resolutions
+  63_update_level_outcomes.py      # immutable publications, resolutions, and expiry retirements
   64_run_levels_daily.py           # deterministic daily sequence
 ```
 
 The package is advisory and shadow-only. It contains no broker execution methods and cannot mutate
 scores, optimizer artifacts, target books, holdings, or orders.
 
-Current code status (2026-08-01): contract v2 and the range engine support shared trailing-FCF and
-allowlisted sector-specialist anchors. Existing July 31 run artifacts still use the prior contract
-and have intentionally not been regenerated. The next deliberate July 31 rerun will exercise v2;
-sector names without either a supported shared method or a complete specialist range will remain
-inactive by construction.
+Current code status (2026-08-02): contract v3 and the range engine support explicit PIT
+trailing-FCF/share, governed same-row FCF numerator reconstruction, and allowlisted
+sector-specialist anchors. Direct market-price anchoring of intrinsic value is prohibited.
+The deliberate July 31 report rebuild exercises v3; sector names without either a supported shared
+method or a complete specialist range remain inactive by construction.
 
 Level publications remain append-only and first-write-wins on economic content. If a deterministic
 rerun produces identical bands/statuses under newly sealed config, input, or code artifacts, the
 new provenance tuple is recorded in `level_publication_source_aliases` without rewriting history.
-Any change to a published band, state, reason, or publication price still fails closed. A stale or
-missing market observation is never recorded as a current publication price.
+Any change to a published band, state, reason, or publication price under the same model version
+still fails closed. A historical report rebuilt under a different model version does not rewrite or
+supersede the original publication: the old row is preserved, the new-model row is omitted from the
+prospective outcome ledger, and the outcome step seals `PASS_WITH_DEFERRED` with
+`cross_model_restatements_skipped`. The new model first becomes prospective evidence on the next
+previously unpublished as-of date. A stale or missing market observation is never recorded as a
+current publication price.

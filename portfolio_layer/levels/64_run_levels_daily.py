@@ -23,10 +23,10 @@ from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 STEPS = (
-    ("valuation_inputs", "60_build_valuation_inputs.py", "valuation_inputs_manifest.json"),
-    ("build_levels", "61_build_levels.py", "levels_build_manifest.json"),
-    ("validate_levels", "62_validate_levels.py", "levels_manifest.json"),
-    ("level_outcomes", "63_update_level_outcomes.py", "level_outcome_ledger_manifest.json"),
+    ("valuation_inputs", "60_build_valuation_inputs.py", "run:valuation_inputs_manifest.json"),
+    ("build_levels", "61_build_levels.py", "run:levels_build_manifest.json"),
+    ("validate_levels", "62_validate_levels.py", "run:levels_manifest.json"),
+    ("level_outcomes", "63_update_level_outcomes.py", "output:levels/outcomes/level_outcome_ledger_manifest.json"),
 )
 STEP_FIELDS = ["step", "status", "return_code", "manifest_path", "manifest_sha256", "detail"]
 
@@ -45,9 +45,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _run(command: list[str], *, dry_run: bool) -> tuple[int, str]:
-    if dry_run:
-        return 0, subprocess.list2cmdline(command)
+def _run(command: list[str]) -> tuple[int, str]:
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     detail = "\n".join(text.strip() for text in (result.stdout, result.stderr) if text.strip())
     if detail:
@@ -55,8 +53,33 @@ def _run(command: list[str], *, dry_run: bool) -> tuple[int, str]:
     return int(result.returncode), detail
 
 
+def _child_manifest_path(
+    *, output_root: Path, levels_dir: Path, manifest_location: str
+) -> Path:
+    scope, separator, relative = manifest_location.partition(":")
+    if not separator or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+        raise ValueError(f"Unsafe step manifest location: {manifest_location}")
+    if scope == "run":
+        return (levels_dir / relative).resolve()
+    if scope == "output":
+        return (output_root / relative).resolve()
+    raise ValueError(f"Unknown step manifest scope: {scope}")
+
+
 def run_selftest() -> None:
     assert [step[0] for step in STEPS] == ["valuation_inputs", "build_levels", "validate_levels", "level_outcomes"]
+    root = Path("C:/tmp/output")
+    run = root / "runs" / "2026-07-31" / "levels"
+    assert _child_manifest_path(
+        output_root=root,
+        levels_dir=run,
+        manifest_location="run:levels_manifest.json",
+    ) == (run / "levels_manifest.json").resolve()
+    assert _child_manifest_path(
+        output_root=root,
+        levels_dir=run,
+        manifest_location="output:levels/outcomes/level_outcome_ledger_manifest.json",
+    ) == (root / "levels/outcomes/level_outcome_ledger_manifest.json").resolve()
     print("levels daily orchestrator selftest: PASS")
 
 
@@ -76,7 +99,7 @@ def main() -> int:
     steps_path = output_dir / "levels_daily_steps.csv"
     manifest_path = output_dir / "levels_daily_manifest.json"
     if args.dry_run:
-        for step, script_name, _manifest_relative in STEPS:
+        for step, script_name, manifest_location in STEPS:
             script = Path(__file__).with_name(script_name)
             command = [sys.executable, str(script), "--config", str(config_path), "--as-of", as_of]
             if step == "valuation_inputs":
@@ -89,17 +112,25 @@ def main() -> int:
                     command.extend(["--market-data-dir", str(args.market_data_dir.resolve())])
             elif step in {"validate_levels", "level_outcomes"}:
                 command.extend(["--input-dir", str(output_dir)])
-                if step == "level_outcomes" and args.market_data_dir is not None:
+                if args.market_data_dir is not None:
                     command.extend(["--market-data-dir", str(args.market_data_dir.resolve())])
             if args.force and step != "level_outcomes":
                 command.append("--force")
-            print(f"{step}: {subprocess.list2cmdline(command)}")
+            expected_manifest = _child_manifest_path(
+                output_root=paths.output_dir,
+                levels_dir=output_dir,
+                manifest_location=manifest_location,
+            )
+            print(
+                f"{step}: {subprocess.list2cmdline(command)}; "
+                f"manifest={expected_manifest}"
+            )
         return 0
     fail_if_exists([steps_path, manifest_path], force=args.force)
     rows: list[dict[str, Any]] = []
     children: list[dict[str, str]] = []
     failed = False
-    for step, script_name, manifest_relative in STEPS:
+    for step, script_name, manifest_location in STEPS:
         script = Path(__file__).with_name(script_name)
         command = [sys.executable, str(script), "--config", str(config_path), "--as-of", as_of]
         if step == "valuation_inputs":
@@ -113,19 +144,19 @@ def main() -> int:
                 command.extend(["--market-data-dir", str(args.market_data_dir.resolve())])
         elif step in {"validate_levels", "level_outcomes"}:
             command.extend(["--input-dir", str(output_dir)])
-            if step == "level_outcomes" and args.market_data_dir is not None:
+            if args.market_data_dir is not None:
                 command.extend(["--market-data-dir", str(args.market_data_dir.resolve())])
         if args.force and step != "level_outcomes":
             command.append("--force")
-        return_code, detail = _run(command, dry_run=args.dry_run)
-        child_manifest = (
-            paths.output_dir / "levels" / "outcomes" / "level_outcome_ledger_manifest.json"
-            if step == "level_outcomes"
-            else (output_dir / manifest_relative).resolve()
+        return_code, detail = _run(command)
+        child_manifest = _child_manifest_path(
+            output_root=paths.output_dir,
+            levels_dir=output_dir,
+            manifest_location=manifest_location,
         )
-        valid = args.dry_run
+        valid = False
         child_hash = ""
-        if not args.dry_run and return_code == 0 and child_manifest.is_file():
+        if return_code == 0 and child_manifest.is_file():
             payload = read_manifest(child_manifest)
             valid = payload.get("acceptance") in {"PASS", "PASS_WITH_DEFERRED"} and payload.get("as_of_date") == as_of
             child_deferred = payload.get("acceptance") == "PASS_WITH_DEFERRED"
@@ -135,7 +166,7 @@ def main() -> int:
         rows.append(
             {
                 "step": step,
-                "status": "DRY_RUN" if args.dry_run else "DEFERRED" if valid and child_deferred else "PASS" if valid else "FAIL",
+                "status": "DEFERRED" if valid and child_deferred else "PASS" if valid else "FAIL",
                 "return_code": return_code,
                 "manifest_path": str(child_manifest),
                 "manifest_sha256": child_hash,
@@ -146,13 +177,10 @@ def main() -> int:
             children.append({"step": step, "manifest_path": str(child_manifest), "manifest_sha256": child_hash})
         if not valid:
             failed = True
-            if not args.dry_run:
-                break
+            break
     write_csv(steps_path, STEP_FIELDS, rows)
     acceptance = (
-        "DRY_RUN"
-        if args.dry_run
-        else "FAIL"
+        "FAIL"
         if failed
         else "PASS_WITH_DEFERRED"
         if any(row["status"] == "DEFERRED" for row in rows)
@@ -162,7 +190,7 @@ def main() -> int:
     write_manifest(
         manifest_path,
         {
-            "schema_version": "levels_daily_manifest_v1",
+            "schema_version": "levels_daily_manifest_v2",
             "acceptance": acceptance,
             "as_of_date": as_of,
             "universe_as_of": universe_as_of,

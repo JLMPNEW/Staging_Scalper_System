@@ -30,9 +30,11 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.expectations_monitor.monitor_common import connect_monitor_db, fetch_universe_snapshot  # noqa: E402
 from portfolio_layer.levels.levels_common import (  # noqa: E402
+    SUPPORTED_VALUATION_METHODS,
     VALUATION_CONTRACT_VERSION,
     VALUATION_FIELDS,
     build_valuation_contract_row,
+    valuation_lineage_errors,
 )
 
 
@@ -65,30 +67,28 @@ def _methods(row: dict[str, Any]) -> list[str]:
 def _validate(rows: list[dict[str, Any]], expected: int) -> list[dict[str, str]]:
     tickers = [str(row["ticker"]) for row in rows]
     valid_count = sum(row["contract_status"] == "valid" for row in rows)
-    supported = {
-        "eps_multiple", "fcf_yield", "fcf_yield_ttm", "ev_ebitda",
-        "sector_specialist",
-    }
+    lineage_errors: dict[str, list[str]] = {}
+    for row in rows:
+        errors = valuation_lineage_errors(row)
+        if errors:
+            lineage_errors[str(row["ticker"])] = errors
     return [
         {"check": "universe_complete_unique", "status": "PASS" if len(rows) == expected and len(tickers) == len(set(tickers)) else "FAIL", "detail": f"rows={len(rows)}; expected={expected}"},
         {"check": "contract_version", "status": "PASS" if all(row["valuation_contract_version"] == VALUATION_CONTRACT_VERSION for row in rows) else "FAIL", "detail": VALUATION_CONTRACT_VERSION},
         {"check": "valid_requires_method", "status": "PASS" if all(row["contract_status"] != "valid" or row["method_allowlist"] != "[]" for row in rows) else "FAIL", "detail": "valid rows have applicable absolute-value methods"},
         {
             "check": "methods_closed_contract",
-            "status": "PASS" if all(set(_methods(row)) <= supported for row in rows) else "FAIL",
+            "status": "PASS" if all(set(_methods(row)) <= SUPPORTED_VALUATION_METHODS for row in rows) else "FAIL",
             "detail": "all valuation methods are explicitly supported",
         },
         {
             "check": "ttm_fcf_numerator_valid",
             "status": "PASS" if all(
                 "fcf_yield_ttm" not in _methods(row)
-                or (
-                    float(row["fcf_yield_ttm"]) > 0
-                    and float(row["fcf_per_share_ttm"]) > 0
-                )
+                or float(row["fcf_per_share_ttm"]) > 0
                 for row in rows
             ) else "FAIL",
-            "detail": "trailing-FCF anchors require a positive published yield and reconstructed FCF/share",
+            "detail": "trailing-FCF anchors require explicit FCF/share or a governed same-row PIT yield-price reconstruction",
         },
         {
             "check": "sector_specialist_range_complete",
@@ -106,7 +106,15 @@ def _validate(rows: list[dict[str, Any]], expected: int) -> list[dict[str, str]]
             ) else "FAIL",
             "detail": "specialist anchors require an ordered range, confidence, method, and PIT timestamp",
         },
-        {"check": "direct_market_price_excluded", "status": "PASS", "detail": "valuation contract has no current-price or market-reference field; price may only reconstruct a published FCF/share numerator"},
+        {
+            "check": "direct_market_price_excluded",
+            "status": "PASS" if not lineage_errors else "FAIL",
+            "detail": (
+                "every valuation method has explicit non-market-price lineage"
+                if not lineage_errors
+                else json.dumps(lineage_errors, sort_keys=True)
+            ),
+        },
         {
             "check": "absolute_valuation_coverage",
             "status": "PASS" if valid_count > 0 else "DEFERRED",
@@ -144,10 +152,43 @@ def run_selftest() -> None:
         },
         source_path=Path("unused_when_source_date_is_present.csv"),
         source_sha="b" * 64,
+        valuation_policy={
+            "allow_ttm_fcf_per_share_reconstruction": True,
+            "ttm_fcf_reconstruction_pipelines": ["semiconductors"],
+            "maximum_source_fcf_yield": 1.0,
+        },
     )
     assert ttm["contract_status"] == "valid"
     assert ttm["fcf_per_share_ttm"] == 5.0
+    assert not valuation_lineage_errors(ttm)
+    explicit_ttm = build_valuation_contract_row(
+        as_of="2026-07-31",
+        ticker="EXPLICIT",
+        source_pipeline="semiconductors",
+        raw={
+            "asof_date": "2026-07-31",
+            "latest_price": 100.0,
+            "fcf_yield": 0.05,
+            "fcf_per_share_ttm": 5.0,
+        },
+        source_path=Path("unused_when_source_date_is_present.csv"),
+        source_sha="c" * 64,
+    )
+    assert explicit_ttm["contract_status"] == "valid"
+    assert not valuation_lineage_errors(explicit_ttm)
+    invalid_lineage = {
+        **explicit_ttm,
+        "valuation_input_lineage_json": json.dumps(
+            {"fcf_yield_ttm": ["latest_price"]}
+        ),
+    }
+    assert valuation_lineage_errors(invalid_lineage) == [
+        "direct_market_price_input:fcf_yield_ttm",
+        "ttm_fcf_missing_valid_numerator_source",
+    ]
+    assert ttm["contract_status"] == "valid"
     assert _methods(ttm) == ["fcf_yield_ttm"]
+    assert not valuation_lineage_errors(ttm)
     print("valuation input contract selftest: PASS")
 
 
@@ -241,6 +282,7 @@ def main() -> int:
                     "currency": "",
                     "normalized_cyclical_flag": 0,
                     "method_allowlist": "[]",
+                    "valuation_input_lineage_json": "{}",
                     "input_freshness_json": "{}",
                     "source_artifact_path": "",
                     "source_artifact_sha256": "",
@@ -289,7 +331,7 @@ def main() -> int:
     write_manifest(
         manifest_path,
         {
-            "schema_version": "valuation_inputs_manifest_v2",
+            "schema_version": "valuation_inputs_manifest_v3",
             "acceptance": acceptance,
             "as_of_date": as_of,
             "universe_as_of": universe_as_of,

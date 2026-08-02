@@ -489,13 +489,18 @@ def main() -> int:
 
     futures = {}
     with ThreadPoolExecutor(max_workers=int(market.get("yahoo_max_workers", 8))) as pool:
+        master_future = None
         for ticker in sorted(symbols):
             future = pool.submit(fetch_yahoo, ticker, symbols[ticker]["yahoo"])
             futures[future] = ticker
-        master_future = pool.submit(fetch_yahoo, "SPY", "SPY")
-        for future in as_completed([*futures, master_future]):
+            if ticker == "SPY" and symbols[ticker]["yahoo"] == "SPY":
+                master_future = future
+        if master_future is None:
+            master_future = pool.submit(fetch_yahoo, "SPY", "SPY")
+        for future in as_completed(set(futures) | {master_future}):
             is_master = future is master_future
-            ticker = "SPY" if is_master else futures[future]
+            is_universe = future in futures
+            ticker = futures[future] if is_universe else "SPY"
             try:
                 _ticker, rows, status = future.result()
             except Exception as exc:  # noqa: BLE001 - audited provider boundary.
@@ -503,24 +508,25 @@ def main() -> int:
                 status = f"exception:{type(exc).__name__}"
             if is_master:
                 master_rows = rows
+            if is_universe:
+                observations.extend(rows)
                 fetch_results.append(
                     _fetch_summary(
-                        ticker="SPY",
-                        tier="master",
+                        ticker=ticker,
+                        tier=tiers[ticker],
                         provider="yahoo",
-                        source_symbol="SPY",
+                        source_symbol=symbols[ticker]["yahoo"],
                         status=status,
                         rows=rows,
                     )
                 )
                 continue
-            observations.extend(rows)
             fetch_results.append(
                 _fetch_summary(
-                    ticker=ticker,
-                    tier=tiers[ticker],
+                    ticker="SPY",
+                    tier="master",
                     provider="yahoo",
-                    source_symbol=symbols[ticker]["yahoo"],
+                    source_symbol="SPY",
                     status=status,
                     rows=rows,
                 )

@@ -24,13 +24,14 @@ def _state(
     *,
     flags: str = "[]",
     market_status: str = "current",
+    action_state: str = "hold",
 ) -> dict[str, str]:
     return {
         "ticker": ticker,
         "run_as_of": "2026-07-31",
         "investable_eligible": "1",
         "internal_state": internal_state,
-        "action_state": "hold",
+        "action_state": action_state,
         "market_data_status": market_status,
         "escalation_flags_json": flags,
         "input_digest": ticker,
@@ -53,6 +54,7 @@ def test_entry_policy_allows_only_clean_green_and_stable() -> None:
         "BROKEN",
         "FLAGGED",
         "STALE",
+        "ACTION_WATCH",
         "MISSING",
     )
     scores = [
@@ -71,9 +73,11 @@ def test_entry_policy_allows_only_clean_green_and_stable() -> None:
         _state("BROKEN", "broken"),
         _state("FLAGGED", "stable", flags='["R6"]'),
         _state("STALE", "green", market_status="stale"),
+        _state("ACTION_WATCH", "stable", action_state="watch"),
     ]
     policy = {
         "entry_states": ["green", "stable"],
+        "entry_action_states": ["buy_candidate", "add_candidate", "hold"],
         "retention_states": ["green", "stable", "watch"],
         "blocking_escalation_flags": ["R6"],
         "minimum_investable_state_coverage_fraction": 0.75,
@@ -97,6 +101,7 @@ def test_entry_policy_allows_only_clean_green_and_stable() -> None:
     assert keyed["BROKEN"]["optimizer_retention_eligible"] == 0
     assert keyed["FLAGGED"]["policy_reason"] == "blocking_flags:R6"
     assert keyed["STALE"]["policy_reason"] == "market_data_not_current:stale"
+    assert keyed["ACTION_WATCH"]["policy_reason"] == "action_state_blocked:watch"
     assert all(check["status"] == "PASS" for check in checks)
 
 
@@ -128,7 +133,7 @@ def test_final_composer_rejects_non_deployable_optimizer_lineage(
             "acceptance": "PASS",
             "run_as_of": "2026-07-31",
             "production_entry_gate": True,
-            "policy": {"policy_version": "monitor_optimizer_entry_v1"},
+            "policy": {"policy_version": "monitor_optimizer_entry_v2"},
             "outputs_sha256": {
                 "monitor_eligibility_overlay.csv": module.sha256_file(overlay)
             },

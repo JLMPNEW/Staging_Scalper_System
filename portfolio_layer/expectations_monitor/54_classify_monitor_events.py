@@ -209,6 +209,12 @@ def main() -> int:
     state_cfg = monitor_cfg.get("state_model", {})
     if not isinstance(state_cfg, dict):
         raise ValueError("expectations_monitor.state_model must be a mapping")
+    if event_cfg.get("policy_version") != "expectations_events_v1":
+        raise ValueError("expectations_events_v1 config is required")
+    if event_cfg.get("provider_sentiment_is_authoritative") is not False:
+        raise ValueError("Provider sentiment must remain non-authoritative")
+    if event_cfg.get("rules_only") is not True:
+        raise ValueError("Event classification must remain rules-only")
     lookback = int(event_cfg.get("lookback_calendar_days", 200))
     floor = (args.as_of - timedelta(days=lookback)).isoformat()
     active_period_grace_days = int(

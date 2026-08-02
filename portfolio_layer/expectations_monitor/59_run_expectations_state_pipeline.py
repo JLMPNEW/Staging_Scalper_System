@@ -47,9 +47,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _run(command: list[str], *, dry_run: bool) -> tuple[int, str]:
-    if dry_run:
-        return 0, subprocess.list2cmdline(command)
+def _run(command: list[str]) -> tuple[int, str]:
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     detail = "\n".join(value.strip() for value in (result.stdout, result.stderr) if value.strip())
     if detail:
@@ -143,14 +141,17 @@ def main() -> int:
         ),
     ]
     if args.dry_run:
-        for step, script, extra, _manifest in steps:
+        for step, script, extra, expected_manifest in steps:
             command = [
                 sys.executable, str(script), "--config", str(config_path),
                 "--as-of", as_of, *extra,
             ]
             if args.force and step != "state_outcomes":
                 command.append("--force")
-            print(f"{step}: {subprocess.list2cmdline(command)}")
+            print(
+                f"{step}: {subprocess.list2cmdline(command)}; "
+                f"manifest={expected_manifest.resolve()}"
+            )
         return 0
     fail_if_exists([steps_path, pipeline_manifest_path], force=args.force)
     step_rows: list[dict[str, Any]] = []
@@ -160,10 +161,10 @@ def main() -> int:
         command = [sys.executable, str(script), "--config", str(config_path), "--as-of", as_of, *extra]
         if args.force and step not in {"state_outcomes"}:
             command.append("--force")
-        return_code, detail = _run(command, dry_run=args.dry_run)
-        valid = args.dry_run
+        return_code, detail = _run(command)
+        valid = False
         child_hash = ""
-        if not args.dry_run and return_code == 0 and child_manifest_path.is_file():
+        if return_code == 0 and child_manifest_path.is_file():
             payload = read_manifest(child_manifest_path)
             valid = payload.get("acceptance") in {"PASS", "PASS_WITH_DEFERRED"} and payload.get("as_of_date") == as_of
             child_deferred = payload.get("acceptance") == "PASS_WITH_DEFERRED"
@@ -173,7 +174,7 @@ def main() -> int:
         step_rows.append(
             {
                 "step": step,
-                "status": "DRY_RUN" if args.dry_run else "DEFERRED" if valid and child_deferred else "PASS" if valid else "FAIL",
+                "status": "DEFERRED" if valid and child_deferred else "PASS" if valid else "FAIL",
                 "return_code": return_code,
                 "manifest_path": str(child_manifest_path.resolve()),
                 "manifest_sha256": child_hash,
@@ -190,13 +191,10 @@ def main() -> int:
             )
         if not valid:
             failed = True
-            if not args.dry_run:
-                break
+            break
     write_csv(steps_path, STEP_FIELDS, step_rows)
     acceptance = (
-        "DRY_RUN"
-        if args.dry_run
-        else "FAIL"
+        "FAIL"
         if failed
         else "PASS_WITH_DEFERRED"
         if any(row["status"] == "DEFERRED" for row in step_rows)

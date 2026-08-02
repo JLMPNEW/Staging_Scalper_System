@@ -134,6 +134,13 @@ def main() -> int:
         raise ValueError("Levels must remain shadow-only until separately promoted")
     if not bool(levels_cfg.get("broker_execution_prohibited", False)):
         raise ValueError("levels.broker_execution_prohibited must be true")
+    if float(levels_cfg.get("lambda_expectations", 0.0)) != 0.0:
+        raise ValueError(
+            "levels.lambda_expectations must remain 0.0 until an expectations "
+            "price adjustment is separately calibrated and promoted"
+        )
+    if not bool(levels_cfg.get("require_explicit_valuation_currency", False)):
+        raise ValueError("levels.require_explicit_valuation_currency must be true")
     levels_dir = args.levels_dir or paths.output_dir / "runs" / as_of / "levels"
     output_subdir = str(
         cfg_get(config, "expectations_monitor.output_subdir", "expectations_monitor")
@@ -190,7 +197,6 @@ def main() -> int:
         as_of=as_of,
     )
     earnings = {row["ticker"]: row for row in read_csv(sealed_earnings)}
-    earnings_covered = True
     macro_path = _manifest_file(
         paths.output_dir / "runs" / as_of / "macro" / "macro_manifest.json",
         "macro_regime.csv",
@@ -230,6 +236,7 @@ def main() -> int:
                 "last_market_date": "",
                 "latest_price": None,
                 "volume_weighted_daily_price_63": None,
+                "avg_dollar_volume_60d": None,
                 "ma50": None,
                 "ma200": None,
                 "atr20": None,
@@ -281,9 +288,10 @@ def main() -> int:
             margins=margins,
         )
         financial_risk = financial_risk_penalty(valuation, margins)
-        adv = optional_float(valuation.get("avg_dollar_volume_60d"))
+        adv = optional_float(market.get("avg_dollar_volume_60d"))
         liquidity_penalty = 0.0 if adv is not None and adv >= minimum_adv else float(margins.get("low_liquidity_penalty", 0.05))
         earnings_row = earnings.get(ticker, {})
+        earnings_covered = bool(earnings_row)
         days_until = optional_float(earnings_row.get("days_until"))
         earnings_block = not earnings_covered or days_until is None or 0 <= days_until <= int(levels_cfg.get("earnings_suspend_days", 5))
         catalyst_date = str(valuation.get("next_catalyst_date", "")).strip()
@@ -492,11 +500,15 @@ def main() -> int:
     write_manifest(
         meta_path,
         {
-            "schema_version": "levels_meta_v2",
+            "schema_version": "levels_meta_v3",
             "as_of_date": as_of,
             "model_version": LEVELS_MODEL_VERSION,
             "price_basis": str(levels_cfg.get("price_basis", "")),
             "band_geometry": geometry,
+            "lambda_expectations": float(
+                levels_cfg.get("lambda_expectations", 0.0)
+            ),
+            "liquidity_metric": "sealed_ohlcv_mean_dollar_volume_60d",
             "row_count": len(rows),
             "active_count": active_count,
             "valid_intrinsic_count": valid_count,
@@ -512,7 +524,7 @@ def main() -> int:
     write_manifest(
         manifest_path,
         {
-            "schema_version": "levels_build_manifest_v1",
+            "schema_version": "levels_build_manifest_v2",
             "acceptance": acceptance,
             "as_of_date": as_of,
             "row_count": len(rows),

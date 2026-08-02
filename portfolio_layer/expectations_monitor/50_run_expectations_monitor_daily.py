@@ -42,6 +42,7 @@ SEMANTICS_SCRIPT = Path(__file__).with_name(
 RECONCILE_SCRIPT = Path(__file__).with_name('42_reconcile_provider_estimates.py')
 EVENT_SCRIPT = Path(__file__).with_name('48_run_provider_earnings_event_cycle.py')
 PENDING_SCRIPT = Path(__file__).with_name('49_snapshot_ib_pending_orders.py')
+DIAGNOSTICS_SCRIPT = Path(__file__).with_name('49a_build_provider_diagnostics.py')
 MARKET_BUILD_SCRIPT = Path(__file__).with_name('51_build_monitor_ohlcv.py')
 MARKET_VALIDATE_SCRIPT = Path(__file__).with_name('52_validate_monitor_ohlcv.py')
 STATE_PIPELINE_SCRIPT = Path(__file__).with_name(
@@ -75,6 +76,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--universe-as-of', type=date.fromisoformat)
     parser.add_argument('--tiers', nargs='+', choices=('tier0', 'tier1', 'tier2'))
     parser.add_argument('--capture-pending-orders', action='store_true')
+    parser.add_argument(
+        '--skip-provider-capture',
+        action='store_true',
+        help=(
+            'Do not call estimate providers. Intended for deterministic historical report '
+            'rebuilds; sealed PIT diagnostics still run from the local snapshot store.'
+        ),
+    )
     parser.add_argument('--skip-pending-orders', action='store_true')
     parser.add_argument('--skip-event-cycle', action='store_true')
     parser.add_argument('--skip-market-data', action='store_true')
@@ -152,6 +161,54 @@ def _manifest_valid(
     if identity is not None and str(manifest.get(identity[0], '')) != identity[1]:
         return False
     return _outputs_valid(path, manifest)
+
+
+def _provider_diagnostics_result(
+    manifest_path: Path,
+    *,
+    return_code: int,
+    as_of_date: str,
+) -> tuple[str, dict[str, Any], str]:
+    """Classify sealed provider diagnostics without blocking provider-independent monitoring."""
+    integrity_valid = _manifest_valid(
+        manifest_path,
+        accepted={'PASS', 'PASS_WITH_WARNINGS', 'FAIL'},
+        identity=('as_of_date', as_of_date),
+    )
+    if not integrity_valid:
+        return 'FAIL', {}, 'provider diagnostics manifest is missing, stale, or hash-invalid'
+    payload = read_manifest(manifest_path)
+    acceptance = str(payload.get('acceptance', ''))
+    if acceptance in {'PASS', 'PASS_WITH_WARNINGS'} and return_code == 0:
+        return (
+            'PASS',
+            payload,
+            f'acceptance={acceptance}; provider coverage gates passed; '
+            'economic signals remain diagnostic',
+        )
+    failure_reasons = payload.get('failure_reasons', [])
+    diagnostic_coverage_failure = (
+        acceptance == 'FAIL'
+        and return_code != 0
+        and failure_reasons == ['tier0_1_provider_coverage']
+        and payload.get('dependency_lineage_verified') is True
+        and payload.get('shadow_only') is True
+        and payload.get('les_effect_authorized') is False
+        and payload.get('levels_effect_authorized') is False
+    )
+    if diagnostic_coverage_failure:
+        return (
+            'DEFERRED',
+            payload,
+            'sealed Tier 0/1 provider coverage failure; alert required, but provider data is '
+            'diagnostic-only and provider-independent monitoring continues',
+        )
+    return (
+        'FAIL',
+        payload,
+        f'unsupported provider diagnostics result: acceptance={acceptance}; '
+        f'return_code={return_code}; failure_reasons={failure_reasons!r}',
+    )
 
 
 def _latest_universe_date(conn: Any, as_of: date) -> str:
@@ -312,7 +369,7 @@ def _publish_stable_manifest(
     parent = read_manifest(parent_path)
     parent_sha = sha256_file(parent_path)
     payload = {
-        'schema_version': 'expectations_monitor_stable_manifest_v1',
+        'schema_version': 'expectations_monitor_stable_manifest_v2',
         'acceptance': str(parent.get('acceptance', '')),
         'run_as_of': str(parent.get('as_of_date', '')),
         'as_of_date': str(parent.get('as_of_date', '')),
@@ -329,10 +386,13 @@ def _publish_stable_manifest(
         existing = read_manifest(stable_path)
         if existing == payload:
             return
-        raise FileExistsError(
-            f'Refusing to replace a different stable monitor manifest without --force: '
-            f'{stable_path}'
-        )
+        existing_acceptance = str(existing.get('acceptance', ''))
+        new_acceptance = str(payload.get('acceptance', ''))
+        if new_acceptance != 'FAIL' and existing_acceptance != 'FAIL':
+            raise FileExistsError(
+                'Refusing to replace a different passing stable monitor manifest '
+                f'without --force: {stable_path}'
+            )
     write_manifest(stable_path, payload)
 
 
@@ -409,6 +469,46 @@ def run_selftest() -> None:
         assert not _manifest_valid(manifest, accepted={'PASS'})
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        output = root / 'provider_coverage_readiness.csv'
+        manifest = root / 'provider_diagnostics_manifest.json'
+        write_csv(output, ['status'], [{'status': 'FAIL'}])
+        base_payload = {
+            'acceptance': 'FAIL',
+            'as_of_date': '2026-07-31',
+            'shadow_only': True,
+            'les_effect_authorized': False,
+            'levels_effect_authorized': False,
+            'failure_reasons': ['tier0_1_provider_coverage'],
+            'dependency_lineage_verified': True,
+            'outputs_sha256': {output.name: sha256_file(output)},
+        }
+        write_manifest(manifest, base_payload)
+        status, _, _ = _provider_diagnostics_result(
+            manifest,
+            return_code=1,
+            as_of_date='2026-07-31',
+        )
+        assert status == 'DEFERRED'
+        write_manifest(
+            manifest,
+            {**base_payload, 'failure_reasons': ['runtime_error']},
+        )
+        status, _, _ = _provider_diagnostics_result(
+            manifest,
+            return_code=1,
+            as_of_date='2026-07-31',
+        )
+        assert status == 'FAIL'
+        write_manifest(manifest, base_payload)
+        output.write_text('status\nPASS\n', encoding='utf-8')
+        status, _, _ = _provider_diagnostics_result(
+            manifest,
+            return_code=1,
+            as_of_date='2026-07-31',
+        )
+        assert status == 'FAIL'
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
         parent = root / 'session' / 'daily_monitor_manifest.json'
         stable = root / 'run' / 'daily_monitor_manifest.json'
         write_manifest(
@@ -427,6 +527,52 @@ def run_selftest() -> None:
             parent_path=parent,
             force=False,
         )
+        changed_parent = root / 'session-2' / 'daily_monitor_manifest.json'
+        write_manifest(
+            changed_parent,
+            {
+                'acceptance': 'PASS',
+                'as_of_date': '2026-07-31',
+                'universe_as_of': '2026-07-31',
+                'shadow_only': True,
+                'state_publication_authorized': False,
+                'plan_digest': 'different',
+            },
+        )
+        try:
+            _publish_stable_manifest(
+                stable_path=stable,
+                parent_path=changed_parent,
+                force=False,
+            )
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError('Different PASS pointer replaced without --force')
+        failed_parent = root / 'failed' / 'daily_monitor_manifest.json'
+        write_manifest(
+            failed_parent,
+            {
+                'acceptance': 'FAIL',
+                'as_of_date': '2026-07-31',
+                'universe_as_of': '2026-07-31',
+                'shadow_only': True,
+                'state_publication_authorized': False,
+                'plan_digest': 'failed',
+            },
+        )
+        _publish_stable_manifest(
+            stable_path=stable,
+            parent_path=failed_parent,
+            force=False,
+        )
+        assert read_manifest(stable)['acceptance'] == 'FAIL'
+        _publish_stable_manifest(
+            stable_path=stable,
+            parent_path=parent,
+            force=False,
+        )
+        assert read_manifest(stable)['acceptance'] == 'PASS_WITH_DEFERRED'
         sealed = read_manifest(stable)
         assert sealed['run_as_of'] == '2026-07-31'
         assert sealed['parent_manifest_sha256'] == sha256_file(parent)
@@ -453,6 +599,15 @@ def main() -> int:
     monitor_cfg = cfg_get(config, 'expectations_monitor', {})
     if not isinstance(monitor_cfg, dict):
         raise ValueError('expectations_monitor config must be a mapping')
+    ingestion_cfg = cfg_get(config, 'provider_ingestion', {})
+    if not isinstance(ingestion_cfg, dict):
+        raise ValueError('provider_ingestion config must be a mapping')
+    independent_provider_owner = (
+        ingestion_cfg.get('enabled') is True
+        and ingestion_cfg.get('network_owner') == 'independent_service'
+        and 'estimates' in ingestion_cfg.get('managed_capabilities', [])
+    )
+    skip_provider_capture = bool(args.skip_provider_capture or independent_provider_owner)
     if monitor_cfg.get('broker_execution_prohibited') is not True:
         raise ValueError('expectations_monitor.broker_execution_prohibited must be true')
     if monitor_cfg.get('enabled_in_production') is not False:
@@ -536,6 +691,7 @@ def main() -> int:
         RECONCILE_SCRIPT.resolve(),
         EVENT_SCRIPT.resolve(),
         PENDING_SCRIPT.resolve(),
+        DIAGNOSTICS_SCRIPT.resolve(),
         MARKET_BUILD_SCRIPT.resolve(),
         MARKET_VALIDATE_SCRIPT.resolve(),
         STATE_PIPELINE_SCRIPT.resolve(),
@@ -554,6 +710,10 @@ def main() -> int:
         'universe_as_of': universe_as_of,
         'tiers': sorted(args.tiers or ['auto']),
         'capture_pending_orders': bool(args.capture_pending_orders),
+        'skip_provider_capture': skip_provider_capture,
+        'provider_network_owner': (
+            'independent_service' if independent_provider_owner else 'daily_monitor'
+        ),
         'skip_pending_orders': bool(args.skip_pending_orders),
         'skip_event_cycle': bool(args.skip_event_cycle),
         'skip_market_data': bool(args.skip_market_data),
@@ -578,14 +738,20 @@ def main() -> int:
         / output_subdir
         / 'daily_monitor_manifest.json'
     )
-    if args.output_dir is None and not args.force:
+    stable_failed = False
+    if stable_manifest_path.is_file():
+        stable_failed = read_manifest(stable_manifest_path).get('acceptance') == 'FAIL'
+    if args.output_dir is None and not args.force and not stable_failed:
         for prior in sorted(root.glob('*/daily_monitor_manifest.json')):
             if _prior_parent_valid(prior, plan_digest=plan_digest):
-                _publish_stable_manifest(
-                    stable_path=stable_manifest_path,
-                    parent_path=prior,
-                    force=False,
-                )
+                try:
+                    _publish_stable_manifest(
+                        stable_path=stable_manifest_path,
+                        parent_path=prior,
+                        force=False,
+                    )
+                except FileExistsError:
+                    continue
                 print('EXPECTATIONS MONITOR DAILY: SKIPPED_ALREADY_PASS')
                 print(f'prior_manifest={prior}')
                 return 0
@@ -805,37 +971,51 @@ def main() -> int:
             failed = True
 
     capture_output = output_dir / 'capture'
-    capture_command = [
-        sys.executable,
-        str(CAPTURE_SCRIPT),
-        '--config',
-        str(config_path),
-        '--db',
-        str(db_path),
-        '--as-of',
-        args.as_of.isoformat(),
-        '--universe-as-of',
-        universe_as_of,
-        '--output-dir',
-        str(capture_output),
-    ]
-    if args.tiers:
-        capture_command.extend(['--tiers', *args.tiers])
-    if args.dry_run:
-        capture_command.append('--dry-run')
-    capture_rc, capture_detail = _run(capture_command, dry_run=False)
     capture_manifest = capture_output / 'capture_session_manifest.json'
-    capture_valid = capture_rc == 0 and _manifest_valid(
-        capture_manifest,
-        accepted={'DRY_RUN'} if args.dry_run else {'PASS', 'PASS_NOOP'},
-        identity=('universe_as_of', universe_as_of),
-    )
+    if skip_provider_capture:
+        capture_rc = 0
+        capture_detail = (
+            'provider capture owned by the independent current-time service; sealed PIT '
+            'diagnostics read the observation store and no observation is backdated'
+        )
+        capture_valid = True
+    else:
+        capture_command = [
+            sys.executable,
+            str(CAPTURE_SCRIPT),
+            '--config',
+            str(config_path),
+            '--db',
+            str(db_path),
+            '--as-of',
+            args.as_of.isoformat(),
+            '--universe-as-of',
+            universe_as_of,
+            '--output-dir',
+            str(capture_output),
+        ]
+        if args.tiers:
+            capture_command.extend(['--tiers', *args.tiers])
+        if args.dry_run:
+            capture_command.append('--dry-run')
+        capture_rc, capture_detail = _run(capture_command, dry_run=False)
+        capture_valid = capture_rc == 0 and _manifest_valid(
+            capture_manifest,
+            accepted={'DRY_RUN'} if args.dry_run else {'PASS', 'PASS_NOOP'},
+            identity=('universe_as_of', universe_as_of),
+        )
     capture_hash = sha256_file(capture_manifest) if capture_manifest.is_file() else ''
     steps.append(
         {
             'step': 'provider_capture',
             'cycle': args.as_of.isoformat(),
-            'status': 'PASS' if capture_valid else 'FAIL',
+            'status': (
+                'DEFERRED'
+                if skip_provider_capture
+                else 'PASS'
+                if capture_valid
+                else 'FAIL'
+            ),
             'return_code': capture_rc,
             'manifest_path': str(capture_manifest.resolve()),
             'manifest_sha256': capture_hash,
@@ -984,6 +1164,64 @@ def main() -> int:
         if not event_valid:
             failed = True
 
+    diagnostics_output = output_dir / 'provider_diagnostics'
+    diagnostics_command = [
+        sys.executable,
+        str(DIAGNOSTICS_SCRIPT),
+        '--config',
+        str(config_path),
+        '--db',
+        str(db_path),
+        '--as-of',
+        args.as_of.isoformat(),
+        '--universe-as-of',
+        universe_as_of,
+        '--output-dir',
+        str(diagnostics_output),
+    ]
+    if args.force:
+        diagnostics_command.append('--force')
+    diagnostics_rc, diagnostics_detail = _run(
+        diagnostics_command,
+        dry_run=args.dry_run,
+    )
+    diagnostics_manifest = diagnostics_output / 'provider_diagnostics_manifest.json'
+    if args.dry_run:
+        diagnostics_status = 'DRY_RUN'
+        diagnostics_payload: dict[str, Any] = {}
+    else:
+        diagnostics_status, diagnostics_payload, diagnostics_detail = (
+            _provider_diagnostics_result(
+                diagnostics_manifest,
+                return_code=diagnostics_rc,
+                as_of_date=args.as_of.isoformat(),
+            )
+        )
+    diagnostics_hash = (
+        sha256_file(diagnostics_manifest) if diagnostics_manifest.is_file() else ''
+    )
+    steps.append(
+        {
+            'step': 'provider_diagnostics',
+            'cycle': args.as_of.isoformat(),
+            'status': diagnostics_status,
+            'return_code': diagnostics_rc,
+            'manifest_path': str(diagnostics_manifest.resolve()),
+            'manifest_sha256': diagnostics_hash,
+            'detail': diagnostics_detail,
+        }
+    )
+    if diagnostics_hash:
+        children.append(
+            {
+                'step': 'provider_diagnostics',
+                'manifest_path': str(diagnostics_manifest.resolve()),
+                'manifest_sha256': diagnostics_hash,
+            }
+        )
+    if diagnostics_status == 'FAIL':
+        failed = True
+
     state_status = 'DEFERRED'
     state_detail = 'state/levels chain not requested or validated market data unavailable'
     run_state_chain = bool(daily_cfg.get('run_state_and_levels_chain', False))
@@ -1075,6 +1313,11 @@ def main() -> int:
             ),
         },
         {
+            'dependency': 'provider_diagnostics',
+            'status': diagnostics_status,
+            'detail': diagnostics_detail,
+        },
+        {
             'dependency': 'pending_orders',
             'status': pending_status,
             'detail': pending_detail,
@@ -1129,12 +1372,16 @@ def main() -> int:
             },
         },
     )
-    if acceptance in {"PASS", "PASS_WITH_DEFERRED"}:
-        _publish_stable_manifest(
-            stable_path=stable_manifest_path,
-            parent_path=manifest_path,
-            force=args.force or stable_manifest_path.exists(),
-        )
+    if acceptance in {"PASS", "PASS_WITH_DEFERRED", "FAIL"}:
+        try:
+            _publish_stable_manifest(
+                stable_path=stable_manifest_path,
+                parent_path=manifest_path,
+                force=args.force,
+            )
+        except FileExistsError as exc:
+            print(f'EXPECTATIONS MONITOR DAILY: FAIL_STABLE_CONFLICT: {exc}')
+            return 1
     print(f'EXPECTATIONS MONITOR DAILY: {acceptance}')
     print(
         f'cycles={len(cycles)}; state_publication_authorized='

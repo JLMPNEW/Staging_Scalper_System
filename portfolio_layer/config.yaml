@@ -9,6 +9,45 @@ paths:
 runtime:
   sqlite_timeout_sec: 120.0
 
+# Independent provider network owner. Scheduled invocations are short-lived;
+# portfolio/report reruns never call current-snapshot endpoints for past dates.
+provider_ingestion:
+  policy_version: provider_observation_store_v1
+  enabled: true
+  network_owner: independent_service
+  managed_capabilities: [estimates]
+  providers: [alpha_vantage, fmp]
+  database_path: "db/provider_observations.sqlite"
+  output_subdir: "provider_ingestion"
+  timezone: America/New_York
+  exchange_calendar: XNYS
+  decision_cutoff_local: "09:25"
+  batch_size: 50
+  writer_lock_timeout_sec: 30.0
+  raw_payload_retention_enabled: false
+  missed_run_policy: current_only_no_backfill
+  scheduler_poll_minutes: 10
+  schedule_grace_minutes: 20
+  max_scheduled_attempts: 2
+  recovery:
+    policy_version: provider_delayed_run_recovery_v1
+    service_started_on: 2026-08-02
+    portfolio_catchup_lookback_sessions: 10
+    continuity_lookback_calendar_days: 8
+    missed_capture_action: flag_no_backfill
+    universe_staleness_action: capture_existing_names_with_warning
+  schedules:
+    sunday_baseline: "18:00"
+    premarket: "07:30"
+    priority_refresh: "08:45"
+    intraday: "disabled"
+    postclose: "18:00"
+  actionability:
+    require_full_cycle_before_same_session_cutoff: true
+    weekend_observations_effective_next_session: true
+    post_cutoff_observations_effective_next_session: true
+    historical_current_snapshot_calls_prohibited: true
+
 # Provider-independent expectations monitor. Raw states, actions, levels, and
 # provider signals remain advisory/shadow-only. The only production use is the
 # separately sealed optimizer.monitor_entry_policy overlay.
@@ -99,8 +138,8 @@ expectations_monitor:
   events:
     policy_version: expectations_events_v1
     lookback_calendar_days: 200
-    form4_database_path: "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}"
-    biotech_database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite"
+    form4_database_path: "${SEC_INSIDER_DB_PATH}"
+    biotech_database_path: "${BIOTECH_DB_PATH}"
     rules_only: true
     provider_sentiment_is_authoritative: false
     implementation_or_policy_data_sent: false
@@ -230,17 +269,57 @@ expectations_monitor:
         - median_normalized_absolute_error
         - signed_scaled_bias
         - raw_mae_diagnostic
+  provider_diagnostics:
+    policy_version: provider_diagnostics_v1
+    timezone: America/Chicago
+    provider_separation_required: true
+    no_provider_averaging: true
+    economic_signal_activation: diagnostic_only
+    coverage:
+      # Tier 0/1 are holdings, targets, and investable names. Missing Tier 2
+      # observations remain visible but do not block otherwise covered names.
+      hard_fail_tiers: [tier0, tier1]
+      maximum_age_calendar_days:
+        tier0: 3
+        tier1: 3
+        tier2: 10
+      hard_floor_by_tier:
+        tier0: 0.90
+        tier1: 0.90
+        tier2: 0.00
+      warning_floor_by_tier:
+        tier0: 0.95
+        tier1: 0.95
+        tier2: 0.50
+    revision_momentum:
+      horizons_calendar_days: [30, 90]
+      relative_flat_band: 0.005
+      prefer_locally_observed_history: true
+      allow_provider_embedded_lookback_fallback: true
+      economic_use: diagnostic_only
+    earnings_date_drift:
+      cross_provider_confirmation_status: unavailable_single_calendar_surface
+      delay_direction_has_economic_sign: false
+      economic_use: diagnostic_only
+    fiscal_period_alignment:
+      require_exact_period: true
+      economic_use: quality_monitoring_only
 
 # Advisory valuation ranges and execution zones. This package never places broker orders and does
 # not feed the optimizer. Missing absolute forward fundamentals fail closed to inactive levels.
 levels:
-  policy_version: advisory_long_levels_v2_raw_nominal
+  policy_version: advisory_long_levels_v3_raw_nominal
   enabled_in_production: false
   broker_execution_prohibited: true
   outcomes:
     horizon_trading_days: 120
+    forward_return_horizons: [1, 5, 20, 60, 120]
+    resolution_expiry_calendar_days: 370
     resolution_price_basis: raw_unadjusted_nominal
     resolve_only_current_model_version: true
+    cost_assumptions:
+      commission_per_trade_usd: 1.25
+      spread_status: not_applied_advisory_diagnostic
   database_path: "db/levels.sqlite"
   writer_lock_timeout_sec: 30.0
   minimum_adv_usd: 5000000.0
@@ -263,8 +342,8 @@ levels:
     drawdown_percentile_add_enabled: true
     deteriorating_trim_tightening_vol: 0.25
   valuation_contract:
-    # A trailing FCF yield may reconstruct FCF/share only when yield and price are
-    # published in the same PIT sector row. Price itself is never a fair-value anchor.
+    # A same-row PIT FCF yield and price may reconstruct FCF/share only for the
+    # listed pipelines. The transformation is lineage-sealed; price is not an anchor.
     allow_ttm_fcf_per_share_reconstruction: true
     ttm_fcf_reconstruction_pipelines:
       [semiconductors, software_infrastructure, technology_hardware]
@@ -619,9 +698,10 @@ optimizer:
   # (fail-open: a missing snapshot or missing/blank row never excludes). Optimizer 09 only.
   max_half_spread_bps: 50
   monitor_entry_policy:
-    policy_version: monitor_optimizer_entry_v1
+    policy_version: monitor_optimizer_entry_v2
     enabled_in_production: true
     entry_states: [green, stable]
+    entry_action_states: [buy_candidate, add_candidate, hold]
     retention_states: [green, stable, watch]
     blocking_escalation_flags:
       [R1, R2, R4, R5, R5_UNAVAILABLE, R6, PROVIDER_CONFLICT, MARKET_DATA_UNAVAILABLE]
@@ -1046,11 +1126,13 @@ orchestration:
     # can publish deployable weights.
     tactical:
       [scores, risk, optimizer, costs, rotation, governor, bootstrap_final,
-       earnings, monitor, monitor_filter, governor, final, final_report]
+       earnings, monitor, monitor_filter, rotation, macro_contract, governor,
+       final, final_report]
     strategic:
       [scores, risk, optimizer, costs, rotation, macro, governor,
-       bootstrap_final, earnings, monitor, monitor_filter, bl, sleeves,
-       ledger, exits, payout, governor, final, final_report]
+       bootstrap_final, earnings, monitor, monitor_filter, rotation,
+       macro_contract, bl, sleeves, ledger, exits, payout, governor, final,
+       final_report]
 
 # Stage 10 - payout / liability planner (SHADOW-ONLY; the +payout walk-forward arm is UNREGISTERED
 # for the first Open Event per docs/LOCKBOX_PROTOCOL.md). Emits a per-run distribution PROPOSAL:

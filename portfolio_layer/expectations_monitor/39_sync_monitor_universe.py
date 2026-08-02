@@ -291,11 +291,30 @@ def main() -> int:
         run_as_of=run_as_of,
         required=bool(universe_cfg.get("require_scores", True)),
     )
+    bootstrap_target = run_dir / "final" / "bootstrap_target_weights.csv"
+    bootstrap_manifest = (
+        run_dir / "final" / "bootstrap_final_weights_manifest.json"
+    )
+    target_artifact = (
+        bootstrap_target
+        if bootstrap_target.is_file() and bootstrap_manifest.is_file()
+        else run_dir / "final" / "final_target_weights.csv"
+    )
+    target_manifest = (
+        bootstrap_manifest
+        if target_artifact == bootstrap_target
+        else run_dir / "final" / "final_weights_manifest.json"
+    )
+    target_key = (
+        "bootstrap_target_weights.csv"
+        if target_artifact == bootstrap_target
+        else "final_target_weights.csv"
+    )
     target_rows, target_sources = _sealed_source(
         role="final_target",
-        artifact=run_dir / "final" / "final_target_weights.csv",
-        manifest_path=run_dir / "final" / "final_weights_manifest.json",
-        artifact_keys=("final_target_weights.csv",),
+        artifact=target_artifact,
+        manifest_path=target_manifest,
+        artifact_keys=(target_key,),
         run_as_of=run_as_of,
         required=bool(universe_cfg.get("require_final_target", True)),
     )

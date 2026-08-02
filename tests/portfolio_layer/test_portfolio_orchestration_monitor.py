@@ -84,6 +84,9 @@ def test_monitor_filter_is_mandatory_second_pass() -> None:
     for cadence in ("tactical", "strategic"):
         groups = orchestrator.DEFAULT_CADENCES[cadence]
         assert groups.index("monitor") < groups.index("monitor_filter")
+        post_filter = groups.index("monitor_filter")
+        assert post_filter < groups.index("rotation", post_filter)
+        assert post_filter < groups.index("macro_contract")
         assert groups.index("monitor_filter") < len(groups) - 1 - groups[::-1].index("final")
         assert len(groups) - 1 - groups[::-1].index("final") < groups.index("final_report")
     assert "monitor" not in orchestrator.SOFT_GROUPS
@@ -95,6 +98,9 @@ def test_monitor_filter_is_mandatory_second_pass() -> None:
     for cadence in ("tactical", "strategic"):
         groups = configured[cadence]
         assert groups.index("monitor") < groups.index("monitor_filter")
+        post_filter = groups.index("monitor_filter")
+        assert post_filter < groups.index("rotation", post_filter)
+        assert post_filter < groups.index("macro_contract")
         final_index = len(groups) - 1 - groups[::-1].index("final")
         assert groups.index("monitor_filter") < final_index
         assert final_index < groups.index("final_report")
@@ -125,3 +131,19 @@ def test_monitor_filter_is_mandatory_second_pass() -> None:
     )
     assert "--monitor-bootstrap" in bootstrap_final
     assert "--monitor-bootstrap" not in deployable_final
+    bootstrap_group = orchestrator.GROUPS["bootstrap_final"]
+    assert bootstrap_group[0][2] == "final/bootstrap_final_weights_manifest.json"
+
+
+def test_historical_catchup_suppresses_current_provider_event_cycle() -> None:
+    orchestrator = _load_orchestrator()
+    args = SimpleNamespace(
+        force=False,
+        reuse_risk_price_data=False,
+        historical_catchup=True,
+    )
+    assert orchestrator.script_args(
+        args,
+        "50_run_expectations_monitor_daily.py",
+        group="monitor",
+    ) == ["--skip-event-cycle"]
