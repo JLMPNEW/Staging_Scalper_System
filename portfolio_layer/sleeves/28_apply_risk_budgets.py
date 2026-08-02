@@ -39,12 +39,12 @@ from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E4
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 from portfolio_layer.sleeves.risk_model import (  # noqa: E402
+    build_sleeve_risk_proposal,
     effective_number_of_bets,
     enforce_rc_cap_to_cash,
     factor_decomposition,
     information_ratios,
     risk_contributions,
-    solve_risk_budget,
     sleeve_risk_bounds,
     target_risk_budget,
     throttle_scale,
@@ -234,7 +234,20 @@ def main() -> int:  # noqa: C901
         tilt=tilt,
         rc_cap=rc_cap,
     )
-    weights = solve_risk_budget(cov, target_b, gross=invested_gross, max_weight=max_weight, max_iter=max_iter)
+    weights, allocation_mode, active_sleeves = build_sleeve_risk_proposal(
+        cov,
+        target_b,
+        prior_weights=prior,
+        sleeve_of=sleeve_of,
+        gross=invested_gross,
+        max_weight=max_weight,
+        max_iter=max_iter,
+    )
+    rec(
+        "cross_sleeve_allocation_mode",
+        "PASS",
+        f"mode={allocation_mode}; active_sleeves={list(active_sleeves)}",
+    )
     rc_enforcement = enforce_rc_cap_to_cash(weights, cov, rc_cap=rc_cap, max_iter=max_iter)
     weights = rc_enforcement.weights
 
@@ -476,6 +489,8 @@ def main() -> int:  # noqa: C901
         "cash_after": final_cash,
         "drawdown_throttle_simulation": simulated_throttle,
         "within_sleeve_ir_tilt": tilt,
+        "allocation_mode": allocation_mode,
+        "active_sleeves": list(active_sleeves),
         "per_name_risk_contribution_cap": rc_cap,
         "rc_cap_enforcement": {
             "converged": rc_enforcement.converged,

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validate the sealed earnings-date calendar for a run.
 
-Hard gates (FAIL): manifest/hash integrity, join integrity against stocks_scores,
+Hard gates (FAIL): manifest/hash integrity, join integrity against the scored-plus-held
+equity universe,
 date validity (ISO, not in the past at fetch time, within horizon), no duplicate
 tickers, only allowed sources. Soft gates (WARN): investable coverage below the
 configured floor, dates that moved vs the prior snapshot (informational).
@@ -36,6 +37,7 @@ from portfolio_layer.earnings_dates.earnings_common import (  # noqa: E402
     RUN_ARTIFACT_NAME,
     RUN_MANIFEST_NAME,
     coerce_iso_date,
+    latest_accepted_stock_ledger,
     latest_run_with_artifact,
 )
 
@@ -96,18 +98,41 @@ def main() -> int:
     if not rows:
         add_check(checks, "artifact_rows", "FAIL", f"missing or empty {artifact_path}")
 
-    # 2. Join integrity: exactly the scored universe, no extras, no duplicates.
+    # 2. Join integrity: exactly the configured scored universe plus sealed stock holdings.
     if scores_path.exists() and rows:
-        scored = {str(r.get("ticker", "")).strip().upper() for r in read_csv(scores_path)}
+        score_rows = read_csv(scores_path)
+        include_all = bool(cfg_get(config, "earnings_dates.include_non_investable", True))
+        scored = {
+            str(r.get("ticker", "")).strip().upper()
+            for r in score_rows
+            if include_all or str(r.get("investable_eligible", "")).strip() == "1"
+        }
         scored.discard("")
+        ledger_run = latest_accepted_stock_ledger(runs_root, run_as_of)
+        held: set[str] = set()
+        if ledger_run is not None:
+            held = {
+                str(r.get("symbol", "")).strip().upper()
+                for r in read_csv(
+                    ledger_run / "ledger" / "broker_net_stock_positions.csv"
+                )
+            }
+            held.discard("")
+        expected = scored | held
         got = [str(r.get("ticker", "")).strip().upper() for r in rows]
         got_set = set(got)
         duplicates = len(got) - len(got_set)
-        missing = sorted(scored - got_set)
-        extras = sorted(got_set - scored)
-        include_all = bool(cfg_get(config, "earnings_dates.include_non_investable", True))
-        join_ok = not extras and not duplicates and (not missing if include_all else True)
-        detail = f"rows={len(got)} scored={len(scored)} missing={len(missing)} extras={len(extras)} dups={duplicates}"
+        missing = sorted(expected - got_set)
+        extras = sorted(got_set - expected)
+        manifest_ledger_as_of = str(manifest.get("ledger_as_of", ""))
+        expected_ledger_as_of = ledger_run.name if ledger_run is not None else ""
+        ledger_lineage_ok = manifest_ledger_as_of == expected_ledger_as_of
+        join_ok = not extras and not duplicates and not missing and ledger_lineage_ok
+        detail = (
+            f"rows={len(got)} scored={len(scored)} held={len(held)} "
+            f"expected={len(expected)} missing={len(missing)} extras={len(extras)} "
+            f"dups={duplicates} ledger={manifest_ledger_as_of or 'none'}"
+        )
         if missing[:5]:
             detail += f" missing_sample={missing[:5]}"
         if extras[:5]:

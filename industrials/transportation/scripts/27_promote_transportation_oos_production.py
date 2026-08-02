@@ -40,14 +40,18 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--asof", default="2026-07-30")
+    parser.add_argument("--research-asof", default="2026-07-30")
+    parser.add_argument("--effective-date", default="2026-07-31")
     parser.add_argument("--allow-overwrite", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    effective = date.fromisoformat(args.asof[:10])
+    research = date.fromisoformat(args.research_asof[:10])
+    effective = date.fromisoformat(args.effective_date[:10])
+    if effective <= research:
+        raise ValueError("--effective-date must follow --research-asof")
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
@@ -79,7 +83,7 @@ def main() -> int:
         calibration_path.read_text(encoding="utf-8")
     )
     if (
-        readiness.get("asof_date") != effective.isoformat()
+        readiness.get("asof_date") != research.isoformat()
         or readiness.get("promotion_readiness") != "PASS"
         or readiness.get("promotion_eligible") is not True
         or calibration.get("promotion_eligible") is not True
@@ -89,9 +93,9 @@ def main() -> int:
             + "; ".join(readiness.get("issues") or [])
         )
     source_rank = resolve_path(
-        family["scoring"]["dashboard_root"],
+        family["historical_scores"]["output_root"],
         base_dir=base_dir,
-    ) / effective.isoformat() / "transportation_final_rank_table.csv"
+    ) / research.isoformat() / "transportation_final_rank_table.csv"
     if not source_rank.is_file():
         raise FileNotFoundError(source_rank)
     source_rows = read_rows(source_rank)
@@ -118,7 +122,7 @@ def main() -> int:
         lock_id=lock_id,
         effective_from=effective,
         effective_to=None,
-        lock_date=effective,
+        lock_date=research,
         train_start_date=train_start,
         train_end_date=train_end,
         scoring_mode="generic_oos",
@@ -130,8 +134,12 @@ def main() -> int:
         decision_manifest_sha256="",
         weights=weights,
     )
+    effective_source_rows = [
+        {**row, "asof_date": effective.isoformat()}
+        for row in source_rows
+    ]
     promoted_rows = finalize_rank_rows(
-        source_rows,
+        effective_source_rows,
         score_model_version=str(
             family["scoring"]["score_model_version"]
         ),
@@ -170,6 +178,8 @@ def main() -> int:
     )
     payload = {
         "weights": weights,
+        "research_asof_date": research.isoformat(),
+        "effective_date": effective.isoformat(),
         "lock_id": lock_id,
         "scoring_mode": "generic_oos",
         "score_model_version": lock.score_model_version,
@@ -192,6 +202,7 @@ def main() -> int:
         "promoted": True,
         "activated": False,
         "asof_date": effective.isoformat(),
+        "research_asof_date": research.isoformat(),
         "lock_id": lock_id,
         "scoring_mode": "generic_oos",
         "score_model_version": lock.score_model_version,

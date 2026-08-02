@@ -21,6 +21,14 @@ COMPONENT_FIELDS = [
     "positioning_score",
 ]
 
+CLASSIFICATION_FIELDS = [
+    "classification_policy_version",
+    "calibration_pool",
+    "economic_peer_group",
+    "risk_tier",
+    "portfolio_role",
+]
+
 SCORING_FEATURE_FIELDS = [
     "asof_date",
     "ticker",
@@ -33,6 +41,7 @@ SCORING_FEATURE_FIELDS = [
     "calibration_cohort_name",
     "calibration_use",
     "development_stage",
+    *CLASSIFICATION_FIELDS,
     "membership_source_id",
     "membership_basis",
     "membership_start_date",
@@ -178,6 +187,34 @@ def validate_scoring_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]
         rank_ready = str(row.get("rank_ready_flag") or "")
         reason = str(row.get("rank_ready_reason") or "")
         status = str(row.get("model_status") or "")
+        calibration_pool = str(row.get("calibration_pool") or "")
+        peer_group = str(row.get("economic_peer_group") or "")
+        risk_tier = str(row.get("risk_tier") or "")
+        portfolio_role = str(row.get("portfolio_role") or "")
+        if calibration_pool not in {
+            "surface_freight_and_logistics",
+            "air_transport_and_aviation_services",
+            "marine_shipping_and_maritime",
+        }:
+            errors.append(f"{ticker}: invalid calibration_pool={calibration_pool!r}")
+        if not peer_group:
+            errors.append(f"{ticker}: economic_peer_group is required")
+        if risk_tier not in {"operating", "development_speculative"}:
+            errors.append(f"{ticker}: invalid risk_tier={risk_tier!r}")
+        if portfolio_role not in {
+            "core_candidate",
+            "airline_satellite_research",
+            "speculative_research",
+            "universe_review",
+        }:
+            errors.append(f"{ticker}: invalid portfolio_role={portfolio_role!r}")
+        if portfolio_role == "core_candidate" and (
+            str(row.get("calibration_use") or "") != "core"
+            or str(row.get("development_stage") or "") != "operating"
+        ):
+            errors.append(
+                f"{ticker}: core_candidate is outside operating-core universe"
+            )
         if rank_ready not in {"0", "1"}:
             errors.append(f"{ticker}: rank_ready_flag must be 0 or 1")
         elif rank_ready == "1" and (reason != "ok" or status != "complete"):
@@ -202,7 +239,7 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
         ticker = str(row.get("ticker") or "<blank>")
         try:
             ranks.append(int(str(row.get("final_rank") or "")))
-            cohort_ranks.setdefault(str(row.get("calibration_cohort") or ""), []).append(
+            cohort_ranks.setdefault(str(row.get("calibration_pool") or ""), []).append(
                 int(str(row.get("cohort_rank") or ""))
             )
         except ValueError:
@@ -215,7 +252,14 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
                 errors.append(f"{ticker}: shadow status must be shadow_only")
         elif oos_valid == "1":
             ready = str(row.get("rank_ready_flag") or "") == "1"
-            expected = ("1", "eligible") if ready else ("0", "not_eligible")
+            authorized = (
+                str(row.get("portfolio_role") or "") == "core_candidate"
+            )
+            expected = (
+                ("1", "eligible")
+                if ready and authorized
+                else ("0", "not_eligible")
+            )
             if (
                 str(row.get("portfolio_candidate_gate") or "") != expected[0]
                 or str(row.get("portfolio_candidate_status") or "") != expected[1]

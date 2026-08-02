@@ -36,7 +36,7 @@ Components are ALWAYS stored separately (`les_snapshots`); the composite alone i
 | Insider activity | `SEC_FORM4_Runner/` + `helper_scripts/build_form4_buy_events_v1.py` | `insider_buy_cluster` / `insider_sale_cluster` events |
 | Short interest / borrow | `market_positioning` (`short_interest_snapshots`, `ibkr_borrow_fee_rate_daily`) | `short_interest_spike`, `borrow_fee_spike` market events |
 | Sector-relative returns | `risk_panel.sector_etf_map` (config.yaml: semis→SOXX, software→IGV, hardware→XLK, biotech→XBI, med→IHI, defense→XAR, machinery→XLI) + Stage 2 `prices_adjclose.csv`/`returns_panel.csv` | abnormal-return and relative-strength calculations |
-| Price fetch plumbing | `risk/yahoo.py` (query1/query2, provenance) | market-signal builder extends the same fetch to keep volume/high/low for the 327 names (doubles as Phase 0 of the price-band engine) |
+| Price fetch plumbing | `risk/yahoo.py`, `risk/ohlcv_sources.py`, and expectations-monitor scripts 51/52 | sealed adjusted OHLCV for the current monitor universe; fixed Yahoo -> read-only IBKR -> Tiingo precedence; doubles as Phase 0 of the price-band engine |
 | API keys | env: `ALPHAVANTAGE_API_KEY`, `GEMINI_API_KEY`; `FMP_API_KEY` (used for splits) | AV news (secondary, quota-shared), Gemini classification (capped), FMP news/analyst endpoints (primary external intel — free-plan limits MUST be probed first) |
 | Artifact conventions | `core/contracts.py` (write_csv/manifests/seals), `core/config.py`, validators | per-run export + manifest + validator follow house pattern |
 | Feed-state bookkeeping | `market_positioning.market_positioning_feed_state` | same design for `feed_state` table |
@@ -276,7 +276,24 @@ Per-run export (house convention, for pipeline joins):
 | Gemini (key exists, FREE tier only) | REST generateContent (pattern already in earnings_dates/37) | hard cap ~100 classifications/day, 6.5 s pacing | ONLY for ambiguous material items; rules classify first |
 | Form 4 | existing `SEC_FORM4_Runner` outputs | daily | insider cluster events |
 | market_positioning DB | short interest, borrow fee | daily (already synced by sectors) | spike events |
-| Prices/volume | extend `risk/yahoo.py` fetch pattern to keep OHLCV for the 327 names | EOD daily + on-demand intraday for holdings (Phase 2: IBKR via existing ib_insync patterns) | This IS Phase 0 of the price-band engine — one shared OHLCV snapshot |
+| Prices/volume | extend `risk/yahoo.py` fetch pattern to keep OHLCV, confirm priority/current observations through read-only IBKR, and recover remaining gaps through Tiingo | Yahoo EOD daily; IBKR current/priority; Tiingo tertiary EOD recovery | This IS Phase 0 of the price-band engine - one shared OHLCV snapshot; source values are never averaged |
+
+Latest-session coverage is enforced at two levels. Tier-0 coverage has a 98% operational target
+and a 90% systemic-outage hard floor. Falling below the target but remaining above the hard floor
+is a warning, not a universe-wide stop. Each missing ticker is retained in the output with
+`market_data_status=missing_latest`, zero market points, no active level, and a fail-closed
+`watch`/`suspend_adds` action. Tickers with current data continue normally. Missing data is never
+interpreted as thesis deterioration.
+
+The market-data build also seals SPY and configured sector-ETF benchmark OHLCV under the same
+source, finality, and validation contract. Market-signal construction consumes this monitor-owned
+benchmark panel, so a current monitor run does not depend on a same-date Stage 2 risk-panel build.
+
+Current state publication and future outcome resolution are separate contracts. Script 58 always
+publishes a validated same-date state. It resolves forward returns only when a valid same-date
+Stage 2 panel is available; an absent panel seals `PASS_WITH_DEFERRED`, while a present but invalid
+panel fails closed. Idempotent reruns compare economic publication fields and record changed
+config/input/code seals in an append-only source-alias ledger. Economic drift remains a hard error.
 | IR RSS | per-company feeds | Phase 2, holdings + Tier 1 only | maintenance-heavy; seed list manual |
 
 Refresh schedule v1 (honest for one Windows box; spec's 15–30 min tiers are Phase 2 with IBKR):
@@ -284,18 +301,33 @@ EDGAR 15 min RTH · FMP news hourly · analyst endpoints 2×/day · market signa
 · LES/state recompute after every poll batch and always EOD · immediate review after earnings
 (from earnings_dates), abnormal move, analyst action, SEC filing, or material peer event.
 
-## 7. Module layout (script numbers 39–45 are free)
+## 7. Implemented module layout
 
 ```
 expectations_monitor/
-  monitor_common.py                    # taxonomy constants, decay math, state machine, DB DDL
-  39_sync_monitor_universe.py          # sealed run -> monitor_universe + baseline; auto peer seeding
-  40_poll_event_feeds.py               # EDGAR/FMP/AV/Form4 -> raw_items (dedup, feed_state); --loop or one-shot
-  41_classify_events.py                # rules first, capped Gemini for ambiguous material items -> events
-  42_build_market_signals.py           # OHLCV snapshot -> market_signals_daily (+ market events)
-  43_update_expectations_state.py      # decay + LES + states + escalations + alerts + per-run CSV export
-  44_validate_expectations_monitor.py  # seal/coverage/audit-trail gates (house validator pattern)
-  data/relationship_overrides.csv      # manual peer/customer/supplier map (auto peers from industry)
+  monitor_common.py                    # provider/universe SQLite and common contracts
+  state_common.py                      # taxonomy, decay, states, immutable evidence ledgers
+  39_sync_monitor_universe.py          # sealed books/scores/holdings -> complete monitor universe
+  40_snapshot_provider_estimates.py    # provider-specific PIT estimate capture
+  41_validate_provider_estimate_semantics.py
+  42_reconcile_provider_estimates.py   # compare; never average providers
+  43_run_provider_capture_schedule.py
+  44_sync_estimate_basis_contract.py
+  45_snapshot_provider_actual_outcomes.py
+  46_sync_fiscal_period_resolutions.py
+  47_link_provider_forecasts_to_outcomes.py
+  48_run_provider_earnings_event_cycle.py
+  49_snapshot_ib_pending_orders.py     # static file or read-only live IB; never order APIs
+  50_run_expectations_monitor_daily.py # standing entry point
+  51_build_monitor_ohlcv.py            # Yahoo -> read-only IB -> Tiingo source surface
+  52_validate_monitor_ohlcv.py         # independent finality/coverage/hash validator
+  53_sync_authoritative_events.py      # local SEC Form 4, issuer guidance, provider outcomes
+  54_classify_monitor_events.py        # deterministic structured classifier
+  55_build_monitor_market_signals.py   # validated OHLCV -> same-date signals
+  56_build_expectations_state.py       # LES, asymmetric transitions, closed state contract
+  57_validate_expectations_state.py
+  58_update_monitor_outcomes.py        # immutable publication + separate resolution ledgers
+  59_run_expectations_state_pipeline.py
 ```
 
 Orchestration: joins the pipeline as a second SOFT group (`monitor`) after `earnings` — WARN-only,
@@ -308,14 +340,16 @@ never blocks. The pollers additionally run standalone on a scheduled task betwee
    same run; never reach into the monitor DB.
 2. **Tier 1 rerank (R6)**: alert only in v1 (`rerank_tier1`); automated rerank is a later decision.
 3. **earnings_dates**: `days_until ≤ 5` gates market-signal severity (§3) and post-report triggers review.
-4. **Stage 1 is read-only**: the monitor NEVER feeds back into sector scores or the optimizer.
-   Like exits/payout it is shadow/advisory until a Stage 11-style validation promotes any of it.
+4. **Stage 1 is read-only**: the monitor never feeds back into sector scores. Raw monitor actions,
+   levels, and provider signals remain shadow/advisory. The sole production exception is the frozen,
+   same-date `monitor_optimizer_entry_v1` overlay: it can block new optimizer allocations for names
+   outside clean `green`/`stable` state, but cannot rewrite scores or force liquidation.
 
-## 9. Phasing
+## 9. Phasing and status
 
-- **Phase 1 (build next):** step 0 = probe FMP free-plan endpoints/limits with the existing key and
-  record results in this spec; then 39, 40 (EDGAR+FMP+Form4), 41 (rules only), 42 (EOD), 43, 44,
-  orchestration soft-group, alerts to log/CSV.
+- **Phase 1 (implemented 2026-07-31):** provider capture, authoritative local structured events,
+  deterministic classification, validated EOD market signals, LES/state engine, validators,
+  hash-chained evidence, and master-orchestrator soft-group integration.
 - **Phase 2:** Gemini-assisted classification (capped), AV news secondary feed, IR RSS for holdings,
   intraday holdings cadence via IBKR, peer read-through automation beyond same-industry.
 - **Phase 3:** levels-engine integration (suspension), Tier rerank automation, notification channel.

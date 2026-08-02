@@ -1,0 +1,86 @@
+policy_version: transportation_eligible_financial_edge_repairs_v1
+asof_date: '2026-07-30'
+scope: surface_freight_eligible_shadow_only
+production_write_allowed: false
+promotion_evidence_allowed: false
+current_eligible_tickers:
+  - ARCB
+  - CHRW
+  - CNI
+  - CP
+  - CSX
+  - CVLG
+  - EXPD
+  - FDX
+  - FWRD
+  - GXO
+  - HUBG
+  - JBHT
+  - KNX
+  - LSTR
+  - NSC
+  - ODFL
+  - RLGT
+  - SAIA
+  - SNDR
+  - TFII
+  - UNP
+  - UPS
+  - WERN
+  - XPO
+source_documents:
+  chrw_2025_10k:
+    path: output/industrials_cache/sec_fundamentals/sec_archive_xbrl/CIK0001043277/000104327726000009/chrw-20251231.htm
+    sha256: 05488c28303fffe7964bc89a28b1bc03a801fbb9fe81409f90f5a7448d57b575
+    accession_number: 0001043277-26-000009
+    filing_date: '2026-02-13'
+  chrw_2026_q1:
+    path: output/industrials_cache/sec_fundamentals/sec_archive_xbrl/CIK0001043277/000104327726000016/chrw-20260331.htm
+    sha256: fbb2aac66d825d41f42437f2951e6035af1dd458909d4757799d44c9fd73948d
+    accession_number: 0001043277-26-000016
+    filing_date: '2026-04-29'
+  expd_2026_q1:
+    path: output/industrials_cache/sec_fundamentals/sec_archive_xbrl/CIK0000746515/000119312526208834/expd-20260331.htm
+    sha256: 4e97dbe490bf310192810fb7a36b57fa2747d285b7e0ffc3f183dacc5014fdfb
+    accession_number: 0001193125-26-208834
+    filing_date: '2026-05-05'
+shared_aliases:
+  - taxonomy: us-gaap
+    concept_name: OtherDepreciationAndAmortization
+    canonical_metric: depreciation_and_amortization
+    target_case: WERN
+  - taxonomy: us-gaap
+    concept_name: ShortTermBankLoansAndNotesPayable
+    canonical_metric: debt_current
+    target_case: EXPD
+repair_cases:
+  - ticker: CHRW
+    metric_id: interest_coverage
+    method: annual_plus_current_quarter_minus_prior_quarter_interest_expense
+    status: DERIVED
+  - ticker: EXPD
+    metric_id: net_debt_to_ebitda
+    method: reported_current_borrowings_minus_cash_over_aligned_ttm_ebitda
+    status: DERIVED
+  - ticker: WERN
+    metric_id: net_debt_to_ebitda
+    method: shared_other_depreciation_alias_with_aligned_ttm_ebitda
+    status: DERIVED
+unresolved_cases:
+  - ticker: EXPD
+    metric_id: interest_coverage
+    status: NOT_DISCLOSED
+    reason: current_filings_do_not_disclose_standalone_interest_expense;combined_or_tax_interest_must_not_be_substituted
+materiality_gates:
+  minimum_current_max_abs_score_delta: 1.0
+  minimum_current_max_abs_rank_change: 2
+  minimum_current_top_quintile_membership_changes: 1
+  minimum_optimistic_train_ic_improvement: 0.01
+  minimum_optimistic_train_spread_improvement: 0.0025
+  decision_rule: current_materiality_and_optimistic_train_improvement
+governance:
+  revealed_validation_or_holdout_used: false
+  historical_stress_split: train
+  optimistic_stress_is_data: false
+  full_24_name_rebuild_before_gate_pass_allowed: false
+  recalibration_before_new_frozen_pit_panel_allowed: false

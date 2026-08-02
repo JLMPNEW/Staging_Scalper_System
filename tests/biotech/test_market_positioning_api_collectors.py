@@ -46,6 +46,21 @@ def test_normalize_ibkr_fee_rate_rejects_unknown_unit() -> None:
         raise AssertionError("Expected ValueError for unsupported IBKR fee-rate unit")
 
 
+def test_verified_https_context_uses_explicit_ca_bundle(monkeypatch) -> None:
+    sentinel = object()
+    captured: list[str] = []
+
+    def fake_create_default_context(*, cafile: str):
+        captured.append(cafile)
+        return sentinel
+
+    monkeypatch.setenv("SSL_CERT_FILE", "C:/trusted/test-ca.pem")
+    monkeypatch.setattr(api_collectors.ssl, "create_default_context", fake_create_default_context)
+
+    assert api_collectors.verified_https_context() is sentinel
+    assert captured == ["C:/trusted/test-ca.pem"]
+
+
 def test_ibkr_shortable_generic_tick_uses_streaming_request(monkeypatch, tmp_path) -> None:
     capture_date = date.today()
 

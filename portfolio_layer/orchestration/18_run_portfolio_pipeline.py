@@ -5,7 +5,7 @@ Runs the sealed per-as-of chain in dependency order, verifying each stage's mani
 before continuing:
 
   scores    01 -> 02 -> 03                       (Stage 1 contract)
-  risk      04 -> 05 -> 06 -> 07 -> [05d] -> 08    (Stage 2 panel; 05d runs when a spread snapshot exists)
+  risk      04 -> 05a -> 05 -> 06 -> 07 -> [05d] -> 08 (Stage 2 panel; 05a hydrates market instruments)
   optimizer 09 -> 10                             (Stage 3 AQR baseline)
   costs     12 -> 13 -> 14 -> 15                 (Stage 4)
   rotation  17 -> 18                             (Stage 5, shadow)
@@ -15,6 +15,9 @@ before continuing:
   ledger    31 -> 32                             (Stage 8.5; skipped unless broker imports exist)
   exits     33 -> 34 -> 35                       (Stage 9, needs ledger)
   governor  19                                   (Stage 12 bounded gross directive)
+  final     20                                   (immutable deployable target weights)
+  monitor   39 -> 64                             (shadow expectations + advisory levels)
+  final_report 21                                (enriched target/IB/monitor report)
 
 Cadences (config `orchestration`): `tactical` refreshes the fast loop, including rotation;
 `strategic` runs every group. Stages are immutable by default; `--force` explicitly rebuilds them.
@@ -157,6 +160,7 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
     ],
     "risk": [
         ("risk", "04_check_risk_readiness.py", None),
+        ("risk", "05a_hydrate_norgate_market_instruments.py", None),
         ("risk", "05_build_return_panel.py", None),
         ("risk", "06_build_risk_coverage.py", None),
         ("risk", "07_build_covariance_model.py", None),
@@ -212,15 +216,63 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
         ("orchestration", "19_run_risk_governor.py", "governor/governor_manifest.json"),
     ],
     "final": [
-        ("orchestration", "20_compose_final_target_book.py", "final/final_manifest.json"),
+        (
+            "orchestration",
+            "20_compose_final_target_book.py",
+            "final/final_weights_manifest.json",
+        ),
     ],
     "earnings": [
         ("earnings_dates", "37_sync_earnings_dates.py", None),
         ("earnings_dates", "38_validate_earnings_dates.py",
          "earnings_dates/validation/earnings_validation_summary.json"),
     ],
+    "monitor": [
+        (
+            "expectations_monitor",
+            "39_sync_monitor_universe.py",
+            "expectations_monitor/monitor_universe_manifest.json",
+        ),
+        (
+            "expectations_monitor",
+            "50_run_expectations_monitor_daily.py",
+            "expectations_monitor/daily_monitor_manifest.json",
+        ),
+    ],
+    "monitor_filter": [
+        (
+            "optimizer",
+            "08_build_monitor_eligibility_overlay.py",
+            "optimizer/monitor_eligibility_manifest.json",
+        ),
+        ("optimizer", "09_run_portfolio_optimizer.py", None),
+        (
+            "optimizer",
+            "10_validate_optimizer_outputs.py",
+            "optimizer/optimizer_manifest.json",
+        ),
+        ("costs", "12_build_trade_list.py", None),
+        ("costs", "13_build_cost_model.py", None),
+        ("costs", "14_apply_no_trade_bands.py", None),
+        ("costs", "15_validate_cost_model.py", "costs/cost_manifest.json"),
+    ],
+    "bootstrap_final": [
+        (
+            "orchestration",
+            "20_compose_final_target_book.py",
+            "final/final_weights_manifest.json",
+        ),
+    ],
+    "final_report": [
+        (
+            "orchestration",
+            "21_enrich_final_target_book.py",
+            "final/final_manifest.json",
+        ),
+    ],
 }
-# Advisory data feeds: a failure here is WARN-only and never blocks or fails the pipeline.
+# Earnings remains advisory. The monitor is now a production Stage-3 entry input,
+# so its failure must stop the deployable pass rather than reuse an old state file.
 SOFT_GROUPS = {"earnings"}
 # Scripts in this set do not expose a --force flag. The macro wrappers are
 # deterministic refresh entry points, while readiness is read-only.
@@ -231,9 +283,17 @@ NO_FORCE_SCRIPTS = {
     "38_validate_earnings_dates.py",
 }
 DEFAULT_CADENCES = {
-    "tactical": ["scores", "risk", "optimizer", "costs", "rotation", "governor", "final", "earnings"],
-    "strategic": ["scores", "risk", "optimizer", "costs", "rotation", "macro", "bl", "sleeves",
-                  "ledger", "exits", "payout", "governor", "final", "earnings"],
+    "tactical": [
+        "scores", "risk", "optimizer", "costs", "rotation", "governor",
+        "bootstrap_final", "earnings", "monitor", "monitor_filter",
+        "governor", "final", "final_report",
+    ],
+    "strategic": [
+        "scores", "risk", "optimizer", "costs", "rotation", "macro", "governor",
+        "bootstrap_final", "earnings", "monitor", "monitor_filter", "bl",
+        "sleeves", "ledger", "exits", "payout", "governor", "final",
+        "final_report",
+    ],
 }
 MACRO_REFRESH_SCRIPTS = {"20a_run_macro_raw.py", "20_run_macro_serving.py"}
 
@@ -309,7 +369,9 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def script_args(args: argparse.Namespace, script: str) -> list[str]:
+def script_args(
+    args: argparse.Namespace, script: str, *, group: str = ""
+) -> list[str]:
     """Return the exact optional flags for a stage script.
 
     Dry-run and execution both call this function so the displayed plan cannot drift from the
@@ -324,6 +386,18 @@ def script_args(args: argparse.Namespace, script: str) -> list[str]:
         flags.extend(("--reuse-existing-panel", "--reuse-price-cache"))
     if script == "20_run_macro_serving.py":
         flags.append("--refresh-industry-stock-foreign")
+    if script == "09_run_portfolio_optimizer.py":
+        flags.extend(
+            (
+                "--monitor-overlay-mode",
+                "required" if group == "monitor_filter" else "ignore",
+            )
+        )
+    if (
+        script == "20_compose_final_target_book.py"
+        and group == "bootstrap_final"
+    ):
+        flags.append("--monitor-bootstrap")
     return flags
 
 
@@ -334,10 +408,59 @@ def manifest_acceptance(run_dir: Path, rel: str) -> str:
     try:
         manifest = read_manifest(path)
         manifest_as_of = str(
-            manifest.get("run_as_of", manifest.get("run_as_of_date", manifest.get("ledger_as_of", "")))
+            manifest.get(
+                "run_as_of",
+                manifest.get(
+                    "run_as_of_date",
+                    manifest.get("as_of_date", manifest.get("ledger_as_of", "")),
+                ),
+            )
         ).strip()
         if manifest_as_of and manifest_as_of != run_dir.name:
             return f"DATE_MISMATCH:{manifest_as_of}"
+        parent_path = str(manifest.get("parent_manifest_path", "")).strip()
+        parent_sha = str(manifest.get("parent_manifest_sha256", "")).strip()
+        if parent_path or parent_sha:
+            if not parent_path or not parent_sha:
+                return "INCOMPLETE_PARENT_SEAL"
+            parent = Path(parent_path)
+            if not parent.is_file():
+                return "MISSING_PARENT"
+            if sha256_file(parent) != parent_sha:
+                return "STALE_PARENT"
+            try:
+                parent_manifest = read_manifest(parent)
+            except ValueError:
+                return "UNREADABLE_PARENT"
+            if manifest_acceptance_value(parent_manifest) != manifest_acceptance_value(manifest):
+                return "PARENT_ACCEPTANCE_MISMATCH"
+            parent_as_of = str(
+                parent_manifest.get(
+                    "as_of_date",
+                    parent_manifest.get("run_as_of", ""),
+                )
+            ).strip()
+            if parent_as_of and parent_as_of != run_dir.name:
+                return f"PARENT_DATE_MISMATCH:{parent_as_of}"
+            outputs = parent_manifest.get("outputs_sha256", {})
+            if not isinstance(outputs, dict) or not outputs:
+                return "PARENT_OUTPUT_SEAL_MISSING"
+            for name, expected in outputs.items():
+                output = parent.parent / str(name)
+                if not output.is_file() or sha256_file(output) != str(expected):
+                    return f"STALE_PARENT_OUTPUT:{name}"
+            children = parent_manifest.get("child_manifests", [])
+            if not isinstance(children, list):
+                return "PARENT_CHILD_SEAL_INVALID"
+            for child in children:
+                if not isinstance(child, dict):
+                    return "PARENT_CHILD_SEAL_INVALID"
+                child_path = Path(str(child.get("manifest_path", "")))
+                expected = str(child.get("manifest_sha256", ""))
+                if not child_path.is_file() or not expected:
+                    return "PARENT_CHILD_MISSING"
+                if sha256_file(child_path) != expected:
+                    return f"STALE_PARENT_CHILD:{child_path.name}"
         return manifest_acceptance_value(manifest) or "UNKNOWN"
     except ValueError:
         return "UNREADABLE"
@@ -411,8 +534,14 @@ def run_pipeline() -> int:  # noqa: C901
     orch = cfg_get(config, "orchestration", {}) or {}
     step_timeout = float(orch.get("step_timeout_sec", 1800))
     macro_step_timeout = float(orch.get("macro_step_timeout_sec", 7200))
-    if step_timeout <= 0 or macro_step_timeout <= 0:
-        LOGGER.error("orchestration timeouts must be positive: step=%s macro=%s", step_timeout, macro_step_timeout)
+    monitor_step_timeout = float(orch.get("monitor_step_timeout_sec", 7200))
+    if step_timeout <= 0 or macro_step_timeout <= 0 or monitor_step_timeout <= 0:
+        LOGGER.error(
+            "orchestration timeouts must be positive: step=%s macro=%s monitor=%s",
+            step_timeout,
+            macro_step_timeout,
+            monitor_step_timeout,
+        )
         return 1
     try:
         planned = plan_groups(args, config, run_dir)
@@ -436,7 +565,7 @@ def run_pipeline() -> int:  # noqa: C901
                 if script == "05d_audit_liquidity_panel.py" and not (run_dir / "risk" / "spread_snapshot.csv").exists():
                     LOGGER.info("  would skip %s/%s (no spread_snapshot.csv)", subdir, script)
                     continue
-                flags = script_args(args, script)
+                flags = script_args(args, script, group=g)
                 suffix = f" {' '.join(flags)}" if flags else ""
                 LOGGER.info("  would run %s/%s --as-of %s%s", subdir, script, run_as_of, suffix)
         return 0
@@ -492,13 +621,19 @@ def run_pipeline() -> int:  # noqa: C901
                 continue
             cmd = [sys.executable, str(PACKAGE_ROOT / subdir / script), "--as-of", run_as_of,
                    "--config", str(config_path)]
-            cmd.extend(script_args(args, script))
+            cmd.extend(script_args(args, script, group=group))
             # Persist the step's group before launch. Long-running refreshes (notably
             # MacroLayer raw/serving) must not leave active_group pointing at the prior
             # completed group for their entire runtime.
             persist("RUNNING", active_group=group)
             started = time.monotonic()
-            timeout = macro_step_timeout if script in MACRO_REFRESH_SCRIPTS else step_timeout
+            timeout = (
+                macro_step_timeout
+                if script in MACRO_REFRESH_SCRIPTS
+                else monitor_step_timeout
+                if script == "50_run_expectations_monitor_daily.py"
+                else step_timeout
+            )
             rc, stdout, stderr = run_command(cmd, timeout=timeout)
             tail = (stderr or stdout or "").strip().splitlines()[-2:]
             elapsed = round(time.monotonic() - started, 1)

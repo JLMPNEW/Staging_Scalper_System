@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--start-date", default="")
     parser.add_argument("--end-date", default="")
+    parser.add_argument("--tickers", default="", help="Comma-separated internal or original tickers.")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
@@ -313,6 +314,19 @@ def main() -> int:
     requested_start = parse_date(args.start_date)
     requested_end = parse_date(args.end_date)
     members = load_members(mapping_path, membership_path)
+    ticker_filter = {
+        value.strip().upper()
+        for value in str(args.tickers or "").split(",")
+        if value.strip()
+    }
+    if ticker_filter:
+        matched = [
+            member for member in members
+            if member.internal_ticker in ticker_filter or member.actual_ticker in ticker_filter
+        ]
+        if not matched:
+            raise ValueError(f"No importable historical members matched --tickers={sorted(ticker_filter)}")
+        members = matched
     if args.max_tickers > 0:
         members = members[: args.max_tickers]
     provider = load_provider()
@@ -402,13 +416,26 @@ def main() -> int:
             if conn is not None and run_id is not None:
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
+    batch_ticker_count = len(report)
+    batch_loaded_rows = sum(int(row["loaded_rows"] or 0) for row in report)
+    if ticker_filter and output_path.exists() and not args.dry_run:
+        merged = {
+            str(row.get("internal_ticker") or "").strip().upper(): row
+            for row in read_csv_flexible(output_path)
+            if str(row.get("internal_ticker") or "").strip()
+        }
+        merged.update(
+            {str(row["internal_ticker"]).strip().upper(): row for row in report}
+        )
+        report = [merged[ticker] for ticker in sorted(merged)]
     write_csv_atomic(output_path, REPORT_FIELDS, report)
     summary = {
         "acceptance": "PASS" if failures == 0 or args.allow_partial else "FAIL",
         "dry_run": bool(args.dry_run),
-        "ticker_count": len(report),
+        "ticker_count": batch_ticker_count,
+        "published_ticker_count": len(report),
         "failed_ticker_count": failures,
-        "loaded_rows": sum(int(row["loaded_rows"] or 0) for row in report),
+        "loaded_rows": batch_loaded_rows,
         "output_csv": str(output_path),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))

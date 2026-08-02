@@ -50,6 +50,8 @@ def coverage_summary(bucket: dict[str, int]) -> dict[str, int]:
         "observed": observed,
         "review_required": int(bucket.get("review_required", 0)),
         "not_disclosed": int(bucket.get("not_disclosed", 0)),
+        "missing_market_denominator": int(bucket.get("missing_market_denominator", 0)),
+        "not_meaningful": int(bucket.get("not_meaningful", 0)),
         "coverage_bps": round(10000 * observed / applicable) if applicable else 10000,
     }
 
@@ -83,6 +85,8 @@ def main() -> int:
             "observed": 0,
             "review_required": 0,
             "not_disclosed": 0,
+            "missing_market_denominator": 0,
+            "not_meaningful": 0,
         }
         for item in definitions
     }
@@ -91,6 +95,8 @@ def main() -> int:
         "observed": 0,
         "review_required": 0,
         "not_disclosed": 0,
+        "missing_market_denominator": 0,
+        "not_meaningful": 0,
     }
     required_bucket = dict(overall_bucket)
     specialized_bucket = dict(overall_bucket)
@@ -205,6 +211,10 @@ def main() -> int:
                     bucket["review_required"] += 1
                 elif status == "NOT_DISCLOSED":
                     bucket["not_disclosed"] += 1
+                elif status == "MISSING_MARKET_DENOMINATOR":
+                    bucket["missing_market_denominator"] += 1
+                elif status == "NEGATIVE_PROFIT_NOT_MEANINGFUL":
+                    bucket["not_meaningful"] += 1
         if definition.specialized and applies:
             cohort = str(member["calibration_cohort_id"])
             bucket = coverage.setdefault(
@@ -214,6 +224,8 @@ def main() -> int:
                     "observed": 0,
                     "review_required": 0,
                     "not_disclosed": 0,
+                    "missing_market_denominator": 0,
+                    "not_meaningful": 0,
                 },
             )
             bucket["applicable"] += 1
@@ -222,6 +234,12 @@ def main() -> int:
                 status in {"DISCLOSED_UNPARSED", "PARSER_FAILURE"}
             )
             bucket["not_disclosed"] += int(status == "NOT_DISCLOSED")
+            bucket["missing_market_denominator"] += int(
+                status == "MISSING_MARKET_DENOMINATOR"
+            )
+            bucket["not_meaningful"] += int(
+                status == "NEGATIVE_PROFIT_NOT_MEANINGFUL"
+            )
     for cohort, bucket in sorted(coverage.items()):
         fraction = bucket["observed"] / bucket["applicable"] if bucket["applicable"] else 1.0
         bucket["coverage_bps"] = round(10000 * fraction)
@@ -252,6 +270,8 @@ def main() -> int:
         "observed",
         "review_required",
         "not_disclosed",
+        "missing_market_denominator",
+        "not_meaningful",
         "coverage_bps",
     ]
     write_csv_atomic(coverage_csv_path, coverage_fields, metric_coverage_rows)

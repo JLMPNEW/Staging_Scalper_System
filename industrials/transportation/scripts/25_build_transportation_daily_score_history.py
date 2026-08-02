@@ -29,8 +29,12 @@ from industrials.core.historical_score_history import (  # noqa: E402
     select_dates,
     valid_score_snapshot,
 )
+from industrials.core.oos_research import select_weekly_dates  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.transportation.contracts import write_manifest  # noqa: E402
+from industrials.transportation.prebuild_contract import (  # noqa: E402
+    load_prebuild_contract,
+)
 from industrials.transportation.scripts._shared import (  # noqa: E402
     DEFAULT_CONFIG,
     MODEL_FAMILY,
@@ -70,6 +74,15 @@ def parse_args() -> argparse.Namespace:
         "--selection", choices=("oldest", "newest"), default="oldest"
     )
     parser.add_argument("--rebuild-existing", action="store_true")
+    parser.add_argument(
+        "--weekly-only",
+        action="store_true",
+        help=(
+            "Restrict the build to the governed OOS weekly observation dates. "
+            "Use this for bounded positioning/scoring reconstruction instead "
+            "of rebuilding every daily snapshot."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--output-json", type=Path, default=None)
@@ -101,37 +114,81 @@ def read_report(path: Path) -> dict[str, dict[str, Any]]:
         }
 
 
-def exact_counts(connection: sqlite3.Connection, *, asof: str) -> dict[str, int]:
+def exact_counts(
+    connection: sqlite3.Connection,
+    *,
+    asof: str,
+    eligible_tickers: tuple[str, ...],
+) -> dict[str, int]:
+    if not eligible_tickers:
+        raise ValueError("frozen eligible ticker scope is empty")
+    placeholders = ",".join("?" for _ in eligible_tickers)
     expected = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT ticker)
             FROM dim_universe_membership
             WHERE model_family=? AND start_date<=?
               AND COALESCE(end_date,'9999-12-31')>=?
+              AND ticker IN ({placeholders})
             """,
-            (MODEL_FAMILY, asof, asof),
+            (MODEL_FAMILY, asof, asof, *eligible_tickers),
         ).fetchone()[0]
     )
     market = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT ticker) FROM feature_market_technical
             WHERE model_family=? AND asof_date=?
+              AND ticker IN ({placeholders})
             """,
-            (MODEL_FAMILY, asof),
+            (MODEL_FAMILY, asof, *eligible_tickers),
         ).fetchone()[0]
     )
     positioning = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT ticker) FROM feature_positioning
             WHERE model_family=? AND asof_date=?
+              AND ticker IN ({placeholders})
             """,
-            (MODEL_FAMILY, asof),
+            (MODEL_FAMILY, asof, *eligible_tickers),
         ).fetchone()[0]
     )
     return {"expected": expected, "market": market, "positioning": positioning}
+
+
+def materialize_existing_market_artifact(
+    connection: sqlite3.Connection,
+    *,
+    asof: str,
+    eligible_tickers: tuple[str, ...],
+    expected_count: int,
+    output_path: Path,
+) -> None:
+    """Write the already-built exact-date market rows without recomputation."""
+    placeholders = ",".join("?" for _ in eligible_tickers)
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT *
+            FROM feature_market_technical
+            WHERE model_family=? AND asof_date=?
+              AND ticker IN ({placeholders})
+            ORDER BY ticker
+            """,
+            (MODEL_FAMILY, asof, *eligible_tickers),
+        ).fetchall()
+    ]
+    if len(rows) != expected_count:
+        raise ValueError(
+            f"{asof}: expected {expected_count} frozen-scope market rows, "
+            f"found {len(rows)}"
+        )
+    if not rows:
+        raise ValueError(f"{asof}: no frozen-scope market rows")
+    write_csv_atomic(output_path, list(rows[0]), rows)
 
 
 def stage_commands(
@@ -143,6 +200,8 @@ def stage_commands(
     dashboard_dir: Path,
     force_scoring: bool,
     force_publish: bool,
+    eligible_tickers: tuple[str, ...] = (),
+    policy_asof: str = "",
 ) -> list[tuple[str, list[str]]]:
     python = sys.executable
     common = ["--config", str(config_path), "--db", str(db_path)]
@@ -165,6 +224,8 @@ def stage_commands(
         "--output-csv",
         str(feature_dir / "scoring_features.csv"),
     ]
+    if policy_asof:
+        scoring.extend(["--policy-asof", policy_asof])
     if force_scoring:
         scoring.append("--force")
     publish = [
@@ -218,19 +279,21 @@ def stage_commands(
                 str(
                     PROJECT_ROOT
                     / "industrials"
+                    / "transportation"
                     / "scripts"
-                    / "09_import_industrials_positioning.py"
+                    / "09_import_transportation_positioning.py"
                 ),
-                *common,
-                "--model-family",
-                MODEL_FAMILY,
+                "--db",
+                str(db_path),
                 "--asof",
                 asof,
                 "--include-historical-members",
                 "--feature-membership-mode",
                 "pit",
                 "--features-only",
-                "--output-csv",
+                "--tickers",
+                ",".join(eligible_tickers),
+                "--snapshot-output-csv",
                 str(feature_dir / "positioning_features.csv"),
             ],
         ),
@@ -286,6 +349,12 @@ def main() -> int:
     historical = family["historical_features"]
     score_history = family["historical_scores"]
     scoring = family["scoring"]
+    prebuild = load_prebuild_contract(config_path, family)
+    standards = cfg_get(
+        config,
+        "oos_calibration_standards.families.transportation",
+        {},
+    )
     base_dir = config_path.parent
     db_path = (
         args.db.expanduser().resolve()
@@ -298,8 +367,15 @@ def main() -> int:
     end_date = iso_date(args.end_date, label="end date")
     if start_date > end_date:
         raise ValueError("--start-date cannot be after --end-date")
-    feature_root = resolve_path(historical["output_root"], base_dir=base_dir)
-    dashboard_root = resolve_path(scoring["dashboard_root"], base_dir=base_dir)
+    feature_root = resolve_path(
+        score_history.get("feature_output_root", historical["output_root"]),
+        base_dir=base_dir,
+    )
+    dashboard_root = resolve_path(
+        score_history.get("output_root", scoring["dashboard_root"]),
+        base_dir=base_dir,
+    )
+    eligible_tickers = tuple(str(value) for value in prebuild["eligible_tickers"])
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
@@ -320,6 +396,16 @@ def main() -> int:
         )
     if not dates:
         raise ValueError("no benchmark trading dates in requested range")
+    if args.weekly_only:
+        if not isinstance(standards, dict) or not standards.get("weekly_anchor_date"):
+            raise ValueError("transportation weekly OOS standards are not configured")
+        dates = select_weekly_dates(
+            dates,
+            anchor=str(standards["weekly_anchor_date"]),
+            selection=str(standards.get("weekly_selection") or "last"),
+        )
+        if not dates:
+            raise ValueError("no governed weekly dates in requested range")
     valid_before = {
         asof
         for asof in dates
@@ -349,6 +435,13 @@ def main() -> int:
             "batch_dates": pending,
             "membership_mode": "pit",
             "metric_snapshot_mode": "latest",
+            "prebuild_contract_path": prebuild["manifest_path"],
+            "prebuild_contract_sha256": prebuild["manifest_sha256"],
+            "observation_cadence": (
+                "weekly_oos_observations"
+                if args.weekly_only
+                else "daily_benchmark_trading_sessions"
+            ),
         }
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
@@ -376,7 +469,23 @@ def main() -> int:
                 )
             )
             with read_only_connection(db_path) as connection:
-                pre_counts = exact_counts(connection, asof=asof)
+                pre_counts = exact_counts(
+                    connection,
+                    asof=asof,
+                    eligible_tickers=eligible_tickers,
+                )
+                market_artifact = feature_dir / "market_features.csv"
+                if (
+                    pre_counts["market"] == pre_counts["expected"]
+                    and not market_artifact.is_file()
+                ):
+                    materialize_existing_market_artifact(
+                        connection,
+                        asof=asof,
+                        eligible_tickers=eligible_tickers,
+                        expected_count=pre_counts["expected"],
+                        output_path=market_artifact,
+                    )
             for stage, command in stage_commands(
                 asof=asof,
                 config_path=config_path,
@@ -385,6 +494,8 @@ def main() -> int:
                 dashboard_dir=dashboard_dir,
                 force_scoring=force_scoring,
                 force_publish=force_publish,
+                eligible_tickers=eligible_tickers,
+                policy_asof=str(score_history["policy_lock_date"]),
             ):
                 # Bulk-prepared shared features are immutable inputs here. Do
                 # not rerun an expensive exact-date builder when DB coverage
@@ -415,7 +526,11 @@ def main() -> int:
             ):
                 raise ValueError("published score snapshot failed immutable validation")
             with read_only_connection(db_path) as connection:
-                counts = exact_counts(connection, asof=asof)
+                counts = exact_counts(
+                    connection,
+                    asof=asof,
+                    eligible_tickers=eligible_tickers,
+                )
             validation = json.loads(
                 (dashboard_dir / VALIDATION_FILENAME).read_text(encoding="utf-8")
             )
@@ -424,7 +539,11 @@ def main() -> int:
             message = f"{type(exc).__name__}: {exc}"
             failures.append(f"{asof}:{message}")
             with read_only_connection(db_path) as connection:
-                counts = exact_counts(connection, asof=asof)
+                counts = exact_counts(
+                    connection,
+                    asof=asof,
+                    eligible_tickers=eligible_tickers,
+                )
             validation = {}
         report_by_date[asof] = {
             "asof_date": asof,
@@ -473,10 +592,18 @@ def main() -> int:
         "history_contract_version": "industrials_daily_pit_score_history_v1",
         "start_date": start_date,
         "end_date": end_date,
-        "observation_cadence": "daily_benchmark_trading_sessions",
+        "observation_cadence": (
+            "weekly_oos_observations"
+            if args.weekly_only
+            else "daily_benchmark_trading_sessions"
+        ),
         "benchmark_ticker": str(score_history["benchmark_ticker"]),
         "membership_mode": "pit",
         "metric_snapshot_mode": "latest",
+        "prebuild_contract_path": prebuild["manifest_path"],
+        "prebuild_contract_sha256": prebuild["manifest_sha256"],
+        "score_engine_version": prebuild["score_engine_version"],
+        "eligible_ticker_count": prebuild["eligible_ticker_count"],
         "financial_snapshot_cadence": str(historical["observation_cadence"]),
         "selected_date_count": len(dates),
         "attempted_date_count": len(pending),

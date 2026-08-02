@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync next-earnings dates for every ticker in the sealed Stage 1 `stocks_scores.csv`.
+"""Sync next-earnings dates for every scored name and sealed IB stock holding.
 
 Provider waterfall (adapted from PROD earnings_release_lookup.py):
   1. Alpha Vantage EARNINGS_CALENDAR in BULK mode (no symbol) -- ONE request covers the
@@ -51,6 +51,7 @@ from portfolio_layer.earnings_dates.earnings_common import (  # noqa: E402
     append_history,
     coerce_iso_date,
     latest_prior_dates,
+    latest_accepted_stock_ledger,
     latest_run_with_artifact,
     load_history,
     source_hashes,
@@ -376,13 +377,35 @@ def main() -> int:
             "source_pipeline": str(row.get("source_pipeline", "")),
             "sector": str(row.get("sector", "")),
         }
+    ledger_run = latest_accepted_stock_ledger(runs_root, run_as_of)
+    ledger_path: Path | None = None
+    ledger_manifest_path: Path | None = None
+    holding_count = 0
+    if ledger_run is not None:
+        ledger_path = ledger_run / "ledger" / "broker_net_stock_positions.csv"
+        ledger_manifest_path = ledger_run / "ledger" / "ledger_manifest.json"
+        for row in read_csv(ledger_path):
+            ticker = str(row.get("symbol", "")).strip().upper()
+            if not ticker:
+                continue
+            holding_count += 1
+            universe.setdefault(
+                ticker,
+                {
+                    "ticker": ticker,
+                    "investable_eligible": "0",
+                    "source_pipeline": "broker_holding_only",
+                    "sector": "",
+                },
+            )
     if not universe:
         LOGGER.error("Universe is empty after filtering %s", scores_path)
         return 1
     LOGGER.info(
-        "Universe: %d tickers (%d investable) from %s",
+        "Universe: %d tickers (%d investable, %d IB stock holdings) from %s",
         len(universe),
         sum(1 for r in universe.values() if r["investable_eligible"] == "1"),
+        holding_count,
         scores_path.name,
     )
 
@@ -550,9 +573,29 @@ def main() -> int:
         "gemini_calls": gemini_calls,
         "alpha_vantage_error": av_error or "",
         "history_rows_total": appended,
-        "input_paths": {"stocks_scores": str(scores_path)},
+        "ledger_as_of": ledger_run.name if ledger_run is not None else "",
+        "ib_stock_holding_count": holding_count,
+        "input_paths": {
+            "stocks_scores": str(scores_path),
+            **(
+                {
+                    "broker_net_stock_positions": str(ledger_path),
+                    "ledger_manifest": str(ledger_manifest_path),
+                }
+                if ledger_path is not None and ledger_manifest_path is not None
+                else {}
+            ),
+        },
         "inputs_sha256": {
             "stocks_scores.csv": sha256_file(scores_path),
+            **(
+                {
+                    "broker_net_stock_positions.csv": sha256_file(ledger_path),
+                    "ledger_manifest.json": sha256_file(ledger_manifest_path),
+                }
+                if ledger_path is not None and ledger_manifest_path is not None
+                else {}
+            ),
             **({"alpha_vantage_bulk_cache": sha256_file(av_cache_path)} if av_cache_path.exists() else {}),
         },
         "outputs_sha256": {RUN_ARTIFACT_NAME: sha256_file(artifact_path)},

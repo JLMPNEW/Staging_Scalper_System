@@ -1,0 +1,11 @@
+ticker,effective_from,effective_to,economic_peer_group,portfolio_role,review_status,source,notes
+JBHT,2019-01-02,,intermodal,,reviewed,transportation_classification_review_20260731,Intermodal economics separated from contract logistics
+HUBG,2019-01-02,,intermodal,,reviewed,transportation_classification_review_20260731,Intermodal economics separated from brokerage
+RXO,2019-01-02,,freight_brokerage,,reviewed,transportation_classification_review_20260731,Brokerage economics override broad trucking label
+CCEC,2019-01-02,,gas_carriers,,reviewed,transportation_classification_review_20260731,Gas carrier peer group
+CMRE,2019-01-02,,vessel_lessors,,reviewed,transportation_classification_review_20260731,Vessel lessor peer group
+GXO,2019-01-02,,contract_warehousing,,reviewed,transportation_classification_review_20260731,Contract warehousing peer group
+CYRX,2019-01-02,,pharma_cold_chain,,reviewed,transportation_classification_review_20260731,Pharma cold-chain peer group
+R,2019-01-02,,fleet_leasing_and_dedicated,,reviewed,transportation_classification_review_20260731,Fleet leasing and dedicated transport peer group
+PAL,2019-01-02,,auto_haul,,reviewed,transportation_classification_review_20260731,Automotive hauling peer group
+PBI,2019-01-02,,mail_presort_under_review,universe_review,pending_universe_review,transportation_classification_review_20260731,Transportation membership requires explicit review before portfolio eligibility

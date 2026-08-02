@@ -113,6 +113,35 @@ def shared_argv(
             "transportation positioning wrapper arguments are pinned="
             f"{overridden}"
         )
+    forwarded: list[str] = []
+    snapshot_output: str | None = None
+    index = 0
+    while index < len(user_args):
+        argument = user_args[index]
+        if argument == "--snapshot-output-csv":
+            if index + 1 >= len(user_args):
+                raise ValueError("--snapshot-output-csv requires a path")
+            snapshot_output = user_args[index + 1]
+            index += 2
+            continue
+        if argument.startswith("--snapshot-output-csv="):
+            snapshot_output = argument.split("=", 1)[1]
+            index += 1
+            continue
+        forwarded.append(argument)
+        index += 1
+    if snapshot_output is not None:
+        candidate = Path(snapshot_output).expanduser().resolve()
+        lowered = str(candidate).lower()
+        if (
+            "transportation" not in lowered
+            or "defense" in lowered
+            or "machinery" in lowered
+        ):
+            raise ValueError(
+                "snapshot positioning output must remain transportation-scoped"
+            )
+        forwarded.extend(["--output-csv", str(candidate)])
     script = INDUSTRIALS_ROOT / "scripts" / script_name
     if not script.is_file():
         raise FileNotFoundError(script)
@@ -122,7 +151,7 @@ def shared_argv(
         str(config_path.resolve()),
         "--model-family",
         MODEL_FAMILY,
-        *user_args,
+        *forwarded,
     ]
 
 

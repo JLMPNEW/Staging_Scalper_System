@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
@@ -64,6 +65,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", default=date.today().isoformat())
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
+        "--replace-policy-metric-scope",
+        action="store_true",
+        help=(
+            "Delete older materialized facts for metrics present in the "
+            "selected policy before inserting its canonical facts."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Build and validate reports without changing research tables.",
@@ -76,6 +85,39 @@ def _iso(value: str, *, field: str) -> str:
         return date.fromisoformat(value).isoformat()
     except ValueError as exc:
         raise ValueError(f"{field} must be YYYY-MM-DD") from exc
+
+
+def _replace_policy_metric_scope(
+    conn: sqlite3.Connection,
+    *,
+    policy: dict[str, object],
+) -> int:
+    decisions = policy.get("decisions")
+    if not isinstance(decisions, list):
+        raise ValueError("Policy decisions must be a list")
+    metrics = sorted(
+        {
+            str(row.get("effective_metric") or "")
+            for row in decisions
+            if isinstance(row, dict)
+            and row.get("decision") in {"ACCEPTED", "CORRECTED"}
+            and str(row.get("effective_metric") or "")
+        }
+    )
+    if not metrics:
+        return 0
+    placeholders = ",".join("?" for _ in metrics)
+    cursor = conn.execute(
+        f"""
+        DELETE FROM fact_technology_specialized_metric
+        WHERE model_family = 'software_infrastructure'
+          AND metric_version = 'software_specialized_measurement_v1'
+          AND source_id = 'software_adjudication_v1'
+          AND metric_name IN ({placeholders})
+        """,
+        metrics,
+    )
+    return max(0, int(cursor.rowcount))
 
 
 def main() -> int:
@@ -109,6 +151,11 @@ def main() -> int:
         )
         if write_database:
             with conn:
+                replaced_fact_count = (
+                    _replace_policy_metric_scope(conn, policy=policy)
+                    if args.replace_policy_metric_scope
+                    else 0
+                )
                 fact_count = upsert_facts(conn, facts=facts)
                 panel, coverage, feature_count = build_pit_features(
                     conn,
@@ -122,6 +169,11 @@ def main() -> int:
             # facts it is supposed to validate and reports an empty panel.
             conn.execute("BEGIN")
             try:
+                replaced_fact_count = (
+                    _replace_policy_metric_scope(conn, policy=policy)
+                    if args.replace_policy_metric_scope
+                    else 0
+                )
                 fact_count = upsert_facts(conn, facts=facts)
                 panel, coverage, feature_count = build_pit_features(
                     conn,
@@ -159,6 +211,7 @@ def main() -> int:
         end_date=end_date,
         policy_path=policy_path,
         fact_count=fact_count,
+        replaced_fact_count=replaced_fact_count,
         feature_count=feature_count,
         panel_rows=panel,
         coverage_rows=coverage,

@@ -6,7 +6,20 @@ Implementation root: `industrials/transportation`
 Shared infrastructure root: `industrials`  
 Shared database: `industrials.sqlite`
 
+## Lifecycle amendment - 2026-07-31
+
+Celadon Group is now the 47th usable delisted history. Canonical ticker `CGI` maps only to
+Norgate `CGIP`, never CGI Inc. ticker `GIB`. The contract preserves NYSE suspension on
+2018-04-03, NYSE removal on 2018-04-30, and the reviewed operations/economic-terminal cutoff
+on 2019-12-09. Because Norgate still records sparse OTC prints after 2019, provider
+`last_quoted_date` remains blank while `eligibility_end_date` is 2019-12-09. The database
+contains 6,489 genuine CGIP bars through that cutoff, the portfolio event contract carries
+terminal value zero, and the historical-load gate passes with RRTS as the sole exclusion.
+
 ## Implementation checkpoint - 2026-07-23
+
+Historical note: the following table records the original checkpoint and its 158/46-name state;
+the 2026-07-31 lifecycle amendment above supersedes only those membership counts.
 
 The historical-data and point-in-time feature batches are complete in the configured shared
 industrials database: foundation, active/delisted prices, FX, SEC raw data, specialized
@@ -301,6 +314,10 @@ Create alias and Norgate resolution comparable to defense/machinery. Transportat
 Never assume that a missing CIK makes a foreign issuer invalid. Instead assign a documented reporting profile and source route. Never combine ADR and ordinary-share price histories without an effective-dated conversion and corporate-action contract.
 
 For each delisted member, reconcile the curated ticker to Norgate (preferred), Yahoo when available, and any approved manual price file. Verify security name, last quoted date, exchange history, adjustment mode, and ticker-reuse risk. The six wipeouts must retain terminal value zero only after the legal/economic outcome and final quoted bar are verified. The one `distressed_nonzero` row must retain an explicit reviewed terminal value. Acquisition rows should carry cash/stock consideration when it is needed to calculate terminal returns; a blank terminal value is a flagged research gap, not an assumed zero.
+
+A reviewed economic-terminal override may end investability before sparse OTC prints stop, but
+the resolver must preserve it as `eligibility_end_date` and must not rewrite it as the provider's
+`last_quoted_date`.
 
 ### Acceptance gate
 

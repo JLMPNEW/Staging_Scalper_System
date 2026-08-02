@@ -154,6 +154,14 @@ def build_steps(
             network=True,
         ),
         Step(
+            "03a_sync_shares",
+            "stage_4",
+            "sync outstanding shares and public float with IB/Yahoo/SEC fallback",
+            "industrials/transportation/scripts/03a_sync_transportation_share_snapshots.py",
+            ["--asof", asof, "--allow-partial"],
+            network=True,
+        ),
+        Step(
             "08c_sync_disclosures",
             "stage_4",
             "sync bounded active and historical specialized disclosures",

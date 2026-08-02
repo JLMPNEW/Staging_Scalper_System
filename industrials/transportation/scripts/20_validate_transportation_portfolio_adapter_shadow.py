@@ -26,6 +26,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--portfolio-config", type=Path, default=DEFAULT_PORTFOLIO_CONFIG)
     parser.add_argument("--asof", required=True)
     parser.add_argument("--sector-output-root", type=Path, default=None)
+    parser.add_argument(
+        "--input-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Optional exact transportation rank table. The configured adapter and "
+            "all fail-closed checks are preserved; only file discovery is overridden."
+        ),
+    )
     parser.add_argument("--output-json", type=Path, default=None)
     return parser.parse_args()
 
@@ -45,7 +54,7 @@ def main() -> int:
     if len(sources) != 1:
         errors.append(f"expected exactly one portfolio transportation source, found {len(sources)}")
     else:
-        source = sources[0]
+        source = dict(sources[0])
         if source.get("adapter") != "industrial_family":
             errors.append("transportation portfolio source must use industrial_family")
         if bool(source.get("required")):
@@ -55,6 +64,10 @@ def main() -> int:
         root = args.sector_output_root.expanduser().resolve() if args.sector_output_root else resolve_path(
             config["score_contract"]["sector_output_root"], base_dir=config_path.parent
         )
+        if args.input_csv is not None:
+            input_csv = args.input_csv.expanduser().resolve()
+            source["file_mode"] = "flat"
+            source["file_path"] = str(input_csv)
         try:
             result = run_adapter(source, root, asof)
         except (FileNotFoundError, ValueError) as exc:

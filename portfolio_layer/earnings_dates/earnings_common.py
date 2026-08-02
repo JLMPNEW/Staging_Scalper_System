@@ -11,7 +11,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from portfolio_layer.core.contracts import read_csv, sha256_file, write_csv
+from portfolio_layer.core.contracts import (
+    manifest_acceptance_value,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+)
 
 
 # One row per Stage 1 contract ticker, keyed to the sealed run it was joined against.
@@ -101,6 +108,41 @@ def latest_run_with_artifact(runs_root: Path, artifact: str) -> str | None:
         if (child / artifact).exists():
             candidates.append(child.name)
     return max(candidates) if candidates else None
+
+
+def latest_accepted_stock_ledger(runs_root: Path, run_as_of: str) -> Path | None:
+    """Return the latest sealed PASS stock ledger on or before ``run_as_of``."""
+    children = runs_root.iterdir() if runs_root.exists() else []
+    candidates: list[Path] = []
+    for child in children:
+        if not child.is_dir() or child.name > run_as_of:
+            continue
+        try:
+            date.fromisoformat(child.name)
+        except ValueError:
+            continue
+        if (child / "ledger" / "ledger_manifest.json").is_file():
+            candidates.append(child)
+    for child in sorted(candidates, key=lambda path: path.name, reverse=True):
+        ledger_dir = child / "ledger"
+        artifact = ledger_dir / "broker_net_stock_positions.csv"
+        manifest_path = ledger_dir / "ledger_manifest.json"
+        try:
+            manifest = read_manifest(manifest_path)
+            if manifest_acceptance_value(manifest) != "PASS":
+                continue
+            errors = sealed_artifact_errors(
+                manifest,
+                artifact,
+                "broker_net_stock_positions",
+                "broker_net_stock_positions.csv",
+                run_as_of=child.name,
+            )
+        except (OSError, ValueError):
+            continue
+        if not errors:
+            return child
+    return None
 
 
 def load_history(path: Path) -> list[dict[str, str]]:

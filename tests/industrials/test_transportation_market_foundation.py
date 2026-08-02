@@ -81,17 +81,29 @@ def test_norgate_identity_contract_is_reviewed_and_fail_closed() -> None:
     mapping = rows(SYSTEM_CSVS / "transportation_norgate_symbol_map.csv")
     history = rows(SYSTEM_CSVS / "transportation_historical_membership.csv")
     assert len(mapping) == 160
-    assert sum(row["calibration_usable_flag"] == "1" for row in mapping) == 158
+    assert sum(row["calibration_usable_flag"] == "1" for row in mapping) == 159
     assert not [row for row in mapping if row["review_status"] == "review_required"]
     excluded = {row["actual_ticker"]: row for row in mapping if row["calibration_usable_flag"] == "0"}
-    assert set(excluded) == {"CGI", "RRTS"}
+    assert set(excluded) == {"RRTS"}
     assert {row["mapping_status"] for row in excluded.values()} == {"verified_excluded"}
+    celadon = next(row for row in mapping if row["actual_ticker"] == "CGI")
+    assert celadon["company_name"] == "Celadon Group"
+    assert celadon["norgate_symbol"] == "CGIP"
+    assert celadon["exit_year"] == "2019"
+    assert celadon["mapping_status"] == "verified_override"
+    assert celadon["last_quoted_date"] == ""
+    assert celadon["eligibility_end_date"] == "2019-12-09"
+    assert celadon["mapping_reason"] == "reviewed_economic_terminal_override_provider_continues_otc"
+    assert celadon["norgate_symbol"] != "GIB"
     active_history = [row for row in history if row["membership_status"] == "active"]
     delisted_history = [row for row in history if row["membership_status"] == "delisted"]
     assert len(active_history) == 112
-    assert len(delisted_history) == 46
+    assert len(delisted_history) == 47
+    celadon_history = next(row for row in delisted_history if row["internal_ticker"] == "CGI")
+    assert celadon_history["end_date"] == "2019-12-09"
+    assert celadon_history["eligibility_basis"] == "reviewed_economic_terminal_event"
     mapped_ends = {
-        row["internal_ticker"]: row["last_quoted_date"]
+        row["internal_ticker"]: row["eligibility_end_date"] or row["last_quoted_date"]
         for row in mapping
         if row["calibration_usable_flag"] == "1" and row["exit_year"]
     }
@@ -113,6 +125,14 @@ def test_delisted_loader_uses_exact_dates_and_retains_excluded_seeds(tmp_path: P
               AND reason LIKE '%Norgate-resolved final quoted date%'
             """
         ).fetchone()[0]
+        economic_terminal = conn.execute(
+            """
+            SELECT COUNT(*) FROM dim_universe_membership
+            WHERE model_family='transportation'
+              AND membership_source_id='transportation_delisted_calibration_seed'
+              AND reason LIKE '%reviewed economic terminal boundary%'
+            """
+        ).fetchone()[0]
         provisional = conn.execute(
             """
             SELECT ticker FROM dim_universe_membership
@@ -123,7 +143,8 @@ def test_delisted_loader_uses_exact_dates_and_retains_excluded_seeds(tmp_path: P
             """
         ).fetchall()
     assert exact == 46
-    assert [row[0] for row in provisional] == ["CGI", "RRTS"]
+    assert economic_terminal == 1
+    assert [row[0] for row in provisional] == ["RRTS"]
 
 
 def test_norgate_importer_only_loads_calibration_usable_delisted_members() -> None:
@@ -132,8 +153,9 @@ def test_norgate_importer_only_loads_calibration_usable_delisted_members() -> No
         SYSTEM_CSVS / "transportation_norgate_symbol_map.csv",
         SYSTEM_CSVS / "transportation_historical_membership.csv",
     )
-    assert len(members) == 46
-    assert {member.actual_ticker for member in members}.isdisjoint({"CGI", "RRTS"})
+    assert len(members) == 47
+    assert "CGI" in {member.actual_ticker for member in members}
+    assert "RRTS" not in {member.actual_ticker for member in members}
 
 
 def test_market_wrappers_pin_family_benchmarks_policy_and_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,12 +264,12 @@ def test_explicit_transportation_benchmarks_override_legacy_secondary_defaults()
     assert secondary == ["XTN", "SPY"]
 
 
-def test_portfolio_layer_has_optional_transportation_shadow_source() -> None:
+def test_portfolio_layer_keeps_transportation_disabled_until_promotion() -> None:
     config = load_yaml(PROJECT_ROOT / "portfolio_layer" / "config.yaml")
     sources = config["score_contract"]["sectors"]
     source = next(row for row in sources if row["model_family"] == "transportation")
     assert source["adapter"] == "industrial_family"
-    assert source["enabled"] is True
+    assert source["enabled"] is False
     assert source["required"] is False
     assert source["require_oos_score_valid"] is True
 
@@ -267,7 +289,7 @@ def test_delisted_export_contract_on_scratch_db(tmp_path: Path, monkeypatch: pyt
             ORDER BY ticker
             """
         ).fetchall()
-        assert len(members) == 46
+        assert len(members) == 47
         for member in members:
             conn.execute(
                 """
@@ -286,8 +308,11 @@ def test_delisted_export_contract_on_scratch_db(tmp_path: Path, monkeypatch: pyt
         ["export.py", "--db", str(db_path), "--output-dir", str(output_dir)],
     )
     assert module.main() == 0
-    assert len(rows(output_dir / "transportation_delisted_price_export.csv")) == 46
+    assert len(rows(output_dir / "transportation_delisted_price_export.csv")) == 47
     events = rows(output_dir / "transportation_delisting_events.csv")
-    assert len(events) == 46
-    assert {row["ticker"] for row in events}.isdisjoint({"CGI", "RRTS"})
+    assert len(events) == 47
+    assert "RRTS" not in {row["ticker"] for row in events}
+    celadon = next(row for row in events if row["ticker"] == "CGI")
+    assert celadon["delist_date"] == "2019-12-09"
+    assert celadon["terminal_value"] == "0"
     assert all(row["delist_date"] for row in events)

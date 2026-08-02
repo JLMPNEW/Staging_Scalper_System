@@ -68,6 +68,8 @@ model_families:
       norgate_symbol_overrides_csv: "transportation/system_csvs/transportation_norgate_symbol_overrides.csv"
       security_continuity_overrides_csv: "transportation/system_csvs/transportation_security_continuity_overrides.csv"
       security_continuity_source_id: transportation_security_continuity_policy
+      classification_overlays_csv: "transportation/system_csvs/transportation_classification_overlays.csv"
+      classification_policy_version: transportation_classification_v1
       optimization_start_date: "2019-01-02"
       delisted_default_start_date: "2000-01-01"
       sector: Industrials
@@ -91,7 +93,7 @@ model_families:
       delisted_price_source_id: norgate_us_equities_total_return
       benchmark_tickers: [IYT, XTN, SPY]
       required_fx_pairs: [BRLUSD, CADUSD, CLPUSD, CNYUSD, COPUSD, EURUSD, GBPUSD, MXNUSD, NOKUSD]
-      approved_price_exclusions: [CGI, RRTS]
+      approved_price_exclusions: [RRTS]
       output_dir: "../output/industrials/transportation/historical_load"
     financial:
       metric_registry: "transportation/data/transportation_metric_registry.yaml"
@@ -103,6 +105,38 @@ model_families:
       feature_output_csv: "../output/industrials/transportation/stage4/financial_feature_coverage.csv"
       metric_availability_output_csv: "../output/industrials/transportation/stage4/transportation_metric_availability.csv"
       metric_validation_output_json: "../output/industrials/transportation/stage4/transportation_metric_validation.json"
+      share_conversion_overrides_csv: "transportation/system_csvs/transportation_share_conversion_overrides.csv"
+      valuation_source_audit_output_csv: "../output/industrials/transportation/valuation/transportation_pit_valuation_source_audit.csv"
+      valuation_source_audit_output_json: "../output/industrials/transportation/valuation/transportation_pit_valuation_source_audit.json"
+      share_source_evidence_output_csv: "../output/industrials/transportation/valuation/transportation_share_source_evidence.csv"
+      share_source_evidence_summary_csv: "../output/industrials/transportation/valuation/transportation_share_source_evidence_summary.csv"
+      share_source_evidence_output_json: "../output/industrials/transportation/valuation/transportation_share_source_evidence.json"
+    share_snapshot_ingestion:
+      # Shared loader, transportation-scoped facts.  Outstanding shares drive
+      # valuation; public float drives liquidity/short-interest.  They must not
+      # be substituted for one another without the explicit proxy flag.
+      history_start: "2019-01-02"
+      output_csv: "../output/industrials/transportation/stage3/transportation_share_snapshot_coverage.csv"
+      share_conversion_overrides_csv: "transportation/system_csvs/transportation_share_conversion_overrides.csv"
+      reviewed_share_observations_csv: "transportation/system_csvs/transportation_reviewed_share_observations.csv"
+      # IB remains first in source precedence, but error 10358 confirmed this
+      # account lacks the fundamentals entitlement. Re-enable after entitlement
+      # is provisioned; never substitute generic-tick shortableShares as float.
+      enable_ib_fundamentals: false
+      enable_yahoo_statistics: true
+      ib_host: "127.0.0.1"
+      ib_port: 7497
+      ib_client_id: 7831
+      ib_market_data_type: 1
+      ib_generic_tick_list: "258"
+      ib_snapshot_wait_sec: 4.0
+      ib_batch_size: 25
+      yahoo_workers: 4
+      request_spacing_sec: 0.10
+      # Keep the loader operational while foreign/legacy filings remain under
+      # reviewed conversion policy.  Promotion gates can be stricter, but must
+      # not lower this threshold silently.
+      minimum_outstanding_coverage: 0.90
     specialized_disclosures:
       # Item-6 coverage pass: one latest annual and one latest interim filing
       # per issuer. This bounded sample measures parser coverage before any
@@ -208,9 +242,12 @@ model_families:
       # Freeze the policy used for retrospective score recomputation. Feature,
       # filing, market, and membership dates remain their original PIT asofs.
       policy_lock_date: "2026-07-30"
-      output_root: "../output/industrials/transportation/dashboard"
-      build_report_csv: "../output/industrials/transportation/score_history/transportation_daily_score_history_build.csv"
-      build_manifest_json: "../output/industrials/transportation/score_history/transportation_daily_score_history_build.json"
+      # The v2 research reconstruction is versioned and must never overwrite
+      # the immutable v1/release dashboard snapshots.
+      output_root: "../output/industrials/transportation/surface_freight_v2/dashboard"
+      feature_output_root: "../output/industrials/transportation/surface_freight_v2/scoring_features"
+      build_report_csv: "../output/industrials/transportation/surface_freight_v2/score_history/transportation_weekly_score_history_build.csv"
+      build_manifest_json: "../output/industrials/transportation/surface_freight_v2/score_history/transportation_weekly_score_history_build.json"
     scoring:
       feature_output_csv: "../output/industrials/transportation/stage6/transportation_scoring_features.csv"
       validation_output_json: "../output/industrials/transportation/stage6/transportation_scoring_validation.json"
@@ -220,7 +257,10 @@ model_families:
       # at zero. Current scoring must therefore reproduce the generic-only
       # baseline exactly; specialized evidence remains visible for research and
       # coverage reporting but cannot affect scores or rank readiness.
-      score_construction_mode: generic_baseline_with_bounded_overlays
+      score_construction_mode: surface_freight_fixed_denominator_v2
+      surface_freight_score_policy: "transportation/data/transportation_surface_freight_score_policy_v2.yaml"
+      prebuild_contract_output_dir: "../output/industrials/transportation/prebuild/surface_freight_score_v2"
+      prebuild_contract_manifest: "../output/industrials/transportation/prebuild/surface_freight_score_v2/transportation_surface_freight_prebuild_manifest.json"
       specialized_overlay_weights:
         fleet_utilization: 0.00
         operating_ratio: 0.00
@@ -232,6 +272,11 @@ model_families:
       minimum_score_confidence: 0.35
       # Enforced only when at least one bounded specialized overlay is active.
       minimum_specialized_coverage: 0.15
+      # Shared positioning is materialized by the family-pinned transportation
+      # wrapper. It remains a zero-weight research component until a clean,
+      # post-freeze calibration selects a non-zero weight.
+      positioning_feature_source_id: industrials_positioning_composite
+      minimum_positioning_input_coverage: 0.50
       score_model_version: transportation_shadow_score_v1
       model_version: transportation_model_v1_shadow
       scoring_contract_version: transportation_final_rank_table_v1_shadow
@@ -630,14 +675,14 @@ oos_calibration_standards:
       require_manifest_hash: true
       require_portfolio_adapter_shadow_validation: true
     transportation:
-      calibration_provenance_version: "transportation_generic_oos_v1"
+      calibration_provenance_version: "transportation_surface_freight_oos_v2"
       calibration_validation_method: "weekly_pit_panel_validation_ic_holdout_backtest"
       production_lock_registry_csv: "transportation/system_csvs/transportation_production_model_locks.csv"
       primary_benchmark_ticker: "IYT"
       robustness_benchmark_ticker: "XTN"
-      snapshot_history_root: "../output/industrials/transportation/dashboard"
-      research_output_root: "../output/industrials/transportation/generic_oos"
-      promotion_output_root: "../output/industrials/transportation/production_promotion"
+      snapshot_history_root: "../output/industrials/transportation/surface_freight_v2/dashboard"
+      research_output_root: "../output/industrials/transportation/surface_freight_v2/generic_oos"
+      promotion_output_root: "../output/industrials/transportation/surface_freight_v2/production_promotion"
       development_start_date: "2019-01-02"
       development_end_date: "2026-07-30"
       weekly_anchor_date: "2018-12-30"
@@ -651,6 +696,7 @@ oos_calibration_standards:
       transaction_cost_bps: 20.0
       top_fraction: 0.20
       minimum_cross_section: 5
+      minimum_complete_component_row_coverage: 0.90
       min_shadow_snapshots_for_promotion: 60
       absolute_gates:
         minimum_snapshot_count: 12

@@ -34,6 +34,7 @@ MONETARY_METRICS = frozenset(
 )
 DERIVED_SIGNAL_SPECS = {
     "annual_recurring_revenue_yoy_growth": "ratio",
+    "annual_recurring_revenue_to_revenue": "ratio",
     "net_revenue_retention_level": "ratio",
     "net_revenue_retention_yoy_change": "ratio",
     "disclosed_billings_yoy_growth": "ratio",
@@ -42,7 +43,10 @@ DERIVED_SIGNAL_SPECS = {
     "customer_threshold_disclosure_change": "event",
 }
 METRIC_DERIVED_SIGNALS = {
-    "annual_recurring_revenue": ("annual_recurring_revenue_yoy_growth",),
+    "annual_recurring_revenue": (
+        "annual_recurring_revenue_yoy_growth",
+        "annual_recurring_revenue_to_revenue",
+    ),
     "net_revenue_retention": (
         "net_revenue_retention_level",
         "net_revenue_retention_yoy_change",
@@ -471,6 +475,12 @@ def adjudicated_facts(
             "definition_variant": decision["definition_variant"],
             "effective_scope": decision["effective_scope"],
             "calibration_eligible_flag": calibration_eligible,
+            "governance_status": str(
+                decision.get("governance_status") or "HUMAN_APPROVED"
+            ),
+            "production_use_prohibited_flag": int(
+                decision.get("production_use_prohibited_flag") or 0
+            ),
             "censored_flag": int(metric in EVENT_METRICS),
         }
         facts.append(
@@ -554,6 +564,26 @@ def upsert_facts(
                 now,
             )
         )
+    conn.executemany(
+        """
+        DELETE FROM fact_technology_specialized_metric
+        WHERE model_family = ?
+          AND metric_version = ?
+          AND source_id = ?
+          AND evidence_key = ?
+          AND specialized_fact_key <> ?
+        """,
+        [
+            (
+                MODEL_FAMILY,
+                METRIC_VERSION,
+                SOURCE_ID,
+                fact.evidence_key,
+                row[0],
+            )
+            for fact, row in zip(facts, rows, strict=True)
+        ],
+    )
     conn.executemany(
         """
         INSERT INTO fact_technology_specialized_metric(
@@ -947,6 +977,58 @@ def derive_signals(
         variant="total_arr",
         definition_version="arr_growth_v1",
     )
+    arr = _latest(
+        visible,
+        metric="annual_recurring_revenue",
+        variant="total_arr",
+    )
+    arr_ratio = _missing_signal(
+        "arr_to_revenue_v1",
+        reason="current_metric_observation_missing",
+    )
+    if arr is not None:
+        stale = _stale_reason(arr, asof=asof)
+        if stale:
+            arr_ratio = _stale_signal(
+                arr,
+                definition_version="arr_to_revenue_v1",
+                reason=stale,
+            )
+        else:
+            fin = _matching_financial(
+                financial,
+                period_end=str(arr["period_end"]),
+                availability_datetime=asof.isoformat(),
+            )
+            revenue_ttm = _number(fin.get("revenue_ttm")) if fin else None
+            arr_value = _number(arr.get("value"))
+            if (
+                fin is not None
+                and arr_value is not None
+                and revenue_ttm is not None
+                and revenue_ttm > 0
+            ):
+                financial_asof = str(fin.get("asof_date") or "")
+                source_asof = max(
+                    str(arr["availability_datetime"]),
+                    (
+                        f"{financial_asof}T23:59:59Z"
+                        if financial_asof
+                        else ""
+                    ),
+                )
+                arr_ratio = _available_signal(
+                    arr_value / revenue_ttm,
+                    source_asof=source_asof,
+                    definition_version="arr_to_revenue_v1",
+                )
+            else:
+                arr_ratio = _missing_signal(
+                    "arr_to_revenue_v1",
+                    source_asof=str(arr["availability_datetime"]),
+                    reason="matching_period_revenue_ttm_missing",
+                )
+    output["annual_recurring_revenue_to_revenue"] = arr_ratio
     nrr = _latest(
         visible,
         metric="net_revenue_retention",
@@ -1430,6 +1512,7 @@ def manifest_payload(
     end_date: str,
     policy_path: Path,
     fact_count: int,
+    replaced_fact_count: int,
     feature_count: int,
     panel_rows: list[dict[str, Any]],
     coverage_rows: list[dict[str, Any]],
@@ -1452,6 +1535,7 @@ def manifest_payload(
             "chain_root_sha256"
         ],
         "materialized_fact_count": fact_count,
+        "replaced_fact_count": replaced_fact_count,
         "materialized_feature_count": feature_count,
         "persisted_feature_row_count": sum(
             int(row["persisted_pit_row_count"])

@@ -52,6 +52,12 @@ def finite_float(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def finite_or_default(value: object, *, default: float) -> float:
+    """Return a finite numeric value without treating an exact zero as missing."""
+    parsed = finite_float(value)
+    return default if parsed is None else parsed
+
+
 def fmt(value: object, digits: int = 12) -> str:
     parsed = finite_float(value)
     if parsed is None:
@@ -389,12 +395,18 @@ def normalized_weights(
 def weighted_score(
     row: Mapping[str, object],
     weights: Mapping[str, float],
+    *,
+    require_complete: bool = False,
 ) -> float | None:
     numerator = 0.0
     denominator = 0.0
     for field, weight in weights.items():
         value = finite_float(row.get(field))
-        if value is None or weight <= 0:
+        if weight <= 0:
+            continue
+        if value is None:
+            if require_complete:
+                return None
             continue
         numerator += value * weight
         denominator += weight
@@ -424,6 +436,7 @@ def evaluate_candidate(
     top_fraction: float = 0.20,
     minimum_cross_section: int = 5,
     transaction_cost_bps: float = 20.0,
+    require_complete_components: bool = False,
 ) -> dict[str, object]:
     by_date: dict[str, list[tuple[str, float, float, str]]] = defaultdict(list)
     eligible_rows = 0
@@ -440,7 +453,11 @@ def evaluate_candidate(
             continue
         eligible_rows += 1
         outcome = finite_float(row.get("forward_excess_return"))
-        score = weighted_score(row, weights)
+        score = weighted_score(
+            row,
+            weights,
+            require_complete=require_complete_components,
+        )
         if outcome is None or score is None:
             continue
         available_rows += 1

@@ -1,0 +1,85 @@
+policy_version: software_arr_census_review_overrides_v1
+reviewed_canonical_sha256: 565180054ac71d94c79cf2b853e278b3440dcdc6f274df455eb995a41b28b5f0
+review_date: '2026-07-30'
+expected_corrected_canonical_count: 71
+overrides:
+  - action: REJECT
+    suppress_accession_reselection_flag: '1'
+    ticker: CRWD
+    accession_number: 0001535527-26-000007
+    expected_candidate_value: '20000000000'
+    corrected_effective_value: ''
+    expected_source_period_end: '2026-01-31'
+    corrected_effective_period_end: ''
+    issue: guidance
+    detail: Forward FY27 outlook and FY36 goal are not reported ARR.
+  - action: REJECT
+    suppress_accession_reselection_flag: '1'
+    ticker: SCWX
+    accession_number: 0001468666-24-000036
+    expected_candidate_value: '300000000'
+    corrected_effective_value: ''
+    expected_source_period_end: '2024-02-02'
+    corrected_effective_period_end: ''
+    issue: guidance_and_duplicate
+    detail: Lower-bound target duplicates the same-period actual ARR disclosure.
+  - action: FIX_VALUE
+    suppress_accession_reselection_flag: '0'
+    ticker: ZIXI
+    accession_number: 0001193125-21-056997
+    expected_candidate_value: '237700000'
+    corrected_effective_value: '237700000'
+    expected_source_period_end: '2020-12-31'
+    corrected_effective_period_end: ''
+    issue: inverted_subset
+    detail: Keep company-total ARR and exclude Cloud ARR subset.
+  - action: FIX_VALUE
+    suppress_accession_reselection_flag: '0'
+    ticker: ZIXI
+    accession_number: 0001193125-21-151751
+    expected_candidate_value: '243600000'
+    corrected_effective_value: '243600000'
+    expected_source_period_end: '2021-03-31'
+    corrected_effective_period_end: ''
+    issue: inverted_subset
+    detail: Keep company-total ARR and exclude Cloud ARR subset.
+  - action: FIX_VALUE
+    suppress_accession_reselection_flag: '0'
+    ticker: ZIXI
+    accession_number: 0001193125-21-237022
+    expected_candidate_value: '252400000'
+    corrected_effective_value: '252400000'
+    expected_source_period_end: '2021-06-30'
+    corrected_effective_period_end: ''
+    issue: inverted_subset
+    detail: Keep company-total ARR and exclude Cloud ARR subset.
+  - action: FIX_VALUE
+    suppress_accession_reselection_flag: '0'
+    ticker: ZIXI
+    accession_number: 0001193125-21-323446
+    expected_candidate_value: '262800000'
+    corrected_effective_value: '262800000'
+    expected_source_period_end: '2021-09-30'
+    corrected_effective_period_end: ''
+    issue: inverted_subset
+    detail: Keep company-total ARR and exclude Cloud ARR subset.
+  - action: FIX_PERIOD
+    suppress_accession_reselection_flag: '0'
+    ticker: DOCN
+    accession_number: 0001582961-26-000045
+    expected_candidate_value: '1032000000'
+    corrected_effective_value: ''
+    expected_source_period_end: '2026-05-04'
+    corrected_effective_period_end: '2026-03-31'
+    issue: filing_date_used_as_period_end
+    detail: Use the Q1 2026 quarter end stated by the disclosure.
+  - action: FIX_PERIOD
+    suppress_accession_reselection_flag: '0'
+    ticker: PATH
+    accession_number: 0001734722-26-000037
+    expected_candidate_value: '1901000000'
+    corrected_effective_value: ''
+    expected_source_period_end: '2026-05-28'
+    corrected_effective_period_end: '2026-04-30'
+    issue: filing_date_used_as_period_end
+    detail: Use the April 30 2026 period explicitly stated by the disclosure.

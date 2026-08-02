@@ -402,14 +402,37 @@ def single_latest_regime_row(
     source: str,
     run_as_of: str,
     model_version: str | None = None,
+    covered_only: bool = False,
 ) -> sqlite3.Row | None:
     normalized_source = str(source or "").strip().lower()
     table = regime_table_for_source(normalized_source)
     if normalized_source == "v1":
+        if covered_only:
+            return conn.execute(
+                f"""
+                SELECT *
+                FROM {table}
+                WHERE as_of_date <= ? AND coverage_flag = 1
+                ORDER BY as_of_date DESC
+                LIMIT 1
+                """,
+                (run_as_of,),
+            ).fetchone()
         return single_latest_row(conn, table, run_as_of)
     model = str(model_version or "").strip()
     if not model:
         raise ValueError("A model_version is required for the v2 regime source.")
+    if covered_only:
+        return conn.execute(
+            f"""
+            SELECT *
+            FROM {table}
+            WHERE as_of_date <= ? AND model_version = ? AND coverage_flag = 1
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """,
+            (run_as_of, model),
+        ).fetchone()
     as_of = latest_as_of(conn, table, run_as_of, model_version=model)
     if not as_of:
         return None

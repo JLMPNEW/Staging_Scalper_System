@@ -31,12 +31,12 @@ from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E4
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 from portfolio_layer.sleeves.risk_model import (  # noqa: E402
+    build_sleeve_risk_proposal,
     effective_number_of_bets,
     enforce_rc_cap_to_cash,
     factor_decomposition,
     information_ratios,
     risk_contributions,
-    solve_risk_budget,
     sleeve_risk_bounds,
     target_risk_budget,
     throttle_scale,
@@ -331,9 +331,11 @@ def main() -> int:  # noqa: C901
     rec("ir_consistency", "PASS" if not ir_outliers else "WARN",
         "no large risk-contribution / IR outliers" if not ir_outliers else f"{ir_outliers[:8]}")
 
-    # 8. HARD improvement-relative: reject material deterioration, while reporting sub-material
-    # trade-offs explicitly. ENB and factor-model idiosyncratic share need not move monotonically
-    # together, especially when the independent RC cap is binding.
+    # 8. HARD improvement-relative. In the normal multi-sleeve mode, reject material declines in
+    # ENB or the idiosyncratic ratio. With one active sleeve there is no cross-sleeve problem to
+    # solve: 28 preserves Stage 7 and only trims hard RC-cap breaches to CASH. In that cap-only
+    # mode the safety invariant is no increase in total/systematic variance; a ratio can move
+    # slightly even while both absolute risks fall.
     div_bad = []
     enb_material_floor = enb_before * (1.0 - DIVERSIFICATION_MATERIAL_REL_TOL)
     idio_before = factor_before["idiosyncratic_share"]
@@ -341,11 +343,23 @@ def main() -> int:  # noqa: C901
     idio_material_floor = idio_before * (1.0 - DIVERSIFICATION_MATERIAL_REL_TOL)
     if enb_after + 1e-6 < enb_material_floor:
         div_bad.append(f"enb {enb_after:.3f}<{enb_before:.3f}")
-    if idio_after + 1e-6 < idio_material_floor:
+    allocation_mode = str(meta28.get("allocation_mode", "")).strip()
+    rc_cap_only = allocation_mode == "single_sleeve_rc_cap_only"
+    if rc_cap_only:
+        total_before = float(factor_before["total_variance"])
+        total_after = float(factor_after["total_variance"])
+        systematic_before = total_before * float(factor_before["systematic_share"])
+        systematic_after = total_after * float(factor_after["systematic_share"])
+        variance_tol = max(1e-12, total_before * 1e-8)
+        if total_after > total_before + variance_tol:
+            div_bad.append(f"total_var {total_after:.8f}>{total_before:.8f}")
+        if systematic_after > systematic_before + variance_tol:
+            div_bad.append(f"systematic_var {systematic_after:.8f}>{systematic_before:.8f}")
+    elif idio_after + 1e-6 < idio_material_floor:
         div_bad.append(f"idio {idio_after:.4f}<{idio_before:.4f}")
     rec("diversification_not_worsened", "PASS" if not div_bad else "FAIL",
-        f"ENB {enb_before:.2f}->{enb_after:.2f}; idio {idio_before:.3f}->{idio_after:.3f}; "
-        f"materiality={DIVERSIFICATION_MATERIAL_REL_TOL:.1%}"
+        f"mode={allocation_mode}; ENB {enb_before:.2f}->{enb_after:.2f}; "
+        f"idio {idio_before:.3f}->{idio_after:.3f}; materiality={DIVERSIFICATION_MATERIAL_REL_TOL:.1%}"
         if not div_bad else f"{div_bad}")
     minor_tradeoffs = []
     if enb_after + 1e-6 < enb_before:
@@ -420,13 +434,22 @@ def main() -> int:  # noqa: C901
             tilt=tilt,
             rc_cap=rc_cap,
         )
-        replay = solve_risk_budget(
+        replay, replay_mode, replay_active_sleeves = build_sleeve_risk_proposal(
             cov,
             replay_budget,
+            prior_weights=prior,
+            sleeve_of=sleeve_of,
             gross=prior_gross,
             max_weight=max_weight,
             max_iter=max_iter,
         )
+        if replay_mode != allocation_mode:
+            det_bad.append(f"allocation_mode:{allocation_mode}!={replay_mode}")
+        stored_active_sleeves = tuple(str(value) for value in (meta28.get("active_sleeves") or []))
+        if stored_active_sleeves != replay_active_sleeves:
+            det_bad.append(
+                f"active_sleeves:{stored_active_sleeves}!={replay_active_sleeves}"
+            )
         replay_enforcement = enforce_rc_cap_to_cash(
             replay,
             cov,

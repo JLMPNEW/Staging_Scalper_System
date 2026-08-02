@@ -123,7 +123,12 @@ def _pymupdf_text_unbounded(payload: bytes, *, max_pages: int) -> DocumentText:
             page_count = document.page_count
             limit = min(page_count, max_pages) if max_pages > 0 else page_count
             for page_number in range(limit):
-                pages.append(document.load_page(page_number).get_text("text"))
+                page_text = document.load_page(page_number).get_text("text")
+                if not isinstance(page_text, str):
+                    raise TypeError(
+                        "PyMuPDF text extraction returned a non-string payload"
+                    )
+                pages.append(page_text)
     except Exception as exc:
         return DocumentText(
             "",

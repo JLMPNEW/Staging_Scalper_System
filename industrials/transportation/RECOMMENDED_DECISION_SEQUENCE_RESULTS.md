@@ -282,6 +282,9 @@ promotion remains unauthorized.
 
 ## 2026-07-30 immediate production-readiness batch
 
+Historical note: the membership counts in this frozen batch predate the 2026-07-31 reviewed
+Celadon lifecycle amendment. Current contracts are 159 usable mappings and 47 delisted histories.
+
 The immediate batch is implemented without reopening source discovery,
 historical parsing, feature materialization, calibration, or outcomes.
 

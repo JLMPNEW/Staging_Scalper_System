@@ -25,4 +25,6 @@ reports and rank tables do not belong here.
 - `transportation_norgate_symbol_map.csv`: reviewed active/delisted provider lineage and
   calibration eligibility.
 - `transportation_norgate_symbol_overrides.csv`: analyst-reviewed symbol aliases and explicit
-  fail-closed exclusions.
+  fail-closed exclusions. `override_end_date` is an eligibility boundary; an
+  `eligibility_end_basis` of `reviewed_economic_terminal_event` must remain separate from the
+  provider's `last_quoted_date`.

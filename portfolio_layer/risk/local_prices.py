@@ -95,10 +95,11 @@ def load_local_adjusted_price_fallbacks(
     if not isinstance(raw_sources, list):
         return {}, {}, []
 
-    universe_pipeline = {
-        str(row.get("ticker") or "").strip().upper(): str(
-            row.get("source_pipeline") or ""
-        ).strip()
+    universe_metadata = {
+        str(row.get("ticker") or "").strip().upper(): (
+            str(row.get("source_pipeline") or "").strip(),
+            str(row.get("role") or "").strip(),
+        )
         for row in universe
         if str(row.get("ticker") or "").strip()
     }
@@ -125,6 +126,9 @@ def load_local_adjusted_price_fallbacks(
             for value in raw_source.get("source_pipelines", [])
             if str(value).strip()
         }
+        include_market_instruments = bool(
+            raw_source.get("include_market_instruments", False)
+        )
         accepted_adjustments = {
             str(value).strip().lower()
             for value in raw_source.get(
@@ -134,8 +138,13 @@ def load_local_adjusted_price_fallbacks(
         }
         candidate_tickers = sorted(
             ticker
-            for ticker, pipeline in universe_pipeline.items()
-            if ticker not in prices and (not pipelines or pipeline in pipelines)
+            for ticker, (pipeline, role) in universe_metadata.items()
+            if ticker not in prices
+            and (
+                not pipelines
+                or pipeline in pipelines
+                or (include_market_instruments and role == "market_instrument")
+            )
         )
         source_summary: dict[str, Any] = {
             "name": name,
@@ -143,6 +152,7 @@ def load_local_adjusted_price_fallbacks(
             "database_exists": database_path.exists(),
             "source_ids": source_ids,
             "source_pipelines": sorted(pipelines),
+            "include_market_instruments": include_market_instruments,
             "accepted_price_adjustments": sorted(accepted_adjustments),
             "requested_ticker_count": len(candidate_tickers),
             "loaded_ticker_count": 0,

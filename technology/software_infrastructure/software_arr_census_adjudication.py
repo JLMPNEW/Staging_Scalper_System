@@ -11,7 +11,6 @@ from typing import Any
 import yaml
 
 
-
 MODEL_FAMILY = "software_infrastructure"
 METRIC_NAME = "annual_recurring_revenue"
 ELIGIBLE_DECISIONS = {"ACCEPTED", "CORRECTED"}

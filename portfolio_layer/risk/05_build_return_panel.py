@@ -578,6 +578,39 @@ def main() -> int:
                     alias_reason,
                 )
 
+        local_bars = local_price_seed.get(ticker, [])
+        if args.reuse_price_cache and local_bars and not alias_applied:
+            required_end = run_date
+            while required_end.weekday() >= 5:
+                required_end -= timedelta(days=1)
+            local_is_complete = (
+                local_bars[0][0] <= (start + timedelta(days=7)).isoformat()
+                and local_bars[-1][0] >= required_end.isoformat()
+            )
+            if local_is_complete:
+                local_provenance = local_price_provenance[ticker]
+                write_cached_bars(
+                    price_cache_dir,
+                    ticker,
+                    local_provenance.provider,
+                    local_bars,
+                    [],
+                    query_symbol=ticker,
+                    source_symbol=ticker,
+                )
+                return (
+                    local_bars,
+                    [],
+                    "ok",
+                    local_provenance.provider,
+                    ticker,
+                    ticker,
+                    False,
+                    "",
+                    "",
+                    "",
+                )
+
         combined_bars: dict[str, float] = {}
         combined_splits: list[dict[str, str]] = []
         providers: list[str] = []
@@ -673,7 +706,7 @@ def main() -> int:
             # segments fabricates a level jump at the seam. Refuse the splice: the name routes to
             # coverage as a failed fetch instead of sealing a mixed-basis series.
             statuses.append(f"{ticker}:cross_provider_adjustment_splice_refused:{'+'.join(sorted(set(providers)))}")
-        if not combined_bars and ticker in local_price_seed:
+        if not combined_bars and ticker in local_price_seed and not alias_applied:
             bars = local_price_seed[ticker]
             local_provenance = local_price_provenance[ticker]
             write_cached_bars(

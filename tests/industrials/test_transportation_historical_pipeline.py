@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import date
 from pathlib import Path
 
 from industrials.core.db import connect, init_db, utc_now
@@ -40,6 +41,34 @@ def load_shared_script(name: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_daily_score_history_uses_family_pinned_positioning_wrapper(
+    tmp_path: Path,
+) -> None:
+    history = load_script("25_build_transportation_daily_score_history.py")
+    commands = dict(
+        history.stage_commands(
+            asof="2026-07-30",
+            config_path=tmp_path / "config.yaml",
+            db_path=tmp_path / "industrials.sqlite",
+            feature_dir=tmp_path / "features",
+            dashboard_dir=tmp_path / "dashboard",
+            force_scoring=False,
+            force_publish=False,
+        )
+    )
+    positioning = commands["positioning_features"]
+    assert any(
+        item.endswith("09_import_transportation_positioning.py")
+        for item in positioning
+    )
+    assert not any(
+        item.endswith("09_import_industrials_positioning.py")
+        for item in positioning
+    )
+    assert "--model-family" not in positioning
+    assert "--config" not in positioning
 
 
 def seed_source_registry(conn) -> None:
@@ -381,3 +410,176 @@ def test_transportation_financial_builder_uses_dated_reporting_profile(
         )
     assert profile["profile_asof_date"] == "2019-03-31"
     assert profile["reporting_profile"] == "SEC_XBRL_US_GAAP"
+
+def test_financial_builder_combines_pit_shares_with_unadjusted_close(
+    tmp_path: Path,
+) -> None:
+    from industrials.core.share_sources import ShareConversion, ShareObservation, upsert_observations
+
+    builder = load_shared_script("08_build_industrials_financial_features.py")
+    db_path = tmp_path / "valuation.sqlite"
+    now = utc_now()
+    with connect(db_path) as conn:
+        seed_source_registry(conn)
+        upsert_observations(
+            conn,
+            [
+                ShareObservation(
+                    ticker="TEST",
+                    model_family="transportation",
+                    asof_date=builder.date(2024, 2, 15),
+                    source_asof_date=builder.date(2023, 12, 31),
+                    source_id="sec_companyfacts",
+                    shares_outstanding=10.0,
+                    outstanding_method="sec_point_in_time",
+                ),
+                ShareObservation(
+                    ticker="TEST",
+                    model_family="defense",
+                    asof_date=builder.date(2024, 2, 15),
+                    source_asof_date=builder.date(2023, 12, 31),
+                    source_id="sec_companyfacts",
+                    shares_outstanding=999.0,
+                    outstanding_method="other_family",
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO fact_price_ohlcv(
+                ticker, bar_date, source_id, open, high, low, close,
+                adj_close, volume, dividend, split_coefficient,
+                dividend_amount, split_factor, price_adjustment, is_adjusted,
+                created_at, updated_at
+            )
+            VALUES ('TEST', ?, 'yahoo_finance_adjusted', 12, 12, 12, ?,
+                    ?, 1000, 0, 1, 0, 1, 'adjusted_close', 1, ?, ?)
+            """,
+            [
+                ("2024-03-01", 12.0, 6.0, now, now),
+                ("2024-03-04", 20.0, 10.0, now, now),
+            ],
+        )
+        market_cap, price = builder.latest_market_values(
+            conn,
+            ticker="TEST",
+            market_source_ids=["yahoo_finance_adjusted"],
+            model_family="transportation",
+            asof=builder.date(2024, 3, 1),
+        )
+        stale = builder.latest_unadjusted_close(
+            conn,
+            ticker="TEST",
+            market_source_ids=["yahoo_finance_adjusted"],
+            asof=builder.date(2024, 3, 20),
+        )
+
+        proxy = builder.diluted_share_market_cap_proxy(
+            conn,
+            ticker="TEST",
+            model_family="transportation",
+            asof=builder.date(2024, 3, 1),
+            diluted_shares=100.0,
+            country="Mexico",
+            market_source_ids=["yahoo_finance_adjusted"],
+            conversions={
+                "TEST": (
+                    ShareConversion(
+                        ticker="TEST",
+                        effective_from=builder.date(2019, 1, 2),
+                        effective_to=None,
+                        ratio=10.0,
+                        status="REVIEWED_ADR",
+                    ),
+                )
+            },
+        )
+        blocked = builder.diluted_share_market_cap_proxy(
+            conn,
+            ticker="TEST",
+            model_family="transportation",
+            asof=builder.date(2024, 3, 1),
+            diluted_shares=100.0,
+            country="Mexico",
+            market_source_ids=["yahoo_finance_adjusted"],
+            conversions={},
+        )
+
+    assert market_cap == 120.0
+    assert price == 12.0
+    assert stale is None
+    assert proxy == (120.0, 12.0, "market_cap_proxy_diluted_shares_reviewed_adr")
+    assert blocked == (None, None, "")
+
+def test_sec_share_observations_keep_only_fresh_pre_window_carry_in(
+    tmp_path: Path,
+) -> None:
+    sync = load_shared_script("03a_sync_industrials_share_snapshots.py")
+    db_path = tmp_path / "share_carry_in.sqlite"
+    with connect(db_path) as conn:
+        seed_source_registry(conn)
+        now = utc_now()
+        conn.executemany(
+            """
+            INSERT INTO fact_sec_xbrl_fact(
+                ticker, cik, source_id, accession_number, form_type, filing_date,
+                accepted_at, period_end, taxonomy, concept_name,
+                canonical_metric, unit, value, source_priority, created_at,
+                updated_at
+            )
+            VALUES (
+                'TEST', '0000000001', 'sec_companyfacts', ?, '20-F', ?, ?, ?,
+                'us-gaap', 'EntityCommonStockSharesOutstanding',
+                'shares_outstanding', 'shares', ?, 1, ?, ?
+            )
+            """,
+            [
+                (
+                    "0000000001-18-000001",
+                    "2018-12-14",
+                    "2018-12-15T12:00:00Z",
+                    "2018-09-30",
+                    100.0,
+                    now,
+                    now,
+                ),
+                (
+                    "0000000001-17-000001",
+                    "2017-01-01",
+                    "2017-01-02T12:00:00Z",
+                    "2016-12-31",
+                    80.0,
+                    now,
+                    now,
+                ),
+            ],
+        )
+        rows, skipped = sync.sec_observations(
+            conn,
+            companies=[
+                sync.Company(
+                    ticker="TEST",
+                    currency="USD",
+                    exchange="NYSE",
+                    evaluation_asof=date(2019, 1, 31),
+                )
+            ],
+            model_family="transportation",
+            history_start=date(2019, 1, 2),
+            asof=date(2019, 1, 31),
+            conversions={
+                "TEST": (
+                    sync.Conversion(
+                        ticker="TEST",
+                        effective_from=date(2019, 1, 2),
+                        effective_to=None,
+                        ratio=1.0,
+                        status="REVIEWED_DIRECT",
+                    ),
+                )
+            },
+        )
+    assert skipped == []
+    assert [(row.asof_date, row.shares_outstanding) for row in rows] == [
+        (date(2018, 12, 15), 100.0)
+    ]

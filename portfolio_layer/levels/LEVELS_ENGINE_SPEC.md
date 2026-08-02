@@ -4,8 +4,9 @@
 > governs provider selection, realistic observability, evidence ledgers, build increments, and
 > definitions of done. This specification governs its domain formulas and contracts.
 
-Status: FROZEN DESIGN - implementation pending.
+Status: IMPLEMENTED - advisory/shadow only; v2 valuation inputs await the next deliberate run.
 Frozen: 2026-07-28.
+Implementation amendment: 2026-08-01.
 Home: `portfolio_layer/levels/`.
 
 ## 1. Objective and boundary
@@ -51,6 +52,8 @@ Eligible anchor families:
 
 - earnings value: normalized forward EPS x a PIT target P/E;
 - cash-flow value: normalized forward FCF / required FCF yield;
+- trailing cash-flow value: same-row PIT trailing FCF/share / required FCF yield, restricted to
+  explicitly configured pipelines and disclosed as `fcf_yield_ttm` rather than forward consensus;
 - enterprise value: normalized EBITDA x PIT EV/EBITDA less net debt and other senior claims,
   divided by split-consistent diluted shares;
 - sector-specific methods explicitly allowed by the sector valuation contract.
@@ -106,6 +109,14 @@ ebitda_forward
 net_debt
 senior_claims
 diluted_shares
+fcf_yield_ttm
+fcf_per_share_ttm
+sector_valuation_low
+sector_valuation_base
+sector_valuation_high
+sector_valuation_method
+sector_valuation_confidence
+sector_valuation_available_at_utc
 normalized_cyclical_flag
 method_allowlist
 input_freshness_json
@@ -116,6 +127,19 @@ valuation_contract_version
 Sector adapters may add specialist inputs, but shared code never guesses their meaning. Examples
 include probability-weighted pipeline value for biotech, backlog/cycle normalization for defense or
 machinery, and cohort-specific profitability rules.
+
+The v2 shared adapter supports two additional, explicit paths:
+
+- `fcf_yield_ttm`: only configured tech pipelines may reconstruct trailing FCF/share as the product
+  of a same-row published decimal FCF yield and same-row price. The price is discarded and never
+  becomes the valuation anchor; the recovered cash-flow numerator is divided by the configured
+  required yield. Percentage-scaled, non-positive, excessive, or non-allowlisted inputs fail closed.
+- `sector_specialist`: the sector must publish ordered positive low/base/high values, a confidence
+  in `[0,1]`, an allowlisted method identity, and a PIT availability timestamp. Partial, future-dated,
+  or unapproved specialist fields invalidate that name rather than being silently ignored.
+
+Coverage is isolated per name. A missing valuation method keeps that ticker inactive but does not
+prevent other names with valid contracts from receiving ranges.
 
 Every historical input must reflect what was available at `available_at_utc`. Current peer
 membership, revised fundamentals, or present-day share counts may not be backfilled into historical
@@ -178,8 +202,12 @@ uncertainty penalty and reduce sizing confidence; they do not move intrinsic val
 
 ## 7. Market structure and volatility
 
-The shared Stage 2 OHLCV extension must provide split-consistent open/high/low/close/volume with
-corporate-action validation. A daily volume-weighted price computed from daily bars must be labeled
+The shared monitor/levels OHLCV artifact must provide split-consistent
+open/high/low/close/volume with corporate-action validation. It is isolated from the Stage 2
+covariance and Stage 11 lockbox panels. Source precedence is Yahoo -> IBKR -> Tiingo. Yahoo is the primary EOD source, IBKR is the bounded
+current/priority-name confirmation source, and Tiingo is the tertiary recovery source. Conflicting
+observations remain separately recorded and quality-gated; they are never averaged. A daily
+volume-weighted price computed from daily bars must be labeled
 `volume_weighted_daily_price`, not intraday VWAP.
 
 Candidate execution zones may use:
@@ -416,7 +444,7 @@ use of current market price as fair value.
 ## 15. Implementation sequence
 
 1. Amend and build the provider-independent expectations monitor.
-2. Add shared Stage 2 OHLCV, corporate-action validation, and executable-price conventions.
+2. Add shared monitor/levels OHLCV, corporate-action validation, and executable-price conventions.
 3. Define and validate sector-owned PIT valuation-input contracts.
 4. Implement shared valuation method applicability and robust aggregation.
 5. Implement long-only market-structure zones and valuation-ceiling gating.
@@ -426,22 +454,30 @@ use of current market price as fair value.
 9. Add consensus after sufficient PIT estimate-vintage history exists.
 10. Keep short-side levels diagnostic unless a new short campaign independently earns promotion.
 
-## 16. Proposed module layout
+## 16. Implemented module layout
 
 ```
 levels/
   LEVELS_ENGINE_SPEC.md
   levels_common.py
-  valuation_contract.py
-  valuation_methods.py
-  market_structure.py
-  outcome_ledger.py
-  45_build_valuation_ranges.py
-  46_build_execution_levels.py
-  47_validate_levels.py
-  48_resolve_level_outcomes.py
-  providers/                       # sector valuation-contract adapters only
-  data/                            # versioned method/company-type overrides
+  60_build_valuation_inputs.py     # Stage 1-sealed sector source -> fail-closed PIT contract
+  61_build_levels.py               # intrinsic ranges, margin of safety, market zones, states
+  62_validate_levels.py            # independent recompute, ceiling, lineage, no-order gates
+  63_update_level_outcomes.py      # immutable publications + separate 120-session resolutions
+  64_run_levels_daily.py           # deterministic daily sequence
 ```
 
-The script numbers are provisional and must be checked against the repository before implementation.
+The package is advisory and shadow-only. It contains no broker execution methods and cannot mutate
+scores, optimizer artifacts, target books, holdings, or orders.
+
+Current code status (2026-08-01): contract v2 and the range engine support shared trailing-FCF and
+allowlisted sector-specialist anchors. Existing July 31 run artifacts still use the prior contract
+and have intentionally not been regenerated. The next deliberate July 31 rerun will exercise v2;
+sector names without either a supported shared method or a complete specialist range will remain
+inactive by construction.
+
+Level publications remain append-only and first-write-wins on economic content. If a deterministic
+rerun produces identical bands/statuses under newly sealed config, input, or code artifacts, the
+new provenance tuple is recorded in `level_publication_source_aliases` without rewriting history.
+Any change to a published band, state, reason, or publication price still fails closed. A stale or
+missing market observation is never recorded as a current publication price.

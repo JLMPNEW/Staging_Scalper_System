@@ -6,12 +6,13 @@ import json
 import logging
 import math
 import os
+import sqlite3
 import sys
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,12 @@ from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
+from industrials.core.share_sources import (  # noqa: E402
+    ShareConversion,
+    load_share_conversions,
+    resolve_share_conversion,
+    resolve_share_snapshot,
+)
 from industrials.core.sec_predecessor_bridge import (  # noqa: E402
     DESPAC_BRIDGE_PROFILE,
     DESPAC_BRIDGE_TAXONOMY,
@@ -638,6 +645,83 @@ def reporting_standard_from_taxonomy(taxonomy: str) -> str:
     return taxonomy
 
 
+def backfill_mapped_xbrl_facts(
+    conn: Any,
+    *,
+    source_ids: tuple[str, ...],
+    tickers: list[str],
+    asof: date,
+) -> int:
+    """Apply current shared aliases to facts already present in the raw store.
+
+    This is deliberately network-free. It prevents a concept-map correction
+    from requiring another SEC fetch/parse cycle merely to populate the mapped
+    and canonical layers.
+    """
+    if not source_ids or not tickers:
+        return 0
+    source_ph = placeholders(list(source_ids))
+    ticker_ph = placeholders(tickers)
+    now = utc_now()
+    with conn:
+        cursor = conn.execute(
+            f"""
+            INSERT INTO fact_sec_xbrl_fact(
+                raw_fact_id, ticker, cik, source_id, accession_number,
+                form_type, filing_date, accepted_at, fiscal_year, fiscal_period,
+                period_start, period_end, frame, taxonomy, concept_name,
+                canonical_metric, financial_statement, period_type, unit,
+                value, sign_policy, source_priority, source_detail,
+                created_at, updated_at
+            )
+            SELECT r.raw_fact_id, r.ticker, r.cik, r.source_id,
+                   r.accession_number, r.form_type, r.filing_date, r.accepted_at,
+                   r.fiscal_year, r.fiscal_period, r.period_start, r.period_end,
+                   r.frame, r.taxonomy, r.concept_name, m.canonical_metric,
+                   m.financial_statement, m.period_type, r.unit,
+                   CASE m.sign_policy
+                       WHEN 'positive_abs' THEN ABS(r.raw_value)
+                       WHEN 'abs' THEN ABS(r.raw_value)
+                       WHEN 'negative_abs' THEN -ABS(r.raw_value)
+                       WHEN 'expense_from_net' THEN MAX(-r.raw_value, 0.0)
+                       ELSE r.raw_value
+                   END,
+                   m.sign_policy, m.priority,
+                   COALESCE(r.source_detail, 'loaded_raw') || '_mapped',
+                   ?, ?
+            FROM fact_sec_xbrl_fact_raw AS r
+            JOIN dim_xbrl_concept_map AS m
+              ON m.taxonomy = r.taxonomy
+             AND m.concept_name = r.concept_name
+             AND m.active_flag = 1
+            WHERE r.source_id IN ({source_ph})
+              AND r.ticker IN ({ticker_ph})
+              AND r.period_end IS NOT NULL
+              AND r.period_end <= ?
+              AND COALESCE(
+                    NULLIF(SUBSTR(r.accepted_at, 1, 10), ''),
+                    r.filing_date,
+                    r.period_end
+                  ) <= ?
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM fact_sec_xbrl_fact AS f
+                    WHERE f.raw_fact_id = r.raw_fact_id
+                      AND f.canonical_metric = m.canonical_metric
+              )
+            """,
+            (
+                now,
+                now,
+                *source_ids,
+                *tickers,
+                asof.isoformat(),
+                asof.isoformat(),
+            ),
+        )
+    return max(0, int(cursor.rowcount or 0))
+
+
 def refresh_canonical_facts(
     conn: Any,
     *,
@@ -656,6 +740,12 @@ def refresh_canonical_facts(
             for source in (source_id, *supplemental_source_ids)
             if str(source).strip()
         )
+    )
+    backfill_mapped_xbrl_facts(
+        conn,
+        source_ids=input_source_ids,
+        tickers=tickers,
+        asof=asof,
     )
     source_ph = placeholders(list(input_source_ids))
     append_only = os.environ.get("INDUSTRIALS_HISTORICAL_APPEND", "").strip() == "1"
@@ -1909,7 +1999,66 @@ def lookup_average_fx_rate(
     return lookup_fx_rate(conn, from_currency=from_currency, to_currency=to_currency, asof=end, max_staleness_days=max_staleness_days)
 
 
+def latest_unadjusted_close(
+    conn: Any,
+    *,
+    ticker: str,
+    market_source_ids: list[str],
+    asof: date,
+    max_staleness_days: int = 7,
+) -> float | None:
+    """Return a PIT unadjusted close suitable for a market-cap denominator."""
+    for market_source_id in market_source_ids:
+        try:
+            row = conn.execute(
+                """
+                SELECT bar_date, close
+                FROM fact_price_ohlcv
+                WHERE ticker = ?
+                  AND source_id = ?
+                  AND bar_date <= ?
+                  AND COALESCE(close, 0.0) > 0.0
+                ORDER BY bar_date DESC
+                LIMIT 1
+                """,
+                (ticker, market_source_id, asof.isoformat()),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            return None
+        if row is None:
+            continue
+        bar_date = parse_date(row["bar_date"])
+        price = as_float(row["close"])
+        if (
+            bar_date is not None
+            and price is not None
+            and price > 0.0
+            and 0 <= (asof - bar_date).days <= max_staleness_days
+        ):
+            return price
+    return None
+
+
 def latest_market_values(conn: Any, *, ticker: str, market_source_ids: list[str], model_family: str, asof: date) -> tuple[float | None, float | None]:
+    # Family-scoped share observations are resolved before the legacy global
+    # market snapshot. Families that have not opted into the share loader have
+    # no rows and retain their legacy behavior below.
+    try:
+        shares = resolve_share_snapshot(
+            conn,
+            ticker=ticker,
+            model_family=model_family,
+            asof=asof,
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        shares = None
+    if shares is not None and shares.market_cap is not None:
+        return shares.market_cap, shares.price
+
     for market_source_id in market_source_ids:
         row = conn.execute(
             """
@@ -1925,24 +2074,85 @@ def latest_market_values(conn: Any, *, ticker: str, market_source_ids: list[str]
         ).fetchone()
         market_cap = as_float(row["market_cap"]) if row is not None else None
         latest_price = as_float(row["regular_market_price"]) if row is not None else None
-        if latest_price is None:
-            row = conn.execute(
-                """
-                SELECT latest_adj_close
-                FROM feature_market_technical
-                WHERE ticker = ?
-                  AND source_id = ?
-                  AND model_family = ?
-                  AND asof_date <= ?
-                ORDER BY asof_date DESC
-                LIMIT 1
-                """,
-                (ticker, market_source_id, model_family, asof.isoformat()),
-            ).fetchone()
-            latest_price = as_float(row["latest_adj_close"]) if row is not None else None
-        if market_cap is not None or latest_price is not None:
+        if market_cap is not None:
             return market_cap, latest_price
+
+    # Filing-derived share observations normally do not carry a market price.
+    # Combine them only with an unadjusted PIT close from the configured market
+    # source. Adjusted closes can disagree with contemporaneous share counts.
+    unadjusted_close = latest_unadjusted_close(
+        conn,
+        ticker=ticker,
+        market_source_ids=market_source_ids,
+        asof=asof,
+    )
+    if shares is not None and shares.shares_outstanding is not None and unadjusted_close is not None:
+        return shares.shares_outstanding * unadjusted_close, unadjusted_close
+    if shares is not None and shares.price is not None:
+        return None, shares.price
+
+    # Legacy families may not yet have family-scoped share observations. Keep
+    # their historical price-only behavior without fabricating market cap.
+    for market_source_id in market_source_ids:
+        row = conn.execute(
+            """
+            SELECT latest_adj_close
+            FROM feature_market_technical
+            WHERE ticker = ?
+              AND source_id = ?
+              AND model_family = ?
+              AND asof_date <= ?
+            ORDER BY asof_date DESC
+            LIMIT 1
+            """,
+            (ticker, market_source_id, model_family, asof.isoformat()),
+        ).fetchone()
+        latest_price = as_float(row["latest_adj_close"]) if row is not None else None
+        if latest_price is not None:
+            return None, latest_price
     return None, None
+
+def diluted_share_market_cap_proxy(
+    conn: Any,
+    *,
+    ticker: str,
+    model_family: str,
+    asof: date,
+    diluted_shares: object,
+    country: object,
+    market_source_ids: list[str],
+    conversions: Mapping[str, Iterable[ShareConversion]],
+) -> tuple[float | None, float | None, str]:
+    shares = as_float(diluted_shares)
+    if shares is None or shares <= 0.0:
+        return None, None, ""
+
+    country_key = str(country or "").strip().upper()
+    if country_key in {"UNITED STATES", "USA", "US"}:
+        ratio = 1.0
+        method = "market_cap_proxy_diluted_shares_domestic"
+    else:
+        conversion = resolve_share_conversion(
+            conversions, ticker=ticker, day=asof
+        )
+        if (
+            conversion is None
+            or conversion.status not in {"REVIEWED_ADR", "REVIEWED_DIRECT"}
+            or conversion.ratio is None
+        ):
+            return None, None, ""
+        ratio = conversion.ratio
+        method = f"market_cap_proxy_diluted_shares_{conversion.status.lower()}"
+
+    price = latest_unadjusted_close(
+        conn,
+        ticker=ticker,
+        market_source_ids=market_source_ids,
+        asof=asof,
+    )
+    if price is None:
+        return None, None, ""
+    return shares / ratio * price, price, method
 
 
 def add_issue(conn: Any, *, ticker: str, source_id: str, model_family: str, severity: str, issue_type: str, detail: str) -> None:
@@ -2045,6 +2255,8 @@ def build_feature_from_facts(
     rows: list[dict[str, Any]],
     market_source_ids: list[str],
     fx_max_staleness_days: int,
+    share_conversions: Mapping[str, Iterable[ShareConversion]] | None = None,
+    enable_statement_share_fallback: bool = False,
     machinery_sec_text_core_metrics: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     feature = base_feature(ticker=ticker, asof=asof, source_id=source_id, model_family=model_family, company=company, profile=profile)
@@ -2367,6 +2579,26 @@ def build_feature_from_facts(
             revenue_stub_quality = "interim_revenue_annualized_observation_only"
     revenue_stub_annualized_usd = usd_income(revenue_stub_annualized)
     market_cap, latest_price = latest_market_values(conn, ticker=ticker, market_source_ids=market_source_ids, model_family=model_family, asof=asof)
+    market_cap_proxy_method = ""
+    if (
+        market_cap is None
+        and enable_statement_share_fallback
+    ):
+        proxy_cap, proxy_price, market_cap_proxy_method = (
+            diluted_share_market_cap_proxy(
+                conn,
+                ticker=ticker,
+                model_family=model_family,
+                asof=asof,
+                diluted_shares=diluted_shares,
+                country=company.get("country"),
+                market_source_ids=market_source_ids,
+                conversions=share_conversions or {},
+            )
+        )
+        if proxy_cap is not None:
+            market_cap = proxy_cap
+            latest_price = proxy_price
     enterprise_value = market_cap + (debt_usd or 0.0) - (cash_usd or 0.0) if market_cap is not None else None
 
     prev_revenue = metric_value({"revenue": select_previous_annual(currency_rows, "revenue", selected.get("revenue"))}, "revenue")
@@ -2455,6 +2687,8 @@ def build_feature_from_facts(
 
     reasons: list[str] = []
     quality_flags: list[str] = []
+    if market_cap_proxy_method:
+        quality_flags.append(market_cap_proxy_method)
     equity_issuance_proceeds_ttm_local, equity_proceeds_flag = sanitize_gross_proceeds_ttm(
         "equity_issuance_proceeds",
         equity_issuance_proceeds_ttm_local,
@@ -4173,6 +4407,21 @@ def main() -> None:
     # MK-3: FX rates older than this many days before the evaluation date are
     # rejected instead of silently converting at arbitrarily old rates.
     fx_max_staleness_days = int(cfg_get(config, "fx_rates.max_staleness_days", 30) or 30)
+    share_conversion_raw = (
+        str(
+            cfg_get(
+                config,
+                f"model_families.{model_family}.financial.share_conversion_overrides_csv",
+                "",
+            )
+            or ""
+        ).strip()
+    )
+    share_conversion_path = resolve_path(share_conversion_raw, base_dir=base_dir) if share_conversion_raw else None
+    if share_conversion_path is not None and not share_conversion_path.is_file():
+        raise FileNotFoundError(share_conversion_path)
+    share_conversions = load_share_conversions(share_conversion_path)
+    enable_statement_share_fallback = share_conversion_path is not None
 
     with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
@@ -4295,6 +4544,8 @@ def main() -> None:
                             rows=rows,
                             market_source_ids=market_source_ids,
                             fx_max_staleness_days=fx_max_staleness_days,
+                            share_conversions=share_conversions,
+                            enable_statement_share_fallback=enable_statement_share_fallback,
                             machinery_sec_text_core_metrics=(
                                 archive_core_metric_recovery_metrics
                                 if ticker in archive_core_metric_recovery_tickers

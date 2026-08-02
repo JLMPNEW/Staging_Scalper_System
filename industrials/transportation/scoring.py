@@ -24,7 +24,18 @@ from industrials.transportation.contracts import (
     write_manifest,
     write_rank_rows,
 )
+from industrials.transportation.classification import (
+    load_classification_overlays,
+    resolve_classification,
+)
 from industrials.transportation.financial_contract import MetricDefinition
+from industrials.transportation.surface_freight_score_engine import (
+    build_surface_component_scores,
+    metric_comparison_group,
+    metric_score_field,
+    score_surface_metric_percentiles,
+    surface_freight_score_eligible,
+)
 
 
 MODEL_FAMILY = "transportation"
@@ -38,6 +49,12 @@ COMPONENT_FIELD = {
     "capital_risk": "capital_risk_score",
     "development_stage_risk": "development_stage_risk_score",
     "positioning": "positioning_score",
+}
+POSITIONING_SIGNALS = {
+    "insider_net_value_90d": 1,
+    "insider_cluster_buyers_90d": 1,
+    "institutional_ownership_delta_pct": 1,
+    "short_interest_change_3m": -1,
 }
 
 
@@ -182,6 +199,93 @@ def latest_profile(conn: sqlite3.Connection, *, ticker: str, asof: str) -> dict[
     return dict(row) if row is not None else {}
 
 
+def load_positioning_rows(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+    source_id: str,
+) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM feature_positioning
+        WHERE model_family=? AND asof_date=? AND source_id=?
+        ORDER BY ticker
+        """,
+        (MODEL_FAMILY, asof, source_id),
+    ).fetchall()
+    return {str(row["ticker"]): dict(row) for row in rows}
+
+
+def positioning_component_scores(
+    members: list[dict[str, Any]],
+    positioning_rows: dict[str, dict[str, Any]],
+    *,
+    comparison_group_by_ticker: dict[str, str] | None = None,
+) -> tuple[dict[str, float], dict[str, dict[str, int]]]:
+    """Build PIT positioning percentiles with explicit Form 4 applicability.
+
+    Foreign private issuers marked ``not_applicable`` are not penalized for
+    Section 16/Form 4 signals. Missing Form 4 coverage for an otherwise covered
+    issuer remains applicable-but-unobserved and therefore lowers coverage.
+    """
+    member_by_ticker = {str(item["ticker"]): item for item in members}
+    coverage: dict[str, dict[str, int]] = {}
+    signal_scores: dict[str, list[float]] = defaultdict(list)
+    values_by_signal_cohort: dict[str, dict[str, list[tuple[str, float]]]] = {
+        signal: defaultdict(list) for signal in POSITIONING_SIGNALS
+    }
+    for ticker, member in member_by_ticker.items():
+        row = positioning_rows.get(ticker, {})
+        form4_status = str(row.get("form4_status") or "").strip().lower()
+        form4_applicable = form4_status != "not_applicable"
+        applicable = 2 + (2 if form4_applicable else 0)
+        observed = 0
+        cohort = (
+            (comparison_group_by_ticker or {}).get(ticker)
+            or str(member["calibration_cohort_id"])
+        )
+        for signal in POSITIONING_SIGNALS:
+            is_insider = signal in {
+                "insider_net_value_90d",
+                "insider_cluster_buyers_90d",
+            }
+            if is_insider and not form4_applicable:
+                continue
+            # Zero is meaningful only when the upstream Form 4 route is covered;
+            # a default zero on a missing route must not be treated as evidence.
+            if is_insider and form4_status != "covered":
+                continue
+            value = _number(row.get(signal))
+            if value is None:
+                continue
+            observed += 1
+            values_by_signal_cohort[signal][cohort].append((ticker, value))
+        coverage[ticker] = {"observed": observed, "applicable": applicable}
+
+    for signal, direction in POSITIONING_SIGNALS.items():
+        for cohort_rows in values_by_signal_cohort[signal].values():
+            raw = sorted(value for _, value in cohort_rows)
+            low = _quantile(raw, 0.05)
+            high = _quantile(raw, 0.95)
+            clipped = [(ticker, min(high, max(low, value))) for ticker, value in cohort_rows]
+            unique_values = sorted({value for _, value in clipped})
+            for ticker, value in clipped:
+                percentile = (
+                    50.0
+                    if len(unique_values) == 1
+                    else 100.0 * unique_values.index(value) / (len(unique_values) - 1)
+                )
+                signal_scores[ticker].append(
+                    percentile if direction == 1 else 100.0 - percentile
+                )
+    scores = {
+        ticker: sum(values) / len(values)
+        for ticker, values in signal_scores.items()
+        if values
+    }
+    return scores, coverage
+
+
 def load_metric_rows(
     conn: sqlite3.Connection,
     *,
@@ -292,7 +396,11 @@ def build_scoring_rows(
     minimum_avg_dollar_volume: float,
     minimum_score_confidence: float,
     minimum_specialized_coverage: float,
+    positioning_source_id: str,
+    minimum_positioning_input_coverage: float,
     specialized_overlay_weights: dict[str, float] | None = None,
+    classification_overlays_path: Path | None = None,
+    surface_score_policy: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     members = load_members(
         conn,
@@ -306,12 +414,21 @@ def build_scoring_rows(
         raise ValueError(
             f"No transportation members at {asof} for mode={membership_mode}"
         )
+    classification_overlays = (
+        load_classification_overlays(classification_overlays_path)
+        if classification_overlays_path is not None
+        else {}
+    )
     if set(component_weights) != set(COMPONENT_FIELD):
         raise ValueError(f"component_weights must define exactly {sorted(COMPONENT_FIELD)}")
     if any(weight < 0 for weight in component_weights.values()) or not math.isclose(
         sum(component_weights.values()), 1.0, abs_tol=1e-9
     ):
         raise ValueError("component_weights must be non-negative and sum to 1")
+    if not positioning_source_id.strip():
+        raise ValueError("positioning_source_id is required")
+    if not 0.0 <= minimum_positioning_input_coverage <= 1.0:
+        raise ValueError("minimum_positioning_input_coverage must be within [0, 1]")
     overlay_weights = {
         str(metric_id): float(weight)
         for metric_id, weight in (specialized_overlay_weights or {}).items()
@@ -350,21 +467,130 @@ def build_scoring_rows(
     # Use the same direction-adjusted percentile engine for the frozen generic
     # baseline and any explicitly activated bounded overlay. Optional
     # specialized metrics with zero weights never enter component averages.
+    retained_surface_metrics = {
+        str(item)
+        for item in (
+            (surface_score_policy or {})
+            .get("score_construction", {})
+            .get("retained_specialized_metrics", [])
+        )
+    }
+    retained_surface_definitions = [
+        definitions_by_id[metric_id]
+        for metric_id in sorted(retained_surface_metrics)
+        if metric_id in definitions_by_id
+    ]
     percentile_definitions = generic_definitions + [
         definitions_by_id[metric_id]
         for metric_id, weight in overlay_weights.items()
         if weight > 0.0
-    ]
+    ] + retained_surface_definitions
     percentiles = metric_percentiles(
         members,
         list(dict.fromkeys(percentile_definitions)),
         metric_rows,
     )
-    output: list[dict[str, str]] = []
+    classification_by_ticker: dict[str, Any] = {}
+    scoring_members: list[dict[str, Any]] = []
     for member in members:
+        ticker = str(member["ticker"])
+        classification = resolve_classification(
+            {
+                "ticker": ticker,
+                "industry": member["industry"],
+                "calibration_cohort": member["calibration_cohort_id"],
+                "calibration_use": member["calibration_use"],
+                "development_stage": member["development_stage"],
+            },
+            asof=asof,
+            overlays=classification_overlays,
+        )
+        classification_by_ticker[ticker] = classification
+        enriched = dict(member)
+        enriched.update(
+            {
+                "calibration_cohort": member["calibration_cohort_id"],
+                "calibration_pool": classification.calibration_pool,
+                "economic_peer_group": classification.economic_peer_group,
+                "risk_tier": classification.risk_tier,
+                "portfolio_role": classification.portfolio_role,
+            }
+        )
+        scoring_members.append(enriched)
+    surface_members = (
+        [
+            member
+            for member in scoring_members
+            if surface_freight_score_eligible(member, surface_score_policy)
+        ]
+        if surface_score_policy is not None
+        else []
+    )
+    surface_scored_by_ticker: dict[str, dict[str, object]] = {}
+    if surface_score_policy is not None:
+        surface_payload_rows: list[dict[str, object]] = []
+        for member in surface_members:
+            ticker = str(member["ticker"])
+            rows_for_ticker = metric_rows.get(ticker, {})
+            surface_payload_rows.append(
+                {
+                    **member,
+                    "asof_date": asof,
+                    "metric_values_json": {
+                        metric_id: row.get("metric_value")
+                        for metric_id, row in rows_for_ticker.items()
+                    },
+                    "metric_status_json": {
+                        metric_id: str(row.get("availability_status") or "")
+                        for metric_id, row in rows_for_ticker.items()
+                    },
+                }
+            )
+        surface_scored_by_ticker = {
+            str(row["ticker"]): row
+            for row in score_surface_metric_percentiles(
+                surface_payload_rows,
+                definitions=list(dict.fromkeys(percentile_definitions)),
+                policy=surface_score_policy,
+            )
+        }
+        for ticker, scored in surface_scored_by_ticker.items():
+            for definition in percentile_definitions:
+                score = _number(scored.get(metric_score_field(definition.metric_id)))
+                if score is not None:
+                    percentiles[ticker][definition.metric_id] = score
+    positioning_rows = load_positioning_rows(
+        conn,
+        asof=asof,
+        source_id=positioning_source_id,
+    )
+    positioning_scores, positioning_coverage = positioning_component_scores(
+        members,
+        positioning_rows,
+    )
+    if surface_score_policy is not None:
+        surface_groups = {
+            str(member["ticker"]): metric_comparison_group(
+                member, surface_score_policy
+            )
+            for member in surface_members
+        }
+        surface_positioning_scores, surface_positioning_coverage = (
+            positioning_component_scores(
+                surface_members,
+                positioning_rows,
+                comparison_group_by_ticker=surface_groups,
+            )
+        )
+        positioning_scores.update(surface_positioning_scores)
+        positioning_coverage.update(surface_positioning_coverage)
+    output: list[dict[str, str]] = []
+    output_members = surface_members if surface_score_policy is not None else scoring_members
+    for member in output_members:
         ticker = str(member["ticker"])
         cohort = str(member["calibration_cohort_id"])
         industry = str(member["industry"])
+        classification = classification_by_ticker[ticker]
         market = latest_feature(conn, table="feature_market_technical", ticker=ticker, asof=asof)
         financial = latest_feature(conn, table="feature_financial_statement", ticker=ticker, asof=asof)
         profile = latest_profile(conn, ticker=ticker, asof=asof)
@@ -426,26 +652,49 @@ def build_scoring_rows(
         required_observed = [definition for definition in required if definition.metric_id in values]
         specialized_observed = [definition for definition in specialized if definition.metric_id in values]
         specialized_coverage = len(specialized_observed) / len(specialized) if specialized else 1.0
-        component_values: dict[str, float] = {}
-        component_coverage: dict[str, dict[str, int]] = {}
-        for component, field in COMPONENT_FIELD.items():
-            component_metrics = [
-                item
-                for item in generic_applicable
-                if item.component == component
-            ]
-            available_scores: list[float] = []
-            ticker_percentiles = percentiles.get(ticker, {})
-            for item in component_metrics:
-                score = ticker_percentiles.get(item.metric_id)
-                if score is not None:
-                    available_scores.append(score)
-            component_coverage[component] = {
-                "observed": len(available_scores),
-                "applicable": len(component_metrics),
-            }
-            if available_scores:
-                component_values[field] = sum(available_scores) / len(available_scores)
+        surface_scored = surface_scored_by_ticker.get(ticker)
+        if surface_scored is not None and surface_score_policy is not None:
+            component_values, component_coverage = build_surface_component_scores(
+                surface_scored,
+                policy=surface_score_policy,
+            )
+        else:
+            component_values = {}
+            component_coverage = {}
+            for component, field in COMPONENT_FIELD.items():
+                component_metrics = [
+                    item
+                    for item in generic_applicable
+                    if item.component == component
+                ]
+                available_scores: list[float] = []
+                ticker_percentiles = percentiles.get(ticker, {})
+                for item in component_metrics:
+                    score = ticker_percentiles.get(item.metric_id)
+                    if score is not None:
+                        available_scores.append(score)
+                component_coverage[component] = {
+                    "observed": len(available_scores),
+                    "applicable": len(component_metrics),
+                }
+                if available_scores:
+                    component_values[field] = sum(available_scores) / len(available_scores)
+        position_coverage = positioning_coverage.get(
+            ticker,
+            {"observed": 0, "applicable": 4},
+        )
+        component_coverage["positioning"] = position_coverage
+        position_fraction = (
+            position_coverage["observed"] / position_coverage["applicable"]
+            if position_coverage["applicable"]
+            else 1.0
+        )
+        position_score = positioning_scores.get(ticker)
+        if (
+            position_score is not None
+            and position_fraction >= minimum_positioning_input_coverage
+        ):
+            component_values["positioning_score"] = position_score
         weighted = [
             (component_values[field], component_weights[component])
             for component, field in COMPONENT_FIELD.items()
@@ -457,6 +706,7 @@ def build_scoring_rows(
             definition
             for definition in specialized
             if overlay_weights.get(definition.metric_id, 0.0) > 0.0
+            and definition.metric_id not in retained_surface_metrics
         ]
         if len(active_overlay_metrics) > 1:
             raise ValueError(
@@ -472,9 +722,26 @@ def build_scoring_rows(
                     (1.0 - weight) * final_score
                     + weight * overlay_percentile
                 )
+        positioning_active = component_weights["positioning"] > 0.0
+        if surface_scored is not None:
+            score_input_total_count = sum(
+                item["applicable"]
+                for component, item in component_coverage.items()
+                if component != "positioning"
+            ) + int(positioning_active)
+            score_input_available_count = sum(
+                item["observed"]
+                for component, item in component_coverage.items()
+                if component != "positioning"
+            ) + int(positioning_active and "positioning_score" in component_values)
+        else:
+            score_input_total_count = len(generic_applicable) + int(positioning_active)
+            score_input_available_count = len(generic_observed) + int(
+                positioning_active and "positioning_score" in component_values
+            )
         availability_fraction = (
-            len(generic_observed) / len(generic_applicable)
-            if generic_applicable
+            score_input_available_count / score_input_total_count
+            if score_input_total_count
             else 0.0
         )
         required_fraction = len(required_observed) / len(required) if required else 1.0
@@ -497,8 +764,14 @@ def build_scoring_rows(
         missing_required = sorted(item.metric_id for item in required if item.metric_id not in values)
         if missing_required:
             reasons.append("missing_required_metrics:" + ",".join(missing_required))
-        if overlay_active and specialized_coverage < minimum_specialized_coverage:
+        if active_overlay_metrics and specialized_coverage < minimum_specialized_coverage:
             reasons.append(f"specialized_coverage_below_{minimum_specialized_coverage:.2f}")
+        if positioning_active and position_score is None:
+            reasons.append("missing_positioning_component")
+        elif positioning_active and position_fraction < minimum_positioning_input_coverage:
+            reasons.append(
+                f"positioning_coverage_below_{minimum_positioning_input_coverage:.2f}"
+            )
         if score_confidence < minimum_score_confidence:
             reasons.append(f"score_confidence_below_{minimum_score_confidence:.2f}")
         rank_ready_policy = str(policy.get("rank_ready_policy") or "")
@@ -528,6 +801,11 @@ def build_scoring_rows(
             "calibration_cohort_name": member["calibration_cohort"],
             "calibration_use": member["calibration_use"],
             "development_stage": stage,
+            "classification_policy_version": classification.policy_version,
+            "calibration_pool": classification.calibration_pool,
+            "economic_peer_group": classification.economic_peer_group,
+            "risk_tier": classification.risk_tier,
+            "portfolio_role": classification.portfolio_role,
             "membership_source_id": member["membership_source_id"],
             "membership_basis": member["membership_basis"],
             "membership_start_date": member["start_date"],
@@ -561,8 +839,8 @@ def build_scoring_rows(
             "minimum_financial_confidence": _fmt(minimum_financial_confidence),
             "policy_valid_from": policy.get("valid_from", ""),
             "policy_gate_status": "pass" if policy_pass else "blocked",
-            "score_input_available_count": len(generic_observed),
-            "score_input_total_count": len(generic_applicable),
+            "score_input_available_count": score_input_available_count,
+            "score_input_total_count": score_input_total_count,
             "score_confidence": _fmt(score_confidence),
             "final_score": _fmt(max(0.0, min(100.0, final_score))),
             "rank_ready_flag": int(rank_ready),
@@ -601,9 +879,23 @@ def finalize_rank_rows(
         active_model_version = production_lock.score_model_version
         active_contract_version = "transportation_final_rank_table_v1_production"
         for source in prepared:
-            score = weighted_score(source, production_lock.weights)
+            score = weighted_score(
+                source,
+                production_lock.weights,
+                require_complete=True,
+            )
             if score is None:
-                raise ValueError(f"{source.get('ticker')}: locked score is unavailable")
+                missing = sorted(
+                    field
+                    for field, weight in production_lock.weights.items()
+                    if weight > 0 and _number(source.get(field)) is None
+                )
+                source["rank_ready_flag"] = "0"
+                source["rank_ready_reason"] = (
+                    "missing_locked_model_components:" + ",".join(missing)
+                )
+                source["model_status"] = "incomplete"
+                continue
             source["final_score"] = _fmt(max(0.0, min(100.0, score)))
     ordered = sorted(
         prepared,
@@ -615,7 +907,7 @@ def finalize_rank_rows(
     )
     cohort_order: dict[str, list[str]] = defaultdict(list)
     for row in ordered:
-        cohort_order[str(row["calibration_cohort"])].append(str(row["ticker"]))
+        cohort_order[str(row["calibration_pool"])].append(str(row["ticker"]))
     cohort_rank = {
         ticker: rank
         for tickers in cohort_order.values()
@@ -627,6 +919,21 @@ def finalize_rank_rows(
         rank_ready = str(source.get("rank_ready_flag") or "0") == "1"
         row = {field: str(source.get(field) or "") for field in SCORING_FEATURE_FIELDS}
         production = production_lock is not None
+        calibration_authorized = (
+            str(source.get("calibration_use") or "") == "core"
+            and str(source.get("development_stage") or "") == "operating"
+            and str(source.get("portfolio_role") or "")
+            in {
+                "core_candidate", "airline_satellite_research"
+            }
+        )
+        portfolio_authorized = (
+            str(source.get("portfolio_role") or "") == "core_candidate"
+        )
+        oos_valid = production and calibration_authorized
+        candidate_eligible = (
+            oos_valid and portfolio_authorized and rank_ready
+        )
         candidate_reason = (
             "ok" if rank_ready else str(source.get("rank_ready_reason") or "not_rank_ready")
         )
@@ -637,27 +944,39 @@ def finalize_rank_rows(
                 "score_model_version": active_score_model_version,
                 "model_version": active_model_version,
                 "scoring_contract_version": active_contract_version,
-                "portfolio_candidate_gate": "1" if production and rank_ready else "0",
+                "portfolio_candidate_gate": "1" if candidate_eligible else "0",
                 "portfolio_candidate_score": str(source.get("final_score") or ""),
                 "portfolio_candidate_status": (
-                    "eligible" if production and rank_ready else
-                    "not_eligible" if production else "shadow_only"
+                    "eligible" if candidate_eligible else
+                    "not_eligible" if oos_valid else "shadow_only"
                 ),
                 "portfolio_candidate_reason": (
-                    candidate_reason if production else
+                    candidate_reason if candidate_eligible else
+                    "portfolio_role_not_production_authorized:"
+                    + str(source.get("portfolio_role") or "")
+                    if oos_valid and not portfolio_authorized else
+                    candidate_reason if oos_valid else
                     "shadow_only_oos_calibration_not_available"
                 ),
-                "calibration_eligible_flag": "1" if rank_ready else "0",
+                "calibration_eligible_flag": (
+                    "1" if rank_ready and calibration_authorized else "0"
+                ),
                 "research_calibration_input_eligible_flag": "0",
                 "research_calibration_reason": "current_snapshot_not_survivorship_corrected",
-                "calibration_sample_role": "strict_oos" if production else "excluded",
+                "calibration_sample_role": "strict_oos" if oos_valid else "excluded",
                 "stage11_calibration_panel_source": "current_transportation_dashboard_snapshot",
                 "stage11_calibration_input_eligible_flag": "0",
                 "stage11_calibration_input_reason": "current_snapshot_not_survivorship_corrected",
                 "survivorship_corrected_panel_flag": "0",
-                "oos_score_valid_flag": "1" if production else "0",
-                "oos_score_asof_date": str(source.get("asof_date") or "") if production else "",
-                "oos_invalid_reason": "" if production else "shadow_pre_oos_calibration",
+                "oos_score_valid_flag": "1" if oos_valid else "0",
+                "oos_score_asof_date": (
+                    str(source.get("asof_date") or "") if oos_valid else ""
+                ),
+                "oos_invalid_reason": (
+                    "" if oos_valid else
+                    "outside_calibrated_production_universe" if production else
+                    "shadow_pre_oos_calibration"
+                ),
                 "calibration_lock_date": production_lock.lock_date.isoformat() if production_lock else "",
             }
         )

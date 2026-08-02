@@ -74,6 +74,14 @@ def _build_price_db(path: Path) -> None:
                     "adjusted_close",
                     1,
                 ),
+                (
+                    "SPY",
+                    "2026-07-24",
+                    "yahoo_finance_adjusted",
+                    640.0,
+                    "adjusted_close",
+                    1,
+                ),
             ],
         )
 
@@ -138,3 +146,41 @@ def test_local_adjusted_price_fallback_missing_database_is_nonfatal(
     assert prices == {}
     assert provenance == {}
     assert summaries[0]["database_exists"] is False
+
+
+def test_local_adjusted_price_fallback_can_include_market_instruments(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "industrials.sqlite"
+    _build_price_db(database_path)
+
+    prices, provenance, summaries = load_local_adjusted_price_fallbacks(
+        [
+            {
+                "name": "test_db",
+                "database_path": str(database_path),
+                "source_pipelines": ["machinery"],
+                "include_market_instruments": True,
+                "source_ids": ["yahoo_finance_adjusted"],
+                "accepted_price_adjustments": ["adjusted_close"],
+            }
+        ],
+        base_dir=tmp_path,
+        universe=[
+            {
+                "ticker": "SPY",
+                "role": "market_instrument",
+                "source_pipeline": "",
+            },
+            {"ticker": "OTHER", "role": "scored", "source_pipeline": "biotech"},
+        ],
+        start=date(2026, 7, 1),
+        end=date(2026, 7, 24),
+    )
+
+    assert prices == {"SPY": [("2026-07-24", 640.0)]}
+    assert provenance["SPY"].provider == (
+        "local_sqlite:test_db:yahoo_finance_adjusted"
+    )
+    assert summaries[0]["include_market_instruments"] is True
+    assert summaries[0]["requested_ticker_count"] == 1

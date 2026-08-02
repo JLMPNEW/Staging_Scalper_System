@@ -8,7 +8,10 @@ DEPENDENCIES: dict[str, set[str]] = {
     "scores": {"risk", "optimizer", "costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "risk": {"optimizer", "costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "liquidity": {"risk", "costs", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
-    "optimizer": {"costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
+    # Rotation and macro are parallel inputs derived from Stage 1/2, not optimizer
+    # consumers. Keeping them here caused a filtered Stage-3 rerun to delete valid
+    # same-date independent evidence.
+    "optimizer": {"costs", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "costs": {"blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
     "rotation": {"blacklitterman", "sleeves", "exits", "final"},
     "macro": {"blacklitterman", "sleeves", "exits", "final"},
@@ -18,6 +21,9 @@ DEPENDENCIES: dict[str, set[str]] = {
     "exits": {"payout", "final"},
     "payout": {"final"},
     "governor": {"final"},
+    "earnings": {"final_report"},
+    "monitor": {"final_report"},
+    "levels": {"final_report"},
 }
 
 CONSUMER_FILES: dict[str, tuple[str, ...]] = {
@@ -50,7 +56,13 @@ CONSUMER_FILES: dict[str, tuple[str, ...]] = {
         "payout/payout_plan.csv",
     ),
     "governor": ("governor/governor_manifest.json", "governor/gross_exposure_directive.json"),
-    "final": ("final/final_manifest.json", "final/final_target_book.csv"),
+    "final": (
+        "final/final_weights_manifest.json",
+        "final/final_target_weights.csv",
+        "final/final_manifest.json",
+        "final/final_target_book.csv",
+    ),
+    "final_report": ("final/final_manifest.json", "final/final_target_book.csv"),
 }
 
 

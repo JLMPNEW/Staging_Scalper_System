@@ -21,6 +21,9 @@ from industrials.transportation.contracts import (  # noqa: E402
 )
 from industrials.transportation.financial_contract import load_metric_registry  # noqa: E402
 from industrials.transportation.scoring import build_scoring_rows  # noqa: E402
+from industrials.transportation.surface_freight_score_engine import (  # noqa: E402
+    load_surface_freight_score_policy,
+)
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG, MODEL_FAMILY  # noqa: E402
 
 
@@ -48,6 +51,14 @@ def parse_args() -> argparse.Namespace:
             "snapshot at or before --asof; current refresh stays exact."
         ),
     )
+    parser.add_argument(
+        "--policy-asof",
+        default="",
+        help=(
+            "Freeze the scoring-eligibility policy date for historical replay. "
+            "Current scoring defaults to --asof."
+        ),
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -59,6 +70,7 @@ def parse_asof(value: str) -> str:
 def main() -> int:
     args = parse_args()
     asof = parse_asof(args.asof)
+    policy_asof = parse_asof(args.policy_asof) if args.policy_asof else asof
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     family = family_config(config, MODEL_FAMILY)
@@ -75,6 +87,10 @@ def main() -> int:
     if output_path.exists() and not args.force:
         raise FileExistsError(f"Refusing to overwrite scoring features without --force: {output_path}")
     registry_path = resolve_path(financial["metric_registry"], base_dir=base_dir)
+    surface_policy_path = resolve_path(
+        scoring["surface_freight_score_policy"], base_dir=base_dir
+    )
+    surface_policy = load_surface_freight_score_policy(surface_policy_path)
     policy_path = resolve_path(
         cfg_get(config, "scoring_policy.families.transportation.eligibility_policy_csv"),
         base_dir=base_dir,
@@ -100,12 +116,22 @@ def main() -> int:
             definitions=definitions,
             registry_version=registry_version,
             policy_path=policy_path,
+            policy_asof=policy_asof,
             component_weights=weights,
             max_staleness_days=int(scoring["max_staleness_days"]),
             minimum_avg_dollar_volume=float(scoring["minimum_avg_dollar_volume_60d"]),
             minimum_score_confidence=float(scoring["minimum_score_confidence"]),
             minimum_specialized_coverage=float(scoring["minimum_specialized_coverage"]),
+            positioning_source_id=str(scoring["positioning_feature_source_id"]),
+            minimum_positioning_input_coverage=float(
+                scoring["minimum_positioning_input_coverage"]
+            ),
             specialized_overlay_weights=overlay_weights,
+            classification_overlays_path=resolve_path(
+                universe["classification_overlays_csv"],
+                base_dir=base_dir,
+            ),
+            surface_score_policy=surface_policy,
         )
     write_scoring_rows(output_path, rows)
     manifest = {
@@ -114,6 +140,7 @@ def main() -> int:
         "asof_date": asof,
         "membership_mode": args.membership_mode,
         "metric_snapshot_mode": args.metric_snapshot_mode,
+        "policy_asof": policy_asof,
         "row_count": len(rows),
         "rank_ready_count": sum(row["rank_ready_flag"] == "1" for row in rows),
         "blocked_count": sum(row["rank_ready_flag"] == "0" for row in rows),
@@ -125,6 +152,26 @@ def main() -> int:
         "specialized_overlay_weights": overlay_weights,
         "specialized_overlay_active": any(
             weight > 0.0 for weight in overlay_weights.values()
+        ),
+        "surface_freight_score_policy_path": str(surface_policy_path),
+        "surface_freight_score_policy_sha256": file_sha256(surface_policy_path),
+        "surface_freight_score_policy_version": str(
+            surface_policy["policy_version"]
+        ),
+        "surface_freight_score_engine_version": str(
+            surface_policy["score_engine_version"]
+        ),
+        "surface_freight_eligible_ticker_count": len(
+            surface_policy["eligible_tickers"]
+        ),
+        "positioning_feature_source_id": str(
+            scoring["positioning_feature_source_id"]
+        ),
+        "positioning_component_weight": float(
+            scoring["component_weights"]["positioning"]
+        ),
+        "positioning_populated_count": sum(
+            bool(str(row.get("positioning_score") or "")) for row in rows
         ),
         "output_csv": str(output_path),
         "output_artifact": {

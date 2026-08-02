@@ -39,6 +39,13 @@ def test_current_refresh_step_graph_is_bounded_and_complete() -> None:
     assert "03_sync_prices" in identifiers
     assert "07_sync_sec" in identifiers
     assert "11_sync_fx" in identifiers
+    assert "03a_sync_shares" in identifiers
+    assert identifiers.index("07_sync_sec") < identifiers.index("03a_sync_shares")
+    assert identifiers.index("03a_sync_shares") < identifiers.index("19_build_exact_pit")
+    share_step = next(step for step in steps if step.step_id == "03a_sync_shares")
+    assert share_step.network is True
+    assert "--include-historical" not in share_step.args
+    assert "--allow-partial" in share_step.args
     disclosure_step = next(
         step for step in steps if step.step_id == "08c_sync_disclosures"
     )

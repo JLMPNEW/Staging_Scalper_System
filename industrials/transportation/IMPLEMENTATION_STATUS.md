@@ -1,6 +1,43 @@
 # Transportation Implementation Status
 
-Status date: 2026-07-30
+Status date: 2026-07-31
+
+## Definitive historical rebuild and calibration result (2026-07-31)
+
+The required implementation and execution sequence has been completed against the
+latest available market date, 2026-07-30. The implementation and data gates pass;
+the new generic model does **not** pass the statistical promotion gates.
+
+- PIT feature history: PASS and frozen; 93 snapshots from 2019-01-02 through
+  2026-07-30, 39 registered metrics, 9,607 membership rows, 374,673 metric
+  availability rows, and zero validation errors.
+- Daily market history: PASS for 1,904 dates. Each local price series was loaded
+  once; network requests and parser invocations were both zero. The Celadon `CGI`
+  cache boundary was corrected to the verified 2019-12-09 terminal membership date.
+- Daily score history: PASS for all 1,904 dates with active and delisted membership
+  sources present. Rank-ready breadth ranges from 12 to 84 names.
+- Generic OOS panel: PASS; 78,562 rows, 35,230 eligible rows, 382 weekly snapshots,
+  and independently validated train/validation/embargo/holdout splits.
+- Calibration-input preflight: PASS for all seven frozen candidates. Complete-row
+  coverage is 11,509 / 11,652 = 98.7727%, above the unchanged 90% minimum. The old
+  zero-valuation-coverage blocker is resolved.
+- Calibration procedure: PASS as an artifact and governance execution. Validation
+  selected `growth_quality` without using the holdout. Its validation mean IC was
+  0.03147, mean net top-basket excess return was 0.02236, and hit rate was 60.32%.
+- Promotion evidence: FAIL. On the sealed holdout, `growth_quality` produced mean IC
+  -0.04612, mean net top-basket excess return -0.00328, and a 36.36% hit rate. All
+  four walk-forward blocks failed, for a 0% pass rate versus the 50% minimum.
+- Production readiness audit: PASS as an independent audit, with
+  `promotion_eligible=false` and the three statistical blockers explicitly sealed.
+- Current rank and portfolio adapter: PASS at 2026-07-30 with 112 rows and 83
+  rank-ready names. `oos_score_valid_flag` and the portfolio-candidate gate remain
+  zero by design, so transportation remains optional and zero-allocation.
+
+No promotion, production lock activation, or portfolio cap/source activation was
+performed. Doing so would violate the unchanged holdout and walk-forward gates. A
+new calibration is permitted only after genuinely new, outcome-blind observations
+accumulate under the governed monitoring/recalibration contract; selecting a
+different candidate after viewing this holdout would be data leakage.
 
 ## Implemented Batches
 
@@ -11,9 +48,10 @@ Status date: 2026-07-30
 - [x] Seed, active, historical/delisted, alias, universe, and identity scripts.
 - [x] Shared family-scoped universe implementation.
 - [x] Cross-family isolation tests.
-- [x] Norgate symbol reconciliation: 160 reviewed mappings, 158 calibration-usable.
-- [x] Exact provider final-date contracts for 46 of 48 delisted seeds.
-- [x] Explicit fail-closed exclusions for CGI and RRTS while Norgate classifies them as current/OTC.
+- [x] Norgate symbol reconciliation: 160 reviewed mappings, 159 calibration-usable.
+- [x] Exact provider final-date contracts for 46 delisted seeds plus one reviewed economic-terminal contract.
+- [x] Celadon `CGI` maps only to provider `CGIP`, with a 2019-12-09 economic cutoff stored separately from the provider's continuing OTC quote series.
+- [x] RRTS is the sole approved price exclusion.
 - [x] Family-pinned price sync, policy audit, market-feature, and market validation wrappers.
 - [x] Explicit-map Norgate delisted price importer and portfolio-layer price/event exporter.
 - [x] Optional portfolio-layer shadow-source configuration with `require_oos_score_valid=true`.
@@ -27,7 +65,7 @@ Status date: 2026-07-30
 - [x] End-to-end `industrial_family` portfolio-adapter validator.
 - [x] Production foundation load in the configured shared industrials database.
 - [x] Historical adjusted prices for all 112 active names and three benchmarks.
-- [x] Norgate total-return histories for 46 calibration-usable delisted names.
+- [x] Norgate total-return histories for 47 calibration-usable delisted names.
 - [x] Portfolio-layer delisted price/event contract export.
 - [x] Historical SEC submissions and CompanyFacts load for all 160 active-plus-delisted names.
 - [x] Nine-pair transportation FX contract, including NOKUSD, plus post-SEC currency discovery.
@@ -106,14 +144,15 @@ Status date: 2026-07-30
 ## Verification
 
 - Configured production database: `C:\Users\josel\Documents\STAGING\DB\industrials.sqlite`.
-- Foundation: 112 active, 158 calibration-usable, and 48 delisted seeds; universe and identity
-  gates PASS. The 158 usable rows comprise all active names and 46 delisted names; CGI and RRTS
-  remain explicit provider-identity exclusions.
+- Foundation: 112 active, 159 calibration-usable, and 48 delisted seeds; universe and identity
+  gates PASS. The 159 usable rows comprise all active names and 47 delisted names; only RRTS
+  remains an approved provider-identity exclusion.
 - Active prices: 172,377 adjusted bars across all 112 active names through 2026-07-22.
 - Benchmarks: IYT, XTN, and SPY all pass the 2026-07-22 current-through gate.
 - Corrected market policy audit: 115 rows, zero failures, and four short-history reviews
   (AZUL, ELOG, FDXF, RUBI).
-- Delisted prices: 178,217 Norgate total-return bars across all 46 usable delisted names.
+- Delisted prices: 184,706 database bars across 47 usable delisted names; the portfolio export
+  contains 184,952 rows and 47 event contracts.
 - FX: all nine explicitly pinned transportation pairs pass, including NOKUSD; JPYUSD is also
   retained from reporting-currency discovery.
 - SEC: 160/160 reporting profiles and filing coverage, 21,147 filings, 1,704,895 raw facts,

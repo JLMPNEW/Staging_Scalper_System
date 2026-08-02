@@ -1,5 +1,10 @@
 # Industrials Transportation
 
+The 2026-08-01 outcome-blind surface-freight cohort and metric-level score
+redesign are documented in
+`SURFACE_FREIGHT_SCORE_REDESIGN_2026-08-01.md`. The redesign remains research
+only and fails closed for production promotion.
+
 Transportation is a model family in the shared industrials pipeline. It uses
 the shared `industrials.sqlite` database and scopes taxonomy, membership,
 features, issues, and runs with `model_family=transportation`.
@@ -511,10 +516,11 @@ CSV and hash manifest; reruns require `--force`. The adapter validator proves th
 layer can read the artifact while all investment, research-calibration, survivorship, and OOS gates
 remain false.
 
-The identity contract contains 160 reviewed Norgate mappings. All 112 active names and 46
-delisted names are calibration-usable. CGI and RRTS remain retained in the 48-row delisted seed
-but are excluded from calibration because Norgate still classifies those OTC symbols as current
-and supplies no terminal date. The market wrappers pin `model_family=transportation`, benchmarks
+The identity contract contains 160 reviewed Norgate mappings. All 112 active names and 47
+delisted names are calibration-usable. RRTS is the sole approved price exclusion. Celadon Group
+maps only to `CGIP`, never CGI Inc.'s `GIB`; its reviewed investability cutoff is 2019-12-09 even
+though sparse OTC prints continue afterward. Provider `last_quoted_date` and reviewed
+`eligibility_end_date` remain separate. The market wrappers pin `model_family=transportation`, benchmarks
 `IYT,XTN,SPY`, family output paths, and the transportation policy.
 
 The portfolio layer consumes only flat published artifacts. Its transportation source is optional,

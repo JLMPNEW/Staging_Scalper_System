@@ -28,6 +28,8 @@ VALID_STATUSES = frozenset(
         "PROXY",
         "NOT_APPLICABLE",
         "NOT_DISCLOSED",
+        "MISSING_MARKET_DENOMINATOR",
+        "NEGATIVE_PROFIT_NOT_MEANINGFUL",
         "DISCLOSED_UNPARSED",
         "PARSER_FAILURE",
     }

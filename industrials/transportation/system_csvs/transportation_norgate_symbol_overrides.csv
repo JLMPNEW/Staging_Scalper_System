@@ -1,8 +1,8 @@
-ticker,norgate_symbol,source_database,override_start_date,override_end_date,mapping_reason,calibration_usable_flag,review_status,notes
-NM,NM-202312,US Equities Delisted,,,reviewed_company_identity_provider_exit_date_differs_from_seed_year,1,reviewed,Provider identifies Navios Maritime Holdings and supplies the final quoted date.
-HRZ,HRZL-201506,US Equities Delisted,,,reviewed_former_symbol_alias,1,reviewed,HRZ collides with historical Hertz; HRZL is the Horizon Lines history.
-EXM,EXMCQ-201402,US Equities Delisted,,,reviewed_bankruptcy_symbol_alias,1,reviewed,Post-bankruptcy Q suffix identifies Excel Maritime Carriers history.
-CGI,CGIP,US Equities,,,current_otc_security_conflicts_with_delisted_seed,0,reviewed,Excluded from delisted calibration until a provider terminal date and terminal value are verified.
-YELL,YELLQ-202607,US Equities Delisted,,,reviewed_bankruptcy_symbol_alias_provider_exit_after_seed_event,1,reviewed,Provider final quoted date is used even though the corporate bankruptcy event began in 2023.
-RRTS,RRTS,US Equities,,,current_otc_security_conflicts_with_delisted_seed,0,reviewed,Excluded from delisted calibration because Norgate still classifies the symbol as current and no terminal date exists.
-EGL,EAGL-200708,US Equities Delisted,,,reviewed_former_symbol_alias,1,reviewed,EAGL is the historical Norgate symbol for EGL Inc.
+ticker,norgate_symbol,source_database,override_start_date,override_end_date,eligibility_end_basis,mapping_reason,calibration_usable_flag,review_status,source_url,notes
+NM,NM-202312,US Equities Delisted,,,,reviewed_company_identity_provider_exit_date_differs_from_seed_year,1,reviewed,,Provider identifies Navios Maritime Holdings and supplies the final quoted date.
+HRZ,HRZL-201506,US Equities Delisted,,,,reviewed_former_symbol_alias,1,reviewed,,HRZ collides with historical Hertz; HRZL is the Horizon Lines history.
+EXM,EXMCQ-201402,US Equities Delisted,,,,reviewed_bankruptcy_symbol_alias,1,reviewed,,Post-bankruptcy Q suffix identifies Excel Maritime Carriers history.
+CGI,CGIP,US Equities,,2019-12-09,reviewed_economic_terminal_event,reviewed_economic_terminal_override_provider_continues_otc,1,reviewed,https://www.prnewswire.com/news-releases/celadon-group-inc-and-affiliates-commence-voluntary-chapter-11-cases-300971115.html,NYSE CGI was suspended on 2018-04-03 and removed on 2018-04-30; the company shut all operations effective 2019-12-09. Norgate CGIP continues sparse OTC quotes after the economic terminal event, so 2019-12-09 is an investability cutoff and not represented as the provider's last quote. Never substitute CGI Inc. ticker GIB.
+YELL,YELLQ-202607,US Equities Delisted,,,,reviewed_bankruptcy_symbol_alias_provider_exit_after_seed_event,1,reviewed,,Provider final quoted date is used even though the corporate bankruptcy event began in 2023.
+RRTS,RRTS,US Equities,,,,current_otc_security_conflicts_with_delisted_seed,0,reviewed,,Excluded from delisted calibration because Norgate still classifies the symbol as current and no terminal date exists.
+EGL,EAGL-200708,US Equities Delisted,,,,reviewed_former_symbol_alias,1,reviewed,,EAGL is the historical Norgate symbol for EGL Inc.

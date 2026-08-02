@@ -26,6 +26,7 @@ from portfolio_layer.core.contracts import (  # noqa: E402
     COLLECTED_FIELDS,
     fail_if_exists,
     manifest_accepts,
+    read_csv,
     read_manifest,
     sha256_file,
     write_csv,
@@ -33,7 +34,7 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 from portfolio_layer.core.db import add_issue, connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
-from portfolio_layer.scores.adapters import run_adapter  # noqa: E402
+from portfolio_layer.scores.adapters import dated_candidates, run_adapter  # noqa: E402
 
 
 LOGGER = logging.getLogger("collect_sector_scores")
@@ -138,6 +139,64 @@ def sealed_run_raw_fallback(paths, *, run_as_of: str, pipeline: str) -> Path | N
     return raw_path
 
 
+def _oos_valid_rows(path: Path) -> bool:
+    return any(
+        str(row.get("oos_score_valid_flag", "")).strip().casefold()
+        in {"1", "1.0", "true", "yes", "y", "t"}
+        for row in read_csv(path)
+    )
+
+
+def operational_oos_fallback_config(
+    cfg: dict, sector_root: Path, *, run_as_of: str
+) -> dict:
+    """Select a prior production artifact during a bounded model-transition gap."""
+    if str(cfg.get("file_mode", "flat")) != "dated":
+        raise ValueError(
+            f"Operational OOS fallback requires dated mode for {cfg.get('model_family')}"
+        )
+    candidates = dated_candidates(cfg, sector_root)
+    target = run_as_of.replace("-", "")
+    eligible = [candidate for candidate in candidates if candidate[0] <= target]
+    if not eligible:
+        raise FileNotFoundError(
+            f"No dated score file for {cfg.get('model_family')} at or before {run_as_of}"
+        )
+    chosen = max(eligible, key=lambda candidate: candidate[0])
+    if _oos_valid_rows(chosen[1]):
+        return dict(cfg)
+    tolerance = int(cfg.get("staleness_tolerance_days", 0))
+    if tolerance < 0:
+        raise ValueError("staleness_tolerance_days must be non-negative")
+    target_date = parse_iso_date(run_as_of, label="run as-of")
+    for candidate_date, candidate_path in sorted(eligible, reverse=True):
+        candidate_iso = (
+            f"{candidate_date[:4]}-{candidate_date[4:6]}-{candidate_date[6:]}"
+        )
+        age_days = (
+            target_date - parse_iso_date(candidate_iso, label="candidate date")
+        ).days
+        if age_days < 0 or age_days > tolerance:
+            continue
+        if _oos_valid_rows(candidate_path):
+            LOGGER.warning(
+                "Sector %s artifact %s has no OOS-valid rows; using prior "
+                "OOS-valid artifact %s within %d-day tolerance",
+                cfg.get("model_family"),
+                chosen[1],
+                candidate_path,
+                tolerance,
+            )
+            fallback_cfg = dict(cfg)
+            fallback_cfg["file_mode"] = "flat"
+            fallback_cfg["file_path"] = str(candidate_path)
+            return fallback_cfg
+    raise ValueError(
+        f"No OOS-valid dated score file for {cfg.get('model_family')} at or before "
+        f"{run_as_of} within {tolerance} calendar days"
+    )
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -159,6 +218,23 @@ def main() -> int:
         LOGGER.error("No enabled sectors in score_contract.sectors")
         return 1
     min_successful = int(cfg_get(config, "score_contract.min_successful_sectors", len(sectors)))
+    fallback_pipelines = {
+        str(value).strip()
+        for value in cfg_get(
+            config, "score_contract.operational_oos_fallback_pipelines", []
+        )
+        if str(value).strip()
+    }
+    configured_pipelines = {
+        str(sector.get("model_family", "unknown")) for sector in sectors
+    }
+    unknown_fallbacks = sorted(fallback_pipelines - configured_pipelines)
+    if unknown_fallbacks:
+        LOGGER.error(
+            "Unknown operational_oos_fallback_pipelines entries: %s",
+            unknown_fallbacks,
+        )
+        return 1
     required_pipelines = {
         str(s.get("model_family", "unknown"))
         for s in sectors
@@ -168,8 +244,19 @@ def main() -> int:
     results = []
     raw_results = []
     failures: list[dict[str, str]] = []
-    for cfg in sectors:
+    for sector_cfg in sectors:
+        cfg = dict(sector_cfg)
         pipeline = str(cfg.get("model_family", "unknown"))
+        if pipeline in fallback_pipelines:
+            if not args.as_of:
+                LOGGER.error(
+                    "Operational OOS fallback requires an explicit --as-of for %s",
+                    pipeline,
+                )
+                return 1
+            cfg = operational_oos_fallback_config(
+                cfg, sector_root, run_as_of=args.as_of
+            )
         try:
             result = run_adapter(cfg, sector_root, args.as_of)
         except FileNotFoundError as exc:

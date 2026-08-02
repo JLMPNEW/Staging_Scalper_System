@@ -176,8 +176,14 @@ def main() -> int:
         str(args.start_date or score_history["start_date"]), label="start date"
     )
     end_date = iso_date(args.end_date, label="end date")
-    feature_root = resolve_path(historical["output_root"], base_dir=base_dir)
-    dashboard_root = resolve_path(scoring["dashboard_root"], base_dir=base_dir)
+    feature_root = resolve_path(
+        score_history.get("feature_output_root", historical["output_root"]),
+        base_dir=base_dir,
+    )
+    dashboard_root = resolve_path(
+        score_history.get("output_root", scoring["dashboard_root"]),
+        base_dir=base_dir,
+    )
     report_path = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
@@ -281,7 +287,17 @@ def main() -> int:
                     minimum_specialized_coverage=float(
                         scoring["minimum_specialized_coverage"]
                     ),
+                    positioning_source_id=str(
+                        scoring["positioning_feature_source_id"]
+                    ),
+                    minimum_positioning_input_coverage=float(
+                        scoring["minimum_positioning_input_coverage"]
+                    ),
                     specialized_overlay_weights=overlay_weights,
+                    classification_overlays_path=resolve_path(
+                        universe["classification_overlays_csv"],
+                        base_dir=base_dir,
+                    ),
                 )
                 scoring_path = feature_dir / "scoring_features.csv"
                 write_scoring_rows(scoring_path, rows)
@@ -293,8 +309,9 @@ def main() -> int:
                     "metric_snapshot_mode": "latest",
                     "policy_asof": str(score_history["policy_lock_date"]),
                     "policy_replay_mode": "frozen_policy_on_pit_features",
-                    "positioning_snapshot_mode": (
-                        "not_materialized_daily_zero_component_weight"
+                    "positioning_snapshot_mode": "exact_date_shared_feature",
+                    "positioning_populated_count": sum(
+                        bool(str(row.get("positioning_score") or "")) for row in rows
                     ),
                     "row_count": len(rows),
                     "rank_ready_count": sum(

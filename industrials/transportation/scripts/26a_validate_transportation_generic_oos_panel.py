@@ -22,6 +22,9 @@ from industrials.core.oos_research import (  # noqa: E402
     finite_float,
     parse_date,
 )
+from industrials.core.oos_price_lineage import (  # noqa: E402
+    audit_panel_return_lineage,
+)
 from industrials.core.reports import (  # noqa: E402
     write_csv_atomic,
     write_text_atomic,
@@ -40,6 +43,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--input-dir", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -48,22 +52,28 @@ def main() -> int:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    root = resolve_path(
-        cfg_get(
-            config,
-            "oos_calibration_standards.families.transportation.research_output_root",
-        ),
-        base_dir=base_dir,
+    root = (
+        args.input_dir.expanduser().resolve()
+        if args.input_dir is not None
+        else resolve_path(
+            cfg_get(
+                config,
+                "oos_calibration_standards.families.transportation.research_output_root",
+            ),
+            base_dir=base_dir,
+        )
     )
     panel_path = root / "transportation_generic_oos_panel.csv"
     manifest_path = root / "transportation_generic_oos_panel_manifest.json"
     source_index_path = root / "transportation_generic_oos_source_index.csv"
     split_path = root / "transportation_generic_oos_splits.csv"
+    price_slice_path = root / "transportation_generic_oos_price_slice.csv"
     for path in (
         panel_path,
         manifest_path,
         source_index_path,
         split_path,
+        price_slice_path,
     ):
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -71,6 +81,7 @@ def main() -> int:
     rows = read_rows(panel_path)
     split_rows = read_rows(split_path)
     source_rows = read_rows(source_index_path)
+    price_rows = read_rows(price_slice_path)
     issues: list[str] = []
     if manifest.get("acceptance") != "PASS":
         issues.append("source panel manifest did not pass")
@@ -91,6 +102,15 @@ def main() -> int:
         issues.append("source index hash mismatch")
     if manifest.get("split_sha256") != artifact_sha256(split_path):
         issues.append("split hash mismatch")
+    price_slice_hash_valid = (
+        manifest.get("price_slice_path") == str(price_slice_path)
+        and manifest.get("price_slice_sha256")
+        == artifact_sha256(price_slice_path)
+        and int(manifest.get("price_slice_row_count") or -1)
+        == len(price_rows)
+    )
+    if not price_slice_hash_valid:
+        issues.append("frozen price slice path/hash/row-count mismatch")
     if int(manifest.get("panel_row_count") or -1) != len(rows):
         issues.append("panel row count mismatch")
     split_map = {
@@ -135,6 +155,11 @@ def main() -> int:
             row.get("calibration_use") != "core"
             or row.get("development_stage") != "operating"
             or row.get("rank_ready_flag") != "1"
+            or row.get("portfolio_role")
+            not in {
+                "core_candidate",
+                "airline_satellite_research",
+            }
         ):
             issues.append(f"{key}: invalid production-universe eligibility")
         if is_available and (
@@ -163,6 +188,11 @@ def main() -> int:
             issues.append(
                 f"{source['asof_date']}: source rank manifest hash mismatch"
             )
+    return_audit = audit_panel_return_lineage(rows, price_rows)
+    issues.extend(
+        f"return reconstruction: {item}"
+        for item in return_audit["issues"]
+    )
     split_counts = Counter(row["split"] for row in split_rows)
     for required in ("train", "validation", "holdout"):
         if split_counts[required] < 12:
@@ -187,6 +217,25 @@ def main() -> int:
             "status": "PASS" if manifest.get("return_basis") == "next_session_open_execution_excess" else "FAIL",
             "observed": str(manifest.get("return_basis") or ""),
             "required": "next_session_open_execution_excess",
+        },
+        {
+            "gate": "frozen_price_slice",
+            "status": "PASS" if price_slice_hash_valid else "FAIL",
+            "observed": artifact_sha256(price_slice_path),
+            "required": str(manifest.get("price_slice_sha256") or ""),
+        },
+        {
+            "gate": "independent_return_reconstruction",
+            "status": str(return_audit["acceptance"]),
+            "observed": json.dumps(
+                {
+                    "available": return_audit["available_row_count"],
+                    "recomputed": return_audit["recomputed_row_count"],
+                    "max_error": return_audit["maximum_absolute_error"],
+                },
+                sort_keys=True,
+            ),
+            "required": "all available returns reconstructed within 1e-9",
         },
         {
             "gate": "minimum_split_history",
@@ -220,6 +269,14 @@ def main() -> int:
         "eligible_row_count": eligible,
         "outcome_available_row_count": available,
         "outcome_unavailable_reasons": dict(reasons),
+        "price_slice_path": str(price_slice_path),
+        "price_slice_sha256": artifact_sha256(price_slice_path),
+        "price_slice_row_count": len(price_rows),
+        "return_reconstruction": {
+            key: value
+            for key, value in return_audit.items()
+            if key != "issues"
+        },
         "source_snapshot_count": len(source_rows),
         "issues": issues[:200],
         "report_csv": str(report_path),

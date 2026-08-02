@@ -8,6 +8,10 @@ from typing import Any
 
 import pytest
 
+from technology.core.db import init_db
+from technology.core.dedicated_parser.db_contract import (
+    ensure_technology_parser_schema,
+)
 from technology.core.measurement_diagnostics import (
     load_pit_measurement_features,
     validate_measurement_diagnostics,
@@ -19,11 +23,13 @@ from technology.software_infrastructure.dedicated_parser_adapter import (
 )
 from technology.software_infrastructure.software_specialized_metrics import (
     PlausibilityThresholds,
+    SpecializedFact,
     _latest,
     _visible_facts,
     adjudicated_facts,
     build_attrition_report,
     derive_signals,
+    upsert_facts,
 )
 
 
@@ -427,3 +433,81 @@ def test_attrition_report_names_censored_lower_bound_exclusion() -> None:
         rows[0]["attrition_reason"]
         == "censored_lower_bound_not_calibration_comparable"
     )
+
+def test_arr_to_revenue_uses_matching_pit_ttm_revenue() -> None:
+    visible = [
+        _specialized_row(
+            metric="annual_recurring_revenue",
+            value=500.0,
+            period_end="2026-03-31",
+            availability="2026-04-20T12:00:00Z",
+            period_kind="quarterly",
+            variant="total_arr",
+        )
+    ]
+    financial = [
+        {
+            "asof_date": "2026-05-01",
+            "fiscal_period_end": "2026-03-31",
+            "revenue": 125.0,
+            "revenue_ttm": 400.0,
+        }
+    ]
+    before = derive_signals(
+        visible=visible,
+        financial=financial,
+        asof=date(2026, 4, 30),
+    )["annual_recurring_revenue_to_revenue"]
+    after = derive_signals(
+        visible=visible,
+        financial=financial,
+        asof=date(2026, 5, 1),
+    )["annual_recurring_revenue_to_revenue"]
+    assert before.value is None
+    assert before.status_reason == "matching_period_revenue_ttm_missing"
+    assert after.value == pytest.approx(1.25)
+    assert after.source_availability_datetime == "2026-05-01T23:59:59Z"
+    assert after.availability_status == "AVAILABLE_PIT"
+
+def test_fact_upsert_supersedes_prior_interpretation_of_same_evidence() -> None:
+    def fact(period_end: str, value: float) -> SpecializedFact:
+        return SpecializedFact(
+            ticker="TEST",
+            cik="0000000001",
+            metric_name="annual_recurring_revenue",
+            value=value,
+            unit="USD",
+            period_start="",
+            period_end=period_end,
+            availability_datetime="2026-05-01T20:00:00Z",
+            filing_date="2026-05-01",
+            accession_number="0000000001-26-000001",
+            form_type="8-K",
+            source_document="earnings.htm",
+            source_document_sha256="a" * 64,
+            evidence_key="same-evidence",
+            confidence=1.0,
+            status_reason="test",
+            definition_version="arr_v1",
+            provenance={
+                "calibration_eligible_flag": 1,
+                "definition_variant": "total_arr",
+                "period_kind": "quarterly",
+            },
+        )
+
+    with connection() as conn:
+        init_db(conn)
+        ensure_technology_parser_schema(conn)
+        upsert_facts(conn, facts=[fact("2026-05-01", 500.0)])
+        upsert_facts(conn, facts=[fact("2026-03-31", 500.0)])
+        rows = conn.execute(
+            """
+            SELECT period_end, value
+            FROM fact_technology_specialized_metric
+            WHERE evidence_key = 'same-evidence'
+            """
+        ).fetchall()
+    assert [(row["period_end"], row["value"]) for row in rows] == [
+        ("2026-03-31", 500.0)
+    ]

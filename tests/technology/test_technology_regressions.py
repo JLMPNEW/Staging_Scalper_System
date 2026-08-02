@@ -15,6 +15,7 @@ from market_positioning.api_collectors import (
     bounded_ibkr_end_date,
     prune_backdated_ibkr_shortable_rows,
 )
+from technology.core import https as technology_https
 from technology.core.db import init_db
 from technology.core.oos_provenance import build_oos_provenance
 from technology.core.portfolio_candidate_fields import (
@@ -35,6 +36,21 @@ from technology.core.universe_loader import prune_removed_current_universe_rows
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_verified_https_context_uses_explicit_ca_bundle(monkeypatch) -> None:
+    sentinel = object()
+    captured: list[str] = []
+
+    def fake_create_default_context(*, cafile: str):
+        captured.append(cafile)
+        return sentinel
+
+    monkeypatch.setenv("SSL_CERT_FILE", "C:/trusted/technology-ca.pem")
+    monkeypatch.setattr(technology_https.ssl, "create_default_context", fake_create_default_context)
+
+    assert technology_https.verified_https_context() is sentinel
+    assert captured == ["C:/trusted/technology-ca.pem"]
 
 
 def load_script(relative_path: str, module_name: str) -> ModuleType:

@@ -969,9 +969,9 @@ biotech_scoring:
   portfolio_candidate_policy:
     enabled: true
     name: "post_adaptive_top4_late_platform_max8_raw"
-    description: "Promoted live allocation gate: rank global Top 20 by current production score, then keep late-clinical/platform candidates with max 4 per cohort and max 8 total."
+    description: "Promoted live allocation gate: rank global Top 25 by current production score, then keep late-clinical/platform candidates with max 4 per cohort and max 8 total."
     selection_order: "global_then_cohort"
-    rank_top_n: 20
+    rank_top_n: 25
     allowed_primary_cohorts:
       - "late_clinical_pivotal_or_registrational"
       - "platform_partnered_modality_pipeline"
@@ -988,14 +988,14 @@ biotech_scoring:
     evidence:
       validated_policy_name: "post_adaptive_top4_late_platform_max8_raw"
       validated_selection_order: "global_then_cohort"
-      validated_rank_top_n: 20
+      validated_rank_top_n: 25
       validated_through: "2026-07-09"
-      artifact: "../output/biotech_index_reports/calibration_tier1_fresh_20190104_20260709/tier1_weight_calibration_grid.csv"
-      artifact_sha256: "705f751c4f8b7c28b89abcffaff1258acb806323118b867b656af704ac312e7a"
-      test_absolute_lcb_return_pct: 7.821502
-      test_xbi_alpha_lcb_return_pct: 10.365881
-      test_selection_date_coverage_pct: 71.428571
-      test_avg_selected_names_per_active_date: 2.7
+      artifact: "../output/biotech_index_reports/global_top25_validation_20190104_20260709/tier1_weight_calibration_grid.csv"
+      artifact_sha256: "b36400379446c92f971d643174f9357e638003a8dfc7a42beaa479a2135faed4"
+      test_absolute_lcb_return_pct: 6.68013
+      test_xbi_alpha_lcb_return_pct: 3.903587
+      test_selection_date_coverage_pct: 85.882353
+      test_avg_selected_names_per_active_date: 3.164384
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
   risk_penalty_inflection: 50.0

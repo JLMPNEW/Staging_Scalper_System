@@ -347,6 +347,46 @@ def solve_risk_budget(
     return {t: float(w[i]) for i, t in enumerate(tickers) if w[i] > 0.0}
 
 
+def build_sleeve_risk_proposal(
+    cov: pd.DataFrame,
+    target_budgets: dict[str, float],
+    *,
+    prior_weights: dict[str, float],
+    sleeve_of: dict[str, str],
+    gross: float,
+    max_weight: float,
+    max_iter: int = 50,
+) -> tuple[dict[str, float], str, tuple[str, ...]]:
+    """Build the pre-RC-cap proposal and disclose whether cross-sleeve allocation applies.
+
+    A single active sleeve has no cross-sleeve risk budget to solve. Re-running the full
+    risk-parity optimizer in that state would introduce an unsupported within-sleeve book
+    rewrite. Preserve the sealed Stage 7 weights instead; the caller still applies the hard
+    realized-RC cap and sends any required trim to CASH.
+    """
+    positive_prior = {
+        str(ticker): float(weight)
+        for ticker, weight in prior_weights.items()
+        if float(weight) > 0.0
+    }
+    if not positive_prior:
+        raise ValueError("sleeve proposal needs at least one positive prior weight")
+    missing = sorted(ticker for ticker in positive_prior if not str(sleeve_of.get(ticker, "")).strip())
+    if missing:
+        raise ValueError(f"positive prior weights missing sleeve assignments: {missing[:20]}")
+    active_sleeves = tuple(sorted({str(sleeve_of[ticker]).strip() for ticker in positive_prior}))
+    if len(active_sleeves) == 1:
+        return positive_prior, "single_sleeve_rc_cap_only", active_sleeves
+    proposal = solve_risk_budget(
+        cov,
+        target_budgets,
+        gross=gross,
+        max_weight=max_weight,
+        max_iter=max_iter,
+    )
+    return proposal, "multi_sleeve_risk_budget", active_sleeves
+
+
 def enforce_rc_cap_to_cash(
     weights: dict[str, float],
     cov: pd.DataFrame,

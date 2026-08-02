@@ -19,6 +19,12 @@ SPECIALIZED_MEASUREMENT_SPECS = [
         None,
     ),
     (
+        "annual_recurring_revenue_to_revenue",
+        "annual_recurring_revenue_to_revenue_score",
+        True,
+        lambda value: 0.0 <= value <= 5.0,
+    ),
+    (
         "net_revenue_retention_level",
         "net_revenue_retention_level_score",
         True,

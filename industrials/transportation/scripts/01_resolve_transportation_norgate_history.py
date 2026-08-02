@@ -35,6 +35,7 @@ MAP_FIELDS = [
     "norgate_security_name",
     "first_quoted_date",
     "last_quoted_date",
+    "eligibility_end_date",
     "mapping_status",
     "mapping_reason",
     "name_similarity",
@@ -57,6 +58,7 @@ MEMBERSHIP_FIELDS = [
     "calibration_cohort",
     "start_date",
     "end_date",
+    "eligibility_basis",
     "membership_status",
     "successor_ticker",
     "event_type",
@@ -82,9 +84,11 @@ class Override:
     database: str
     start: str
     end: str
+    end_basis: str
     reason: str
     calibration_usable: bool
     review_status: str
+    source_url: str
     notes: str
 
 
@@ -169,9 +173,11 @@ def load_overrides(path: Path) -> dict[str, Override]:
             database=str(row.get("source_database") or "").strip(),
             start=str(row.get("override_start_date") or "").strip(),
             end=str(row.get("override_end_date") or "").strip(),
+            end_basis=str(row.get("eligibility_end_basis") or "").strip(),
             reason=str(row.get("mapping_reason") or "reviewed_override").strip(),
             calibration_usable=usable_raw == "1",
             review_status="reviewed",
+            source_url=str(row.get("source_url") or "").strip(),
             notes=str(row.get("notes") or "").strip(),
         )
     return out
@@ -198,12 +204,20 @@ def choose_delisted_symbol(
                 "review": "review_required",
             }
         name = provider_name(provider, override.symbol)
+        provider_last = provider_date(provider, "last_quoted_date", override.symbol)
+        eligibility_end = override.end or provider_last
         return {
             "symbol": override.symbol,
             "database": override.database,
             "name": name,
             "first": override.start or provider_date(provider, "first_quoted_date", override.symbol),
-            "last": override.end or provider_date(provider, "last_quoted_date", override.symbol),
+            "last": provider_last,
+            "end": eligibility_end,
+            "eligibility_basis": (
+                override.end_basis
+                or ("reviewed_override_end_date" if override.end else "norgate_first_and_last_quoted_dates")
+            ),
+            "source_url": override.source_url or "norgate_local_metadata",
             "score": similarity(company, name),
             "status": "verified_override" if override.calibration_usable else "verified_excluded",
             "reason": override.reason,
@@ -248,6 +262,9 @@ def choose_delisted_symbol(
         "name": name,
         "first": first,
         "last": last,
+        "end": last,
+        "eligibility_basis": "norgate_first_and_last_quoted_dates",
+        "source_url": "norgate_local_metadata",
         "score": similarity(company, name),
         "status": "verified_auto" if auto else "review_required",
         "reason": "symbol_name_exit_year_match" if auto else "best_candidate_requires_review",
@@ -334,6 +351,7 @@ def main() -> int:
                 "norgate_security_name": name,
                 "first_quoted_date": first,
                 "last_quoted_date": "",
+                "eligibility_end_date": "",
                 "mapping_status": status,
                 "mapping_reason": "exact_active_symbol_and_name_match" if usable else "active_symbol_requires_review",
                 "name_similarity": f"{score:.6f}",
@@ -363,6 +381,11 @@ def main() -> int:
                 "calibration_cohort": cohort_names[row["calibration_cohort"]],
                 "start_date": start,
                 "end_date": "",
+                "eligibility_basis": (
+                    continuity.history_treatment
+                    if continuity is not None
+                    else "active_at_contract_build"
+                ),
                 "membership_status": "active",
                 "successor_ticker": "",
                 "event_type": (
@@ -438,7 +461,11 @@ def main() -> int:
         internal = normalize_ticker(internal)
         first = str(match.get("first") or "")
         last = str(match.get("last") or "")
-        usable = bool(match.get("usable") and first and last)
+        eligibility_end = str(match.get("end") or last)
+        eligibility_basis = str(
+            match.get("eligibility_basis") or "norgate_first_and_last_quoted_dates"
+        )
+        usable = bool(match.get("usable") and first and eligibility_end)
         # Historical issuers may have exited before the active-model history
         # floor. Preserve their provider listing boundary so start never falls
         # after the verified final quote; downstream panels apply their own floor.
@@ -453,6 +480,7 @@ def main() -> int:
                 "norgate_security_name": match.get("name", ""),
                 "first_quoted_date": first,
                 "last_quoted_date": last,
+                "eligibility_end_date": eligibility_end,
                 "mapping_status": match.get("status", "unresolved"),
                 "mapping_reason": match.get("reason", ""),
                 "name_similarity": f"{finite_float(match.get('score')):.6f}",
@@ -477,22 +505,26 @@ def main() -> int:
                     "calibration_cohort_id": row["cohort"],
                     "calibration_cohort": cohort_names[row["cohort"]],
                     "start_date": start,
-                    "end_date": last,
+                    "end_date": eligibility_end,
+                    "eligibility_basis": eligibility_basis,
                     "membership_status": "delisted",
                     "successor_ticker": "",
                     "event_type": row["exit_type"],
                     "confidence": "0.95" if row["confidence"].lower() == "verified" else "0.90",
-                    "source_url": "norgate_local_metadata",
-                    "notes": f"terminal_type={row['terminal_type']}; acquirer={row['acquirer']}",
+                    "source_url": match.get("source_url", "norgate_local_metadata"),
+                    "notes": (
+                        f"terminal_type={row['terminal_type']}; acquirer={row['acquirer']}; "
+                        f"eligibility_basis={eligibility_basis}"
+                    ),
                 }
             )
             listing_rows.append(
                 {
                     "ticker": internal,
                     "first_eligible_date": start,
-                    "last_eligible_date": last,
-                    "eligibility_basis": "norgate_first_and_last_quoted_dates",
-                    "source": "norgate_local_metadata",
+                    "last_eligible_date": eligibility_end,
+                    "eligibility_basis": eligibility_basis,
+                    "source": match.get("source_url", "norgate_local_metadata"),
                     "confidence": "0.95",
                     "notes": f"actual_ticker={ticker}; norgate_symbol={match['symbol']}",
                 }

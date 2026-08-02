@@ -1,0 +1,41 @@
+ticker,effective_from,effective_to,listing_instrument,underlying_shares_per_traded_security,review_status,source_url,notes
+AER,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1378789/000162828026007513/aer-20251231.htm,Primary filing identifies AER ordinary shares traded directly on NYSE
+ASR,2019-01-02,,ADR_ADS,10.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1123452/000110465921049375/tm2037704d1_20f.htm,Primary filing states each ADS represents ten Series B shares
+AZUL,2026-06-01,,ADR_ADS,2.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1432364/000129281426002828/azul20260416_f1.htm,Post-restructuring regime only; primary filing states each ADS represents two preferred shares
+CPA,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1345105/000119312521128866/d128959d20f.htm,Primary filing identifies CPA Class A shares traded directly on NYSE
+LTM,2024-07-25,,ADR_ADS,2000.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1047716/000104771626000046/ltm-20251231.htm,Post-relisting regime only; primary filing states each ADS represents two thousand common shares
+OMAB,2019-01-02,,ADR_ADS,8.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1378239/000155837021005352/omab-20201231x20f.htm,Primary filing states each ADS represents eight Series B shares
+PAC,2019-01-02,,ADR_ADS,10.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1347557/000156459022015156/pac-20f_20211231.htm,Primary filing states each ADS represents ten Series B shares
+RYAAY,2019-01-02,,ADR_ADS,5.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1038683/000155837021009268/ryaa-20210331x20f.htm,Primary filing states each ADS represents five ordinary shares
+VLRS,2019-01-02,,ADR_ADS,10.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1520504/000129281426002559/vlrsform20f_2025.htm,Primary filing states each ADS represents ten CPOs and each CPO represents one Series A share
+ZTO,2019-01-02,,ADR_ADS,1.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1677250/000110465926044613/zto-20251231x20f.htm,Primary filing states each ADS represents one Class A ordinary share
+ATCO,2019-01-02,2023-03-27,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1794846/000162828023008175/atco-20221231.htm,Primary filing identifies ATCO common shares traded on NYSE
+FLY,2019-01-02,2021-08-02,ADR_ADS,1.0,REVIEWED_ADR,https://www.sec.gov/Archives/edgar/data/1407298/000119312513192898/d502841d424b3.htm,Primary filing states each ADS represents one common share
+GLOG,2019-01-02,2021-06-08,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1534126/000104746921000509/a2242982z20-f.htm,Primary filing identifies GLOG common shares traded on NYSE
+GLOP,2019-01-02,2023-07-12,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1598655/000104746921000482/a2242951z20-f.htm,Primary filing identifies GLOP common units traded on NYSE
+NNA,2019-01-02,2021-10-14,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1437260/000119312521134842/d131813d20f.htm,Primary filing identifies NNA common stock traded on NYSE
+TGP,2019-01-02,2022-01-12,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1308106/000162828021006328/tk-20201231.htm,Primary filing identifies TGP common units traded on NYSE
+ASC,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1577437/000110465926024690/asc-20251231x20f.htm,Primary filing identifies ASC common stock traded directly on NYSE
+CAAP,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1717393/000110465921048754/tm214044d1_20f.htm,Primary filing identifies CAAP common shares traded directly on NYSE
+CCEC,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1392326/000119312526179568/d41846d20f.htm,Primary filing identifies CCEC ordinary shares traded directly on NYSE
+CMRE,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1503584/000093041321000517/c101223_20f.htm,Primary filing identifies CMRE common stock traded directly on NYSE
+CNI,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/16868/000110465926010352/tm261145d1_40f.htm,Primary filing identifies CNI common shares traded directly on NYSE
+CP,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/16875/000119312526173665/d172022d10ka.htm,Primary filing identifies CP common shares traded directly on NYSE
+DAC,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1369241/000110465926021574/dac-20251231x20f.htm,Primary filing identifies DAC common stock traded directly on NYSE
+DSX,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1318885/000156276226000030/dsx-20251231.htm,Primary filing identifies DSX common stock traded directly on NYSE
+ECO,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1964954/000110465926032731/eco-20251231x20f.htm,Primary filing identifies ECO common shares traded directly on NYSE
+ESEA,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1341170/000117184326002807/esea20251231_20f.htm,Primary filing identifies ESEA common stock traded directly on Nasdaq
+GASS,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1328919/000119312526183385/d66975d20f.htm,Primary filing identifies GASS common stock traded directly on Nasdaq
+GSL,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1430725/000114036126009637/gsl-20251231.htm,Primary filing identifies GSL Class A common shares traded directly on NYSE
+HSHP,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1959455/000195945526000024/hshp-20251231.htm,Primary filing identifies HSHP common shares traded directly on NYSE
+SB,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1434754/000162828026014408/sb-20251231.htm,Primary filing identifies SB common stock traded directly on NYSE
+SBLK,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1386716/000095015726000397/sblk-20251231.htm,Primary filing identifies SBLK common shares traded directly on Nasdaq
+SHIP,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1448397/000114036126012374/ef20060628_20f.htm,Primary filing identifies SHIP common shares traded directly on Nasdaq
+TFII,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1588823/000095017025024282/tfii-20241231.htm,Primary filing identifies TFII common shares traded directly on NYSE
+ZIM,2019-01-02,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1654126/000117891326000784/zk2634463.htm,Primary filing identifies ZIM ordinary shares traded directly on NYSE
+CMDB,2025-05-01,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/2033535/000114036126011994/ef20066084_20f.htm,Primary filing identifies CMDB common stock traded directly on NYSE
+DRYS,2019-01-02,2019-10-10,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1308858/000091957419002125/d8124519_20-f.htm,Primary filing identifies DRYS common stock traded directly on Nasdaq
+GMLP,2019-01-02,2021-04-15,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1415916/000141591621000003/gmlp-20201231.htm,Primary filing identifies GMLP common units traded directly on Nasdaq
+HAFN,2024-04-09,,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1815779/000114036126015278/ef20060668.htm,Primary filing identifies HAFN ordinary shares traded directly on NYSE
+NM,2019-01-02,2023-12-13,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1333172/000119312523080667/d460704d20f.htm,Primary filing identifies NM common stock traded directly on NYSE
+TOO,2019-01-02,2020-01-22,DIRECT_SHARE,1.0,REVIEWED_DIRECT,https://www.sec.gov/Archives/edgar/data/1382298/000162828019002248/too201820-fdoc.htm,Primary filing identifies TOO common units traded directly on NYSE

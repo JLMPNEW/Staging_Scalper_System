@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Stage 3 - AQR-only baseline book: long-only mean-variance on the injected Stage 2 covariance.
 
-Universe (LOCKED): investable_eligible=1 AND risk_eligible=1 AND role=scored AND ticker in covariance.csv.
+Universe (LOCKED): Stage 1 investable, Stage 2 risk eligible, monitor-entry eligible,
+role=scored, and ticker in covariance.csv.
 Risk-ineligible eligible names are NOT sized (never zero-weighted inside the solver) and are surfaced in
 risk_excluded_candidates.csv. mu_used = final_score * score_confidence (annualized expected alpha).
 """
@@ -25,7 +26,16 @@ import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    manifest_acceptance_value,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
@@ -43,8 +53,11 @@ WEIGHT_FIELDS = [
     "ticker", "sector", "industry", "source_pipeline", "rating", "final_score", "score_confidence",
     "mu_raw", "mu_used", "weight", "weight_band_low", "weight_band_high",
 ]
-EXCLUDED_FIELDS = ["ticker", "source_pipeline", "investable_eligible", "risk_eligible", "role",
-                   "risk_status", "exclusion_reason"]
+EXCLUDED_FIELDS = [
+    "ticker", "source_pipeline", "investable_eligible", "risk_eligible", "role",
+    "risk_status", "monitor_entry_eligible", "monitor_internal_state",
+    "monitor_action_state", "monitor_policy_reason", "exclusion_reason",
+]
 
 
 def iso_date_arg(raw: str) -> str:
@@ -61,6 +74,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--as-of", type=iso_date_arg, default=None)
     p.add_argument("--db", type=Path, default=None)
     p.add_argument("--force", action="store_true")
+    p.add_argument(
+        "--monitor-overlay-mode",
+        choices=("ignore", "required"),
+        default="required",
+        help=(
+            "ignore is allowed only for the orchestrator's preliminary bootstrap solve; "
+            "required is the deployable fail-closed default"
+        ),
+    )
     return p.parse_args()
 
 
@@ -91,6 +113,68 @@ def median_half_spread_bps(row: dict[str, str] | None) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if np.isfinite(value) else None
+
+
+def load_monitor_overlay(
+    run_dir: Path,
+    *,
+    run_as_of: str,
+    enabled: bool,
+    mode: str,
+) -> tuple[dict[str, dict[str, str]], dict[str, object]]:
+    if mode == "ignore":
+        return {}, {
+            "status": "bootstrap_ignored",
+            "enabled_in_production": enabled,
+            "deployable": False,
+            "n_excluded": 0,
+        }
+    if not enabled:
+        raise ValueError(
+            "--monitor-overlay-mode required but optimizer.monitor_entry_policy is disabled"
+        )
+    overlay_path = run_dir / "optimizer" / "monitor_eligibility_overlay.csv"
+    manifest_path = run_dir / "optimizer" / "monitor_eligibility_manifest.json"
+    if not overlay_path.is_file() or not manifest_path.is_file():
+        raise FileNotFoundError(
+            "Required monitor eligibility overlay is missing; run optimizer/08 first"
+        )
+    manifest = read_manifest(manifest_path)
+    if (
+        manifest_acceptance_value(manifest) != "PASS"
+        or str(manifest.get("run_as_of", "")) != run_as_of
+        or manifest.get("production_entry_gate") is not True
+    ):
+        raise ValueError("Monitor eligibility manifest is not same-date production PASS")
+    errors = sealed_artifact_errors(
+        manifest,
+        overlay_path,
+        overlay_path.name,
+        run_as_of=run_as_of,
+    )
+    if errors:
+        raise ValueError(f"Monitor eligibility overlay is not sealed/current: {errors}")
+    overlay: dict[str, dict[str, str]] = {}
+    for row in read_csv(overlay_path):
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not ticker or ticker in overlay:
+            raise ValueError(
+                f"Monitor eligibility overlay has blank/duplicate ticker: {ticker!r}"
+            )
+        if str(row.get("run_as_of", "")).strip() != run_as_of:
+            raise ValueError(f"Monitor eligibility row is not same-date: {ticker}")
+        overlay[ticker] = row
+    return overlay, {
+        "status": "applied",
+        "enabled_in_production": True,
+        "deployable": True,
+        "overlay_path": str(overlay_path),
+        "overlay_sha256": sha256_file(overlay_path),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": sha256_file(manifest_path),
+        "policy": manifest.get("policy", {}),
+        "n_excluded": 0,
+    }
 
 
 def stage3_readiness(run_dir: Path, risk_dir: Path) -> list[dict[str, str]]:
@@ -206,6 +290,21 @@ def main() -> int:  # noqa: C901
         return 1
 
     oc = cfg_get(config, "optimizer", {})
+    monitor_policy = oc.get("monitor_entry_policy", {})
+    if not isinstance(monitor_policy, dict):
+        LOGGER.error("optimizer.monitor_entry_policy must be a mapping")
+        return 1
+    monitor_policy_enabled = monitor_policy.get("enabled_in_production") is True
+    try:
+        monitor_overlay, monitor_meta = load_monitor_overlay(
+            run_dir,
+            run_as_of=run_as_of,
+            enabled=monitor_policy_enabled,
+            mode=args.monitor_overlay_mode,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        LOGGER.error("%s", exc)
+        return 1
     use_conf = bool(oc.get("use_confidence_adjusted_mu", True))
     risk_aversion = float(oc.get("risk_aversion", 5.0))
     gross = float(oc.get("gross_exposure", 1.0))
@@ -235,6 +334,34 @@ def main() -> int:  # noqa: C901
     excluded: list[dict] = []
     n_liquidity_excluded = 0
     n_liquidity_no_spread = 0
+    n_monitor_excluded = 0
+
+    def exclusion_row(
+        ticker: str,
+        srow: dict[str, str],
+        crow: dict[str, str],
+        *,
+        risk_eligible: bool,
+        role: str,
+        reason: str,
+    ) -> dict[str, object]:
+        monitor = monitor_overlay.get(ticker, {})
+        return {
+            "ticker": ticker,
+            "source_pipeline": srow.get("source_pipeline", ""),
+            "investable_eligible": 1,
+            "risk_eligible": int(risk_eligible),
+            "role": role,
+            "risk_status": crow.get("risk_status", "missing"),
+            "monitor_entry_eligible": monitor.get(
+                "optimizer_entry_eligible", ""
+            ),
+            "monitor_internal_state": monitor.get("internal_state", ""),
+            "monitor_action_state": monitor.get("action_state", ""),
+            "monitor_policy_reason": monitor.get("policy_reason", ""),
+            "exclusion_reason": reason,
+        }
+
     for ticker, srow in scores.items():
         if str(srow.get("investable_eligible", "")).strip() != "1":
             continue
@@ -242,15 +369,40 @@ def main() -> int:  # noqa: C901
         risk_eligible = str(crow.get("risk_eligible", "")).strip() == "1"
         role = str(crow.get("role", "")).strip()
         in_cov = ticker in cov_tickers
+        if args.monitor_overlay_mode == "required":
+            monitor = monitor_overlay.get(ticker)
+            if monitor is None:
+                LOGGER.error("Investable ticker missing from monitor overlay: %s", ticker)
+                return 1
+            if str(monitor.get("stage1_investable_eligible", "")).strip() != "1":
+                LOGGER.error("Monitor overlay Stage 1 eligibility mismatch: %s", ticker)
+                return 1
+            if str(monitor.get("optimizer_entry_eligible", "")).strip() != "1":
+                excluded.append(
+                    exclusion_row(
+                        ticker,
+                        srow,
+                        crow,
+                        risk_eligible=risk_eligible,
+                        role=role,
+                        reason="monitor_entry_policy",
+                    )
+                )
+                n_monitor_excluded += 1
+                continue
         if risk_eligible and role == "scored" and in_cov:
             spread_bps = median_half_spread_bps(spread_rows.get(ticker)) if max_half_spread > 0 else None
             if max_half_spread > 0 and spread_bps is not None and spread_bps > max_half_spread:
-                excluded.append({
-                    "ticker": ticker, "source_pipeline": srow.get("source_pipeline", ""),
-                    "investable_eligible": 1, "risk_eligible": 1,
-                    "role": role, "risk_status": crow.get("risk_status", "missing"),
-                    "exclusion_reason": "liquidity_spread",
-                })
+                excluded.append(
+                    exclusion_row(
+                        ticker,
+                        srow,
+                        crow,
+                        risk_eligible=True,
+                        role=role,
+                        reason="liquidity_spread",
+                    )
+                )
                 n_liquidity_excluded += 1
                 continue
             if max_half_spread > 0 and spread_bps is None:
@@ -262,12 +414,16 @@ def main() -> int:  # noqa: C901
                 else "role_not_scored" if role != "scored"
                 else "missing_covariance_row"
             )
-            excluded.append({
-                "ticker": ticker, "source_pipeline": srow.get("source_pipeline", ""),
-                "investable_eligible": 1, "risk_eligible": int(risk_eligible),
-                "role": role, "risk_status": crow.get("risk_status", "missing"),
-                "exclusion_reason": reason,
-            })
+            excluded.append(
+                exclusion_row(
+                    ticker,
+                    srow,
+                    crow,
+                    risk_eligible=risk_eligible,
+                    role=role,
+                    reason=reason,
+                )
+            )
     if max_half_spread > 0:
         LOGGER.info(
             "Liquidity floor (max_half_spread_bps=%.4g): excluded=%d, fail_open_no_spread=%d, snapshot_rows=%d",
@@ -386,6 +542,10 @@ def main() -> int:  # noqa: C901
             "snapshot_present": bool(spread_rows),
             "n_excluded": n_liquidity_excluded,
             "n_fail_open_no_spread": n_liquidity_no_spread,
+        },
+        "monitor_entry_policy": {
+            **monitor_meta,
+            "n_excluded": n_monitor_excluded,
         },
         "sensitivity_band_gammas": band_gammas,
         "covariance_source": "stage2_risk_covariance_csv",

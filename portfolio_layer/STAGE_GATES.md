@@ -245,14 +245,18 @@ own refresh scripts, but it lives **outside** the core portfolio layer.
 
 **Goal:** a working, risk-aware portfolio from AQR scores alone — the baseline and first shippable value.
 
-**Optimizer universe policy (LOCKED):** the optimizer sizes only names with **`investable_eligible=1`
+**Optimizer universe policy (LOCKED):** the deployable optimizer sizes only names with
+**`investable_eligible=1 AND optimizer_entry_eligible=1`
 AND `risk_eligible=1`** (Stage 1 selection gate ∩ Stage 2 risk-data gate). Any name with
 `risk_eligible=0` is **excluded from sizing** and surfaced in a `risk_excluded_candidates.csv`
 (a.k.a. `held_no_risk_data`) report — selectable by score, but not sized until it has risk history.
+The monitor entry condition is a distinct, same-date sealed overlay; it never rewrites Stage 1
+eligibility. It admits only current `green`/`stable` states with no configured material blocker.
 **Do NOT** zero-weight risk-ineligible names inside the optimizer, and **do NOT** invent prior-hold
 behavior — that waits for the holdings ledger (Stage 8.5+). This is the correct default pre-ledger.
 
-**Universe (refined):** sized names are `investable_eligible=1 AND risk_eligible=1 AND role=scored AND
+**Universe (refined):** sized names are `investable_eligible=1 AND optimizer_entry_eligible=1 AND
+risk_eligible=1 AND role=scored AND
 ticker ∈ covariance.csv`. Benchmarks/ETFs are diagnostics/replay context only, never optimization
 candidates. `risk_eligible=0` eligible names → `risk_excluded_candidates.csv` (may be empty).
 
@@ -265,6 +269,7 @@ are used only for the report-only replay.
 **Build (implemented):** `tier1_portfolio_optimizer.py` + `tier1_common.py` vendored into `optimizer/`
 (re-rooted, independence-gated) for later BL use; the Stage 3 baseline uses a thin long-only
 mean-variance solver `optimizer/optimizer_core.py` (cvxpy, injected Σ). Scripts:
+`optimizer/08_build_monitor_eligibility_overlay.py` (sealed entry/retention policy),
 `optimizer/09_run_portfolio_optimizer.py` (book + `risk_excluded_candidates.csv` + `optimizer_meta.json`),
 `optimizer/10_validate_optimizer_outputs.py` (gates + provenance-sealed `optimizer_manifest.json`),
 `backtest/11_run_static_baseline_replay.py` (**static trailing replay diagnostic — NOT an OOS backtest**;
@@ -273,6 +278,12 @@ true walk-forward baseline is Stage 11).
 **Acceptance tests:**
 - Optimizer universe == `{investable_eligible=1} ∩ {risk_eligible=1} ∩ {role=scored} ∩ {in covariance}`;
   every excluded eligible name in `risk_excluded_candidates.csv` and **nowhere** in the weight vector.
+- The deployable universe additionally intersects the sealed monitor entry overlay. `watch`,
+  `deteriorating`, `broken`, missing/stale states, provider conflicts, and configured material
+  escalation flags receive no new target weight. `watch` remains retention/review eligible and is
+  not an automatic liquidation instruction.
+- Daily orchestration is two-pass: the first Stage 3/4/final build is a non-deployable monitor
+  bootstrap; the mandatory second pass rebuilds Stage 3/4/governor/final from the sealed overlay.
 - Weights valid: long-only, `≤ max_weight_per_name`, sum to `gross_exposure` (within tolerance).
 - **Positive `mu_used`↔active-weight relationship** (Spearman > 0); negative-α holdings allowed as
   diversifiers but reported (NOT a monotonic-weight gate — covariance/caps break monotonicity).
@@ -687,6 +698,11 @@ contains the **SPY + 5 sleeve ETFs**, so a multi-factor model falls straight out
 realized risk-contribution cap binds, the excess weight is trimmed to CASH (de-risking); Stage 8 does **not**
 scale gross upward or set a live `σ_target` (Stage 6/7 own gross via regime). Explicit vol-targeting is Phase 2.
 
+If only one sleeve is active, there is no cross-sleeve allocation problem: Stage 8 preserves the sealed Stage 7
+weights and applies only the hard realized-RC cap (trim-to-CASH). In this cap-only mode, hard diversification
+safety means ENB is not materially worse and absolute total/systematic variance cannot increase; relative factor
+shares remain reported because a de-risking trim can move a ratio while reducing every absolute risk amount.
+
 **Build (`sleeves/`, clean):**
 - `sleeves/risk_model.py` — RC, Σ-based factor decomposition, ENB, betas, IR, realized RC-cap trimming,
   sleeve feasibility bounds (pure functions).
@@ -1048,10 +1064,25 @@ calibration module, not a premature Stage 1 rewrite.
 portfolio-level kill-switch.
 
 **Build:** `orchestration/18_run_portfolio_pipeline.py` core DAG:
-`scores -> risk -> liquidity/costs -> rotation -> macro -> BL -> sleeves -> ledger/exits -> payout -> governor -> final`.
+`scores -> risk -> bootstrap optimizer/costs -> rotation/macro/BL/sleeves -> ledger/exits/payout ->
+governor -> bootstrap final weights -> earnings/monitor/levels -> sealed monitor entry overlay ->
+deployable optimizer/costs/governor/final weights -> final report`.
 Optional branches (`forecast`, `hedging`) are disabled unless Stage 11 OOS validation promotes them.
 `orchestration/19_run_risk_governor.py` handles drawdown circuit-breaker + regime kill-switch using the
 rule-based stack first; ML/hedging governors are later optional plugins, not baseline dependencies.
+
+Stage 12 has two deliberately separate final artifacts:
+- **12a deployable weights:** `orchestration/20_compose_final_target_book.py` writes the sealed
+  `final/final_target_weights.csv`. A preliminary copy bootstraps same-day monitoring, but it is
+  explicitly non-deployable. With the monitor policy production-enabled, the final composer accepts
+  only the second-pass Stage 4 book whose Stage 3 manifest seals the same-date monitor overlay.
+  Monitor classifications constrain the optimizer universe; they never edit weights directly.
+- **12b enriched report:** after same-date earnings, expectations-state, price-level, macro, and broker
+  inputs are sealed, `orchestration/21_enrich_final_target_book.py` writes
+  `final/final_target_book.csv`. It includes the latest sealed IB stock holdings even when a holding is
+  absent from the scored/monitored universe; those rows carry zero target weight and explicit
+  `is_scored`/`is_monitored` flags. Options remain in the broker ledger and are not misrepresented as
+  stock target rows.
 
 **Acceptance tests:**
 - One command rebuilds the full book consistently; strategic vs tactical cadences run on schedule without
@@ -1060,6 +1091,9 @@ rule-based stack first; ML/hedging governors are later optional plugins, not bas
   recovery re-risks correctly. Forecast-driven cuts are optional only after Stage 11 promotion.
 - Full pipeline is idempotent and PIT-consistent across all sectors at a single as-of date.
 - End-to-end dry-run on current data produces a deployable target book with full provenance.
+- The enriched report preserves the deployable second-pass 12a weights exactly, contains every sealed IB
+  stock holding, and carries same-date macro/monitor/levels lineage. The frozen entry overlay is the only
+  monitor-to-optimizer edge; level and action recommendations remain advisory.
 
 ---
 

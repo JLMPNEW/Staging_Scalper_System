@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Stage 12 - compose the DEPLOYABLE final target book with full provenance.
+"""Stage 12a - compose sealed deployable target weights with full provenance.
 
-One sealed artifact answers "what would we trade right now, and exactly which layers produced it":
+This pre-monitor artifact answers which weights are deployable and which layers produced them.
+Stage 12b enriches these immutable weights with monitor, levels, macro, earnings, and IB context.
 
   base book  = the highest PROMOTED book in the precedence chain
                sleeves (sleeves.enabled_in_production)
@@ -54,14 +55,22 @@ LOGGER = logging.getLogger("compose_final_target_book")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 CASH_TICKER = "CASH"
 PAYOUT_RESERVED_TICKER = "PAYOUT_RESERVED"
-BOOK_FIELDS = ["ticker", "weight", "layer_source"]
+WEIGHT_FIELDS = ["ticker", "weight"]
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Compose the deployable final target book (Stage 12).")
+    p = argparse.ArgumentParser(description="Compose deployable target weights (Stage 12a).")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--as-of", default=None)
     p.add_argument("--force", action="store_true")
+    p.add_argument(
+        "--monitor-bootstrap",
+        action="store_true",
+        help=(
+            "Write a sealed but explicitly non-deployable preliminary target for "
+            "same-day monitor construction."
+        ),
+    )
     return p.parse_args()
 
 
@@ -131,6 +140,94 @@ def read_manifest_or_error(path: Path) -> tuple[dict[str, Any], str]:
         return {}, f"manifest_unreadable={path}:{exc}"
 
 
+def require_monitor_filtered_aqr_lineage(
+    run_dir: Path,
+    *,
+    run_as_of: str,
+    cost_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Require the same-date monitor-filtered Stage 3 book behind Stage 4."""
+    optimizer_dir = run_dir / "optimizer"
+    optimizer_manifest_path = optimizer_dir / "optimizer_manifest.json"
+    target_path = optimizer_dir / "target_weights.csv"
+    monitor_manifest_path = optimizer_dir / "monitor_eligibility_manifest.json"
+    monitor_overlay_path = optimizer_dir / "monitor_eligibility_overlay.csv"
+    required = (
+        optimizer_manifest_path,
+        target_path,
+        monitor_manifest_path,
+        monitor_overlay_path,
+    )
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise ValueError(f"monitor-filtered AQR lineage is incomplete: {missing}")
+
+    optimizer_manifest = read_manifest(optimizer_manifest_path)
+    monitor_manifest = read_manifest(monitor_manifest_path)
+    errors = sealed_artifact_errors(
+        optimizer_manifest,
+        target_path,
+        "target_weights.csv",
+        run_as_of=run_as_of,
+        allow_deferred=False,
+    )
+    errors.extend(
+        sealed_artifact_errors(
+            monitor_manifest,
+            monitor_overlay_path,
+            "monitor_eligibility_overlay.csv",
+            run_as_of=run_as_of,
+            allow_deferred=False,
+        )
+    )
+    monitor_meta = optimizer_manifest.get("monitor_entry_policy", {})
+    if optimizer_manifest.get("deployable") is not True:
+        errors.append("optimizer_manifest.deployable!=true")
+    if not isinstance(monitor_meta, dict) or monitor_meta.get("status") != "applied":
+        errors.append("optimizer monitor_entry_policy.status!=applied")
+    if monitor_manifest.get("production_entry_gate") is not True:
+        errors.append("monitor manifest production_entry_gate!=true")
+
+    cost_provenance = cost_manifest.get("provenance_sha256", {})
+    if not isinstance(cost_provenance, dict):
+        errors.append("cost manifest provenance_sha256 missing")
+        cost_provenance = {}
+    if cost_provenance.get("optimizer_manifest.json") != sha256_file(
+        optimizer_manifest_path
+    ):
+        errors.append("cost manifest does not consume current optimizer manifest")
+    if cost_provenance.get("target_weights.csv") != sha256_file(target_path):
+        errors.append("cost manifest does not consume current target weights")
+
+    optimizer_provenance = optimizer_manifest.get("provenance_sha256", {})
+    if not isinstance(optimizer_provenance, dict):
+        errors.append("optimizer provenance_sha256 missing")
+        optimizer_provenance = {}
+    if optimizer_provenance.get(
+        "monitor_eligibility_overlay.csv"
+    ) != sha256_file(monitor_overlay_path):
+        errors.append("optimizer does not seal current monitor eligibility overlay")
+    if optimizer_provenance.get(
+        "monitor_eligibility_manifest.json"
+    ) != sha256_file(monitor_manifest_path):
+        errors.append("optimizer does not seal current monitor eligibility manifest")
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    return {
+        "status": "applied",
+        "policy_version": str(
+            monitor_manifest.get("policy", {}).get("policy_version", "")
+        )
+        if isinstance(monitor_manifest.get("policy"), dict)
+        else "",
+        "optimizer_manifest_sha256": sha256_file(optimizer_manifest_path),
+        "monitor_manifest_sha256": sha256_file(monitor_manifest_path),
+        "monitor_overlay_sha256": sha256_file(monitor_overlay_path),
+        "entry_eligible_count": monitor_manifest.get("entry_eligible_count"),
+    }
+
+
 def main() -> int:  # noqa: C901
     configure_utc_logging()
     args = parse_args()
@@ -142,19 +239,33 @@ def main() -> int:  # noqa: C901
     run_dir = runs_root / run_as_of
 
     out_dir = run_dir / "final"
-    book_path = out_dir / "final_target_book.csv"
-    manifest_path = out_dir / "final_manifest.json"
+    weights_path = out_dir / "final_target_weights.csv"
+    manifest_path = out_dir / "final_weights_manifest.json"
+    enriched_path = out_dir / "final_target_book.csv"
+    enriched_manifest_path = out_dir / "final_manifest.json"
     try:
-        fail_if_exists([book_path, manifest_path], force=args.force)
+        fail_if_exists(
+            [weights_path, manifest_path, enriched_path, enriched_manifest_path],
+            force=args.force,
+        )
     except FileExistsError as exc:
         LOGGER.error("%s", exc)
         return 1
+    if args.force:
+        # Recomputed target weights invalidate the downstream human/reporting view.
+        enriched_path.unlink(missing_ok=True)
+        enriched_manifest_path.unlink(missing_ok=True)
 
     sleeves_on = bool(cfg_get(config, "sleeves.enabled_in_production", False))
     bl_on = bool(cfg_get(config, "black_litterman_fusion.enabled_in_production", False))
     exits_on = bool(cfg_get(config, "exit_engine.apply_in_final", False))
     payout_on = bool(cfg_get(config, "payout.enabled_in_production", False))
     governor_on = bool(cfg_get(config, "risk_governor.apply_directive", False))
+    monitor_policy = cfg_get(config, "optimizer.monitor_entry_policy", {})
+    monitor_policy_on = (
+        isinstance(monitor_policy, dict)
+        and monitor_policy.get("enabled_in_production") is True
+    )
 
     candidates = [
         ("sleeves", sleeves_on, run_dir / "sleeves" / "sleeve_adjusted_target_weights.csv",
@@ -170,6 +281,7 @@ def main() -> int:  # noqa: C901
     book: dict[str, float] = {}
     current_book_sha256 = ""
     base_seal_errors: list[str] = []
+    base_manifest: dict[str, Any] = {}
     for name, enabled, path, mpath, wcol, manifest_keys in candidates:
         manifest: dict[str, Any] = {}
         manifest_error = ""
@@ -194,6 +306,7 @@ def main() -> int:  # noqa: C901
                 LOGGER.error("Promoted base layer %s is malformed: %s", name, exc)
                 return 1
             base_name = name
+            base_manifest = manifest
             current_book_sha256 = sha256_file(path)
             status = "applied_base"
             base_seal_errors = seal_errors
@@ -210,6 +323,42 @@ def main() -> int:  # noqa: C901
     if not base_name:
         LOGGER.error("No usable base book (Stage 4 baseline missing?); run the pipeline first")
         return 1
+
+    monitor_lineage: dict[str, Any] = {"status": "disabled"}
+    if monitor_policy_on and args.monitor_bootstrap:
+        monitor_lineage = {
+            "status": "bootstrap_ignored",
+            "policy_version": str(monitor_policy.get("policy_version", "")),
+        }
+    elif monitor_policy_on:
+        if base_name != "aqr_cost_baseline":
+            LOGGER.error(
+                "Monitor optimizer entry policy is production-enabled, but promoted base %s "
+                "does not yet declare the monitor-filter lineage",
+                base_name,
+            )
+            return 1
+        try:
+            monitor_lineage = require_monitor_filtered_aqr_lineage(
+                run_dir,
+                run_as_of=run_as_of,
+                cost_manifest=base_manifest,
+            )
+        except ValueError as exc:
+            LOGGER.error("Refusing non-filtered deployable AQR book: %s", exc)
+            return 1
+        layers.append(
+            {
+                "layer": "monitor_optimizer_entry",
+                "enabled_in_production": True,
+                "status": "applied",
+                "artifact": "optimizer/monitor_eligibility_overlay.csv",
+                "artifact_sha256": monitor_lineage["monitor_overlay_sha256"],
+                "manifest_sha256": monitor_lineage["monitor_manifest_sha256"],
+                "manifest_acceptance": "PASS",
+                "seal_errors": [],
+            }
+        )
 
     # exits overlay
     exits_book = run_dir / "exits" / "exit_adjusted_book.csv"
@@ -351,8 +500,7 @@ def main() -> int:  # noqa: C901
     malformed_final = [f"{ticker}={weight}" for ticker, weight in book.items()
                        if not math.isfinite(weight) or weight < -1e-12]
 
-    rows = [{"ticker": t, "weight": round(w, 10),
-             "layer_source": base_name if t != CASH_TICKER else f"{base_name}+overlays"}
+    rows = [{"ticker": t, "weight": round(w, 10)}
             for t, w in sorted(book.items(), key=lambda kv: (-kv[1], kv[0]))]
     gross_after = sum(float(r["weight"]) for r in rows)
 
@@ -372,16 +520,35 @@ def main() -> int:  # noqa: C901
              layer["status"] != "applied" or layer["enabled_in_production"]
              for layer in layers) else "FAIL",
          "detail": "every applied layer has its production flag set; all others recorded as shadow"},
+        {"check": "monitor_optimizer_entry_lineage",
+         "status": (
+             "PASS"
+             if (
+                 not monitor_policy_on
+                 or monitor_lineage.get("status") == "applied"
+                 or (
+                     args.monitor_bootstrap
+                     and monitor_lineage.get("status") == "bootstrap_ignored"
+                 )
+             )
+             else "FAIL"
+         ),
+         "detail": (
+             f"production_enabled={monitor_policy_on}; "
+             f"bootstrap={args.monitor_bootstrap}; "
+             f"status={monitor_lineage.get('status')}"
+         )},
     ]
     acceptance = "PASS" if all(c["status"] == "PASS" for c in checks) else "FAIL"
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(book_path, BOOK_FIELDS, rows)
+    write_csv(weights_path, WEIGHT_FIELDS, rows)
     manifest_payload = {
-        "stage": "stage12_final_target_book",
+        "stage": "stage12a_final_target_weights",
         "generated_at": utc_now(),
         "run_as_of": run_as_of,
         "acceptance": acceptance,
+        "deployable": acceptance == "PASS" and not args.monitor_bootstrap,
         "base_layer": base_name,
         "governor_multiplier_observed": multiplier,
         "governor_multiplier_applied": applied_multiplier,
@@ -389,19 +556,38 @@ def main() -> int:  # noqa: C901
         "n_positions": sum(1 for r in rows if r["ticker"] not in (CASH_TICKER, "PAYOUT_RESERVED")
                            and _f(r["weight"]) > 0),
         "layers": layers,
+        "monitor_entry_policy": monitor_lineage,
         "checks": checks,
         "provenance_sha256": {
             "config.yaml": sha256_file(config_path),
             "20_compose_final_target_book.py": sha256_file(Path(__file__).resolve()),
+            **(
+                {
+                    "optimizer/optimizer_manifest.json": monitor_lineage[
+                        "optimizer_manifest_sha256"
+                    ],
+                    "optimizer/monitor_eligibility_manifest.json": monitor_lineage[
+                        "monitor_manifest_sha256"
+                    ],
+                    "optimizer/monitor_eligibility_overlay.csv": monitor_lineage[
+                        "monitor_overlay_sha256"
+                    ],
+                }
+                if monitor_policy_on and not args.monitor_bootstrap
+                else {}
+            ),
         },
         "files": {
-            "final_target_book.csv": {"sha256": sha256_file(book_path), "rows": len(rows)},
+            "final_target_weights.csv": {
+                "sha256": sha256_file(weights_path),
+                "rows": len(rows),
+            },
         },
     }
     write_manifest(manifest_path, manifest_payload)
     for c in checks:
         LOGGER.info("[%s] %s -- %s", c["status"], c["check"], c["detail"])
-    LOGGER.info("FINAL TARGET BOOK (%s): base=%s positions=%s gross=%.6f multiplier=%.2f -> %s",
+    LOGGER.info("FINAL TARGET WEIGHTS (%s): base=%s positions=%s gross=%.6f multiplier=%.2f -> %s",
                 acceptance, base_name,
                 sum(1 for r in rows if _f(r["weight"]) > 0), gross_after, applied_multiplier, out_dir)
     return 0 if acceptance == "PASS" else 1

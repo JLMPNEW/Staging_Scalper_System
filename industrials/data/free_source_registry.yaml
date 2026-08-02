@@ -427,6 +427,74 @@ sources:
     status: active
     notes: Reviewed HTTPS issuer releases and presentations; transcripts remain review-only evidence.
 
+  - source_id: interactive_brokers_fundamentals
+    stage: market_data
+    source_name: Interactive Brokers fundamental ratios
+    source_owner: Interactive Brokers
+    source_type: broker_api
+    base_url: ibkr://tws/fundamental-ratios
+    authentication_required: true
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Interactive Brokers
+    raw_schema:
+      - ibkr_fundamental_ratios
+    canonical_tables:
+      - fact_share_snapshot
+    feature_stages:
+      - market_data
+      - positioning
+      - financials
+    subsector_scope: industrials
+    priority: 58
+    status: active
+    notes: Primary current share-count source. shortableShares is explicitly excluded because it is borrow inventory, not public float.
+
+  - source_id: yahoo_finance_share_statistics
+    stage: market_data
+    source_name: Yahoo Finance share statistics
+    source_owner: Yahoo Finance
+    source_type: rest_json
+    base_url: https://finance.yahoo.com/
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: Yahoo
+    raw_schema:
+      - yahoo_share_statistics
+    canonical_tables:
+      - fact_share_snapshot
+    feature_stages:
+      - market_data
+      - positioning
+      - financials
+    subsector_scope: industrials
+    priority: 59
+    status: active
+    notes: Secondary current source for sharesOutstanding and floatShares after IB fundamentals.
+
+  - source_id: reviewed_filing_share_override
+    stage: market_data
+    source_name: Reviewed filing share observations
+    source_owner: internal
+    source_type: system_csv
+    base_url: industrials/{subsector}/system_csvs/*_reviewed_share_observations.csv
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: manual
+    data_owner: internal
+    raw_schema:
+      - reviewed_filing_share_observation_csv
+    canonical_tables:
+      - fact_share_snapshot
+    feature_stages:
+      - market_data
+      - financials
+    subsector_scope: industrials
+    priority: 60
+    status: active
+    notes: Family-owned dated primary-filing observations; proxy rows remain explicit and current IB or Yahoo values outrank them.
+
   - source_id: yahoo_finance_adjusted
     stage: market_data
     source_name: Yahoo Finance adjusted chart data

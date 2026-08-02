@@ -72,3 +72,26 @@ def test_positioning_wrapper_rejects_pinned_overrides(
             "14_validate_industrials_sec_positioning_stages.py",
             [argument],
         )
+
+
+def test_positioning_wrapper_allows_family_scoped_snapshot_output(
+    tmp_path,
+) -> None:
+    output = tmp_path / "transportation" / "positioning.csv"
+    argv = shared_argv(
+        "09_import_industrials_positioning.py",
+        ["--snapshot-output-csv", str(output)],
+    )
+    assert "--snapshot-output-csv" not in argv
+    assert argv[argv.index("--output-csv") + 1] == str(output.resolve())
+
+
+def test_positioning_wrapper_rejects_cross_family_snapshot_output(
+    tmp_path,
+) -> None:
+    output = tmp_path / "defense" / "positioning.csv"
+    with pytest.raises(ValueError, match="transportation-scoped"):
+        shared_argv(
+            "09_import_industrials_positioning.py",
+            ["--snapshot-output-csv", str(output)],
+        )

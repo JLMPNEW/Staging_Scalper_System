@@ -1,0 +1,56 @@
+policy_version: transportation_surface_freight_research_v1
+cohort_id: north_american_surface_freight_and_logistics
+calibration_pool: surface_freight_and_logistics
+required_risk_tier: operating
+required_portfolio_role: core_candidate
+included_economic_peer_groups:
+  - auto_haul
+  - contract_warehousing
+  - fleet_leasing_and_dedicated
+  - freight_brokerage
+  - integrated_freight_and_logistics
+  - intermodal
+  - rail_and_rail_equipment
+  - surface_equipment_leasing
+  - trucking
+metric_comparison_groups:
+  asset_light_logistics:
+    - contract_warehousing
+    - freight_brokerage
+    - integrated_freight_and_logistics
+    - intermodal
+  asset_based_freight:
+    - auto_haul
+    - fleet_leasing_and_dedicated
+    - rail_and_rail_equipment
+    - surface_equipment_leasing
+    - trucking
+excluded_tickers:
+  FSTR: rail-equipment manufacturer rather than freight operator
+  GBX: railcar manufacturer and lessor rather than freight operator
+  RAIL: railcar manufacturer rather than freight operator
+  TRN: railcar and infrastructure manufacturer rather than freight operator
+  ZTO: China parcel network with different macro, regulatory, and currency drivers
+minimum_active_cohort_size: 20
+metric_research_gates:
+  minimum_train_observation_coverage: 0.90
+  minimum_train_ic_snapshot_count: 52
+  minimum_positive_train_subperiods: 2
+  train_subperiod_count: 3
+  minimum_candidate_metric_count: 3
+  maximum_candidate_metric_count: 8
+  maximum_metrics_per_component: 3
+  maximum_single_metric_weight: 0.35
+  mean_reversion_metric_ids:
+    - relative_strength_3m
+    - ret_12m_ex_1m
+  minimum_negative_train_subperiods: 2
+  mean_reversion_candidate_weight: 0.30
+governance:
+  membership_selection_uses_outcomes: false
+  metric_candidate_derivation_split: train
+  candidate_selection_split: validation
+  revealed_holdout_status: contaminated_research_diagnostic_only
+  promotion_from_revealed_holdout_allowed: false
+  serving_universe_policy: current_active_rank_ready_members_only
+  historical_universe_policy: point_in_time_then_active_members_including_delisted

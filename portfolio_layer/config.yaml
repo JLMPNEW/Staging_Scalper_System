@@ -9,6 +9,316 @@ paths:
 runtime:
   sqlite_timeout_sec: 120.0
 
+# Provider-independent expectations monitor. Raw states, actions, levels, and
+# provider signals remain advisory/shadow-only. The only production use is the
+# separately sealed optimizer.monitor_entry_policy overlay.
+expectations_monitor:
+  enabled_in_production: false
+  state_publication_enabled: false
+  broker_execution_prohibited: true
+  state_contract:
+    schema_version: expectations_state_v1
+    allowed_states:
+      - buy_candidate
+      - add_candidate
+      - hold
+      - watch
+      - deteriorating
+      - suspend_adds
+      - exit_review
+    exit_review_is_human_only: true
+  market_data:
+    policy_version: monitor_market_data_v1
+    build_enabled: true
+    source_priority: [yahoo, ibkr, tiingo]
+    primary_eod_source: yahoo
+    current_confirmation_source: ibkr
+    recovery_source: tiingo
+    average_conflicting_prices: false
+    retain_source_disagreements: true
+    lookback_trading_days: 504
+    calendar_buffer_days: 760
+    market_timezone: America/New_York
+    same_day_final_after: "18:00"
+    request_timeout_sec: 20
+    max_retries: 2
+    max_response_bytes: 10000000
+    yahoo_max_workers: 8
+    disagreement_warn_bps: 25.0
+    disagreement_fail_bps: 100.0
+    tier0_latest_coverage_floor: 0.98       # operational target; misses are isolated per name
+    tier0_latest_coverage_hard_floor: 0.90  # systemic-source-outage circuit breaker
+    tier1_latest_coverage_warn: 0.90
+    maximum_missing_fraction: 0.02
+    ib_max_batch_size: 90
+    ibkr:
+      enabled: true
+      host: "127.0.0.1"
+      port: 7496
+      client_id: 53
+      timeout_sec: 20
+      request_pause_sec: 0.20
+      confirmation_tiers: [tier0]
+      confirmation_lookback_calendar_days: 10
+    tiingo:
+      enabled: true
+      fallback_only: true
+      crosscheck_tiers: []
+    require_final_daily_bar: true
+    require_corporate_action_validation: true
+  database_path: "db/expectations_monitor.sqlite"
+  output_subdir: "expectations_monitor"
+  writer_lock_timeout_sec: 30.0
+  retention:
+    policy_version: "provisional_retention_v1"
+    normalized_snapshots_enabled: true
+    raw_payload_retention_enabled: false
+    derived_signals_shadow_only: true
+    purge_requires_reason: true
+    allowed_providers: [fmp, alpha_vantage]
+  universe:
+    require_scores: true
+    require_final_target: true
+    require_broker_holdings: true
+    require_pending_orders: false
+  pending_orders:
+    policy_version: ib_pending_orders_v1
+    capture_enabled_by_default: true
+    source_mode: static                 # static | live; static never connects to IB
+    static:
+      source_reports_dir: "../IB_reports"
+      statement_glob: "U*.csv"
+      max_stale_days: 10
+    live:
+      host: "127.0.0.1"
+      port: 7496                        # real-account TWS default; set to the API port shown in TWS
+      client_id: 52
+      require_single_managed_account: true
+      account: ""                        # optional; prefer IBKR_MONITOR_ACCOUNT environment variable
+      timeout_sec: 20
+  events:
+    policy_version: expectations_events_v1
+    lookback_calendar_days: 200
+    form4_database_path: "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}"
+    biotech_database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite"
+    rules_only: true
+    provider_sentiment_is_authoritative: false
+    implementation_or_policy_data_sent: false
+  state_model:
+    policy_version: expectations_state_model_v1
+    points_per_unit: 4.0
+    baseline_scale: 0.6
+    baseline_cap: 30.0
+    market_component_cap: 15.0
+    peer_component_cap: 10.0
+    novelty_repeat_window_trading_days: 20
+    novelty_repeat_value: 0.30
+    upgrades_require_dwell_or_confirmation: true
+    broken_requires_confirmed_thesis_break: true
+  daily_orchestration:
+    policy_version: expectations_monitor_daily_v1
+    allow_shadow_with_deferred_dependencies: true
+    run_state_and_levels_chain: true
+  provider_capture:
+    policy_version: provider_capture_v1
+    providers: [alpha_vantage, fmp]
+    batch_size: 50
+    max_attempts_per_batch: 3
+    tier0_cadence: daily
+    tier1_cadence: daily
+    tier2_cadence: weekly
+    tier2_weekly_weekday: 4             # Monday=0; Friday=4
+    event_refresh_enabled: true
+    event_cycle:
+      policy_version: provider_event_cycle_v1
+      included_tiers: [tier0, tier1]
+      calendar_source: alpha_vantage_bulk
+      lookback_calendar_days: 2
+      lookahead_calendar_days: 2
+      maximum_calendar_staleness_days: 3
+      maximum_event_symbols: 200
+  estimate_basis:
+    policy_version: estimate_basis_v1
+    reporting_currency_source: fmp_income_statement
+    provider_semantics:
+      alpha_vantage:
+        eps:
+          currency_semantics_status: unverified
+          definition_semantics_status: unverified
+          metric_definition: provider_consensus_eps_unknown_gaap_adjusted
+          unit_scale: currency_per_share
+          per_share_basis: provider_defined_unknown
+        revenue:
+          currency_semantics_status: unverified
+          definition_semantics_status: unverified
+          metric_definition: provider_consensus_total_revenue
+          unit_scale: currency_units
+          per_share_basis: not_applicable
+      fmp:
+        eps:
+          currency_semantics_status: unverified
+          definition_semantics_status: unverified
+          metric_definition: provider_consensus_eps_unknown_gaap_adjusted
+          unit_scale: currency_per_share
+          per_share_basis: provider_defined_unknown
+        revenue:
+          currency_semantics_status: unverified
+          definition_semantics_status: unverified
+          metric_definition: provider_consensus_total_revenue
+          unit_scale: currency_units
+          per_share_basis: not_applicable
+  provider_outcomes:
+    policy_version: provider_outcomes_v1
+    provider: fmp
+    endpoint: earnings_report
+    require_trusted_release_timestamp: true
+    require_eligible_metric_basis: true
+    forecast_linking: fail_closed
+  forecast_evaluation:
+    policy_version: forecast_evaluation_v1
+    fiscal_period_resolver_provider: alpha_vantage
+    fiscal_period_resolver_endpoint: earnings_history
+    forecast_cutoff_policy: strictly_before_report_date_us_eastern
+    timezone: America/New_York
+    maximum_forecast_age_days: 180
+    require_exact_fiscal_period_end: true
+    require_eligible_metric_basis: true
+    actual_conflict_tolerance: 1.0e-09
+  provider_reconciliation:
+    policy_version: "provider_reconciliation_v2"
+    no_averaging: true
+    selection_mode: "downside_guard_candidate_only"
+    central_estimate_policy: "unassigned_pending_prospective_accuracy"
+    deterministic_tie_break_provider: "fmp"
+    cadence: "monthly"
+    active_period_grace_days: 90
+    require_both_providers_for_candidate: true
+    require_verified_currency_for_downside_guard: true
+    minimum_analyst_count_per_provider: 2
+    maximum_pair_fetch_skew_minutes: 360
+    boundary_policy:
+      mode: "symmetric_provider_ranges_then_empirical"
+      provider_ranges_role: "diagnostic_until_calibrated"
+      require_two_complete_ranges_for_cross_provider_band: true
+      require_range_overlap_for_action_boundary: true
+      empirical_method: "rolling_conformal_residual_quantiles"
+      lower_residual_quantile: 0.10
+      upper_residual_quantile: 0.90
+      minimum_matured_observations: 60
+      minimum_distinct_fiscal_quarters: 6
+      target_interval_coverage: 0.80
+    require_exact_fiscal_period_end: true
+    require_same_canonical_period: true
+    disagreement_warn_relative:
+      eps: 0.10
+      revenue: 0.05
+    relative_difference_floor:
+      eps: 0.01
+      revenue: 1.0
+    accuracy_review:
+      status: "pending_realized_outcomes"
+      reporting_cadence: "monthly"
+      provider_preference_review_cadence: "quarterly"
+      minimum_matured_observations_for_reporting: 20
+      minimum_matured_observations_for_preference: 40
+      minimum_distinct_fiscal_quarters_for_preference: 4
+      minimum_relative_mae_improvement: 0.05
+      paired_confidence_level: 0.95
+      minimum_preference_hold_quarters: 2
+      metrics:
+        - normalized_absolute_error
+        - median_normalized_absolute_error
+        - signed_scaled_bias
+        - raw_mae_diagnostic
+
+# Advisory valuation ranges and execution zones. This package never places broker orders and does
+# not feed the optimizer. Missing absolute forward fundamentals fail closed to inactive levels.
+levels:
+  policy_version: advisory_long_levels_v2_raw_nominal
+  enabled_in_production: false
+  broker_execution_prohibited: true
+  outcomes:
+    horizon_trading_days: 120
+    resolution_price_basis: raw_unadjusted_nominal
+    resolve_only_current_model_version: true
+  database_path: "db/levels.sqlite"
+  writer_lock_timeout_sec: 30.0
+  minimum_adv_usd: 5000000.0
+  earnings_suspend_days: 5
+  catalyst_suspend_days: 10
+  lambda_expectations: 0.0
+  price_basis: raw_unadjusted_nominal
+  price_currency: USD
+  require_explicit_valuation_currency: true
+  emit_market_reference_bands_when_intrinsic_missing: true
+  band_geometry:
+    starter_width_vol: 0.40
+    add_near_vol: 0.80
+    add_far_vol: 1.50
+    trim_near_vol: 0.80
+    trim_far_vol: 2.00
+    minimum_volatility_unit_pct: 0.01
+    maximum_volatility_regime_scale: 1.75
+    support_snap_enabled: true
+    drawdown_percentile_add_enabled: true
+    deteriorating_trim_tightening_vol: 0.25
+  valuation_contract:
+    # A trailing FCF yield may reconstruct FCF/share only when yield and price are
+    # published in the same PIT sector row. Price itself is never a fair-value anchor.
+    allow_ttm_fcf_per_share_reconstruction: true
+    ttm_fcf_reconstruction_pipelines:
+      [semiconductors, software_infrastructure, technology_hardware]
+    maximum_source_fcf_yield: 1.0
+    # Sector-owned ranges are accepted only under these explicit method identities.
+    # Each export must also publish low/base/high, confidence, and available_at_utc.
+    sector_specialist_method_allowlist:
+      biotech: [probability_weighted_pipeline_value]
+      med_devices: [normalized_eps_value, normalized_fcf_value]
+      defense: [normalized_cycle_eps_value, backlog_supported_value, ev_ebitda_value]
+      machinery: [normalized_cycle_eps_value, ev_ebitda_value]
+      semiconductors: [normalized_eps_value, normalized_fcf_value]
+      software_infrastructure: [normalized_fcf_value, ev_revenue_value]
+      technology_hardware: [normalized_eps_value, normalized_fcf_value]
+  valuation_multiples:
+    default: {pe: 18.0, fcf_yield: 0.06, ev_ebitda: 10.0}
+    stable_profitable: {pe: 20.0, fcf_yield: 0.05, ev_ebitda: 12.0}
+    growth_profitable: {pe: 25.0, fcf_yield: 0.04, ev_ebitda: 15.0}
+    cyclical: {pe: 14.0, fcf_yield: 0.07, ev_ebitda: 8.0}
+    unprofitable_growth: {pe: 0.0, fcf_yield: 0.0, ev_ebitda: 0.0}
+  margin_of_safety:
+    default_base: 0.15
+    base_by_company_type:
+      stable_profitable: 0.12
+      growth_profitable: 0.18
+      cyclical: 0.20
+      unprofitable_growth: 0.30
+      unknown: 0.25
+    maximum_uncertainty_penalty: 0.15
+    base_uncertainty_penalty: 0.02
+    disagreement_weight: 0.10
+    minimum_corroborating_anchors: 2
+    missing_anchor_penalty: 0.04
+    staleness_penalty_per_90_days: 0.01
+    maximum_staleness_penalty: 0.05
+    unknown_financial_risk_penalty: 0.05
+    net_debt_to_ebitda_penalties:
+      low_max: 1.0
+      medium_max: 2.5
+      high_max: 4.0
+      low: 0.00
+      medium: 0.02
+      high: 0.05
+      extreme: 0.10
+    low_liquidity_penalty: 0.05
+    event_gap_penalty: 0.05
+    regime_additions:
+      HEATING_UP: 0.00
+      EXPANSION_DISINFLATION: 0.00
+      SLOW_GROWTH: 0.02
+      STAGFLATION: 0.05
+      CONTRACTION: 0.07
+    maximum_total_margin: 0.50
+
 # Stage 1 - canonical cross-sector stocks_scores contract.
 # Adapters read each sector's published score CSV (never its DB) and map onto the contract.
 # calibration.expected_alpha_at_full = provisional annualized alpha at native score==100; empirical
@@ -17,7 +327,11 @@ score_contract:
   contract_version: "stocks_scores_v1"
   sector_output_root: "../output"        # repo-level output/ tree (relative to this config)
   staleness_tolerance_days: 10
-  min_successful_sectors: 6              # fail collection if fewer enabled production sectors publish usable rows
+  min_successful_sectors: 7              # all seven enabled production sectors must publish usable rows
+  # Operational continuity for governed model transitions. Stage 1 may carry the latest prior
+  # OOS-valid dated artifact only within that sector's staleness tolerance. Research replay and
+  # direct adapters retain exact-date semantics.
+  operational_oos_fallback_pipelines: [machinery]
   native_score_range: {min: 0.0, max: 100.0}
   max_abs_expected_alpha: 1.0             # hard sanity bound for calibrated final_score annual alpha
   # When a ticker is scored by >1 sector, force it to its canonical source pipeline before the
@@ -120,11 +434,11 @@ score_contract:
       file_path: "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
-    # Transportation is connected as an optional shadow source. It remains
-    # allocation-ineligible until its dated ranks carry a valid sealed OOS score.
+    # Transportation remains outside portfolio_layer until its implementation,
+    # calibration, and production activation are complete and separately approved.
     - model_family: transportation
       adapter: industrial_family
-      enabled: true
+      enabled: false
       required: false
       staleness_tolerance_days: 3
       sector: "Industrials"
@@ -176,12 +490,27 @@ risk_panel:
       issuer_id: "CIK0001474432"
       reason: "Pure Storage/Everpure active ticker; stitch PSTG history before P effective date"
   local_adjusted_price_fallbacks:
+    - name: portfolio_norgate_market_instruments
+      enabled: true
+      database_path: "output/cache/norgate_market_instruments.sqlite"
+      include_market_instruments: true
+      source_ids: [norgate_us_equities_total_return]
+      accepted_price_adjustments: [total_return_adjusted_close]
     - name: industrials_shared_db
       enabled: true
       database_path: "${INDUSTRIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/industrials.sqlite"
       source_pipelines: [defense, machinery, transportation]
+      include_market_instruments: true
       source_ids: [yahoo_finance_adjusted]
       accepted_price_adjustments: [adjusted_close]
+  norgate_market_instrument_cache:
+    enabled: true
+    include_scored_universe: true
+    python_executable: "C:/Users/josel/Miniconda3/python.exe"
+    database_path: "output/cache/norgate_market_instruments.sqlite"
+    manifest_path: "output/cache/norgate_market_instruments_manifest.json"
+    source_id: norgate_us_equities_total_return
+    price_adjustment: total_return_adjusted_close
   benchmark_tickers: [SPY, QQQ, SMH, SOXX, XBI, XLK, XLV, XLF, XLE, XLI, XLP, XLY, XLU, XLB, XLRE, XLC, XAR, ITA, VIS, IYT]
   hedge_rotation_etfs: [IGV, IHI, XAR, MCHI, FXI, INDA, EWZ, EWG, EWY, EWT, IEMG]
   sector_etf_map:                                  # source_pipeline -> shrinkage-target ETF
@@ -289,6 +618,14 @@ optimizer:
   # whose run-dir risk/spread_snapshot.csv median_half_spread_bps exceeds this are excluded from sizing
   # (fail-open: a missing snapshot or missing/blank row never excludes). Optimizer 09 only.
   max_half_spread_bps: 50
+  monitor_entry_policy:
+    policy_version: monitor_optimizer_entry_v1
+    enabled_in_production: true
+    entry_states: [green, stable]
+    retention_states: [green, stable, watch]
+    blocking_escalation_flags:
+      [R1, R2, R4, R5, R5_UNAVAILABLE, R6, PROVIDER_CONFLICT, MARKET_DATA_UNAVAILABLE]
+    minimum_investable_state_coverage_fraction: 0.98
 
 # Stage 4 - transaction-cost & turnover overlay (flat per-order commission, AUM-aware). Stage 3 unchanged.
 transaction_costs:
@@ -702,10 +1039,18 @@ calibration_feedback:
 orchestration:
   step_timeout_sec: 1800
   macro_step_timeout_sec: 7200             # raw + full serving fits can legitimately exceed 30 minutes
+  monitor_step_timeout_sec: 7200           # provider + OHLCV + state + levels fan-out
   cadences:
-    # earnings runs last: advisory-only (WARN on failure) and must never delay trading-critical stages
-    tactical: [scores, risk, optimizer, costs, rotation, governor, final, earnings]
-    strategic: [scores, risk, optimizer, costs, rotation, macro, bl, sleeves, ledger, exits, payout, governor, final, earnings]
+    # The first final book is an explicitly non-deployable same-day monitor
+    # bootstrap. monitor_filter re-solves Stage 3/4; only the later final group
+    # can publish deployable weights.
+    tactical:
+      [scores, risk, optimizer, costs, rotation, governor, bootstrap_final,
+       earnings, monitor, monitor_filter, governor, final, final_report]
+    strategic:
+      [scores, risk, optimizer, costs, rotation, macro, governor,
+       bootstrap_final, earnings, monitor, monitor_filter, bl, sleeves,
+       ledger, exits, payout, governor, final, final_report]
 
 # Stage 10 - payout / liability planner (SHADOW-ONLY; the +payout walk-forward arm is UNREGISTERED
 # for the first Open Event per docs/LOCKBOX_PROTOCOL.md). Emits a per-run distribution PROPOSAL:

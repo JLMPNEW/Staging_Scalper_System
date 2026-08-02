@@ -729,6 +729,24 @@ def test_complete_cache_gate_stops_before_run_allocation(
     assert json.loads(dedicated_gate_path.read_text(encoding="utf-8"))["mode"] == "cache_gate_failed"
 
 
+def test_defense_hydration_scope_preserves_missing_reason() -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "defense"
+            / "scripts"
+            / "08d_run_defense_dedicated_parser_shadow.py"
+        )
+    )
+    assert namespace["HYDRATION_SCOPE_FIELDS"] == [
+        "ticker",
+        "accession_number",
+        "form_type",
+        "filing_date",
+        "reason",
+    ]
+
 def test_machinery_hydration_command_is_bounded_and_cache_reusing() -> None:
     namespace = runpy.run_path(
         str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "08d_run_machinery_dedicated_parser_shadow.py")

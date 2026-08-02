@@ -60,16 +60,15 @@ def main() -> int:
         base_dir=base_dir,
     )
     dashboard_root = resolve_path(
-        family["scoring"]["dashboard_root"],
+        family["historical_scores"]["output_root"],
         base_dir=base_dir,
     )
-    history_validation_path = (
-        PROJECT_ROOT
-        / "output"
-        / "industrials"
-        / "transportation"
-        / "score_history"
-        / "transportation_daily_rank_history_validation.json"
+    history_build_manifest = resolve_path(
+        family["historical_scores"]["build_manifest_json"],
+        base_dir=base_dir,
+    )
+    history_validation_path = history_build_manifest.with_name(
+        "transportation_weekly_rank_history_validation.json"
     )
     panel_validation_path = (
         research_root / "transportation_generic_oos_panel_validation.json"
@@ -132,9 +131,18 @@ def main() -> int:
     )
     if minimum_walk_forward_rate is None:
         minimum_walk_forward_rate = 1.0
+    scoring_config = family.get("scoring")
+    frozen_surface_universe = (
+        isinstance(scoring_config, dict)
+        and str(scoring_config.get("score_construction_mode") or "")
+        == "surface_freight_fixed_denominator_v2"
+    )
     if history.get("acceptance") != "PASS":
-        issues.append("daily score history has not passed")
-    if not history.get("active_and_inactive_membership_sources_present"):
+        issues.append("weekly score history has not passed")
+    if (
+        not frozen_surface_universe
+        and not history.get("active_and_inactive_membership_sources_present")
+    ):
         issues.append("active/delisted history sources are not both present")
     if panel.get("acceptance") != "PASS":
         issues.append("generic OOS panel has not passed")
@@ -159,6 +167,8 @@ def main() -> int:
         )
     if calibration.get("promotion_eligible") is not True:
         issues.append("calibration is not promotion eligible")
+    if calibration.get("promotion_evidence_eligible") is not True:
+        issues.append("untouched post-freeze promotion evidence is not available")
     if rank_manifest.get("acceptance") != "PASS":
         issues.append("current rank manifest has not passed")
     if (
@@ -200,7 +210,14 @@ def main() -> int:
         {
             "gate": "daily_history",
             "status": "PASS" if history.get("acceptance") == "PASS" else "FAIL",
-            "detail": str(history.get("validated_date_count") or ""),
+            "detail": (
+                f"{history.get('validated_date_count') or ''} weekly snapshots; "
+                + (
+                    "frozen active surface-freight cohort"
+                    if frozen_surface_universe
+                    else "active/delisted PIT universe"
+                )
+            ),
         },
         {
             "gate": "oos_panel",
@@ -258,6 +275,7 @@ def main() -> int:
         "audit_acceptance": "PASS",
         "promotion_readiness": "PASS" if not issues else "FAIL",
         "promotion_eligible": not issues,
+        "frozen_surface_universe": frozen_surface_universe,
         "asof_date": args.asof,
         "selected_candidate_id": calibration.get(
             "selected_candidate_id", ""

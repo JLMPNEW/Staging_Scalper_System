@@ -3,6 +3,7 @@ from __future__ import annotations
 # pyright: reportMissingImports=false
 
 import sys
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from macro_serving_common import release_staleness_days  # noqa: E402
 from portfolio_layer.macro.contract import (  # noqa: E402
     regime_application_errors,
     regime_table_for_source,
+    single_latest_regime_row,
     verify_v2_promotion_manifest,
 )
 
@@ -91,6 +93,45 @@ def test_regime_source_selector_rejects_unknown_source() -> None:
         assert "Unsupported macro regime source" in str(exc)
     else:
         raise AssertionError("Unknown regime source was accepted")
+
+
+def test_latest_covered_regime_skips_a_newer_uncovered_gap() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE macro_regime_decision_daily (
+            as_of_date TEXT PRIMARY KEY,
+            coverage_flag INTEGER NOT NULL,
+            active_current_regime TEXT,
+            active_next_regime TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO macro_regime_decision_daily VALUES (?, ?, ?, ?)",
+        [
+            ("2026-07-28", 1, "SLOW_GROWTH", "STAGFLATION"),
+            ("2026-07-29", 0, "SLOW_GROWTH", "STAGFLATION"),
+        ],
+    )
+    try:
+        latest = single_latest_regime_row(
+            conn,
+            source="v1",
+            run_as_of="2026-07-29",
+            covered_only=False,
+        )
+        covered = single_latest_regime_row(
+            conn,
+            source="v1",
+            run_as_of="2026-07-29",
+            covered_only=True,
+        )
+    finally:
+        conn.close()
+    assert latest is not None and latest["as_of_date"] == "2026-07-29"
+    assert covered is not None and covered["as_of_date"] == "2026-07-28"
 
 
 def test_v2_promotion_manifest_must_be_inside_allowed_root(tmp_path: Path) -> None:

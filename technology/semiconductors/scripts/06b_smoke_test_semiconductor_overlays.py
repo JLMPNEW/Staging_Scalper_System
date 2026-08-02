@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from technology.core.https import verified_https_context  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -108,7 +109,11 @@ def fetch_url(
         headers["Content-Type"] = content_type
     request = urllib.request.Request(url, data=payload, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(  # noqa: S310
+            request,
+            timeout=timeout_sec,
+            context=verified_https_context(),
+        ) as response:
             body = response.read(max_bytes + 1)
             if len(body) > max_bytes:
                 body = body[:max_bytes]

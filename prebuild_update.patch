@@ -1,0 +1,34 @@
+diff --git a/industrials/transportation/PREBUILD_VALUATION_AND_CALIBRATION_GATES.md b/industrials/transportation/PREBUILD_VALUATION_AND_CALIBRATION_GATES.md
+--- a/industrials/transportation/PREBUILD_VALUATION_AND_CALIBRATION_GATES.md
++++ b/industrials/transportation/PREBUILD_VALUATION_AND_CALIBRATION_GATES.md
+@@ -9 +9 @@
+-No historical feature rebuild or calibration is authorized by this document. The rebuild occurs once, after the source gates below pass.
++The valuation source gate now passes and authorizes one historical valuation/feature rebuild. Calibration remains unauthorized until the rebuilt-panel preflight passes.
+@@ -28,2 +28,4 @@
+- 62 of those 107 are currently source-ready.
+- 45 remain blocked: 30 foreign-listing structure reviews, 9 explicit share-conversion reviews, 4 weighted-average-share fallbacks, and 2 missing point-in-time share facts.
++- All 107 required issuers are source-ready; the blocker count is zero.
++- Current active coverage is 112/112 for both shares outstanding and public float.
++- Historical endpoint coverage is 138/139 for shares outstanding. The only miss is seed-only CGI; required coverage is complete.
++- Historical public-float coverage is 126/139. Missing float remains unavailable and is not fabricated from shares outstanding.
+@@ -35,7 +37,4 @@
+-1. Review the 39 foreign-listing/share-conversion cases once from primary registration statements, annual reports, or deposit agreements. Record either a source-backed ADR/ADS ratio or a reviewed direct-share ratio of 1. Structural breaks such as AZUL and LTM require separate effective-date rows.
+-2. Recover point-in-time shares only for CVLG, GWR, SNDR, USX, FDXF, and VLRS. Use filing cover pages or inline XBRL instance documents; do not rerun the specialized-metric parser corpus.
+-3. Rerun `25e_audit_transportation_pit_valuation_sources.py`. The valuation rebuild is authorized only when all required research-window issuers are ready or have an explicit reviewed exclusion.
+-4. Build the point-in-time share panel and historical market capitalization, then compute `fcf_yield`, `ev_operating_income`, and `valuation_score` for the full survivorship-corrected panel in one pass.
+-5. Rebuild financial/market feature history, daily score history, and the generic OOS panel once. Rerun `26aa_audit_transportation_calibration_inputs.py`; every candidate must meet the 90% strict complete-row gate.
+-6. Only after the preflight passes, run the bounded candidate calibration, holdout, and walk-forward gates. A failure remains a legitimate zero-overlay outcome; a pass may proceed through readiness audit, promotion, immutable production lock, portfolio adapter validation, and activation.
+-7. At the completed batch boundary, commit the scoped source/config/test changes and mint a successor release seal. Do not overwrite the prior immutable release.
++1. Build historical market capitalization and compute `fcf_yield`, `ev_operating_income`, and `valuation_score` for the full survivorship-corrected panel in one pass. Do not rerun the filing search or specialized-metric parser.
++2. Rebuild financial/market feature history, daily score history, and the generic OOS panel once. Rerun `26aa_audit_transportation_calibration_inputs.py`; every candidate must meet the 90% strict complete-row gate.
++3. Only after the preflight passes, run the bounded candidate calibration, holdout, and walk-forward gates. A failure remains a legitimate zero-overlay outcome; a pass may proceed through readiness audit, promotion, immutable production lock, portfolio adapter validation, and activation.
++4. At the completed batch boundary, commit the scoped source/config/test changes and mint a successor release seal. Do not overwrite the prior immutable release.
+@@ -52 +51 @@
+-| Valuation rebuild readiness | All required research-window issuers source-ready or explicitly excluded | FAIL: 45 blockers |
++| Valuation rebuild readiness | All required research-window issuers source-ready or explicitly excluded | PASS: 107/107; zero blockers |
+@@ -54 +53 @@
+-| Historical rebuild | Run once after valuation source readiness passes | NOT RUN |
++| Historical rebuild | Run once after valuation source readiness passes | AUTHORIZED; NOT YET RUN |
+@@ -61,0 +61,2 @@
++- `output/industrials/transportation/stage3/transportation_share_snapshot_coverage.csv`
++- `output/industrials/transportation/historical_load/transportation_historical_share_snapshot_coverage.csv`

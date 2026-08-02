@@ -22,8 +22,8 @@ from industrials.core.oos_research import (  # noqa: E402
     artifact_sha256,
     evaluate_candidate,
     finite_float,
+    finite_or_default,
     fmt,
-    normalized_weights,
 )
 from industrials.core.reports import (  # noqa: E402
     write_csv_atomic,
@@ -32,6 +32,9 @@ from industrials.core.reports import (  # noqa: E402
 from industrials.transportation.contracts import (  # noqa: E402
     COMPONENT_FIELDS,
     read_rows,
+)
+from industrials.transportation.prebuild_contract import (  # noqa: E402
+    load_prebuild_contract,
 )
 from industrials.transportation.scripts._shared import (  # noqa: E402
     DEFAULT_CONFIG,
@@ -71,68 +74,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--allow-overwrite", action="store_true")
     return parser.parse_args()
-
-
-def candidate_registry(
-    baseline: dict[str, float],
-) -> dict[str, dict[str, float]]:
-    raw = {
-        "baseline_frozen": baseline,
-        "equal_nonzero": {
-            field: 1.0
-            for field in COMPONENT_FIELDS
-            if field != "positioning_score"
-        },
-        "market_quality": {
-            "market_trend_score": 0.35,
-            "quality_score": 0.25,
-            "growth_score": 0.10,
-            "valuation_score": 0.05,
-            "operating_efficiency_score": 0.10,
-            "capital_risk_score": 0.10,
-            "development_stage_risk_score": 0.05,
-        },
-        "quality_efficiency": {
-            "market_trend_score": 0.20,
-            "quality_score": 0.25,
-            "growth_score": 0.10,
-            "valuation_score": 0.10,
-            "operating_efficiency_score": 0.20,
-            "capital_risk_score": 0.10,
-            "development_stage_risk_score": 0.05,
-        },
-        "risk_control": {
-            "market_trend_score": 0.20,
-            "quality_score": 0.20,
-            "growth_score": 0.05,
-            "valuation_score": 0.10,
-            "operating_efficiency_score": 0.15,
-            "capital_risk_score": 0.25,
-            "development_stage_risk_score": 0.05,
-        },
-        "growth_quality": {
-            "market_trend_score": 0.25,
-            "quality_score": 0.20,
-            "growth_score": 0.20,
-            "valuation_score": 0.05,
-            "operating_efficiency_score": 0.15,
-            "capital_risk_score": 0.10,
-            "development_stage_risk_score": 0.05,
-        },
-        "balanced_value": {
-            "market_trend_score": 0.20,
-            "quality_score": 0.15,
-            "growth_score": 0.10,
-            "valuation_score": 0.20,
-            "operating_efficiency_score": 0.15,
-            "capital_risk_score": 0.15,
-            "development_stage_risk_score": 0.05,
-        },
-    }
-    return {
-        name: normalized_weights(COMPONENT_FIELDS, weights)
-        for name, weights in raw.items()
-    }
 
 
 def gate_result(
@@ -248,6 +189,7 @@ def evaluate(
         transaction_cost_bps=float(
             standards["transaction_cost_bps"]
         ),
+        require_complete_components=True,
     )
 
 
@@ -257,6 +199,7 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     family = family_config(config, "transportation")
+    prebuild = load_prebuild_contract(config_path, family)
     standards = cfg_get(
         config,
         "oos_calibration_standards.families.transportation",
@@ -313,6 +256,13 @@ def main() -> int:
     manifest_path = (
         root / "transportation_generic_oos_calibration_manifest.json"
     )
+    preflight_path = (
+        root / "transportation_calibration_input_preflight.json"
+    )
+    if not preflight_path.is_file():
+        raise FileNotFoundError(
+            "Transportation calibration input preflight is required"
+        )
     if (
         not args.allow_overwrite
         and any(
@@ -330,21 +280,24 @@ def main() -> int:
             "Generic OOS calibration is sealed; use --allow-overwrite"
         )
     rows = read_rows(panel_path)
-    component_key_map = {
-        "market_trend": "market_trend_score",
-        "quality": "quality_score",
-        "growth": "growth_score",
-        "valuation": "valuation_score",
-        "operating_efficiency": "operating_efficiency_score",
-        "capital_risk": "capital_risk_score",
-        "development_stage_risk": "development_stage_risk_score",
-        "positioning": "positioning_score",
+    candidates = {
+        str(candidate_id): {
+            str(field): float(weight) for field, weight in weights.items()
+        }
+        for candidate_id, weights in prebuild["enabled_candidate_registry"].items()
     }
-    baseline = {
-        component_key_map[key]: float(value)
-        for key, value in family["scoring"]["component_weights"].items()
-    }
-    candidates = candidate_registry(baseline)
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    if (
+        preflight.get("acceptance") != "PASS"
+        or preflight.get("panel_sha256") != artifact_sha256(panel_path)
+        or preflight.get("candidate_registry") != candidates
+    ):
+        raise ValueError(
+            "Transportation calibration input preflight failed or is stale: "
+            + "; ".join(
+                str(item) for item in (preflight.get("issues") or [])[:20]
+            )
+        )
     gates = {
         str(key): float(value)
         for key, value in standards["absolute_gates"].items()
@@ -361,19 +314,15 @@ def main() -> int:
     ordered_candidates = sorted(
         candidates,
         key=lambda candidate_id: (
-            -(
-                finite_float(
-                    validation_metrics[candidate_id].get(
-                        "mean_top_excess_net"
-                    )
-                )
-                or -999.0
+            -finite_or_default(
+                validation_metrics[candidate_id].get(
+                    "mean_top_excess_net"
+                ),
+                default=-999.0,
             ),
-            -(
-                finite_float(
-                    validation_metrics[candidate_id].get("mean_ic")
-                )
-                or -999.0
+            -finite_or_default(
+                validation_metrics[candidate_id].get("mean_ic"),
+                default=-999.0,
             ),
             candidate_id,
         ),
@@ -398,9 +347,12 @@ def main() -> int:
         split="holdout",
         standards=standards,
     )
+    baseline_candidate_id = "surface_balanced"
+    if baseline_candidate_id not in candidates:
+        raise ValueError(f"missing pre-registered baseline={baseline_candidate_id}")
     baseline_holdout = evaluate(
         rows,
-        weights=candidates["baseline_frozen"],
+        weights=candidates[baseline_candidate_id],
         split="holdout",
         standards=standards,
     )
@@ -426,14 +378,14 @@ def main() -> int:
             gates,
         )
     )
-    if selected_id != "baseline_frozen":
+    if selected_id != baseline_candidate_id:
         summary_rows.append(
             serialize_summary(
-                "baseline_frozen",
+                baseline_candidate_id,
                 "holdout_reference",
                 False,
                 baseline_holdout,
-                candidates["baseline_frozen"],
+                candidates[baseline_candidate_id],
                 gates,
             )
         )
@@ -507,13 +459,11 @@ def main() -> int:
         block_candidate = sorted(
             candidates,
             key=lambda candidate_id: (
-                -(
-                    finite_float(
-                        training_metrics[candidate_id].get(
-                            "mean_top_excess_net"
-                        )
-                    )
-                    or -999.0
+                -finite_or_default(
+                    training_metrics[candidate_id].get(
+                        "mean_top_excess_net"
+                    ),
+                    default=-999.0,
                 ),
                 candidate_id,
             ),
@@ -583,24 +533,6 @@ def main() -> int:
         if walk_rows
         else 0.0
     )
-    promotion_eligible = (
-        validation_pass
-        and holdout_pass
-        and walk_forward_pass_rate >= 0.50
-    )
-    registry = {
-        "artifact_family": "transportation_generic_oos_candidate_registry",
-        "selection_rule": (
-            "highest_validation_mean_top_excess_net_then_mean_ic; "
-            "holdout untouched until one candidate is selected"
-        ),
-        "candidates": candidates,
-        "registry_frozen_before_holdout_evaluation": True,
-    }
-    write_text_atomic(
-        registry_path,
-        json.dumps(registry, indent=2, sort_keys=True) + "\n",
-    )
     split_dates = {
         split: sorted(
             {
@@ -611,14 +543,64 @@ def main() -> int:
         )
         for split in ("train", "validation", "holdout")
     }
+    freeze_asof = str(prebuild["asof_date"])
+    validation_is_post_freeze = bool(split_dates["validation"]) and all(
+        value > freeze_asof for value in split_dates["validation"]
+    )
+    holdout_is_post_freeze = bool(split_dates["holdout"]) and all(
+        value > freeze_asof for value in split_dates["holdout"]
+    )
+    promotion_evidence_eligible = bool(
+        validation_is_post_freeze and holdout_is_post_freeze
+    )
+    statistical_gate_pass = (
+        validation_pass
+        and holdout_pass
+        and walk_forward_pass_rate >= 0.50
+    )
+    promotion_eligible = statistical_gate_pass and promotion_evidence_eligible
+    registry = {
+        "artifact_family": "transportation_generic_oos_candidate_registry",
+        "selection_rule": (
+            "highest_validation_mean_top_excess_net_then_mean_ic; "
+            "holdout untouched until one candidate is selected"
+        ),
+        "candidates": candidates,
+        "registry_frozen_before_holdout_evaluation": True,
+        "evidence_posture": (
+            "untouched_post_freeze"
+            if promotion_evidence_eligible
+            else "spent_history_diagnostic_only"
+        ),
+        "prebuild_freeze_asof": freeze_asof,
+    }
+    write_text_atomic(
+        registry_path,
+        json.dumps(registry, indent=2, sort_keys=True) + "\n",
+    )
     manifest = {
         "artifact_family": "transportation_generic_oos_calibration",
         "model_family": "transportation",
         "artifact_acceptance": "PASS",
         "promotion_gate_status": (
-            "PASS" if promotion_eligible else "FAIL"
+            "PASS"
+            if promotion_eligible
+            else "FAIL_EVIDENCE_REUSE"
+            if statistical_gate_pass and not promotion_evidence_eligible
+            else "FAIL_STATISTICAL_GATES"
         ),
         "promotion_eligible": promotion_eligible,
+        "statistical_gate_pass": statistical_gate_pass,
+        "promotion_evidence_eligible": promotion_evidence_eligible,
+        "evidence_posture": (
+            "untouched_post_freeze"
+            if promotion_evidence_eligible
+            else "spent_history_diagnostic_only"
+        ),
+        "prebuild_freeze_asof": freeze_asof,
+        "validation_is_post_freeze": validation_is_post_freeze,
+        "holdout_is_post_freeze": holdout_is_post_freeze,
+        "promotion_from_revealed_holdout_allowed": False,
         "selected_candidate_id": selected_id,
         "selected_weights": selected_weights,
         "selection_used_holdout": False,
@@ -633,7 +615,10 @@ def main() -> int:
         "minimum_walk_forward_pass_rate": 0.50,
         "return_basis": "next_session_open_execution_excess",
         "horizon_sessions": 63,
-        "production_universe_policy": "operating_core_only",
+        "production_universe_policy": "frozen_24_surface_freight_only",
+        "prebuild_contract_path": prebuild["manifest_path"],
+        "prebuild_contract_sha256": prebuild["manifest_sha256"],
+        "score_engine_version": prebuild["score_engine_version"],
         "train_start_date": (
             split_dates["train"][0] if split_dates["train"] else ""
         ),
@@ -665,6 +650,12 @@ def main() -> int:
         "panel_validation_path": str(panel_validation_path),
         "panel_validation_sha256": artifact_sha256(
             panel_validation_path
+        ),
+        "calibration_input_preflight_path": str(preflight_path),
+        "calibration_input_preflight_sha256": artifact_sha256(preflight_path),
+        "component_missingness_policy": "strict_complete_positive_weight_components",
+        "structurally_excluded_components": preflight.get(
+            "structurally_excluded_components", []
         ),
         "candidate_registry_path": str(registry_path),
         "candidate_registry_sha256": artifact_sha256(registry_path),

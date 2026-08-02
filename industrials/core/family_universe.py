@@ -791,11 +791,19 @@ def load_historical_and_delisted(
             if resolved
             else f"{exit_year:04d}-12-31"
         )
-        boundary_note = (
-            "Norgate-resolved final quoted date"
+        eligibility_basis = (
+            str(resolved.get("eligibility_basis") or "").strip()
             if resolved
-            else "provisional year-end boundary; excluded from calibration until price reconciliation"
+            else ""
         )
+        if resolved and eligibility_basis == "reviewed_economic_terminal_event":
+            boundary_note = "reviewed economic terminal boundary"
+        elif resolved:
+            boundary_note = "Norgate-resolved final quoted date"
+        else:
+            boundary_note = (
+                "provisional year-end boundary; excluded from calibration until price reconciliation"
+            )
         _upsert_membership(
             conn,
             company_id=company_id,

@@ -304,6 +304,10 @@ derived_metrics:
     definition_version: arr_growth_v1
     inputs: [annual_recurring_revenue]
     production_status: measurement_only
+  - metric_name: annual_recurring_revenue_to_revenue
+    definition_version: arr_to_revenue_v1
+    inputs: [annual_recurring_revenue, revenue_ttm]
+    production_status: measurement_only
   - metric_name: net_revenue_retention_level
     definition_version: nrr_level_v1
     inputs: [net_revenue_retention]

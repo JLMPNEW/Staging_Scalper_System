@@ -89,8 +89,13 @@ def main() -> int:
     review_override_path = args.review_overrides.expanduser().resolve()
     review_overrides = load_arr_review_overrides(review_override_path)
     expected_canonical_count = 0
-    if review_override_path.suffix.lower() == ".json":
-        review_policy = json.loads(review_override_path.read_text(encoding="utf-8"))
+    review_policy_suffix = review_override_path.suffix.lower()
+    if review_policy_suffix in {".json", ".yaml", ".yml"}:
+        review_policy = (
+            json.loads(review_override_path.read_text(encoding="utf-8"))
+            if review_policy_suffix == ".json"
+            else load_yaml(review_override_path)
+        )
         expected_canonical_count = int(review_policy.get("expected_corrected_canonical_count") or 0)
     proposals, override_summary = apply_arr_review_overrides(
         proposals,

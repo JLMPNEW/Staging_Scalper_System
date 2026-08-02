@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,11 @@ from industrials.core.oos_research import (  # noqa: E402
     purged_split_map,
     select_weekly_dates,
 )
+from industrials.core.oos_price_lineage import (  # noqa: E402
+    PRICE_SLICE_FIELDS,
+    price_slice_rows,
+    prices_from_slice,
+)
 from industrials.core.reports import (  # noqa: E402
     write_csv_atomic,
     write_text_atomic,
@@ -46,6 +51,13 @@ from industrials.transportation.oos_identity import (  # noqa: E402
     load_memberships,
     resolve_price_ticker,
 )
+from industrials.transportation.prebuild_contract import (  # noqa: E402
+    load_prebuild_contract,
+)
+from industrials.transportation.surface_freight_score_engine import (  # noqa: E402
+    load_surface_freight_score_policy,
+    surface_freight_score_eligible,
+)
 from industrials.transportation.scripts._shared import (  # noqa: E402
     DEFAULT_CONFIG,
     MODEL_FAMILY,
@@ -59,15 +71,25 @@ PANEL_FIELDS = [
     "asof_date",
     "ticker",
     "company_name",
+    "industry",
     "calibration_cohort",
     "calibration_use",
     "development_stage",
+    "classification_policy_version",
+    "calibration_pool",
+    "economic_peer_group",
+    "risk_tier",
+    "portfolio_role",
     "membership_source_id",
     "membership_start_date",
     "membership_end_date",
     "membership_status",
+    "terminal_type",
     "physical_price_ticker",
     "alias_resolution",
+    "metric_registry_version",
+    "metric_values_json",
+    "metric_status_json",
     *COMPONENT_FIELDS,
     "baseline_final_score",
     "rank_ready_flag",
@@ -107,6 +129,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--start-date", default="")
     parser.add_argument("--end-date", default="")
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--allow-overwrite", action="store_true")
     return parser.parse_args()
 
@@ -155,6 +178,7 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     family = family_config(config, MODEL_FAMILY)
+    prebuild = load_prebuild_contract(config_path, family)
     universe = family["universe"]
     historical = family["historical_scores"]
     standards = cfg_get(
@@ -170,16 +194,36 @@ def main() -> int:
         historical["output_root"],
         base_dir=base_dir,
     )
-    output_root = resolve_path(
-        standards["research_output_root"],
+    output_root = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir is not None
+        else resolve_path(
+            standards["research_output_root"],
+            base_dir=base_dir,
+        )
+    )
+    surface_policy_path = resolve_path(
+        family["scoring"]["surface_freight_score_policy"],
         base_dir=base_dir,
     )
+    surface_policy = load_surface_freight_score_policy(surface_policy_path)
     panel_path = output_root / "transportation_generic_oos_panel.csv"
     split_path = output_root / "transportation_generic_oos_splits.csv"
     manifest_path = output_root / "transportation_generic_oos_panel_manifest.json"
+    price_slice_path = (
+        output_root / "transportation_generic_oos_price_slice.csv"
+    )
     if (
         not args.allow_overwrite
-        and any(path.exists() for path in (panel_path, split_path, manifest_path))
+        and any(
+            path.exists()
+            for path in (
+                panel_path,
+                split_path,
+                manifest_path,
+                price_slice_path,
+            )
+        )
     ):
         raise FileExistsError(
             "Generic transportation OOS panel is sealed; use "
@@ -246,9 +290,26 @@ def main() -> int:
             connection,
             tickers=sorted(physical_tickers),
             sources=[active_source, delisted_source],
+            end_date=end,
         )
     finally:
         connection.close()
+    price_slice_start = (
+        parse_date(start, field="development start") - timedelta(days=10)
+    ).isoformat()
+    frozen_price_rows = price_slice_rows(
+        prices,
+        start_date=price_slice_start,
+        end_date=end,
+    )
+    if not frozen_price_rows:
+        raise ValueError("Frozen transportation OOS price slice is empty")
+    write_csv_atomic(
+        price_slice_path,
+        list(PRICE_SLICE_FIELDS),
+        frozen_price_rows,
+    )
+    prices = prices_from_slice(frozen_price_rows)
     benchmark_windows: dict[tuple[str, int], Any] = {}
     usable_weekly_dates: list[str] = []
     for asof in selected:
@@ -308,10 +369,13 @@ def main() -> int:
             )
             continuity_policy = continuity.get(ticker, {})
             core_eligible = (
+                surface_freight_score_eligible(source_row, surface_policy)
+                and
                 source_row.get("stage11_calibration_input_eligible_flag")
                 == "1"
                 and source_row.get("calibration_use") == "core"
                 and source_row.get("development_stage") == "operating"
+                and source_row.get("portfolio_role") == "core_candidate"
             )
             eligibility_reason = (
                 "ok"
@@ -389,13 +453,22 @@ def main() -> int:
                         "asof_date",
                         "ticker",
                         "company_name",
+                        "industry",
                         "calibration_cohort",
                         "calibration_use",
                         "development_stage",
+                        "classification_policy_version",
+                        "calibration_pool",
+                        "economic_peer_group",
+                        "risk_tier",
+                        "portfolio_role",
                         "membership_source_id",
                         "membership_start_date",
                         "membership_end_date",
                         "membership_status",
+                        "metric_registry_version",
+                        "metric_values_json",
+                        "metric_status_json",
                         *COMPONENT_FIELDS,
                     ]
                 }
@@ -403,6 +476,9 @@ def main() -> int:
                     {
                         "physical_price_ticker": price_ticker,
                         "alias_resolution": alias_resolution,
+                        "terminal_type": str(
+                            membership.get("terminal_type") or ""
+                        ),
                         "baseline_final_score": source_row.get(
                             "final_score", ""
                         ),
@@ -522,10 +598,21 @@ def main() -> int:
         "snapshot_cadence": "weekly",
         "weekly_selection": standards.get("weekly_selection"),
         "survivorship_corrected": True,
-        "production_universe_policy": "operating_core_only",
+        "production_universe_policy": "frozen_24_surface_freight_only",
+        "surface_freight_score_policy_path": str(surface_policy_path),
+        "surface_freight_score_policy_sha256": artifact_sha256(surface_policy_path),
+        "surface_freight_score_policy_version": surface_policy["policy_version"],
+        "prebuild_contract_path": prebuild["manifest_path"],
+        "prebuild_contract_sha256": prebuild["manifest_sha256"],
         "panel_path": str(panel_path),
         "panel_sha256": artifact_sha256(panel_path),
         "panel_row_count": len(panel_rows),
+        "price_slice_path": str(price_slice_path),
+        "price_slice_sha256": artifact_sha256(price_slice_path),
+        "price_slice_row_count": len(frozen_price_rows),
+        "price_slice_start_date": price_slice_start,
+        "price_slice_end_date": end,
+        "price_slice_signal_lookback_calendar_days": 10,
         "source_index_path": str(source_index_path),
         "source_index_sha256": artifact_sha256(source_index_path),
         "split_path": str(split_path),

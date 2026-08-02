@@ -69,14 +69,20 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment", "capex", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "DepreciationDepletionAndAmortization", "depreciation_and_amortization", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "DepreciationAndAmortization", "depreciation_and_amortization", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
+    # Used by issuers including WERN. 07_sync already recognizes this standard
+    # CompanyFacts concept; keeping it in the authoritative shared seed lets a
+    # network-free raw-fact backfill repair every industrial family consistently.
+    _xbrl_concept("us-gaap", "OtherDepreciationAndAmortization", "depreciation_and_amortization", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "Depreciation", "depreciation_and_amortization", "cash_flow", "duration", priority=30, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "InterestExpense", "interest_expense", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "InterestExpenseNonoperating", "interest_expense", "income_statement", "duration", priority=20, sign_policy="positive_abs"),
+    _xbrl_concept("us-gaap", "InterestAndDebtExpense", "interest_expense", "income_statement", "duration", priority=25, sign_policy="positive_abs"),
     _xbrl_concept("us-gaap", "InterestExpenseDebt", "interest_expense", "income_statement", "duration", priority=30, sign_policy="positive_abs"),
     # Net interest line ("Interest expense, net"): negative = net expense. The
     # expense_from_net policy maps net income (positive) to 0 rather than abs()
     # so cash-rich issuers cannot gain a phantom interest expense.
     _xbrl_concept("us-gaap", "InterestIncomeExpenseNet", "interest_expense", "income_statement", "duration", priority=40, sign_policy="expense_from_net"),
+    _xbrl_concept("us-gaap", "InterestIncomeExpenseNonoperatingNet", "interest_expense", "income_statement", "duration", priority=45, sign_policy="expense_from_net"),
     _xbrl_concept("us-gaap", "IncomeTaxExpenseBenefit", "income_tax_expense", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", "pretax_income", "income_statement", "duration", priority=10),
     _xbrl_concept("us-gaap", "ProceedsFromIssuanceOfCommonStock", "equity_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
@@ -118,9 +124,17 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("dei", "EntityCommonStockSharesOutstanding", "shares_outstanding", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "DebtCurrent", "debt_current", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "LongTermDebtCurrent", "debt_current", "balance_sheet", "instant", priority=20),
+    # EXPD reports subsidiary working-capital borrowings under this standard
+    # tag. Missing the tag must not be interpreted as zero debt.
+    _xbrl_concept("us-gaap", "ShortTermBankLoansAndNotesPayable", "debt_current", "balance_sheet", "instant", priority=20),
     _xbrl_concept("us-gaap", "LongTermDebtNoncurrent", "debt_noncurrent", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "LongTermDebtAndFinanceLeaseObligationsNoncurrent", "debt_noncurrent", "balance_sheet", "instant", priority=20),
+    _xbrl_concept("us-gaap", "LongTermDebtAndCapitalLeaseObligations", "debt_noncurrent", "balance_sheet", "instant", priority=30),
+    _xbrl_concept("us-gaap", "LongTermDebtAndCapitalLeaseObligationsCurrent", "debt_current", "balance_sheet", "instant", priority=30),
     _xbrl_concept("us-gaap", "DebtAndFinanceLeaseObligations", "debt_total", "balance_sheet", "instant", priority=10),
+    _xbrl_concept("us-gaap", "DebtAndCapitalLeaseObligations", "debt_total", "balance_sheet", "instant", priority=15),
+    _xbrl_concept("us-gaap", "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities", "debt_total", "balance_sheet", "instant", priority=20),
+    _xbrl_concept("us-gaap", "LongTermDebt", "debt_total", "balance_sheet", "instant", priority=30),
     _xbrl_concept("us-gaap", "ContractWithCustomerLiabilityCurrent", "deferred_revenue_current", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "ContractWithCustomerLiabilityNoncurrent", "deferred_revenue_noncurrent", "balance_sheet", "instant", priority=10),
     _xbrl_concept("us-gaap", "ContractWithCustomerLiability", "deferred_revenue_total", "balance_sheet", "instant", priority=10),
@@ -150,6 +164,7 @@ XBRL_CONCEPT_MAP_SEED: list[dict[str, object]] = [
     _xbrl_concept("ifrs-full", "DepreciationAndAmortisationExpense", "depreciation_and_amortization", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "AdjustmentsForDepreciationAndAmortisationExpense", "depreciation_and_amortization", "cash_flow", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "InterestExpense", "interest_expense", "income_statement", "duration", priority=10, sign_policy="positive_abs"),
+    _xbrl_concept("ifrs-full", "FinanceCosts", "interest_expense", "income_statement", "duration", priority=20, sign_policy="positive_abs"),
     _xbrl_concept("ifrs-full", "IncomeTaxExpenseContinuingOperations", "income_tax_expense", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "ProfitLossBeforeTax", "pretax_income", "income_statement", "duration", priority=10),
     _xbrl_concept("ifrs-full", "ProceedsFromIssuingShares", "equity_issuance_proceeds", "cash_flow", "duration", priority=10, sign_policy="positive_abs"),
@@ -488,6 +503,34 @@ CREATE TABLE IF NOT EXISTS fact_market_snapshot (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(ticker, asof_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+-- Share statistics are family-scoped even though market bars are shared.  A
+-- transportation refresh must never change the share denominator selected by
+-- defense or machinery for the same ticker.  Outstanding shares and public
+-- float remain separate because they serve different financial/liquidity uses.
+CREATE TABLE IF NOT EXISTS fact_share_snapshot (
+    ticker TEXT NOT NULL,
+    model_family TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_asof_date TEXT,
+    source_id TEXT NOT NULL,
+    shares_outstanding REAL,
+    float_shares REAL,
+    market_cap REAL,
+    price REAL,
+    currency TEXT,
+    outstanding_method TEXT,
+    float_method TEXT,
+    outstanding_proxy_flag INTEGER NOT NULL DEFAULT 0,
+    float_proxy_flag INTEGER NOT NULL DEFAULT 0,
+    quality_status TEXT NOT NULL DEFAULT 'accepted',
+    review_reason TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, model_family, asof_date, source_id),
     FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 
@@ -1158,6 +1201,9 @@ CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_source_date
 CREATE INDEX IF NOT EXISTS idx_fact_market_snapshot_ticker_asof
     ON fact_market_snapshot(ticker, asof_date);
 
+CREATE INDEX IF NOT EXISTS idx_fact_share_snapshot_lookup
+    ON fact_share_snapshot(model_family, ticker, asof_date, source_id);
+
 CREATE INDEX IF NOT EXISTS idx_feature_market_technical_asof
     ON feature_market_technical(model_family, asof_date);
 
@@ -1315,7 +1361,7 @@ def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, d
 # One-time data backfills and table rebuilds are gated on this version so init_db
 # (which every pipeline script runs on every connection) does not repeat them.
 # Bump the constant when adding a new gated migration step below.
-DB_USER_VERSION = 5
+DB_USER_VERSION = 6
 
 
 def db_user_version(conn: sqlite3.Connection) -> int:

@@ -458,6 +458,7 @@ def ingest_industrials_diluted_share_proxies(
         source: str,
         accession_number: str,
         priority: int,
+        proxy_flag: bool = True,
     ) -> None:
         if shares < 100_000.0:
             return
@@ -479,7 +480,7 @@ def ingest_industrials_diluted_share_proxies(
                 source_asof.isoformat(),
                 None,
                 "",
-                1.0,
+                1.0 if proxy_flag else 0.0,
                 now,
                 now,
             )
@@ -527,9 +528,62 @@ def ingest_industrials_diluted_share_proxies(
             """,
             (*internal_tickers, end_date.isoformat()),
         ).fetchall()
+        try:
+            share_rows = industrials_conn.execute(
+                f"""
+                SELECT ticker, asof_date, source_asof_date, source_id, float_shares,
+                       float_method, float_proxy_flag
+                FROM fact_share_snapshot
+                WHERE model_family = ?
+                  AND ticker IN ({placeholders})
+                  AND asof_date >= ? AND asof_date <= ?
+                  AND COALESCE(float_shares, 0.0) > 0.0
+                  AND quality_status = 'accepted'
+                ORDER BY ticker, asof_date, source_id
+                """,
+                (
+                    model_family,
+                    *internal_tickers,
+                    history_start_date.isoformat(),
+                    end_date.isoformat(),
+                ),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            # Backward compatibility for isolated pre-v6 fixture databases.
+            # Production init_db creates the table before this script runs.
+            share_rows = []
     finally:
         if industrials_conn is not None:
             industrials_conn.close()
+    # True/public-float observations lead. SEC public-float conversions remain
+    # marked proxy; shares-outstanding/diluted-share fallbacks are loaded only
+    # after this family-scoped source has been considered.
+    for row in share_rows:
+        internal_ticker = normalize_source_ticker(row["ticker"])
+        shares = to_float(row["float_shares"])
+        asof = parse_13f_date(row["asof_date"])
+        source_asof = parse_13f_date(row["source_asof_date"]) or asof
+        if (
+            not internal_ticker
+            or shares is None
+            or shares <= 0.0
+            or asof is None
+            or source_asof is None
+        ):
+            continue
+        proxy_flag = bool(row["float_proxy_flag"] or 0)
+        add_proxy_row(
+            internal_ticker=internal_ticker,
+            asof=asof,
+            source_asof=source_asof,
+            shares=shares,
+            source=f"industrials_{str(row['source_id'])}_float",
+            accession_number=str(row["float_method"] or ""),
+            priority=5 if proxy_flag else 0,
+            proxy_flag=proxy_flag,
+        )
     for row in rows:
         internal_ticker = normalize_source_ticker(row["ticker"])
         shares = to_float(row["value"])
@@ -597,7 +651,7 @@ def ingest_industrials_diluted_share_proxies(
         conn.execute(
             f"""
             DELETE FROM float_shares_snapshots
-            WHERE source IN (?, ?)
+            WHERE (source IN (?, ?) OR source LIKE 'industrials_%_float')
               AND asof_date >= ?
               AND asof_date <= ?
               AND ticker IN ({ticker_qmarks})

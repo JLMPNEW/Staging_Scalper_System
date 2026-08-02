@@ -203,6 +203,10 @@ def _regime_row(run_as_of: str, row: Any | None, *, source_table: str) -> dict[s
             "staleness_days": "",
         }
     stale = staleness_days(run_as_of, str(row["as_of_date"]))
+    override_reason = str(row["regime_override_reason"] or "")
+    if stale is not None and stale > 0:
+        carry_reason = f"COVERED_CARRY_FORWARD:{source_table}:{stale}d"
+        override_reason = f"{carry_reason}|{override_reason}" if override_reason else carry_reason
     return {
         "run_as_of": run_as_of,
         "macro_as_of_date": row["as_of_date"],
@@ -211,7 +215,7 @@ def _regime_row(run_as_of: str, row: Any | None, *, source_table: str) -> dict[s
         "current_confidence": finite_or_blank(row["current_confidence"]),
         "next_confidence": finite_or_blank(row["next_confidence"]),
         "coverage_flag": _coverage_flag(row["coverage_flag"]),
-        "regime_override_reason": row["regime_override_reason"] or "",
+        "regime_override_reason": override_reason,
         "staleness_days": "" if stale is None else stale,
     }
 
@@ -485,6 +489,7 @@ def main() -> int:
                 source=regime_source,
                 run_as_of=run_as_of,
                 model_version=regime_model_version,
+                covered_only=True,
             ),
             source_table=regime_table,
         )

@@ -19,6 +19,7 @@ from typing import Any
 
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now
+from technology.core.https import verified_https_context
 from technology.core.logging_utils import configure_utc_logging
 from technology.core.source_registry import load_source_registry, upsert_source_registry
 from technology.core.text_norm import normalize_ticker
@@ -144,7 +145,11 @@ def fetch_url(url: str, *, ua: str, timeout_sec: float, max_bytes: int | None = 
     last_exc: Exception | None = None
     for attempt in range(max(1, retries)):
         try:
-            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            with urllib.request.urlopen(  # noqa: S310
+                request,
+                timeout=timeout_sec,
+                context=verified_https_context(),
+            ) as response:
                 if max_bytes is None:
                     return response.read()
                 return response.read(max_bytes)

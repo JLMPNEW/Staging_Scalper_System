@@ -25,6 +25,7 @@ from industrials.core.historical_score_history import (  # noqa: E402
     sha256_file,
     valid_score_snapshot,
 )
+from industrials.core.oos_research import select_weekly_dates  # noqa: E402
 from industrials.core.reports import write_text_atomic  # noqa: E402
 from industrials.transportation.contracts import read_rows  # noqa: E402
 from industrials.transportation.scripts._shared import (  # noqa: E402
@@ -58,7 +59,10 @@ def main() -> int:
         base_dir=base_dir,
     )
     feature_root = resolve_path(
-        family["historical_features"]["output_root"],
+        history.get(
+            "feature_output_root",
+            family["historical_features"]["output_root"],
+        ),
         base_dir=base_dir,
     )
     db_path = (
@@ -66,6 +70,18 @@ def main() -> int:
         if args.db
         else resolve_path(config["paths"]["database_path"], base_dir=base_dir)
     )
+    build_manifest_path = resolve_path(
+        history["build_manifest_json"],
+        base_dir=base_dir,
+    )
+    build_manifest = read_json(build_manifest_path)
+    surface_policy = load_yaml(
+        resolve_path(
+            family["scoring"]["surface_freight_score_policy"],
+            base_dir=base_dir,
+        )
+    )
+    frozen_tickers = {str(value) for value in surface_policy["eligible_tickers"]}
     connection = connect(
         db_path,
         timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 120)),
@@ -78,6 +94,17 @@ def main() -> int:
             start_date=str(history["start_date"]),
             end_date=str(history["policy_lock_date"]),
         )
+        if build_manifest.get("observation_cadence") == "weekly_oos_observations":
+            standards = cfg_get(
+                config,
+                "oos_calibration_standards.families.transportation",
+                {},
+            )
+            dates = select_weekly_dates(
+                dates,
+                anchor=str(standards["weekly_anchor_date"]),
+                selection=str(standards.get("weekly_selection") or "last"),
+            )
         issues: list[str] = []
         rank_ready_counts: list[int] = []
         eligible_counts: list[int] = []
@@ -123,7 +150,7 @@ def main() -> int:
                     """,
                     (MODEL_FAMILY, asof, asof),
                 ).fetchall()
-            }
+            } & frozen_tickers
             actual = {row["ticker"] for row in rows}
             if len(actual) != len(rows) or actual != expected:
                 issues.append(
@@ -153,11 +180,6 @@ def main() -> int:
             )
     finally:
         connection.close()
-    build_manifest_path = resolve_path(
-        history["build_manifest_json"],
-        base_dir=base_dir,
-    )
-    build_manifest = read_json(build_manifest_path)
     if (
         build_manifest.get("acceptance") != "PASS"
         or int(build_manifest.get("completed_date_count") or -1)
@@ -166,7 +188,7 @@ def main() -> int:
     ):
         issues.append("daily-history build manifest is incomplete")
     result = {
-        "artifact_family": "transportation_daily_rank_history_validation",
+        "artifact_family": "transportation_weekly_rank_history_validation",
         "model_family": MODEL_FAMILY,
         "acceptance": "PASS" if not issues else "FAIL",
         "expected_date_count": len(dates),
@@ -202,13 +224,8 @@ def main() -> int:
         ),
         "issues": issues[:200],
     }
-    output = (
-        PROJECT_ROOT
-        / "output"
-        / "industrials"
-        / MODEL_FAMILY
-        / "score_history"
-        / "transportation_daily_rank_history_validation.json"
+    output = build_manifest_path.with_name(
+        "transportation_weekly_rank_history_validation.json"
     )
     write_text_atomic(
         output,

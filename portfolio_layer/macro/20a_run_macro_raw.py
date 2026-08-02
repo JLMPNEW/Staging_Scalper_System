@@ -62,15 +62,15 @@ def _macro_raw_db_path(macro_config: Path) -> Path | None:
     )
 
 
-def _latest_completed_raw_as_of(db_path: Path | None) -> str:
+def _latest_completed_raw_run(db_path: Path | None) -> tuple[str, str]:
     if db_path is None or not db_path.is_file():
-        return ""
+        return "", ""
     uri = f"file:{db_path.as_posix()}?mode=ro"
     try:
         with sqlite3.connect(uri, uri=True, timeout=30.0) as conn:
             row: tuple[Any, ...] | None = conn.execute(
                 """
-                SELECT as_of_date
+                SELECT as_of_date, run_id
                 FROM macro_ingest_run
                 WHERE status IN ('completed', 'completed_with_errors')
                   AND completed_at_utc IS NOT NULL
@@ -80,8 +80,71 @@ def _latest_completed_raw_as_of(db_path: Path | None) -> str:
             ).fetchone()
     except sqlite3.Error as exc:
         LOGGER.warning("Could not inspect MacroLayer raw coverage; running refresh: %s", exc)
-        return ""
-    return str(row[0] or "") if row else ""
+        return "", ""
+    return (str(row[0] or ""), str(row[1] or "")) if row else ("", "")
+
+
+def _latest_completed_raw_as_of(db_path: Path | None) -> str:
+    return _latest_completed_raw_run(db_path)[0]
+
+
+def _raw_qa_passed(db_path: Path | None, ingest_run_id: str) -> bool:
+    if db_path is None or not db_path.is_file() or not ingest_run_id:
+        return False
+    uri = f"file:{db_path.as_posix()}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True, timeout=30.0) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM macro_qa_run
+                WHERE ingest_run_id = ?
+                  AND status = 'passed'
+                  AND completed_at_utc IS NOT NULL
+                ORDER BY completed_at_utc DESC, rowid DESC
+                LIMIT 1
+                """,
+                (ingest_run_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _ensure_raw_qa(
+    *,
+    vendor_root: Path,
+    macro_config: Path,
+    db_path: Path | None,
+    ingest_run_id: str,
+    python_executable: str,
+) -> bool:
+    if _raw_qa_passed(db_path, ingest_run_id):
+        return True
+    qa_script = vendor_root / "qa_macro_raw.py"
+    if not qa_script.is_file():
+        LOGGER.error("Missing MacroLayer raw QA script: %s", qa_script)
+        return False
+    if not ingest_run_id:
+        LOGGER.error("Cannot run MacroLayer raw QA without a completed ingest run id")
+        return False
+    command = [
+        python_executable,
+        str(qa_script),
+        "--config",
+        str(macro_config),
+        "--run-id",
+        ingest_run_id,
+    ]
+    LOGGER.info("Running MacroLayer raw QA: %s", subprocess.list2cmdline(command))
+    completed = subprocess.run(command, cwd=str(vendor_root), check=False)
+    if completed.returncode != 0:
+        LOGGER.error("MacroLayer raw QA process failed with exit_code=%s", completed.returncode)
+        return False
+    if not _raw_qa_passed(db_path, ingest_run_id):
+        LOGGER.error("MacroLayer raw QA did not persist a passed result for ingest_run_id=%s", ingest_run_id)
+        return False
+    return True
 
 
 def _raw_refresh_needed(latest_completed: str, requested_as_of: str) -> bool:
@@ -104,7 +167,8 @@ def main() -> int:
         args.macro_config or (vendor_root / "config_macro_raw.yaml"),
         label="MacroLayer config",
     )
-    latest_completed = _latest_completed_raw_as_of(_macro_raw_db_path(macro_config))
+    raw_db_path = _macro_raw_db_path(macro_config)
+    latest_completed, latest_run_id = _latest_completed_raw_run(raw_db_path)
     if not _raw_refresh_needed(latest_completed, args.as_of):
         LOGGER.info(
             "Skipping historical raw refresh for %s: completed raw ingest %s already covers it; "
@@ -112,7 +176,13 @@ def main() -> int:
             args.as_of,
             latest_completed,
         )
-        return 0
+        return 0 if _ensure_raw_qa(
+            vendor_root=vendor_root,
+            macro_config=macro_config,
+            db_path=raw_db_path,
+            ingest_run_id=latest_run_id,
+            python_executable=str(args.python_executable),
+        ) else 1
     command = [
         str(args.python_executable),
         str(script),
@@ -127,7 +197,22 @@ def main() -> int:
     completed = subprocess.run(command, cwd=str(vendor_root), check=False)
     if completed.returncode != 0:
         LOGGER.error("MacroLayer raw DAG failed with exit_code=%s", completed.returncode)
-    return int(completed.returncode)
+        return int(completed.returncode)
+    completed_as_of, completed_run_id = _latest_completed_raw_run(raw_db_path)
+    if _raw_refresh_needed(completed_as_of, args.as_of):
+        LOGGER.error(
+            "MacroLayer raw DAG returned success but completed coverage=%s is older than requested=%s",
+            completed_as_of or "MISSING",
+            args.as_of,
+        )
+        return 1
+    return 0 if _ensure_raw_qa(
+        vendor_root=vendor_root,
+        macro_config=macro_config,
+        db_path=raw_db_path,
+        ingest_run_id=completed_run_id,
+        python_executable=str(args.python_executable),
+    ) else 1
 
 
 if __name__ == "__main__":

@@ -22,7 +22,16 @@ from scipy.stats import spearmanr  # noqa: E402
 
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
+from portfolio_layer.core.contracts import (  # noqa: E402
+    fail_if_exists,
+    manifest_acceptance_value,
+    read_csv,
+    read_manifest,
+    sealed_artifact_errors,
+    sha256_file,
+    write_csv,
+    write_manifest,
+)
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.liquidity import load_spread_snapshot  # noqa: E402
@@ -106,6 +115,8 @@ def main() -> int:  # noqa: C901
     covariance_path = risk_dir / "covariance.csv"
     stage1_manifest_path = run_dir / "manifest.json"
     risk_manifest_path = risk_dir / "risk_manifest.json"
+    monitor_overlay_path = opt_dir / "monitor_eligibility_overlay.csv"
+    monitor_manifest_path = opt_dir / "monitor_eligibility_manifest.json"
 
     for required in (
         weights_path, excluded_path, meta_path, scores_path, coverage_path, covariance_path,
@@ -144,6 +155,51 @@ def main() -> int:  # noqa: C901
     excluded_rows = read_csv(excluded_path)
     excluded = {str(r.get("ticker", "")).strip() for r in excluded_rows if str(r.get("ticker", "")).strip()}
     meta = load_json(meta_path)
+    monitor_meta = (
+        meta.get("monitor_entry_policy", {})
+        if isinstance(meta.get("monitor_entry_policy"), dict)
+        else {}
+    )
+    monitor_status = str(monitor_meta.get("status", ""))
+    monitor_overlay: dict[str, dict[str, str]] = {}
+    monitor_seal_errors: list[str] = []
+    if monitor_status == "applied":
+        if not monitor_overlay_path.is_file() or not monitor_manifest_path.is_file():
+            monitor_seal_errors.append("monitor_overlay_or_manifest_missing")
+        else:
+            monitor_manifest = read_manifest(monitor_manifest_path)
+            if (
+                manifest_acceptance_value(monitor_manifest) != "PASS"
+                or str(monitor_manifest.get("run_as_of", "")) != run_as_of
+                or monitor_manifest.get("production_entry_gate") is not True
+            ):
+                monitor_seal_errors.append("monitor_manifest_not_same_date_production_pass")
+            monitor_seal_errors.extend(
+                sealed_artifact_errors(
+                    monitor_manifest,
+                    monitor_overlay_path,
+                    monitor_overlay_path.name,
+                    run_as_of=run_as_of,
+                )
+            )
+            for row in read_csv(monitor_overlay_path):
+                ticker = str(row.get("ticker", "")).strip().upper()
+                if not ticker or ticker in monitor_overlay:
+                    monitor_seal_errors.append(
+                        f"monitor_overlay_blank_or_duplicate={ticker!r}"
+                    )
+                    continue
+                monitor_overlay[ticker] = row
+            if str(monitor_meta.get("overlay_sha256", "")) != sha256_file(
+                monitor_overlay_path
+            ):
+                monitor_seal_errors.append("optimizer_meta_overlay_hash_mismatch")
+            if str(monitor_meta.get("manifest_sha256", "")) != sha256_file(
+                monitor_manifest_path
+            ):
+                monitor_seal_errors.append("optimizer_meta_monitor_manifest_hash_mismatch")
+    elif monitor_status != "bootstrap_ignored":
+        monitor_seal_errors.append(f"unknown_monitor_policy_status={monitor_status!r}")
     stage1_manifest = load_json(stage1_manifest_path)
     risk_manifest = load_json(risk_manifest_path)
     scores = {r["ticker"]: r for r in read_csv(scores_path)}
@@ -157,6 +213,16 @@ def main() -> int:  # noqa: C901
     def rec(name: str, status: str, detail: str) -> None:
         checks.append({"check": name, "status": status, "detail": detail})
 
+    rec(
+        "monitor_policy_mode_sealed",
+        "PASS" if not monitor_seal_errors else "FAIL",
+        (
+            f"status={monitor_status}; deployable={monitor_status == 'applied'}"
+            if not monitor_seal_errors
+            else str(monitor_seal_errors[:20])
+        ),
+    )
+
     universe = [str(r.get("ticker", "")).strip() for r in rows]
     universe_counts = Counter(universe)
     duplicate_universe = sorted(t for t, count in universe_counts.items() if t and count > 1)
@@ -169,9 +235,17 @@ def main() -> int:  # noqa: C901
 
     # 1. exact optimizer universe: every eligible scored/risk-covered/cov-backed name is present once,
     # and no other name is in the optimizer book.
+    def monitor_entry_eligible(ticker: str) -> bool:
+        if monitor_status == "bootstrap_ignored":
+            return True
+        return str(
+            monitor_overlay.get(ticker, {}).get("optimizer_entry_eligible", "")
+        ).strip() == "1"
+
     expected_universe = {
         t for t, s in scores.items()
         if str(s.get("investable_eligible", "")).strip() == "1"
+        and monitor_entry_eligible(t)
         and str(coverage.get(t, {}).get("risk_eligible", "")).strip() == "1"
         and str(coverage.get(t, {}).get("role", "")).strip() == "scored"
         and t in cov_tickers
@@ -183,7 +257,7 @@ def main() -> int:  # noqa: C901
         "optimizer_universe_exact",
         "PASS" if not (missing_book or extra_book or duplicate_universe) else "FAIL",
         (
-            f"universe={len(book_set)} exactly matches expected scored/risk-eligible/cov-backed names"
+            f"universe={len(book_set)} exactly matches expected scored/monitor/risk/cov names"
             if not (missing_book or extra_book or duplicate_universe)
             else f"missing={missing_book[:10]} extra={extra_book[:10]} duplicates={duplicate_universe[:10]}"
         ),
@@ -196,7 +270,7 @@ def main() -> int:  # noqa: C901
     missing_exclusions = sorted(expected_excluded - excluded)
     extra_exclusions = sorted(excluded - expected_excluded)
     rec(
-        "risk_exclusions_exact",
+        "optimizer_exclusions_exact",
         "PASS" if not (missing_exclusions or extra_exclusions) else "FAIL",
         (
             f"excluded={len(excluded)} exactly matches eligible names outside optimizer universe"
@@ -205,6 +279,62 @@ def main() -> int:  # noqa: C901
         ),
     )
 
+    if monitor_status == "applied":
+        investable_missing_overlay = sorted(investable - set(monitor_overlay))
+        reason_by_ticker = {
+            str(row.get("ticker", "")).strip(): str(
+                row.get("exclusion_reason", "")
+            ).strip()
+            for row in excluded_rows
+        }
+        expected_monitor_excluded = {
+            ticker
+            for ticker in investable
+            if not monitor_entry_eligible(ticker)
+        }
+        wrong_monitor_reasons = sorted(
+            ticker
+            for ticker in expected_monitor_excluded
+            if reason_by_ticker.get(ticker) != "monitor_entry_policy"
+        )
+        extra_monitor_reasons = sorted(
+            ticker
+            for ticker, reason in reason_by_ticker.items()
+            if reason == "monitor_entry_policy"
+            and ticker not in expected_monitor_excluded
+        )
+        monitor_count_matches = int(monitor_meta.get("n_excluded", -1)) == len(
+            expected_monitor_excluded
+        )
+        rec(
+            "monitor_entry_exclusions_exact",
+            (
+                "PASS"
+                if not (
+                    investable_missing_overlay
+                    or wrong_monitor_reasons
+                    or extra_monitor_reasons
+                )
+                and monitor_count_matches
+                else "FAIL"
+            ),
+            (
+                f"excluded={len(expected_monitor_excluded)}; all reasons and meta agree"
+                if not (
+                    investable_missing_overlay
+                    or wrong_monitor_reasons
+                    or extra_monitor_reasons
+                )
+                and monitor_count_matches
+                else (
+                    f"missing_overlay={investable_missing_overlay[:10]} "
+                    f"wrong_reason={wrong_monitor_reasons[:10]} "
+                    f"extra_reason={extra_monitor_reasons[:10]} "
+                    f"meta_count={monitor_meta.get('n_excluded')}"
+                )
+            ),
+        )
+
     # 2b. liquidity floor: every name above the half-spread ceiling is excluded with the right reason,
     # and the optimizer_meta liquidity_floor block agrees with the reproduced exclusion count.
     if max_half_spread > 0:
@@ -212,8 +342,13 @@ def main() -> int:  # noqa: C901
             str(r.get("ticker", "")).strip(): str(r.get("exclusion_reason", "")).strip()
             for r in excluded_rows
         }
-        expected_liquidity = {t for t in expected_excluded if liquidity_excluded(t)} | {
-            t for t in excluded if liquidity_excluded(t)
+        # Monitor policy is evaluated before liquidity in Stage 3. A name failing
+        # both gates must retain the monitor reason, so only monitor-eligible names
+        # belong to the liquidity-reason set.
+        expected_liquidity = {
+            t
+            for t in expected_excluded
+            if monitor_entry_eligible(t) and liquidity_excluded(t)
         }
         liq_bad = []
         for t in sorted(expected_liquidity):
@@ -409,17 +544,25 @@ def main() -> int:  # noqa: C901
         "vendored/tier1_portfolio_optimizer.py": PACKAGE_ROOT / "optimizer" / "tier1_portfolio_optimizer.py",
         "vendored/tier1_common.py": PACKAGE_ROOT / "optimizer" / "tier1_common.py",
         "optimizer_core.py": PACKAGE_ROOT / "optimizer" / "optimizer_core.py",
+        "08_build_monitor_eligibility_overlay.py": PACKAGE_ROOT / "optimizer" / "08_build_monitor_eligibility_overlay.py",
+        "09_run_portfolio_optimizer.py": PACKAGE_ROOT / "optimizer" / "09_run_portfolio_optimizer.py",
+        "10_validate_optimizer_outputs.py": Path(__file__).resolve(),
     }
+    if monitor_status == "applied":
+        provenance_paths["monitor_eligibility_overlay.csv"] = monitor_overlay_path
+        provenance_paths["monitor_eligibility_manifest.json"] = monitor_manifest_path
     provenance = {name: sha256_file(p) for name, p in provenance_paths.items() if p.exists()}
     manifest = {
         "run_as_of": run_as_of,
         "stage": "stage3_aqr_baseline",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "acceptance": "PASS" if passed else "FAIL",
+        "deployable": passed and monitor_status == "applied",
         "universe_size": len(book_set),
         "n_held": len(held),
         "n_excluded_candidates": len(excluded),
         "optimizer_config": oc,
+        "monitor_entry_policy": monitor_meta,
         "provenance_sha256": provenance,
         "checks": checks,
     }

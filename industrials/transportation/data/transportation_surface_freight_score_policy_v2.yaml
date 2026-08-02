@@ -1,0 +1,142 @@
+policy_version: transportation_surface_freight_score_policy_v2
+score_engine_version: transportation_surface_freight_fixed_denominator_v2
+cohort_id: north_american_surface_freight_and_logistics
+calibration_pool: surface_freight_and_logistics
+required_risk_tier: operating
+required_portfolio_role: core_candidate
+included_economic_peer_groups:
+  - contract_warehousing
+  - integrated_freight_and_logistics
+  - intermodal
+  - rail_and_rail_equipment
+  - trucking
+metric_comparison_groups:
+  asset_light_logistics:
+    - contract_warehousing
+    - integrated_freight_and_logistics
+    - intermodal
+  asset_based_freight:
+    - rail_and_rail_equipment
+    - trucking
+eligible_tickers:
+  - ARCB
+  - CHRW
+  - CNI
+  - CP
+  - CSX
+  - CVLG
+  - EXPD
+  - FDX
+  - FWRD
+  - GXO
+  - HUBG
+  - JBHT
+  - KNX
+  - LSTR
+  - NSC
+  - ODFL
+  - RLGT
+  - SAIA
+  - SNDR
+  - TFII
+  - UNP
+  - UPS
+  - WERN
+  - XPO
+excluded_tickers: {}
+minimum_active_cohort_size: 20
+score_construction:
+  missing_optional_metric_policy: fixed_slot_neutral_score
+  neutral_missing_score: 50.0
+  retained_specialized_metrics:
+    - operating_ratio
+  component_metric_weights:
+    default:
+      market_trend:
+        ret_3m: 0.25
+        ret_6m: 0.25
+        ret_12m_ex_1m: 0.25
+        relative_strength_3m: 0.25
+      quality:
+        operating_margin: 0.40
+        fcf_margin: 0.40
+        fcf_conversion: 0.20
+      growth:
+        revenue_growth: 0.50
+        operating_income_growth: 0.50
+      valuation:
+        fcf_yield: 0.50
+        ev_operating_income: 0.50
+      operating_efficiency:
+        asset_turnover: 1.00
+      capital_risk:
+        realized_volatility_60d: 0.20
+        maximum_drawdown_12m: 0.20
+        average_dollar_volume_60d: 0.10
+        capex_to_revenue: 0.20
+        net_debt_to_ebitda: 0.15
+        interest_coverage: 0.15
+    asset_light_logistics:
+      operating_efficiency:
+        asset_turnover: 1.00
+    asset_based_freight:
+      operating_efficiency:
+        asset_turnover: 0.75
+        operating_ratio: 0.25
+specialized_metric_dispositions:
+  operating_ratio: CALIBRATION_CANDIDATE
+  purchased_transportation_ratio: DIAGNOSTIC_ONLY
+  pricing_or_yield_growth: DEFERRED_REVIEW
+  transport_volume_growth: DEFERRED_REVIEW
+  asset_utilization: DIAGNOSTIC_ONLY
+specialized_disposition_sources:
+  operating_ratio:
+    - operating_ratio
+  purchased_transportation_ratio:
+    - purchased_transportation_ratio
+  pricing_or_yield_growth:
+    - pricing_or_yield_growth
+  transport_volume_growth:
+    - surface_volume_growth
+    - rail_intermodal_volume_growth
+  asset_utilization:
+    - equipment_utilization
+candidate_component_weights:
+  surface_balanced:
+    market_trend: 0.25
+    quality: 0.15
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.15
+    capital_risk: 0.25
+  surface_quality_efficiency:
+    market_trend: 0.20
+    quality: 0.22
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.23
+    capital_risk: 0.15
+  surface_balanced_positioning:
+    market_trend: 0.20
+    quality: 0.15
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.15
+    capital_risk: 0.25
+    positioning: 0.05
+candidate_requirements:
+  surface_balanced_positioning:
+    - positioning_history
+positioning_history_gate:
+  minimum_rebuildable_row_coverage: 0.90
+  minimum_eligible_date_fraction: 0.90
+  minimum_date_cross_section: 20
+governance:
+  membership_selection_uses_outcomes: false
+  membership_basis: current_rank_ready_liquid_operating_surface_freight_as_of_2026_07_30
+  candidate_design_uses_outcomes: false
+  candidate_selection_split: future_untouched_validation
+  revealed_holdout_status: spent_diagnostic_only
+  promotion_from_revealed_holdout_allowed: false
+  specialized_parser_status: frozen_no_additional_broad_parse
+  historical_universe_policy: point_in_time_membership_intersect_frozen_eligible_entities

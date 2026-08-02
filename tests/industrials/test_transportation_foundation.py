@@ -118,7 +118,7 @@ def test_transportation_foundation_load_and_validate(tmp_path: Path) -> None:
             historical_source_id=str(paths["historical_source"]),
             delisted_source_id=str(paths["delisted_source"]),
             expected_active=112,
-            expected_historical=158,
+            expected_historical=159,
             expected_delisted=48,
         )
         assert errors == []

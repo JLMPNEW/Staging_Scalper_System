@@ -63,6 +63,16 @@ def main() -> int:
                 (MODEL_FAMILY, str(family["universe"]["seed_source_id"]), asof, asof),
             ).fetchall()
         }
+    if str(family["scoring"].get("score_construction_mode") or "").startswith(
+        "surface_freight_"
+    ):
+        surface_policy = load_yaml(
+            resolve_path(
+                family["scoring"]["surface_freight_score_policy"],
+                base_dir=base_dir,
+            )
+        )
+        expected &= {str(value) for value in surface_policy["eligible_tickers"]}
     actual = {str(row.get("ticker") or "") for row in rows}
     if actual != expected:
         errors.append(

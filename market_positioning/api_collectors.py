@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sqlite3
+import ssl
 import sys
 import time
 import urllib.error
@@ -19,6 +20,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import certifi
 
 from market_positioning.core import (
     aggregate_13f_ownership,  # noqa: F401  (kept exported for backward compatibility)
@@ -57,6 +60,11 @@ class SyncResult:
     message: str
 
 
+def verified_https_context() -> ssl.SSLContext:
+    ca_bundle = os.environ.get("SSL_CERT_FILE", "").strip() or certifi.where()
+    return ssl.create_default_context(cafile=ca_bundle)
+
+
 def normalize_cusip(raw: object) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(raw or "").upper())[:9]
 
@@ -82,7 +90,11 @@ def http_request(
     if payload is not None:
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
-    with urllib.request.urlopen(request, timeout=timeout_sec) as response:  # noqa: S310
+    with urllib.request.urlopen(  # noqa: S310
+        request,
+        timeout=timeout_sec,
+        context=verified_https_context(),
+    ) as response:
         return response.read()
 
 

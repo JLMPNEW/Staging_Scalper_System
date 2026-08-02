@@ -339,8 +339,8 @@ def main() -> int:
         errors.append(f"transportation taxonomy rows={len(taxonomy)} expected=160")
     if len(active_members) != 112:
         errors.append(f"active memberships={len(active_members)} expected=112")
-    if len(historical_members) != 158:
-        errors.append(f"historical memberships={len(historical_members)} expected=158")
+    if len(historical_members) != 159:
+        errors.append(f"historical memberships={len(historical_members)} expected=159")
     if len(delisted_seed) != 48:
         errors.append(f"delisted seeds={len(delisted_seed)} expected=48")
     if set(db_continuity) != set(continuity_policies):

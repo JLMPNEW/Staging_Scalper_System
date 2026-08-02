@@ -192,7 +192,10 @@ def build_steps(
                             "--asof",
                             asof,
                             "--all-metrics",
+                            "--hydrate-missing-cache",
+                            "--require-complete-cache",
                         ],
+                        network=True,
                         accepts_config=True,
                     ),
                     Step(
@@ -646,6 +649,9 @@ def run_selftest() -> int:
     assert "--config" not in step_command(price_step, cfg), "config-unaware child must NOT receive --config"
     parser_python = Path("C:/envs/parser/python.exe")
     parser_step = next(s for s in shadow if s.step_id == "08d_dedicated_parser_shadow")
+    assert "--hydrate-missing-cache" in parser_step.args
+    assert "--require-complete-cache" in parser_step.args
+    assert parser_step.network
     assert step_command(
         parser_step,
         cfg,

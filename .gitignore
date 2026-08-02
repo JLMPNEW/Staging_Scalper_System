@@ -24,8 +24,13 @@ ticker_mapping/_semiconductor_yahoo_profile_cache/
 tmp/edgartools/
 
 # --- Local secrets ---
+.env
+.env.*
+!.env.example
+*.local.env
 med_devices/secrets.local.yaml
 med_devices/secrets*.local.yaml
+portfolio_layer/expectations_monitor/provider_entitlements.local.yaml
 
 # --- Data file formats ---
 *.parquet

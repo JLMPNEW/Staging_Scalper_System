@@ -144,6 +144,7 @@ GWR,1996-06-25,2019-12-27,norgate_first_and_last_quoted_dates,norgate_local_meta
 PWX,1990-01-02,2016-11-01,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=PWX; norgate_symbol=PWX-201611
 SWFT,1990-06-29,2007-05-10,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=SWFT; norgate_symbol=SWFT-200705
 USX,2018-06-14,2023-06-30,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=USX; norgate_symbol=USX-202306
+CGI,1994-01-21,2019-12-09,reviewed_economic_terminal_event,https://www.prnewswire.com/news-releases/celadon-group-inc-and-affiliates-commence-voluntary-chapter-11-cases-300971115.html,0.95,actual_ticker=CGI; norgate_symbol=CGIP
 USAK,1992-03-19,2022-09-14,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=USAK; norgate_symbol=USAK-202209
 CNW,1990-01-02,2015-10-29,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=CNW; norgate_symbol=CNW-201510
 YELL,1990-01-02,2026-07-01,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=YELL; norgate_symbol=YELLQ-202607

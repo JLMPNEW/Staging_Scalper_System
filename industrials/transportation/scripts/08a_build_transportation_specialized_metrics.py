@@ -361,12 +361,57 @@ def classify_metric(
             "confidence": 1.0,
             "status_reason": "issuer_cash_generative_runway_not_meaningful",
         }
+    if metric.metric_id == "fcf_conversion":
+        net_income = number(financial.get("net_income_ttm_usd"))
+        if net_income is None:
+            net_income = number(financial.get("net_income_usd"))
+        if net_income is not None and net_income <= 0:
+            return {
+                **base,
+                "availability_status": "NOT_APPLICABLE",
+                "source_id": str(financial.get("source_id") or ""),
+                "extraction_method": "conditional_applicability",
+                "confidence": 1.0,
+                "status_reason": "fcf_conversion_not_meaningful_nonpositive_net_income",
+            }
     if metric.source in {"market", "financial"}:
         source = market if metric.source == "market" else financial
         # A reviewed 0.0 financial confidence (e.g. raw-archive profiles) must
         # survive as 0.0; only a missing value falls back to the 0.5 default.
         source_confidence = number(source.get("financial_confidence"))
         value = number(source.get(metric.source_field))
+        if metric.metric_id in {"fcf_yield", "ev_operating_income"}:
+            market_cap = number(financial.get("market_cap"))
+            if market_cap is None or market_cap <= 0:
+                return {
+                    **base,
+                    "availability_status": "MISSING_MARKET_DENOMINATOR",
+                    "source_id": str(financial.get("source_id") or ""),
+                    "accession_number": str(
+                        financial.get("accession_number") or ""
+                    ),
+                    "filing_date": str(financial.get("asof_date") or ""),
+                    "extraction_method": "financial_feature_lookup",
+                    "status_reason": "pit_market_cap_missing_or_nonpositive",
+                }
+        if metric.metric_id == "ev_operating_income":
+            operating_income = number(
+                financial.get("operating_income_ttm_usd")
+            )
+            if operating_income is None:
+                operating_income = number(financial.get("operating_income_usd"))
+            if operating_income is not None and operating_income <= 0:
+                return {
+                    **base,
+                    "availability_status": "NEGATIVE_PROFIT_NOT_MEANINGFUL",
+                    "source_id": str(financial.get("source_id") or ""),
+                    "accession_number": str(
+                        financial.get("accession_number") or ""
+                    ),
+                    "filing_date": str(financial.get("asof_date") or ""),
+                    "extraction_method": "financial_feature_lookup",
+                    "status_reason": "operating_income_nonpositive_multiple_not_meaningful",
+                }
         history = int(number(market.get("trading_days_available")) or 0)
         if metric.source == "market" and history < metric.minimum_history_days:
             value = None

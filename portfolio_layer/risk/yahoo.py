@@ -8,20 +8,34 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+import ssl
 import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
+import certifi
+
 
 ADJUSTED_OHLCV_FIELDS = (
     "date",
+    "open",
+    "high",
+    "low",
+    "close",
     "adj_open",
     "adj_high",
     "adj_low",
     "adj_close",
     "volume",
+    "adjustment_factor",
+    "split_factor",
+    "dividend_cash",
 )
+
+_CA_BUNDLE = os.environ.get("REQUESTS_CA_BUNDLE") or certifi.where()
+_TLS_CONTEXT = ssl.create_default_context(cafile=_CA_BUNDLE)
 
 
 def _unix(day: date) -> int:
@@ -47,6 +61,46 @@ def _parse_split_events(result: dict) -> list[dict[str, str]]:
     return sorted(out, key=lambda r: r["split_date"])
 
 
+def _corporate_action_maps(result: dict) -> tuple[dict[str, float], dict[str, float]]:
+    events = result.get("events") if isinstance(result.get("events"), dict) else {}
+    splits = events.get("splits", {}) if isinstance(events, dict) else {}
+    dividends = events.get("dividends", {}) if isinstance(events, dict) else {}
+    split_by_date: dict[str, float] = {}
+    dividend_by_date: dict[str, float] = {}
+    for raw in splits.values() if isinstance(splits, dict) else ():
+        if not isinstance(raw, dict) or raw.get("date") is None:
+            continue
+        day = datetime.fromtimestamp(int(raw["date"]), tz=timezone.utc).date().isoformat()
+        numerator = raw.get("numerator")
+        denominator = raw.get("denominator")
+        try:
+            if numerator is None or denominator is None:
+                raise ValueError("split ratio components are missing")
+            factor = float(numerator) / float(denominator)
+        except (TypeError, ValueError, ZeroDivisionError):
+            ratio = str(raw.get("splitRatio", "")).split(":", maxsplit=1)
+            try:
+                factor = float(ratio[0]) / float(ratio[1])
+            except (IndexError, ValueError, ZeroDivisionError):
+                continue
+        if factor > 0:
+            split_by_date[day] = factor
+    for raw in dividends.values() if isinstance(dividends, dict) else ():
+        if not isinstance(raw, dict) or raw.get("date") is None:
+            continue
+        day = datetime.fromtimestamp(int(raw["date"]), tz=timezone.utc).date().isoformat()
+        try:
+            raw_amount = raw.get("amount")
+            if raw_amount is None:
+                raise ValueError("dividend amount is missing")
+            amount = float(raw_amount)
+        except (TypeError, ValueError):
+            continue
+        if amount >= 0:
+            dividend_by_date[day] = amount
+    return split_by_date, dividend_by_date
+
+
 def _fetch_yahoo_adjclose(
     ticker: str,
     *,
@@ -66,7 +120,7 @@ def _fetch_yahoo_adjclose(
     for attempt in range(max(1, max_retries) + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_sec, context=_TLS_CONTEXT) as resp:
                 payload = json.load(resp)
             chart = payload.get("chart") or {}
             result = chart.get("result") or []
@@ -115,7 +169,7 @@ def _fetch_yahoo_adjusted_ohlcv(
     for attempt in range(max(1, max_retries) + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_sec, context=_TLS_CONTEXT) as resp:
                 payload = json.load(resp)
             chart = payload.get("chart") or {}
             result = chart.get("result") or []
@@ -130,6 +184,7 @@ def _fetch_yahoo_adjusted_ohlcv(
                 return [], "missing_quote_or_adjclose"
             quote = quote_blocks[0] if isinstance(quote_blocks[0], dict) else {}
             adj = adj_blocks[0] if isinstance(adj_blocks[0], dict) else {}
+            split_by_date, dividend_by_date = _corporate_action_maps(res)
             opens = quote.get("open") or []
             highs = quote.get("high") or []
             lows = quote.get("low") or []
@@ -163,11 +218,18 @@ def _fetch_yahoo_adjusted_ohlcv(
                 out.append(
                     {
                         "date": day,
+                        "open": raw_open,
+                        "high": raw_high,
+                        "low": raw_low,
+                        "close": raw_close,
                         "adj_open": adj_open,
                         "adj_high": adj_high,
                         "adj_low": adj_low,
                         "adj_close": adj_close,
                         "volume": max(0.0, volume),
+                        "adjustment_factor": factor,
+                        "split_factor": split_by_date.get(day, 1.0),
+                        "dividend_cash": dividend_by_date.get(day, 0.0),
                     }
                 )
             return out, "ok" if out else "no_complete_ohlcv"
@@ -229,7 +291,7 @@ def _fetch_stooq_close(
     )
     try:
         req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec, context=_TLS_CONTEXT) as resp:
             text = resp.read().decode("utf-8", errors="replace")
         rows = list(csv.DictReader(io.StringIO(text)))
         out: list[tuple[str, float]] = []
@@ -358,7 +420,7 @@ def fetch_splits(
         )
         try:
             req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_sec, context=_TLS_CONTEXT) as resp:
                 payload = json.load(resp)
             result = (payload.get("chart") or {}).get("result") or []
             if not result:

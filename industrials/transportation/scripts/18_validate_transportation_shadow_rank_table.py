@@ -105,6 +105,16 @@ def main() -> int:
                 (MODEL_FAMILY, asof, asof),
             ).fetchall()
         expected = {str(row[0]) for row in expected_rows}
+    if str(scoring.get("score_construction_mode") or "").startswith(
+        "surface_freight_"
+    ):
+        surface_policy = load_yaml(
+            resolve_path(
+                scoring["surface_freight_score_policy"],
+                base_dir=base_dir,
+            )
+        )
+        expected &= {str(value) for value in surface_policy["eligible_tickers"]}
     actual = {str(row.get("ticker") or "") for row in rows}
     errors.extend(
         validate_shadow_survivorship_sidecar(

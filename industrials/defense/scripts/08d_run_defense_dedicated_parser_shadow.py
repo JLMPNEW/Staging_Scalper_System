@@ -33,6 +33,7 @@ HYDRATION_SCOPE_FIELDS = [
     "accession_number",
     "form_type",
     "filing_date",
+    "reason",
 ]
 
 

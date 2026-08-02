@@ -1,0 +1,172 @@
+schema_version: provider_entitlements_v1
+probe:
+  max_symbols_by_provider:
+    alpha_vantage: 50
+    fmp: 50
+    tiingo: 6
+  timeout_sec: 30.0
+  max_response_bytes: 2000000
+  max_retries: 1
+  request_pause_sec: 0.35
+  representative_symbols:
+    - AAPL
+    - NVDA
+    - MSFT
+    - SYK
+    - REGN
+    - RTX
+
+providers:
+  alpha_vantage:
+    enabled: true
+    plan: premium_75_rpm_monthly
+    api_key_env: ALPHAVANTAGE_PREMIUM_API_KEY
+    base_url: https://www.alphavantage.co
+    request_pause_sec: 1.05
+    auth:
+      mode: query
+      query_parameter: apikey
+    retention:
+      status: provisional_user_authorized
+      policy_version: provisional_retention_v1
+      raw_payloads: do_not_retain
+      normalized_snapshots: allowed_local_private_provisional
+      derived_data: allowed_shadow_only
+      post_termination: unresolved_purge_capable
+    capabilities:
+      earnings_estimates:
+        path: /query
+        query:
+          function: EARNINGS_ESTIMATES
+          symbol: "{symbol}"
+        expected_payload: object.estimates
+        required_any_fields:
+          - eps_estimate_average
+          - revenue_estimate_average
+          - eps_estimate_revision_up_trailing_30_days
+          - eps_estimate_revision_down_trailing_30_days
+      earnings_history:
+        path: /query
+        query:
+          function: EARNINGS
+          symbol: "{symbol}"
+        expected_payload: object.quarterlyEarnings
+        required_any_fields:
+          - fiscalDateEnding
+          - reportedDate
+          - reportedEPS
+
+  fmp:
+    enabled: true
+    plan: premium
+    api_key_env: FMP_API_KEY
+    base_url: https://financialmodelingprep.com
+    auth:
+      mode: header
+      header: apikey
+      prefix: ""
+    retention:
+      status: provisional_user_authorized
+      policy_version: provisional_retention_v1
+      raw_payloads: do_not_retain
+      normalized_snapshots: allowed_local_private_provisional
+      derived_data: allowed_shadow_only
+      post_termination: unresolved_purge_capable
+    capabilities:
+      analyst_estimates:
+        path: /stable/analyst-estimates
+        query:
+          symbol: "{symbol}"
+          period: annual
+          page: "0"
+          limit: "5"
+        expected_payload: rows
+        required_any_fields: [epsAvg, revenueAvg, estimatedEpsAvg, estimatedRevenueAvg]
+      analyst_estimates_quarterly:
+        path: /stable/analyst-estimates
+        query:
+          symbol: "{symbol}"
+          period: quarter
+          page: "0"
+          limit: "12"
+        expected_payload: rows
+        required_any_fields: [epsAvg, revenueAvg, estimatedEpsAvg, estimatedRevenueAvg]
+      historical_grade_counts:
+        path: /stable/grades-historical
+        query:
+          symbol: "{symbol}"
+          limit: "5"
+        expected_payload: rows
+        required_any_fields: [analystRatingsBuy, analystRatingsHold, analystRatingsSell]
+      grade_actions:
+        path: /stable/grades
+        query:
+          symbol: "{symbol}"
+          limit: "5"
+        expected_payload: rows
+        required_any_fields: [gradingCompany, previousGrade, newGrade, action]
+      price_target_consensus:
+        path: /stable/price-target-consensus
+        query:
+          symbol: "{symbol}"
+        expected_payload: rows
+        required_any_fields: [targetConsensus, targetMedian, targetHigh, targetLow]
+      historical_ratings:
+        path: /stable/ratings-historical
+        query:
+          symbol: "{symbol}"
+          limit: "5"
+        expected_payload: rows
+        required_any_fields: [rating, overallScore, ratingScore]
+      earnings_report:
+        path: /stable/earnings
+        query:
+          symbol: "{symbol}"
+          limit: "5"
+        expected_payload: rows
+        required_any_fields: [epsActual, epsEstimated, revenueActual, revenueEstimated]
+      reporting_currency:
+        path: /stable/income-statement
+        query:
+          symbol: '{symbol}'
+          period: annual
+          limit: '5'
+        expected_payload: rows
+        required_any_fields: [date, reportedCurrency]
+
+  tiingo:
+    enabled: true
+    plan: free
+    api_key_env: TIINGO_API_KEY
+    base_url: https://api.tiingo.com
+    auth:
+      mode: header
+      header: Authorization
+      prefix: "Token "
+    retention:
+      status: unconfirmed
+      raw_payloads: unconfirmed_do_not_retain
+      derived_data: unconfirmed_do_not_promote
+      post_termination: deletion_required_without_written_carveout
+    capabilities:
+      eod_prices:
+        path: /tiingo/daily/{symbol}/prices
+        query:
+          startDate: "{start_date}"
+          endDate: "{end_date}"
+          resampleFreq: daily
+        expected_payload: rows
+        required_any_fields: [close, adjClose]
+      news:
+        path: /tiingo/news
+        query:
+          tickers: "{symbol}"
+          limit: "3"
+        expected_payload: rows
+        required_any_fields: [publishedDate, crawlDate, title, url]
+      fundamentals:
+        path: /tiingo/fundamentals/{symbol}/statements
+        query:
+          startDate: "{history_start_date}"
+        expected_payload: rows
+        required_any_fields: [date, statementData]

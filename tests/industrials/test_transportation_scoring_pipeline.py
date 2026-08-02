@@ -3,13 +3,16 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from industrials.core.config import family_config, load_yaml
 from industrials.core.db import connect, utc_now
-from industrials.transportation.contracts import read_rows
+from industrials.core.production_lock import ProductionLock
+from industrials.transportation.contracts import COMPONENT_FIELDS, read_rows
+from industrials.transportation.scoring import finalize_rank_rows
 from industrials.transportation.scripts import _shared
 from portfolio_layer.scores.adapters import run_adapter
 from tests.industrials.test_transportation_market_foundation import load_scratch_foundation
@@ -208,18 +211,31 @@ def test_specialized_metric_and_scoring_contract_is_complete(
     metric_rows = read_rows(metric_csv)
     score_rows = read_rows(scoring_csv)
     config = load_yaml(CONFIG_PATH)
-    registry_path = INDUSTRIALS_ROOT / family_config(config, "transportation")["financial"]["metric_registry"]
+    family = family_config(config, "transportation")
+    registry_path = INDUSTRIALS_ROOT / family["financial"]["metric_registry"]
     registry = load_yaml(registry_path)
+    surface_policy = load_yaml(
+        INDUSTRIALS_ROOT / family["scoring"]["surface_freight_score_policy"]
+    )
+    expected_scored = set(surface_policy["eligible_tickers"])
     assert len(metric_rows) == 112 * len(registry["metrics"])
-    assert len(score_rows) == 112
-    assert sum(row["rank_ready_flag"] == "1" for row in score_rows) == 112
+    assert {row["ticker"] for row in score_rows} == expected_scored
+    assert len(score_rows) == 24
+    assert sum(row["rank_ready_flag"] == "1" for row in score_rows) == 24
     assert {row["calibration_cohort"] for row in score_rows} == {
         "surface_freight_and_logistics",
-        "air_transport_and_aviation_services",
-        "marine_shipping_and_maritime",
-        "development_stage_and_speculative_transport",
     }
     assert all(float(row["specialized_coverage"]) >= 0.15 for row in score_rows)
+    valuation_rows = {
+        row["metric_name"]: row
+        for row in metric_rows
+        if row["ticker"] == "UNP"
+        and row["metric_name"] in {"fcf_yield", "ev_operating_income"}
+    }
+    assert set(valuation_rows) == {"fcf_yield", "ev_operating_income"}
+    assert {row["availability_status"] for row in valuation_rows.values()} == {
+        "MISSING_MARKET_DENOMINATOR"
+    }
     metric_validator = load_script("08a_validate_transportation_specialized_metrics.py")
     monkeypatch.setattr(
         sys,
@@ -331,7 +347,7 @@ def test_zero_overlay_scoring_is_invariant_to_optional_specialized_coverage(
         rescored_csv.with_suffix(".manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["score_construction_mode"] == (
-        "generic_baseline_with_bounded_overlays"
+        "surface_freight_fixed_denominator_v2"
     )
     assert manifest["specialized_overlay_active"] is False
     assert all(
@@ -430,10 +446,7 @@ def test_cash_generative_runway_is_conditionally_not_applicable(
     assert metric_by_name["cash_runway_years"]["status_reason"] == (
         "issuer_cash_generative_runway_not_meaningful"
     )
-    score = next(row for row in read_rows(scoring_csv) if row["ticker"] == ticker)
-    assert score["rank_ready_flag"] == "1"
-    statuses = json.loads(score["metric_status_json"])
-    assert "cash_runway_years" not in statuses
+    assert ticker not in {row["ticker"] for row in read_rows(scoring_csv)}
     metric_validator = load_script("08a_validate_transportation_specialized_metrics.py")
     monkeypatch.setattr(
         sys,
@@ -449,6 +462,66 @@ def test_cash_generative_runway_is_conditionally_not_applicable(
         ],
     )
     assert metric_validator.main() == 0
+
+
+def test_nonpositive_operating_income_has_explicit_valuation_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "transportation.sqlite"
+    seed_complete_inputs(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE feature_financial_statement
+            SET market_cap=1000000000.0,
+                operating_income_ttm_usd=-100000000.0,
+                ev_operating_income=-10.0
+            WHERE ticker='UNP' AND model_family='transportation'
+              AND asof_date=?
+            """,
+            (ASOF,),
+        )
+    metric_csv, _ = run_feature_pipeline(db_path, tmp_path, monkeypatch)
+    metrics = {
+        row["metric_name"]: row
+        for row in read_rows(metric_csv)
+        if row["ticker"] == "UNP"
+        and row["metric_name"] in {"fcf_yield", "ev_operating_income"}
+    }
+    assert metrics["fcf_yield"]["availability_status"] == "REPORTED"
+    assert metrics["ev_operating_income"]["availability_status"] == (
+        "NEGATIVE_PROFIT_NOT_MEANINGFUL"
+    )
+
+
+def test_nonpositive_net_income_makes_fcf_conversion_not_applicable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "transportation.sqlite"
+    seed_complete_inputs(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE feature_financial_statement
+            SET net_income_ttm_usd=-1000000.0,
+                fcf_to_net_income=NULL
+            WHERE ticker='UNP' AND model_family='transportation'
+              AND asof_date=?
+            """,
+            (ASOF,),
+        )
+    metric_csv, _ = run_feature_pipeline(db_path, tmp_path, monkeypatch)
+    metric = next(
+        row
+        for row in read_rows(metric_csv)
+        if row["ticker"] == "UNP" and row["metric_name"] == "fcf_conversion"
+    )
+    assert metric["availability_status"] == "NOT_APPLICABLE"
+    assert metric["status_reason"] == (
+        "fcf_conversion_not_meaningful_nonpositive_net_income"
+    )
 
 
 def test_shadow_publish_is_deterministic_and_portfolio_adapter_fails_closed(
@@ -479,7 +552,7 @@ def test_shadow_publish_is_deterministic_and_portfolio_adapter_fails_closed(
         rank_paths.append(output_dir / "transportation_final_rank_table.csv")
     assert rank_paths[0].read_bytes() == rank_paths[1].read_bytes()
     ranks = read_rows(rank_paths[0])
-    assert [int(row["final_rank"]) for row in ranks] == list(range(1, 113))
+    assert [int(row["final_rank"]) for row in ranks] == list(range(1, 25))
     assert {row["portfolio_candidate_gate"] for row in ranks} == {"0"}
     assert {row["oos_score_valid_flag"] for row in ranks} == {"0"}
     portfolio_config = load_yaml(PROJECT_ROOT / "portfolio_layer" / "config.yaml")
@@ -491,7 +564,7 @@ def test_shadow_publish_is_deterministic_and_portfolio_adapter_fails_closed(
     assert result.source_pipeline == "transportation"
     assert result.adapter == "industrial_family"
     assert result.source_asof_date == ASOF
-    assert len(result.rows) == 112
+    assert len(result.rows) == 24
     assert not any(row.investable_eligible for row in result.rows)
     assert not any(row.oos_score_valid_flag for row in result.rows)
     assert not any(row.calibration_research_eligible for row in result.rows)
@@ -527,6 +600,62 @@ def test_shadow_publish_is_deterministic_and_portfolio_adapter_fails_closed(
         ],
     )
     assert adapter_validator.main() == 0
+
+    versioned_validation = tmp_path / "versioned_adapter_validation.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_adapter.py",
+            "--asof",
+            ASOF,
+            "--input-csv",
+            str(rank_paths[0]),
+            "--output-json",
+            str(versioned_validation),
+        ],
+    )
+    assert adapter_validator.main() == 0
+    assert json.loads(versioned_validation.read_text(encoding="utf-8"))["acceptance"] == "PASS"
+
+
+def test_production_lock_keeps_research_roles_out_of_portfolio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "transportation.sqlite"
+    seed_complete_inputs(db_path)
+    _, scoring_csv = run_feature_pipeline(db_path, tmp_path / "features", monkeypatch)
+    weights = {field: 0.0 for field in COMPONENT_FIELDS}
+    weights["market_trend_score"] = 1.0
+    lock = ProductionLock(
+        model_family="transportation",
+        lock_id="test",
+        effective_from=date.fromisoformat(ASOF),
+        effective_to=None,
+        lock_date=date.fromisoformat(ASOF),
+        train_start_date=date(2019, 1, 2),
+        train_end_date=date(2025, 12, 31),
+        scoring_mode="generic_oos",
+        score_model_version="test_transportation_oos",
+        validation_method="test",
+        decision_manifest_path=tmp_path / "decision.json",
+        decision_manifest_sha256="test",
+        weights=weights,
+    )
+    rows = finalize_rank_rows(
+        read_rows(scoring_csv),
+        score_model_version="shadow",
+        model_version="shadow",
+        scoring_contract_version="shadow",
+        production_lock=lock,
+    )
+    by_ticker = {row["ticker"]: row for row in rows}
+    assert {"CISS", "DAL", "PBI"}.isdisjoint(by_ticker)
+    assert len(by_ticker) == 24
+    assert by_ticker["UNP"]["oos_score_valid_flag"] == "1"
+    assert by_ticker["UNP"]["portfolio_candidate_gate"] == "1"
+
 
 
 def test_financial_and_fx_wrappers_are_family_pinned(monkeypatch: pytest.MonkeyPatch) -> None:

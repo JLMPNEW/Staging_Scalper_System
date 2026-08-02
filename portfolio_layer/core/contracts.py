@@ -131,6 +131,11 @@ def _replace_atomic(source: str | Path, target: str | Path) -> None:
             time.sleep(min(0.05 * (2**attempt), 1.0))
 
 
+def replace_atomic(source: str | Path, target: str | Path) -> None:
+    """Publish a sibling temp file with the repository's Windows retry policy."""
+    _replace_atomic(source, target)
+
+
 def write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[dict[str, Any]]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -259,7 +264,15 @@ def sealed_artifact_errors(
     acceptance = manifest_acceptance_value(manifest)
     if not manifest_accepts(manifest, allow_deferred=allow_deferred):
         errors.append(f"acceptance={acceptance or 'MISSING'}")
-    manifest_as_of = str(manifest.get("run_as_of", manifest.get("run_as_of_date", ""))).strip()
+    manifest_as_of = str(
+        manifest.get(
+            "run_as_of",
+            manifest.get(
+                "run_as_of_date",
+                manifest.get("as_of_date", manifest.get("ledger_as_of", "")),
+            ),
+        )
+    ).strip()
     if run_as_of:
         if not manifest_as_of:
             errors.append(f"run_as_of=MISSING expected={run_as_of}")
