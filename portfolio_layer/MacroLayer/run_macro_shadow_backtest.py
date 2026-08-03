@@ -340,7 +340,12 @@ def _load_price_panel(holdings: pd.DataFrame, layer_cfg: ShadowBacktestConfig, b
     start = dates.min() - pd.Timedelta(days=10)
     end = dates.max() + pd.Timedelta(days=max(30, layer_cfg.holding_period_trading_days * 3))
     logger.info("Loading Staging prices for %d tickers from %s to %s", len(tickers), start.date(), end.date())
-    return load_staging_prices(tickers=tickers, start_date=start, end_date=end, freshness_as_of=end)
+    # The request window extends past the last signal so exit bars exist, but
+    # freshness cannot be asserted at a date that has not happened yet: clamp
+    # the anchor to the run date so a current panel is not marked stale, while
+    # exit bars between the last signal and today remain valid history.
+    freshness_anchor = min(end, pd.Timestamp.now().normalize())
+    return load_staging_prices(tickers=tickers, start_date=start, end_date=end, freshness_as_of=freshness_anchor)
 
 
 def _trade_date_map(signal_dates: pd.Series, price_index: pd.DatetimeIndex, holding_period_days: int) -> pd.DataFrame:
