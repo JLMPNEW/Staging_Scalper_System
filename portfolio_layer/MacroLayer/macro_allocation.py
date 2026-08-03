@@ -17,12 +17,17 @@ def bounded_normalize(
     upper: float | pd.Series = 1.0,
     target_sum: float = 1.0,
     tolerance: float = TOLERANCE,
+    allow_partial: bool = False,
 ) -> pd.Series:
     """Normalize non-negative scores while satisfying exact lower/upper bounds.
 
     Positive scores receive residual budget proportionally. If they all saturate,
     any feasible remainder is distributed across zero-score rows instead of
     silently returning an underweight portfolio or re-breaking a cap.
+
+    With ``allow_partial=True`` an infeasible ``target_sum`` is clamped to the
+    nearest feasible bound instead of raising: caps stay honest and the caller
+    receives an explicitly under-invested (or floor-bound) allocation to handle.
     """
     scores = pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=0.0)
     low = pd.Series(lower, index=scores.index, dtype="float64") if np.isscalar(lower) else pd.to_numeric(lower, errors="coerce").reindex(scores.index)
@@ -37,9 +42,11 @@ def bounded_normalize(
     min_sum = float(low.sum())
     max_sum = float(high.sum())
     if target < min_sum - tolerance or target > max_sum + tolerance:
-        raise ValueError(
-            f"Infeasible allocation bounds: lower_sum={min_sum:.12f} target={target:.12f} upper_sum={max_sum:.12f}."
-        )
+        if not allow_partial:
+            raise ValueError(
+                f"Infeasible allocation bounds: lower_sum={min_sum:.12f} target={target:.12f} upper_sum={max_sum:.12f}."
+            )
+        target = min(max(target, min_sum), max_sum)
 
     out = low.astype(float).copy()
     capacity = (high - low).clip(lower=0.0).astype(float)
@@ -90,8 +97,13 @@ def hierarchical_bounded_normalize(
     group_cap: float,
     item_floor: float = 0.0,
     target_sum: float = 1.0,
+    allow_partial: bool = False,
 ) -> pd.Series:
-    """Allocate exactly to target while enforcing both item and group caps."""
+    """Allocate exactly to target while enforcing both item and group caps.
+
+    With ``allow_partial=True`` an infeasible target is clamped to the feasible
+    group-cap bound (see :func:`bounded_normalize`) instead of raising.
+    """
     scores = pd.to_numeric(raw, errors="coerce").fillna(0.0).clip(lower=0.0)
     group_series = pd.Series(groups, index=scores.index, dtype="object").fillna("UNKNOWN")
     if scores.empty:
@@ -110,6 +122,7 @@ def hierarchical_bounded_normalize(
         lower=group_lower,
         upper=group_upper,
         target_sum=target_sum,
+        allow_partial=allow_partial,
     )
 
     out = pd.Series(0.0, index=scores.index, dtype="float64")

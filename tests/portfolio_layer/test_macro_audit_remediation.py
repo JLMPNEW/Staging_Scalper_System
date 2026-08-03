@@ -538,6 +538,23 @@ def test_bounded_allocator_fails_on_infeasible_caps() -> None:
         bounded_normalize(pd.Series([1.0, 1.0]), upper=0.40, target_sum=1.0)
 
 
+def test_allow_partial_clamps_infeasible_target_without_breaking_caps() -> None:
+    # Thin-coverage dates: caps stay honest and the allocation is explicitly
+    # under-invested instead of raising or renormalizing above the cap.
+    weights = bounded_normalize(
+        pd.Series([1.0, 1.0]), upper=0.40, target_sum=1.0, allow_partial=True
+    )
+    assert float(weights.sum()) == pytest.approx(0.80)
+    assert float(weights.max()) <= 0.40 + 1e-12
+    raw = pd.Series([3.0, 1.0], index=["A", "B"])
+    groups = pd.Series(["S1", "S2"], index=raw.index)
+    partial = hierarchical_bounded_normalize(
+        raw, groups, item_cap=0.20, group_cap=0.35, target_sum=1.0, allow_partial=True
+    )
+    assert float(partial.sum()) == pytest.approx(0.40)
+    assert float(partial.max()) <= 0.20 + 1e-12
+
+
 def test_stage12d_imports_optimizer_and_selects_accepted_sealed_base() -> None:
     assert _TIER1_IMPORT_ERROR is None
     config_path, cfg = load_macro_raw_config(MACRO_ROOT / "config_macro_raw.yaml")

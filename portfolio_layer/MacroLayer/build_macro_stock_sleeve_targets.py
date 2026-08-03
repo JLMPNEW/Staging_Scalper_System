@@ -407,14 +407,25 @@ def _build_industry_targets(stock: pd.DataFrame, layer_cfg: StockSleeveTargetCon
                 raw_norm = raw_active / float(raw_active.sum())
                 equal = pd.Series(1.0 / len(raw_active), index=raw_active.index, dtype="float64")
                 raw_active = (1.0 - layer_cfg.equal_weight_blend) * raw_norm + layer_cfg.equal_weight_blend * equal
-            weights.loc[active] = hierarchical_bounded_normalize(
+            allocated = hierarchical_bounded_normalize(
                 raw_active,
                 sub.loc[active, "sector_name"],
                 item_cap=layer_cfg.max_industry_weight,
                 group_cap=layer_cfg.max_sector_weight,
                 item_floor=layer_cfg.min_target_weight,
                 target_sum=1.0,
+                allow_partial=True,
             )
+            shortfall = 1.0 - float(allocated.sum())
+            if shortfall > 1e-9:
+                logger.warning(
+                    "Stage 12B under-invested %s: active_industries=%d allocated=%.4f "
+                    "(caps bind before full investment; residual is implicit cash).",
+                    sub["as_of_date"].iloc[0],
+                    int(active.sum()),
+                    float(allocated.sum()),
+                )
+            weights.loc[active] = allocated
         target_parts.append(weights)
     out["target_weight"] = pd.concat(target_parts).sort_index()
     out = _add_bands(

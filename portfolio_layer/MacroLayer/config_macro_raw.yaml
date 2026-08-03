@@ -419,7 +419,12 @@ macro_raw:
       fallback_value: 0.0
     target:
       equal_weight_blend: 0.15
-      max_industry_weight: 0.08
+      # The tier-1 sleeve universe only ever has 12-13 targetable industries,
+      # so an 0.08 cap made full investment infeasible on every date (12 x
+      # 0.08 = 0.96 < 1) and the legacy code silently renormalized above the
+      # cap. 0.20 keeps concentration bounded while remaining feasible down
+      # to ~5 active industries across sectors.
+      max_industry_weight: 0.20
       min_target_weight: 0.0
       renormalize_after_caps: true
     bands:
