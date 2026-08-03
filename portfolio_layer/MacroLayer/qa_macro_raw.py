@@ -482,6 +482,7 @@ def _build_issue_rows(
     freshness_rows: list[dict[str, Any]],
     country_rows: list[dict[str, Any]],
     policies: dict[str, MetricPolicy],
+    full_history_revision_keys: frozenset[str] = frozenset(),
 ) -> list[tuple[Any, ...]]:
     issues: list[tuple[Any, ...]] = []
     registry_by_key = {str(row["registry_key"]): row for row in registry_rows}
@@ -650,6 +651,12 @@ def _build_issue_rows(
             )
         )
 
+    exempt_clause = ""
+    exempt_params: tuple[Any, ...] = ()
+    if full_history_revision_keys:
+        placeholders = ",".join("?" for _ in full_history_revision_keys)
+        exempt_clause = f" AND v.registry_key NOT IN ({placeholders})"
+        exempt_params = tuple(sorted(full_history_revision_keys))
     vintage_concentration = _query_grouped_counts(
         conn,
         """
@@ -679,9 +686,13 @@ def _build_issue_rows(
         WHERE t.total_periods >= 100
           AND v.vintage_periods >= 100
           AND (1.0 * v.vintage_periods / t.total_periods) >= 0.80
+        """
+        + exempt_clause
+        + """
         GROUP BY v.registry_key
         HAVING COUNT(*) >= 3
         """,
+        exempt_params,
     )
     for row in vintage_concentration:
         reg = _registry_row_for_issue(
@@ -964,6 +975,10 @@ def main() -> None:
             freshness_rows=freshness_rows,
             policies=policies,
         )
+        full_history_keys = frozenset(
+            str(item)
+            for item in (cfg_get(cfg, "qa_full_history_revision_registry_keys", default=None) or [])
+        )
         issues = _build_issue_rows(
             conn,
             qa_run_id=qa_run_id,
@@ -973,6 +988,7 @@ def main() -> None:
             freshness_rows=freshness_rows,
             country_rows=country_rows,
             policies=policies,
+            full_history_revision_keys=full_history_keys,
         )
         if issues:
             conn.executemany(

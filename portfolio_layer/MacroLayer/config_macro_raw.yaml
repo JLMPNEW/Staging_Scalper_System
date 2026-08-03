@@ -9,6 +9,15 @@ macro_raw:
   release_calendar_csv: "MacroLayer/macro_release_calendar_seed.csv"
   run_mode: "daily"
   as_of_date: null
+  # True-vintage series whose provider legitimately restates the full history on
+  # (re)estimation: NFCI/ANFCI are re-estimated weekly by the Chicago Fed factor
+  # model; INDPRO is restated by the annual G.17 revisions. Exempt from the
+  # implausible_vintage_concentration QA error, which otherwise flags exactly the
+  # clamped-realtime fabrication signature.
+  qa_full_history_revision_registry_keys:
+    - "us_nfci"
+    - "us_anfci"
+    - "us_industrial_production"
 
   serving:
     pit_workers: 2
