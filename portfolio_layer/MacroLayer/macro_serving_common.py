@@ -18,7 +18,9 @@ RELEASE_STALENESS_POLICY_VERSION = "release_business_days_v1"
 DEFAULT_PUBLICATION_LAG_DAYS = {
     "daily": 1,
     "weekly": 7,
-    "monthly": 30,
+    # 45 days covers the slowest tier-1 monthly publishers (OECD CLI/BCI/CCI
+    # arrive ~5-6 weeks after the reference month ends).
+    "monthly": 45,
     "quarterly": 60,
     "annual": 90,
 }
@@ -249,15 +251,16 @@ def effective_available_date(
     """Return the first date on which a raw value can safely be used.
 
     Explicit release/vintage metadata wins. For providers that expose neither,
-    availability is conservatively bounded by both a cadence-based publication
-    lag and the date on which this system actually retrieved the snapshot.
-
-    Daily-frequency rows are exempt from the retrieval bound: they are market
-    prints (yields, breakevens, spot prices, FX, vol) that are public and
-    effectively unrevised on their observation date, so a later backfill
-    retrieval still reproduces exactly what was knowable then. Clamping them
-    to the retrieval date would collapse decades of daily history onto a
-    handful of ingest dates and starve every standardization window.
+    availability is the reference-period end plus a conservative cadence-based
+    publication lag. Historical values from such providers are necessarily
+    latest-revision (no vintage archive exists), presented at realistic
+    first-publication dates — the standard backtest convention for unarchived
+    indicators. True first prints accrue going forward via append-only
+    ingestion. Clamping availability to the retrieval date was rejected: it
+    collapses decades of backfilled history onto a handful of ingest dates,
+    starving every standardization window (daily market prints and OECD
+    monthly indicators alike) while protecting only against modest revision
+    noise in level indicators.
     """
     if release_date is not None or vintage_date is not None:
         values = [item for item in (observation_date, release_date, vintage_date) if item is not None]
@@ -268,11 +271,7 @@ def effective_available_date(
     lag_days = publication_lag_days
     if lag_days is None:
         lag_days = DEFAULT_PUBLICATION_LAG_DAYS.get(normalized_frequency, 1)
-    inferred = period_end_date(observation_date, frequency) + timedelta(days=max(int(lag_days), 0))
-    if normalized_frequency == "daily":
-        return inferred
-    retrieved = _retrieval_date(retrieved_at)
-    return max(inferred, retrieved) if retrieved is not None else inferred
+    return period_end_date(observation_date, frequency) + timedelta(days=max(int(lag_days), 0))
 
 
 def candidate_rank(candidate: RawCandidate) -> tuple[date, date, date, str, int, str]:
