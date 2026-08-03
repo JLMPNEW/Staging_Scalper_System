@@ -370,7 +370,11 @@ def _compute_country_coverage_rows(
                 else:
                     missing_required.append(metric_key)
         coverage_ratio = round(available_metric_count / expected_metric_count, 6) if expected_metric_count else None
-        required_coverage_ratio = round(available_required_count / required_metric_count, 6) if required_metric_count else 1.0
+        required_coverage_ratio = (
+            round(available_required_count / required_metric_count, 6)
+            if required_metric_count
+            else None
+        )
         row = {
             "qa_run_id": qa_run_id,
             "ingest_run_id": ingest_run_id,
@@ -561,13 +565,14 @@ def _build_issue_rows(
                 o.registry_key,
                 o.observation_period,
                 COALESCE(o.observation_date, '') AS observation_date,
+                o.retrieved_at,
                 COUNT(*) AS row_count
             FROM macro_observation_raw o
             JOIN macro_metric_registry r
               ON r.registry_key = o.registry_key
             WHERE r.enabled = 1
               AND r.vintage_policy != 'true_vintage'
-            GROUP BY o.registry_key, o.observation_period, COALESCE(o.observation_date, '')
+            GROUP BY o.registry_key, o.observation_period, COALESCE(o.observation_date, ''), o.retrieved_at
             HAVING COUNT(*) > 1
         ) d
         GROUP BY d.registry_key
@@ -645,6 +650,65 @@ def _build_issue_rows(
             )
         )
 
+    vintage_concentration = _query_grouped_counts(
+        conn,
+        """
+        WITH period_totals AS (
+            SELECT o.registry_key, COUNT(DISTINCT o.observation_period) AS total_periods
+            FROM macro_observation_raw o
+            JOIN macro_metric_registry r ON r.registry_key = o.registry_key
+            WHERE r.enabled = 1
+              AND r.vintage_policy = 'true_vintage'
+            GROUP BY o.registry_key
+        ), vintage_counts AS (
+            SELECT o.registry_key, o.vintage_date,
+                   COUNT(DISTINCT o.observation_period) AS vintage_periods
+            FROM macro_observation_raw o
+            JOIN macro_metric_registry r ON r.registry_key = o.registry_key
+            WHERE r.enabled = 1
+              AND r.vintage_policy = 'true_vintage'
+              AND o.vintage_date IS NOT NULL
+            GROUP BY o.registry_key, o.vintage_date
+        )
+        SELECT v.registry_key,
+               COUNT(*) AS suspicious_vintage_count,
+               MAX(v.vintage_periods) AS max_periods_per_vintage,
+               MAX(t.total_periods) AS total_periods
+        FROM vintage_counts v
+        JOIN period_totals t ON t.registry_key = v.registry_key
+        WHERE t.total_periods >= 100
+          AND v.vintage_periods >= 100
+          AND (1.0 * v.vintage_periods / t.total_periods) >= 0.80
+        GROUP BY v.registry_key
+        HAVING COUNT(*) >= 3
+        """,
+    )
+    for row in vintage_concentration:
+        reg = _registry_row_for_issue(
+            registry_by_key,
+            str(row["registry_key"]),
+            "implausible_vintage_concentration",
+        )
+        if reg is None:
+            continue
+        issues.append(
+            _issue_tuple(
+                qa_run_id=qa_run_id,
+                severity="error",
+                issue_type="implausible_vintage_concentration",
+                registry_key=str(row["registry_key"]),
+                metric_key=str(reg["metric_key"]),
+                ref_area=str(reg["ref_area"]),
+                source_name=str(reg["source_name"]),
+                issue_count=int(row["suspicious_vintage_count"] or 0),
+                details={
+                    "suspicious_vintage_count": int(row["suspicious_vintage_count"] or 0),
+                    "max_periods_per_vintage": int(row["max_periods_per_vintage"] or 0),
+                    "total_periods": int(row["total_periods"] or 0),
+                    "threshold": "at least 3 vintages each carrying >=80% of >=100 periods",
+                },
+            )
+        )
     chronology_release = _query_grouped_counts(
         conn,
         """
@@ -947,6 +1011,8 @@ def main() -> None:
         )
     finally:
         conn.close()
+    if error_count:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

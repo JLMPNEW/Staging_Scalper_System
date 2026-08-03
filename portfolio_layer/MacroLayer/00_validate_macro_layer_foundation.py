@@ -231,10 +231,7 @@ def _check_source_api_credentials(cfg: dict[str, Any]) -> CheckResult:
                 continue
             literal_key = str(source_cfg.get("api_key", "") or "").strip()
             if literal_key and literal_key.lower() not in {"null", "none"}:
-                if literal_key.lower() in {"changeme", "placeholder", "todo", "required"}:
-                    problems.append(f"sources.{source_name}.api_key_placeholder")
-                else:
-                    resolved.append(f"{source_name}:config")
+                problems.append(f"sources.{source_name}.literal_api_key_forbidden")
                 continue
             if env_name:
                 if os.getenv(env_name):
@@ -343,7 +340,7 @@ def _check_db_health(cfg: dict[str, Any]) -> tuple[CheckResult, dict[str, Any]]:
     return CheckResult("sqlite_db_health", True, "raw and serving DBs open read-only and pass quick_check"), db_info
 
 
-def _check_stage7_contract(cfg: dict[str, Any]) -> tuple[CheckResult, dict[str, Any]]:
+def _check_stage7_contract(cfg: dict[str, Any], *, max_serving_age_days: int) -> tuple[CheckResult, dict[str, Any]]:
     serving_db = _resolve_config_path(cfg.get("serving_db_path"))
     table_info: dict[str, Any] = {}
     if serving_db is None or not serving_db.exists():
@@ -353,9 +350,17 @@ def _check_stage7_contract(cfg: dict[str, Any]) -> tuple[CheckResult, dict[str, 
             columns = _table_columns(conn, table_name)
             missing_columns = required_columns - columns
             row_count = _table_count(conn, table_name)
+            max_as_of_date = _max_as_of(conn, table_name)
+            age_days: int | None = None
+            if max_as_of_date:
+                try:
+                    age_days = (datetime.now(timezone.utc).date() - datetime.fromisoformat(max_as_of_date).date()).days
+                except ValueError:
+                    age_days = None
             table_info[table_name] = {
                 "row_count": row_count,
-                "max_as_of_date": _max_as_of(conn, table_name),
+                "max_as_of_date": max_as_of_date,
+                "age_days": age_days,
                 "required_columns_present": not missing_columns,
             }
             if missing_columns:
@@ -369,6 +374,16 @@ def _check_stage7_contract(cfg: dict[str, Any]) -> tuple[CheckResult, dict[str, 
                 )
             if row_count <= 0 and table_name not in OPTIONAL_EMPTY_SERVING_TABLES:
                 return CheckResult("stage7_contract_tables", False, f"{table_name} has no rows"), table_info
+            if (
+                row_count > 0
+                and max_as_of_date is not None
+                and (age_days is None or age_days < 0 or age_days > max_serving_age_days)
+            ):
+                return CheckResult(
+                    "stage7_contract_tables",
+                    False,
+                    f"{table_name} freshness invalid: max_as_of_date={max_as_of_date} age_days={age_days} max={max_serving_age_days}",
+                ), table_info
     return CheckResult("stage7_contract_tables", True, "serving DB exposes Stage 7 contract tables"), table_info
 
 
@@ -414,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--hash-db", action="store_true", help="Hash large copied DB files; slower.")
+    parser.add_argument("--max-serving-age-days", type=int, default=7, help="Maximum allowed age for dated Stage 7 serving tables.")
     args = parser.parse_args(argv)
 
     _configure_logging()
@@ -426,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     db_check, db_info = _check_db_health(cfg)
     checks.append(db_check)
-    contract_check, table_info = _check_stage7_contract(cfg)
+    contract_check, table_info = _check_stage7_contract(cfg, max_serving_age_days=max(0, int(args.max_serving_age_days)))
     checks.append(contract_check)
 
     for check in checks:

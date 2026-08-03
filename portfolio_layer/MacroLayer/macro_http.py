@@ -122,7 +122,7 @@ class HttpClient:
         delay = min(cap, base * (2 ** attempt))
         jitter = random.uniform(0.0, delay * 0.25)
         if retry_after_seconds is not None:
-            delay = max(delay, retry_after_seconds)
+            delay = min(cap, max(delay, retry_after_seconds))
             jitter = 0.0
         total_attempts = self.settings.max_retries + 1
         current_attempt = attempt + 1

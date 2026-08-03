@@ -75,6 +75,9 @@ def _raw_candidate_from_row(row: sqlite3.Row) -> RawCandidate | None:
         observation_date=observation_date,
         release_date=release_date,
         vintage_date=vintage_date,
+        retrieved_at=str(row["retrieved_at"] or ""),
+        frequency=str(row["frequency"] or ""),
+        source_name=str(row["source_name"] or ""),
     )
     if available_date is None:
         return None
@@ -101,8 +104,11 @@ def _raw_candidate_from_row(row: sqlite3.Row) -> RawCandidate | None:
 
 
 def _iter_metric_candidates(raw_conn: sqlite3.Connection, metric_key: str, end_date: str):
-    cursor = raw_conn.execute(
-        f"""
+    end = parse_calendar_date(end_date)
+    if end is None:
+        raise ValueError(f"Invalid PIT end date: {end_date!r}")
+    rows = raw_conn.execute(
+        """
         SELECT
             o.registry_key,
             o.metric_key,
@@ -122,23 +128,16 @@ def _iter_metric_candidates(raw_conn: sqlite3.Connection, metric_key: str, end_d
           ON r.registry_key = o.registry_key
         WHERE r.enabled = 1
           AND o.metric_key = ?
-          AND {_AVAILABILITY_EXPR} != ''
-          AND {_AVAILABILITY_EXPR} <= ?
-        ORDER BY
-            {_AVAILABILITY_EXPR} ASC,
-            COALESCE(o.vintage_date, '') ASC,
-            COALESCE(o.release_date, '') ASC,
-            COALESCE(o.observation_date, '') ASC,
-            r.source_priority ASC,
-            o.retrieved_at ASC
         """,
-        (metric_key, end_date),
-    )
-    for row in cursor:
+        (metric_key,),
+    ).fetchall()
+    candidates = []
+    for row in rows:
         candidate = _raw_candidate_from_row(row)
-        if candidate is not None:
-            yield candidate
-
+        if candidate is not None and candidate.effective_available_date <= end:
+            candidates.append(candidate)
+    candidates.sort(key=lambda item: (item.effective_available_date, candidate_rank(item)))
+    yield from candidates
 
 def _null_pit_row(metric: MetricTask, as_of: date, now_iso: str) -> tuple:
     return (

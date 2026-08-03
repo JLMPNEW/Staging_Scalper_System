@@ -78,6 +78,7 @@ class SmoothingConfig:
     current_blend: float
     next_blend: float
     transition_bias_deadband: float
+    next_horizon_steps: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -371,7 +372,8 @@ def _build_smoothed_outputs(
             smoothed_current_probs = _normalize_probabilities(
                 (1.0 - cfg.current_blend) * raw_current_probs + cfg.current_blend * predicted_current
             )
-            predicted_next = _normalize_probabilities(smoothed_current_probs @ transition_matrix)
+            transition_horizon_matrix = np.linalg.matrix_power(transition_matrix, cfg.next_horizon_steps)
+            predicted_next = _normalize_probabilities(smoothed_current_probs @ transition_horizon_matrix)
             smoothed_next_probs = _normalize_probabilities(
                 (1.0 - cfg.next_blend) * raw_next_probs + cfg.next_blend * predicted_next
             )
@@ -528,11 +530,14 @@ def main() -> None:
             cfg_get(smoothing_cfg, "next_blend", default=0.35),
             label="regime_layer.smoothing.next_blend",
         ),
+        next_horizon_steps=int(cfg_get(smoothing_cfg, "next_horizon_steps", default=63)),
         transition_bias_deadband=_require_unit_interval(
             cfg_get(layer_cfg, "transition_bias_deadband", default=0.05),
             label="regime_layer.transition_bias_deadband",
         ),
     )
+    if cfg_obj.next_horizon_steps < 1:
+        raise ValueError("regime_layer.smoothing.next_horizon_steps must be >= 1.")
     if cfg_obj.transition_prior_strength < 0.0:
         raise ValueError("regime_layer.smoothing.transition_prior_strength must be >= 0.")
 
@@ -547,6 +552,13 @@ def main() -> None:
             start_override=args.start_date,
             end_override=args.end_date,
         )
+        if write_start != history_start:
+            logger.info(
+                "Ignoring partial smoothing start %s; path-dependent state is rebuilt from %s.",
+                write_start,
+                history_start,
+            )
+            write_start = history_start
         raw_ingest_run_id = _latest_raw_regime_run_raw_ingest_id(conn)
 
         start_serving_run(

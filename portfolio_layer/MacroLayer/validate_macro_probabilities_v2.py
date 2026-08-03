@@ -385,9 +385,13 @@ def main() -> None:
                 provenance_errors.append("build_end_date_mismatch")
             if manifest.get("config_sha256") != _sha256_file(config_path):
                 provenance_errors.append("config_hash_mismatch")
-            builder_path = Path(__file__).resolve().parent / "build_macro_probabilities_v2.py"
+            source_root = Path(__file__).resolve().parent
+            builder_path = source_root / "build_macro_probabilities_v2.py"
             if manifest.get("builder_sha256") != _sha256_file(builder_path):
                 provenance_errors.append("builder_hash_mismatch")
+            probability_engine_path = source_root / "macro_probability_v2.py"
+            if manifest.get("probability_engine_sha256") != _sha256_file(probability_engine_path):
+                provenance_errors.append("probability_engine_hash_mismatch")
             manifest_files = manifest.get("files")
             if not isinstance(manifest_files, dict) or not manifest_files:
                 provenance_errors.append("missing_file_hashes")

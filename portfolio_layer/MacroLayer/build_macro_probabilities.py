@@ -41,12 +41,13 @@ class ProbabilitySpec:
     target_start_month_offset: int
     target_window_months: int
     label_threshold: float = 0.0
+    calibration_mode: str = "forecast_logistic"
 
 
 PROBABILITY_SPECS: tuple[ProbabilitySpec, ...] = (
-    ProbabilitySpec("P_G_NOW", "G_NOW", "G_NOW", 0, 1, 0.0),
+    ProbabilitySpec("P_G_NOW", "G_NOW", "G_NOW", 0, 1, 0.0, "direct_standardized_logistic"),
     ProbabilitySpec("P_G_LEAD", "G_LEAD", "G_NOW", 1, 3, 0.0),
-    ProbabilitySpec("P_PI_NOW", "PI_NOW", "PI_NOW", 0, 1, 0.0),
+    ProbabilitySpec("P_PI_NOW", "PI_NOW", "PI_NOW", 0, 1, 0.0, "direct_standardized_logistic"),
     ProbabilitySpec("P_PI_LEAD", "PI_LEAD", "PI_NOW", 1, 3, 0.0),
 )
 
@@ -163,9 +164,17 @@ def _build_monthly_probability_dataset(
     target_window_value = target_window_value.where(target_window.notna().sum(axis=1) == spec.target_window_months)
     label = (target_window_value >= float(spec.label_threshold)).astype(float)
     label = label.where(target_window_value.notna())
-    label_available_date = date_map[spec.target_composite_key].shift(
-        -(spec.target_start_month_offset + spec.target_window_months - 1)
+    target_end_offset = spec.target_start_month_offset + spec.target_window_months - 1
+    observed_target_date = date_map[spec.target_composite_key].shift(-target_end_offset)
+    target_end_periods = pd.PeriodIndex(value_map.index, freq="M") + target_end_offset
+    completed_month_date = pd.Series(
+        target_end_periods.to_timestamp(how="end").normalize(),
+        index=value_map.index,
     )
+    label_available_date = pd.concat(
+        [pd.to_datetime(observed_target_date, errors="coerce"), completed_month_date],
+        axis=1,
+    ).max(axis=1)
     return pd.DataFrame(
         {
             "source_value": value_map[spec.source_composite_key],
@@ -298,21 +307,32 @@ def _build_calibration_and_diagnostics(
     label_date = pd.to_datetime(dataset["label_available_date"], errors="coerce").dt.normalize()
     for _, anchor_row in anchors.iterrows():
         anchor_date = pd.Timestamp(anchor_row["source_snapshot_date"]).normalize()
-        train_mask = (
-            dataset["source_value"].notna()
-            & dataset["label_value"].notna()
-            & label_date.notna()
-            & (label_date <= anchor_date)
-        )
-        train = dataset.loc[train_mask, ["source_value", "label_value"]].copy()
+        if spec.calibration_mode == "direct_standardized_logistic":
+            source_date = pd.to_datetime(dataset["source_snapshot_date"], errors="coerce").dt.normalize()
+            train_mask = dataset["source_value"].notna() & source_date.notna() & (source_date < anchor_date)
+            train = dataset.loc[train_mask, ["source_value"]].copy()
+            train["label_value"] = (train["source_value"] >= float(spec.label_threshold)).astype(float)
+        else:
+            train_mask = (
+                dataset["source_value"].notna()
+                & dataset["label_value"].notna()
+                & label_date.notna()
+                & (label_date <= anchor_date)
+            )
+            train = dataset.loc[train_mask, ["source_value", "label_value"]].copy()
         training_sample_count = int(len(train))
         positive_sample_count = int(train["label_value"].sum()) if training_sample_count > 0 else 0
         negative_sample_count = training_sample_count - positive_sample_count
         positive_rate = float(positive_sample_count / training_sample_count) if training_sample_count > 0 else None
         ready = int(
             training_sample_count >= int(min_training_months)
-            and positive_sample_count >= int(min_positive_months)
-            and negative_sample_count >= int(min_negative_months)
+            and (
+                spec.calibration_mode == "direct_standardized_logistic"
+                or (
+                    positive_sample_count >= int(min_positive_months)
+                    and negative_sample_count >= int(min_negative_months)
+                )
+            )
         )
 
         predictor_mean = float(train["source_value"].mean()) if training_sample_count > 0 else 0.0
@@ -331,7 +351,10 @@ def _build_calibration_and_diagnostics(
         saturation_low_share: float | None = None
         saturation_high_share: float | None = None
 
-        if ready == 1:
+        if spec.calibration_mode == "direct_standardized_logistic":
+            intercept_value = 0.0
+            slope_value = 1.0
+        elif ready == 1:
             fit = _fit_monotonic_logistic(
                 train["source_value"].to_numpy(dtype=float),
                 train["label_value"].to_numpy(dtype=float),
@@ -506,9 +529,9 @@ def main() -> None:
     min_training_months = int(cfg_get(layer_cfg, "calibration_min_months", default=36))
     min_positive_months = int(cfg_get(layer_cfg, "calibration_min_positive_months", default=6))
     min_negative_months = int(cfg_get(layer_cfg, "calibration_min_negative_months", default=6))
-    ridge_penalty = float(cfg_get(layer_cfg, "ridge_penalty", default=1.0))
+    ridge_penalty = float(cfg_get(layer_cfg, "ridge_penalty", default=2.5))
     logloss_clip = float(cfg_get(layer_cfg, "logloss_clip", default=1e-6))
-    output_probability_floor = float(cfg_get(layer_cfg, "output_probability_floor", default=0.005))
+    output_probability_floor = float(cfg_get(layer_cfg, "output_probability_floor", default=0.02))
 
     conn = connect_sqlite(serving_db_path, row_factory=sqlite3.Row)
     serving_run_id = uuid.uuid4().hex

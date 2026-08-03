@@ -129,6 +129,27 @@ def _policy_frame(policy_rows: list[CompositePolicy]) -> pd.DataFrame:
     return pd.DataFrame([asdict(item) for item in policy_rows])
 
 
+def _validate_policy_feature_pairs(
+    conn: sqlite3.Connection,
+    policy_rows: list[CompositePolicy],
+) -> None:
+    expected = {(item.metric_key, item.feature_name) for item in policy_rows}
+    available = {
+        (str(row[0]), str(row[1]))
+        for row in conn.execute(
+            "SELECT DISTINCT metric_key, feature_name FROM macro_feature_daily"
+        ).fetchall()
+    }
+    missing = sorted(expected - available)
+    if missing:
+        sample = ", ".join(f"{metric}::{feature}" for metric, feature in missing[:12])
+        suffix = "..." if len(missing) > 12 else ""
+        raise ValueError(
+            f"Composite policy references {len(missing)} feature pair(s) never materialized "
+            f"in macro_feature_daily: {sample}{suffix}"
+        )
+
+
 def _ensure_consistent_scalar(policy_frame: pd.DataFrame, column_name: str, composite_key: str) -> float | int:
     values = [item for item in policy_frame[column_name].dropna().unique().tolist()]
     if len(values) != 1:
@@ -361,6 +382,7 @@ def main() -> None:
             policy_rows = all_policy_rows
         if not policy_rows:
             raise ValueError("No composite policy rows matched the requested build.")
+        _validate_policy_feature_pairs(conn, policy_rows)
 
         policy_by_composite: dict[str, list[CompositePolicy]] = {}
         for item in policy_rows:

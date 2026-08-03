@@ -173,6 +173,7 @@ def _load_configs(cfg: dict[str, Any]) -> tuple[SmoothingConfig, DecisionConfig]
         next_blend=_finite_float(
             cfg_get(smoothing, "next_blend", default=0.35), label="next_blend", minimum=0.0, maximum=1.0
         ),
+        next_horizon_steps=int(cfg_get(smoothing, "next_horizon_steps", default=63)),
         transition_bias_deadband=_finite_float(
             cfg_get(regime_cfg, "transition_bias_deadband", default=0.05),
             label="transition_bias_deadband",
@@ -180,6 +181,8 @@ def _load_configs(cfg: dict[str, Any]) -> tuple[SmoothingConfig, DecisionConfig]
             maximum=1.0,
         ),
     )
+    if smoothing_config.next_horizon_steps < 1:
+        raise ValueError("regime_layer.smoothing.next_horizon_steps must be >= 1.")
     confirm_periods = int(cfg_get(decision, "confirm_periods", default=2))
     if confirm_periods < 1:
         raise ValueError("regime_layer.decision.confirm_periods must be >= 1.")
@@ -204,7 +207,16 @@ def _load_configs(cfg: dict[str, Any]) -> tuple[SmoothingConfig, DecisionConfig]
             maximum=1.0,
         ),
         confirm_periods=confirm_periods,
+        min_incumbent_probability=_finite_float(
+            cfg_get(decision, "min_incumbent_probability", default=0.15),
+            label="min_incumbent_probability",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        incumbent_breach_periods=int(cfg_get(decision, "incumbent_breach_periods", default=2)),
     )
+    if decision_config.incumbent_breach_periods < 1:
+        raise ValueError("regime_layer.decision.incumbent_breach_periods must be >= 1.")
     return smoothing_config, decision_config
 
 
@@ -482,6 +494,13 @@ def main() -> None:
             start_override=args.start_date,
             end_override=args.end_date,
         )
+        if write_start != history_start:
+            logger.info(
+                "Ignoring partial v2 decision start %s; path-dependent state is rebuilt from %s.",
+                write_start,
+                history_start,
+            )
+            write_start = history_start
         smoothing_config, decision_config = _load_configs(cfg)
         start_serving_run(
             conn,
@@ -543,6 +562,8 @@ def main() -> None:
             "build_end_date": write_end.isoformat(),
             "config_sha256": _sha256_file(config_path),
             "builder_sha256": _sha256_file(Path(__file__)),
+            "probability_builder_sha256": _sha256_file(Path(__file__).resolve().parent / "build_macro_probabilities_v2.py"),
+            "probability_engine_sha256": _sha256_file(Path(__file__).resolve().parent / "macro_probability_v2.py"),
             "smoothing_engine_sha256": _sha256_file(Path(__file__).resolve().parent / "build_macro_regime_smoothed.py"),
             "decision_engine_sha256": _sha256_file(Path(__file__).resolve().parent / "build_macro_regime_decision.py"),
             "files": {latest_path.name: _sha256_file(latest_path)},

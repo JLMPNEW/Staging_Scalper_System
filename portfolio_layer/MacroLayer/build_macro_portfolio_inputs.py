@@ -281,7 +281,7 @@ def _zscore_by_date(frame: pd.DataFrame, column: str, *, fill: float = 0.0) -> p
 def _percentile_by_date(frame: pd.DataFrame, column: str) -> pd.Series:
     values = pd.to_numeric(frame[column], errors="coerce")
     ranks = values.groupby(frame["as_of_date"]).rank(method="first", ascending=True, pct=True)
-    return ranks.fillna(0.0).clip(0.0, 1.0)
+    return ranks.clip(0.0, 1.0)
 
 
 def _minmax_by_date(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -289,13 +289,16 @@ def _minmax_by_date(frame: pd.DataFrame, column: str) -> pd.Series:
 
     def transform(sub: pd.Series) -> pd.Series:
         valid = sub.dropna()
+        result = pd.Series(np.nan, index=sub.index, dtype="float64")
         if valid.empty:
-            return pd.Series(0.0, index=sub.index, dtype="float64")
+            return result
         lo = float(valid.min())
         hi = float(valid.max())
         if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            return pd.Series(0.5, index=sub.index, dtype="float64")
-        return ((sub - lo) / (hi - lo)).fillna(0.0)
+            result.loc[valid.index] = 0.5
+            return result
+        result.loc[valid.index] = (valid - lo) / (hi - lo)
+        return result
 
     return values.groupby(frame["as_of_date"], group_keys=False).transform(transform).clip(0.0, 1.0)
 
@@ -807,10 +810,40 @@ def _export_stock_optimizer_csv(
             ["AsOfDate", "Ticker", "Company", "sector", "industry", "industry_aggregate", "Rating", "FinalScore"]
         ].copy()
     else:
-        export = canonical.merge(macro, on="Ticker", how="inner")
+        if canonical["Ticker"].duplicated().any() or macro["Ticker"].duplicated().any():
+            raise ValueError("Canonical or macro optimizer universe contains duplicate tickers.")
+        missing_macro = sorted(set(canonical["Ticker"]) - set(macro["Ticker"]))
+        if missing_macro:
+            sample = ", ".join(missing_macro[:10])
+            raise ValueError(
+                f"Macro overlay is missing {len(missing_macro)} canonical optimizer ticker(s); sample={sample}."
+            )
+        export = canonical.merge(macro, on="Ticker", how="inner", validate="one_to_one")
         if "FinalScore" in export.columns:
             export["BaseFinalScore"] = pd.to_numeric(export["FinalScore"], errors="coerce")
         export["FinalScore"] = pd.to_numeric(export["MacroFinalScore"], errors="coerce")
+    stable_macro_columns = {
+        "BaseFinalScore": "base_final_score",
+        "MacroFinalScore": "final_score",
+        "SelectionScore": "selection_score",
+        "WeightScore": "weight_score",
+        "MacroStockFitZ": "macro_stock_fit_z",
+        "IndustryMacroFit": "industry_macro_fit",
+        "IndustryAggregateMacroFit": "industry_aggregate_macro_fit",
+        "SectorMacroFit": "sector_macro_fit",
+        "SectorTacticalLiftZ": "sector_tactical_lift_z",
+        "ShockFit": "shock_fit",
+        "MacroInputState": "state",
+        "OptimizerScoreSource": "optimizer_score_source",
+    }
+    if canonical.empty:
+        ticker_source = stock_latest.set_index(stock_latest["ticker"].astype(str).str.upper().str.strip())
+        export_index = export["Ticker"].astype(str).str.upper().str.strip()
+        for output_column, source_column in stable_macro_columns.items():
+            export[output_column] = export_index.map(ticker_source[source_column])
+    for output_column in stable_macro_columns:
+        if output_column not in export.columns:
+            export[output_column] = np.nan
     export = export.drop(columns=["_source_path"], errors="ignore")
     export = export.sort_values("Ticker").reset_index(drop=True)
     _write_atomic_csv(path, export)

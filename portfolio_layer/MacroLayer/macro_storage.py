@@ -560,6 +560,9 @@ def _insert_artifacts(conn: sqlite3.Connection, run_id: str, artifacts: Iterable
 
 
 def _make_dedupe_key(registry_key: str, obs: ObservationRecord) -> str:
+    # Providers without release/vintage metadata are snapshot-versioned by
+    # retrieval time. Unchanged values are filtered before insertion below.
+    snapshot_id = obs.retrieved_at if obs.release_date is None and obs.vintage_date is None else ""
     text = "|".join(
         [
             registry_key,
@@ -569,6 +572,7 @@ def _make_dedupe_key(registry_key: str, obs: ObservationRecord) -> str:
             obs.observation_period,
             obs.release_date or "",
             obs.vintage_date or "",
+            snapshot_id,
         ]
     )
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -581,9 +585,38 @@ def _upsert_observations(
     registry_key: str,
     observations: Iterable[ObservationRecord],
 ) -> int:
+    observation_list = list(observations)
+    non_vintage_periods = sorted(
+        {
+            obs.observation_period
+            for obs in observation_list
+            if obs.release_date is None and obs.vintage_date is None
+        }
+    )
+    latest_non_vintage: dict[str, float] = {}
+    if non_vintage_periods:
+        placeholders = ",".join("?" for _ in non_vintage_periods)
+        rows = conn.execute(
+            f"""
+            SELECT observation_period, value
+            FROM macro_observation_raw
+            WHERE registry_key = ?
+              AND release_date IS NULL
+              AND vintage_date IS NULL
+              AND observation_period IN ({placeholders})
+            ORDER BY observation_id
+            """,
+            (registry_key, *non_vintage_periods),
+        ).fetchall()
+        latest_non_vintage = {str(period): float(value) for period, value in rows}
+
     payload = []
-    count = 0
-    for obs in observations:
+    for obs in observation_list:
+        is_non_vintage = obs.release_date is None and obs.vintage_date is None
+        prior_value = latest_non_vintage.get(obs.observation_period) if is_non_vintage else None
+        if prior_value is not None and prior_value == float(obs.value):
+            continue
+        revision_flag = 1 if is_non_vintage and prior_value is not None else obs.revision_flag
         payload.append(
             (
                 _make_dedupe_key(registry_key, obs),
@@ -603,12 +636,16 @@ def _upsert_observations(
                 obs.value,
                 obs.source_last_updated,
                 obs.retrieved_at,
-                obs.revision_flag,
+                revision_flag,
                 obs.notes_hash,
                 run_id,
             )
         )
-        count += 1
+        if is_non_vintage:
+            latest_non_vintage[obs.observation_period] = float(obs.value)
+    if not payload:
+        return 0
+
     conn.executemany(
         """
         INSERT INTO macro_observation_raw (
@@ -630,8 +667,7 @@ def _upsert_observations(
         """,
         payload,
     )
-    return count
-
+    return len(payload)
 
 def _upsert_sync_state(conn: sqlite3.Connection, *, result: FetchResult) -> None:
     max_obs = _max_field(result.observations, "observation_date")
@@ -649,27 +685,27 @@ def _upsert_sync_state(conn: sqlite3.Connection, *, result: FetchResult) -> None
             metric_key=excluded.metric_key,
             source_name=excluded.source_name,
             last_observation_date=CASE
-                WHEN excluded.last_error_text IS NOT NULL THEN macro_sync_state.last_observation_date
+                WHEN excluded.last_error_text IS NOT NULL OR excluded.last_row_count = 0 THEN macro_sync_state.last_observation_date
                 ELSE excluded.last_observation_date
             END,
             last_release_date=CASE
-                WHEN excluded.last_error_text IS NOT NULL THEN macro_sync_state.last_release_date
+                WHEN excluded.last_error_text IS NOT NULL OR excluded.last_row_count = 0 THEN macro_sync_state.last_release_date
                 ELSE excluded.last_release_date
             END,
             last_vintage_date=CASE
-                WHEN excluded.last_error_text IS NOT NULL THEN macro_sync_state.last_vintage_date
+                WHEN excluded.last_error_text IS NOT NULL OR excluded.last_row_count = 0 THEN macro_sync_state.last_vintage_date
                 ELSE excluded.last_vintage_date
             END,
             last_source_last_updated=CASE
-                WHEN excluded.last_error_text IS NOT NULL THEN macro_sync_state.last_source_last_updated
+                WHEN excluded.last_error_text IS NOT NULL OR excluded.last_row_count = 0 THEN macro_sync_state.last_source_last_updated
                 ELSE excluded.last_source_last_updated
             END,
             last_success_at_utc=CASE
-                WHEN excluded.last_error_text IS NOT NULL THEN macro_sync_state.last_success_at_utc
+                WHEN excluded.last_error_text IS NOT NULL OR excluded.last_row_count = 0 THEN macro_sync_state.last_success_at_utc
                 ELSE excluded.last_success_at_utc
             END,
             last_row_count=CASE
-                WHEN excluded.last_error_text IS NOT NULL THEN macro_sync_state.last_row_count
+                WHEN excluded.last_error_text IS NOT NULL OR excluded.last_row_count = 0 THEN macro_sync_state.last_row_count
                 ELSE excluded.last_row_count
             END,
             last_error_text=excluded.last_error_text,
@@ -683,7 +719,7 @@ def _upsert_sync_state(conn: sqlite3.Connection, *, result: FetchResult) -> None
             max_release,
             max_vintage,
             result.source_last_updated,
-            now if result.error_text is None else None,
+            now if result.error_text is None and result.row_count > 0 else None,
             result.row_count,
             result.error_text,
             now,

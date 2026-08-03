@@ -44,6 +44,7 @@ def _thresholds(cfg: dict) -> dict[str, object]:
         "min_latest_selection_score_std": 0.05,
         "min_latest_weight_score_std": 0.05,
         "max_foreign_required": False,
+        "stock_eligible_state": str(cfg_get(cfg, "portfolio_input_layer", "stock", "state_when_eligible", default="Eligible")),
     }
     defaults.update(raw)
     return defaults
@@ -111,7 +112,7 @@ def _latest_checks(inputs: pd.DataFrame, summary: pd.DataFrame, latest_date: str
     stock = inputs.loc[inputs["asset_type"].eq("US_STOCK")].copy()
     foreign = inputs.loc[inputs["asset_type"].eq("FOREIGN_ETF")].copy()
     stock_count = int(len(stock))
-    stock_eligible = int(stock["state"].astype(str).eq("Eligible").sum())
+    stock_eligible = int(stock["state"].astype(str).eq(str(thresholds["stock_eligible_state"])).sum())
     final_score = pd.to_numeric(stock["final_score"], errors="coerce")
     selection = pd.to_numeric(stock["selection_score"], errors="coerce")
     weight = pd.to_numeric(stock["weight_score"], errors="coerce")
@@ -217,6 +218,7 @@ def _history_checks(conn: sqlite3.Connection) -> pd.DataFrame:
         SELECT COUNT(*) AS bad_count
         FROM portfolio_inputs_daily
         WHERE final_score IS NULL
+           OR score_pct IS NULL
            OR score_pct < 0.0
            OR score_pct > 1.0
            OR state IS NULL

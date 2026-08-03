@@ -790,8 +790,11 @@ def _summary(
         assessment = "SOURCE_ARCHIVE_REVIEW_REQUIRED"
     else:
         assessment = "HISTORICAL_BACKFILL_CANDIDATE"
+    all_local_history_sufficient = sample_recoverable and all(
+        str(row.get("recovery_status")) == "LOCAL_HISTORY_SUFFICIENT" for row in input_rows
+    )
     return {
-        "audit_status": "PASS",
+        "audit_status": "PASS" if all_local_history_sufficient else "GAPS_FOUND",
         "model_version": model_version,
         "evidence_as_of_date": end_date,
         "preferred_history_start_date": preferred_history_start.isoformat(),
@@ -975,7 +978,8 @@ def main() -> None:
     }
     _atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     logger.info(
-        "MACRO V2 VINTAGE AUDIT: PASS assessment=%s cells=%d dependencies=%d -> %s",
+        "MACRO V2 VINTAGE AUDIT: %s assessment=%s cells=%d dependencies=%d -> %s",
+        summary["audit_status"],
         summary["promotion_acceleration_assessment"],
         len(cell_rows),
         len(input_rows),

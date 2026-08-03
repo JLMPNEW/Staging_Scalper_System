@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from macro_allocation import bounded_normalize
 from macro_raw_config import (
     cfg_get,
     configure_pipeline_logging,
@@ -260,43 +261,9 @@ def _load_foreign_inputs(conn: sqlite3.Connection, *, start_date: str, end_date:
 
 
 def _cap_and_normalize(weights: pd.Series, *, cap: float, renormalize: bool) -> pd.Series:
-    weights = pd.to_numeric(weights, errors="coerce").fillna(0.0).clip(lower=0.0)
-    out = pd.Series(0.0, index=weights.index, dtype="float64")
-    active = weights.gt(0.0)
-    if not active.any():
-        return out
-    values = weights.loc[active] / float(weights.loc[active].sum())
-    if cap <= 0.0:
-        out.loc[values.index] = values
-        return out
     if not renormalize:
-        out.loc[values.index] = values.clip(upper=cap)
-        return out
-    remaining = values.index.tolist()
-    capped = pd.Series(0.0, index=values.index, dtype="float64")
-    budget = 1.0
-    while remaining:
-        current = values.loc[remaining]
-        if float(current.sum()) <= 0.0:
-            capped.loc[remaining] = budget / len(remaining)
-            break
-        scaled = current / float(current.sum()) * budget
-        over = scaled.gt(cap)
-        if not bool(over.any()):
-            capped.loc[remaining] = scaled
-            break
-        over_idx = scaled.loc[over].index.tolist()
-        capped.loc[over_idx] = cap
-        budget -= cap * len(over_idx)
-        remaining = [idx for idx in remaining if idx not in set(over_idx)]
-        if budget <= 1e-12:
-            break
-    total = float(capped.sum())
-    if total > 0.0:
-        capped = capped / total
-    out.loc[capped.index] = capped
-    return out
-
+        logger.warning("renormalize_after_caps=false is deprecated; exact bounded normalization is enforced.")
+    return bounded_normalize(weights, lower=0.0, upper=cap, target_sum=1.0)
 
 def _candidate_weights(selected: pd.DataFrame, layer_cfg: ForeignSleeveBudgetConfig) -> pd.Series:
     if selected.empty:

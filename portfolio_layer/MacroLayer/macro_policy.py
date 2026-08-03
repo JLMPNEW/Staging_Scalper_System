@@ -56,6 +56,8 @@ def load_metric_policy(csv_path: Path) -> dict[str, MetricPolicy]:
             metric_key = str(row.get("metric_key", "") or "").strip()
             if not metric_key:
                 continue
+            if metric_key in policies:
+                raise ValueError(f"Duplicate metric_key in macro metric policy: {metric_key}")
             max_staleness_days = _parse_int(row.get("max_staleness_days"), default=None)
             source_quality_weight = _parse_float(row.get("source_quality_weight"), default=None)
             policies[metric_key] = MetricPolicy(

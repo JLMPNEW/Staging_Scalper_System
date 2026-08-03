@@ -24,13 +24,15 @@ def resolve_config_path(config_path: Path | None) -> Path:
 def load_macro_raw_config(config_path: Path | None) -> tuple[Path, dict[str, Any]]:
     path = resolve_config_path(config_path)
     if not path.exists():
-        return path, {}
+        raise FileNotFoundError(f"Macro config does not exist: {path}")
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
-        return path, {}
+        raise ValueError(f"Macro config must contain a YAML mapping: {path}")
     if isinstance(data.get("macro_raw"), dict):
         return path, data["macro_raw"]
+    if not data:
+        raise ValueError(f"Macro config is empty: {path}")
     return path, data
 
 

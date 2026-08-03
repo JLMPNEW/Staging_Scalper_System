@@ -298,7 +298,7 @@ def _decision_comparison(
     return summary, common
 
 
-def _verify_upstream(output_dir: Path, *, model_version: str, end_date: str) -> None:
+def _verify_upstream(output_dir: Path, *, model_version: str, end_date: str, config_path: Path) -> None:
     probability_validation = output_dir / "macro_regime_v2_validation.json"
     decision_manifest = output_dir / "macro_regime_v2_decision_manifest.json"
     errors: list[str] = []
@@ -318,10 +318,26 @@ def _verify_upstream(output_dir: Path, *, model_version: str, end_date: str) -> 
             errors.append("decision_model_version_mismatch")
         if decision_payload.get("build_end_date") != end_date:
             errors.append("decision_date_mismatch")
-        for filename, expected_hash in (decision_payload.get("files") or {}).items():
-            path = output_dir / str(filename)
-            if not path.exists() or _sha256_file(path) != str(expected_hash):
-                errors.append(f"decision_artifact_hash_mismatch:{filename}")
+        source_root = Path(__file__).resolve().parent
+        expected_sources = {
+            "config_sha256": config_path,
+            "builder_sha256": source_root / "build_macro_regime_v2_decision.py",
+            "probability_builder_sha256": source_root / "build_macro_probabilities_v2.py",
+            "probability_engine_sha256": source_root / "macro_probability_v2.py",
+            "smoothing_engine_sha256": source_root / "build_macro_regime_smoothed.py",
+            "decision_engine_sha256": source_root / "build_macro_regime_decision.py",
+        }
+        for field_name, source_path in expected_sources.items():
+            if decision_payload.get(field_name) != _sha256_file(source_path):
+                errors.append(f"decision_source_hash_mismatch:{field_name}")
+        decision_files = decision_payload.get("files")
+        if not isinstance(decision_files, dict) or not decision_files:
+            errors.append("decision_missing_file_hashes")
+        else:
+            for filename, expected_hash in decision_files.items():
+                path = output_dir / str(filename)
+                if not path.exists() or _sha256_file(path) != str(expected_hash):
+                    errors.append(f"decision_artifact_hash_mismatch:{filename}")
     if errors:
         raise ValueError(f"V2 promotion upstream seal failed: {errors}")
 
@@ -454,7 +470,7 @@ def main() -> None:
         if output_root is None:
             raise ValueError("Unable to resolve probability_v2.output_dir.")
         output_dir = output_root / end_date
-        _verify_upstream(output_dir, model_version=model_version, end_date=end_date)
+        _verify_upstream(output_dir, model_version=model_version, end_date=end_date, config_path=config_path)
         evaluation = _load_evaluation_frame(conn, model_version=model_version, end_date=end_date)
         cell_rows = [
             _cell_evidence(evaluation, probability_key=spec.probability_key, layer_cfg=layer_cfg)

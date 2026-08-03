@@ -104,6 +104,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serving-db-path", type=Path, default=None)
     parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--layer-block", type=str, default="probability_h1")
+    parser.add_argument(
+        "--initialize-baseline",
+        action="store_true",
+        help="Explicitly create the immutable H1 drift baseline when none exists; the initialization run is not promotable.",
+    )
     parser.add_argument("--selftest", action="store_true", help="Run the in-memory selftest and exit.")
     return parser.parse_args()
 
@@ -699,6 +704,7 @@ def evaluate(
     min_coverage: float,
     min_top: float,
     min_confidence: float,
+    initialize_baseline: bool = False,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     evidence_dir = output_root / end
@@ -845,13 +851,18 @@ def evaluate(
             advanced["ledger_row_counts"] = current_baseline["ledger_row_counts"]
             advanced["updated_at_utc"] = utc_now_iso()
             baseline_path.write_text(json.dumps(advanced, indent=1, sort_keys=True), encoding="utf-8")
-    else:
+    elif initialize_baseline:
         payload = dict(current_baseline)
         payload["created_at_utc"] = utc_now_iso()
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_path.write_text(json.dumps(payload, indent=1, sort_keys=True), encoding="utf-8")
         drift = []
         baseline_created = True
+        reasons.append("component_baseline_initialized")
+    else:
+        drift = ["baseline_missing"]
+        baseline_created = False
+        reasons.append("component_baseline_missing")
 
     acceptance = "PROMOTABLE" if not reasons else "NOT_PROMOTABLE"
     return {
@@ -948,6 +959,7 @@ def main() -> None:
             min_coverage=min_coverage,
             min_top=min_top,
             min_confidence=min_confidence,
+            initialize_baseline=bool(args.initialize_baseline),
         )
         evidence_dir = output_root / end
         evidence_dir.mkdir(parents=True, exist_ok=True)

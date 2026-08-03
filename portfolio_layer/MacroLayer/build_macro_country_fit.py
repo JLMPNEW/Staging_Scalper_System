@@ -641,21 +641,24 @@ def _build_stage10_frames(
     global_shocks: pd.DataFrame,
     layer_cfg: CountryMacroConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    base = coverage.merge(countries, on=["ticker", "ref_area"], how="left", suffixes=("", "_metadata"))
+    base = coverage.merge(countries, on="ticker", how="left", suffixes=("", "_metadata"), validate="many_to_one")
+    base["ref_area_mismatch"] = (
+        base["ref_area_metadata"].notna()
+        & base["ref_area"].astype(str).ne(base["ref_area_metadata"].astype(str))
+    )
     base["country_class"] = base["country_class"].fillna(base["coverage_country_class"])
     base = base.merge(regime, on="as_of_date", how="left")
     base = base.merge(local_scores, on=["as_of_date", "ref_area"], how="left")
     base = base.merge(global_shocks, on="as_of_date", how="left")
     base["decision_coverage_flag"] = base["decision_coverage_flag"].fillna(0).astype(int)
     base["country_coverage_flag"] = base["country_coverage_flag"].fillna(0).astype(int)
-    base["coverage_flag"] = (base["decision_coverage_flag"] & base["country_coverage_flag"]).astype(int)
+    base["coverage_flag"] = (
+        base["decision_coverage_flag"]
+        & base["country_coverage_flag"]
+        & (~base["ref_area_mismatch"]).astype(int)
+    ).astype(int)
     base["feature_count"] = base["expected_metric_count"].fillna(0).astype(int)
     base["available_feature_count"] = base["available_metric_count"].fillna(0).astype(int)
-    base["local_feature_coverage_ratio"] = np.where(
-        base["feature_count"] > 0,
-        base["available_feature_count"] / base["feature_count"],
-        np.nan,
-    )
     for column in (
         "growth_now_score",
         "growth_lead_score",
@@ -670,6 +673,21 @@ def _build_stage10_frames(
         if column not in base.columns:
             base[column] = np.nan
         base[column] = pd.to_numeric(base[column], errors="coerce").clip(-3.0, 3.0)
+
+    local_columns = {
+        "growth_now": "growth_now_score",
+        "growth_lead": "growth_lead_score",
+        "inflation_now": "inflation_score",
+    }
+    required_local_columns = [
+        column_name
+        for group_name, column_name in local_columns.items()
+        if float(layer_cfg.feature_group_weights.get(group_name, 0.0)) > 0.0
+    ]
+    if required_local_columns:
+        base["local_feature_coverage_ratio"] = base[required_local_columns].notna().sum(axis=1) / float(len(required_local_columns))
+    else:
+        base["local_feature_coverage_ratio"] = np.nan
 
     base["global_regime_fit"] = base.apply(lambda row: _global_regime_fit(row, layer_cfg), axis=1)
     base["local_macro_fit"] = base.apply(lambda row: _weighted_group_score(row, layer_cfg.feature_group_weights), axis=1)

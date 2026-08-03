@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -43,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--fetch-ibkr", action="store_true")
     parser.add_argument("--ib-client-id", type=int, default=913)
+    parser.add_argument("--write-sensitive-account-data", action="store_true")
     parser.add_argument("--portfolio-value", type=float, default=None)
     parser.add_argument("--min-trade-dollars", type=float, default=100.0)
     return parser.parse_args()
@@ -69,10 +71,25 @@ def _as_float(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
-def _read_weights(final_dir: Path, case_name: str) -> pd.DataFrame:
-    path = final_dir / case_name / "weights_long_only.csv"
-    if not path.exists():
-        raise FileNotFoundError(path)
+def _read_weights(final_dir: Path, case_name: str, *, expected_run_id: str) -> pd.DataFrame:
+    case_dir = final_dir / case_name
+    path = case_dir / "weights_long_only.csv"
+    manifest_path = case_dir / "stage12d_case_manifest.json"
+    if not path.exists() or not manifest_path.exists():
+        raise FileNotFoundError(path if not path.exists() else manifest_path)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid optimizer case manifest: {manifest_path}") from exc
+    output_hashes = manifest.get("output_sha256")
+    expected_hash = output_hashes.get(path.name) if isinstance(output_hashes, dict) else None
+    if (
+        manifest.get("status") != "completed"
+        or manifest.get("case_name") != case_name
+        or manifest.get("run_id") != expected_run_id
+        or expected_hash != _sha256_file(path)
+    ):
+        raise ValueError(f"Optimizer weights are not sealed to run {expected_run_id}: {path}")
     out = pd.read_csv(path)
     if "Ticker" not in out.columns or "Weight" not in out.columns:
         raise ValueError(f"{path} must contain Ticker and Weight columns.")
@@ -99,18 +116,61 @@ def _read_case_summary(final_dir: Path) -> pd.DataFrame:
     return out
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 def _read_acceptance(final_dir: Path) -> pd.DataFrame:
-    path = final_dir / "checks" / "stage12d_optimizer_acceptance_summary.csv"
-    if not path.exists():
+    checks_dir = final_dir / "checks"
+    path = checks_dir / "stage12d_optimizer_acceptance_summary.csv"
+    manifest_path = checks_dir / "stage12d_optimizer_acceptance_manifest.json"
+    if not path.exists() or not manifest_path.exists():
         return pd.DataFrame()
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return pd.DataFrame()
+    expected_hash = dict(manifest.get("files") or {}).get(path.name)
+    run_id = str(manifest.get("run_id") or "").strip()
+    summary_path = final_dir / "stage12d_optimizer_case_summary.csv"
+    case_names = [str(value).strip() for value in manifest.get("case_names", []) if str(value).strip()]
+    case_manifest_hashes = manifest.get("case_manifest_sha256")
+    if (
+        manifest.get("acceptance") != "PASS"
+        or not run_id
+        or expected_hash != _sha256_file(path)
+        or not summary_path.exists()
+        or manifest.get("case_summary_sha256") != _sha256_file(summary_path)
+        or not isinstance(case_manifest_hashes, dict)
+        or set(case_manifest_hashes) != set(case_names)
+    ):
+        return pd.DataFrame()
+    for case_name in case_names:
+        case_manifest = final_dir / case_name / "stage12d_case_manifest.json"
+        if not case_manifest.exists() or case_manifest_hashes.get(case_name) != _sha256_file(case_manifest):
+            return pd.DataFrame()
     out = pd.read_csv(path)
-    if "passed" in out.columns:
-        out["passed"] = _as_float(out["passed"]).fillna(0).astype(int)
+    if "passed" not in out.columns or "run_id" not in out.columns:
+        return pd.DataFrame()
+    out["passed"] = _as_float(out["passed"]).fillna(0).astype(int)
+    row_run_ids = {
+        str(value).strip()
+        for value in out["run_id"]
+        if pd.notna(value) and str(value).strip()
+    }
+    if row_run_ids != {run_id}:
+        return pd.DataFrame()
+    out.attrs["run_id"] = run_id
     return out
 
 
 def build_case_comparison(summary: pd.DataFrame, baseline_case: str) -> pd.DataFrame:
     out = summary.copy()
+    if "portfolio" in out.columns:
+        out = out.loc[out["portfolio"].astype(str).str.upper().eq("LONG_ONLY")].copy()
     baseline = out.loc[out["case_name"].astype(str).eq(baseline_case)]
     if baseline.empty:
         raise ValueError(f"Baseline case not found in case summary: {baseline_case}")
@@ -139,8 +199,8 @@ def _merge_weights(target: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame
         "EarningsDaysAhead",
         "EarningsDaysAheadAsOf",
     ]
-    target_cols = [c for c in meta_cols if c in target.columns] + ["Weight", "Low", "High"]
-    baseline_cols = [c for c in meta_cols if c in baseline.columns] + ["Weight", "Low", "High"]
+    target_cols = [c for c in meta_cols if c in target.columns] + [c for c in ("Weight", "Low", "High") if c in target.columns]
+    baseline_cols = [c for c in meta_cols if c in baseline.columns] + [c for c in ("Weight", "Low", "High") if c in baseline.columns]
     merged = target[target_cols].merge(
         baseline[baseline_cols],
         on="Ticker",
@@ -220,13 +280,11 @@ def choose_candidate(
     preferred_case: str,
     tie_break_case: str,
 ) -> dict[str, Any]:
-    passing_cases: set[str] | None = None
-    if not acceptance.empty and {"case_name", "passed"}.issubset(acceptance.columns):
-        grouped = acceptance.groupby("case_name")["passed"].min()
-        passing_cases = {str(case) for case, passed in grouped.items() if int(passed) == 1}
-    eligible = comparison.copy()
-    if passing_cases is not None:
-        eligible = eligible.loc[eligible["case_name"].astype(str).isin(passing_cases)].copy()
+    if acceptance.empty or not {"case_name", "passed"}.issubset(acceptance.columns):
+        raise ValueError("Stage 12D acceptance evidence is missing or malformed; candidate selection is fail-closed.")
+    grouped = acceptance.groupby("case_name")["passed"].min()
+    passing_cases = {str(case) for case, passed in grouped.items() if int(passed) == 1}
+    eligible = comparison.loc[comparison["case_name"].astype(str).isin(passing_cases)].copy()
     if eligible.empty:
         raise ValueError("No passing Stage 12D cases were available for candidate selection.")
     best_sharpe = float(eligible["sharpe_ann"].max())
@@ -247,13 +305,15 @@ def choose_candidate(
         "cash_budget_relaxation_used": str(selected.get("cash_budget_relaxation_used", "")),
         "candidate_case_requested": preferred_case,
         "tie_break_case": tie_break_case,
-        "passing_cases": sorted(passing_cases) if passing_cases is not None else None,
+        "passing_cases": sorted(passing_cases),
     }
 
 
 def _load_ibkr_config(path: Path, client_id_override: int) -> IbkrConfig:
     cfg = _read_yaml(path)
     ib_cfg = dict(cfg.get("ib", {}) or {})
+    if not ib_cfg:
+        ib_cfg = dict(((cfg.get("liquidity_panel", {}) or {}).get("ib", {}) or {}))
     return IbkrConfig(
         host=str(ib_cfg.get("host", "127.0.0.1")),
         port=int(ib_cfg.get("port", 7497)),
@@ -267,7 +327,7 @@ def fetch_ibkr_holdings(ibkr_cfg: IbkrConfig) -> tuple[pd.DataFrame, dict[str, A
     from ib_insync import IB
 
     ib = IB()
-    ib.connect(ibkr_cfg.host, ibkr_cfg.port, clientId=ibkr_cfg.client_id, timeout=15)
+    ib.connect(ibkr_cfg.host, ibkr_cfg.port, clientId=ibkr_cfg.client_id, timeout=15, readonly=True)
     try:
         try:
             ib.reqMarketDataType(ibkr_cfg.market_data_type)
@@ -315,7 +375,9 @@ def _latest_close_prices(base_config: Path, tickers: list[str]) -> pd.Series:
     if not tickers:
         return pd.Series(dtype="float64")
     cfg = _read_yaml(base_config)
-    end_raw = cfg.get("end")
+    cfg = dict(cfg.get("tier1_optimizer", cfg) or {})
+    returns_cfg = dict(cfg.get("returns", {}) or {})
+    end_raw = returns_cfg.get("end", cfg.get("end"))
     end = pd.to_datetime(end_raw, errors="coerce")
     if pd.isna(end):
         return pd.Series(dtype="float64")
@@ -514,6 +576,18 @@ def main() -> None:
 
     summary = _read_case_summary(final_dir)
     acceptance = _read_acceptance(final_dir)
+    acceptance_run_id = str(acceptance.attrs.get("run_id") or "")
+    summary_run_ids = (
+        {
+            str(value).strip()
+            for value in summary["run_id"]
+            if pd.notna(value) and str(value).strip()
+        }
+        if "run_id" in summary.columns
+        else set()
+    )
+    if not acceptance_run_id or summary_run_ids != {acceptance_run_id}:
+        raise ValueError("Stage 12D case summary and sealed acceptance evidence are not from one shared run.")
     case_comparison = build_case_comparison(summary, args.baseline_case)
     decision = choose_candidate(
         case_comparison,
@@ -527,8 +601,8 @@ def main() -> None:
     if not selected_rank.empty:
         decision["selected_rank"] = int(selected_rank.iloc[0])
 
-    baseline = _read_weights(final_dir, args.baseline_case)
-    selected = _read_weights(final_dir, selected_case)
+    baseline = _read_weights(final_dir, args.baseline_case, expected_run_id=acceptance_run_id)
+    selected = _read_weights(final_dir, selected_case, expected_run_id=acceptance_run_id)
     holdings_diff = _merge_weights(selected, baseline)
     group_comparison = build_group_comparison(holdings_diff)
 
@@ -544,11 +618,12 @@ def main() -> None:
     if args.fetch_ibkr:
         ibkr_cfg = _load_ibkr_config(trade_config, args.ib_client_id)
         current_holdings, account_summary = fetch_ibkr_holdings(ibkr_cfg)
-        _write_csv(out_dir / "current_holdings_ibkr.csv", current_holdings)
-        (out_dir / "ibkr_account_summary.json").write_text(
-            json.dumps(account_summary, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        if args.write_sensitive_account_data:
+            _write_csv(out_dir / "current_holdings_ibkr.csv", current_holdings)
+            (out_dir / "ibkr_account_summary.json").write_text(
+                json.dumps(account_summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
         trade_delta, trade_meta = build_trade_delta(
             selected,
             current_holdings,
@@ -557,6 +632,8 @@ def main() -> None:
             portfolio_value_override=args.portfolio_value,
             min_trade_dollars=args.min_trade_dollars,
         )
+        if not args.write_sensitive_account_data:
+            trade_meta["account"] = "redacted"
         _write_csv(out_dir / f"trade_delta_to_{selected_case}.csv", trade_delta)
         (out_dir / "trade_delta_summary.json").write_text(
             json.dumps(trade_meta, indent=2, sort_keys=True) + "\n",

@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=None, help="Optional output directory override.")
     parser.add_argument("--windows", nargs="*", default=None, help="Optional window-name filter.")
     parser.add_argument("--top-components", type=int, default=5, help="Number of component contributions to retain per composite extreme date.")
+    parser.add_argument("--warn-only", action="store_true", help="Write failed checks without returning a non-zero process status.")
     return parser.parse_args()
 
 
@@ -93,8 +94,10 @@ def _load_composite_daily(
     if df.empty:
         raise ValueError("macro_composite_daily returned no rows for the requested regime-check range.")
     df["as_of_date"] = pd.to_datetime(df["as_of_date"], errors="coerce")
-    df["analysis_value"] = df["composite_value_smoothed"]
-    df.loc[df["analysis_value"].isna(), "analysis_value"] = df.loc[df["analysis_value"].isna(), "composite_value_raw"]
+    covered = df["coverage_flag"].fillna(0).astype(int).eq(1)
+    df["analysis_value"] = df["composite_value_smoothed"].where(covered)
+    covered_raw_fallback = covered & df["analysis_value"].isna()
+    df.loc[covered_raw_fallback, "analysis_value"] = df.loc[covered_raw_fallback, "composite_value_raw"]
     return df
 
 
@@ -215,7 +218,7 @@ def _comparison_checks(summary_df: pd.DataFrame) -> pd.DataFrame:
                 "description": description,
                 "observed_value": observed,
                 "expected_condition": expected,
-                "status": "PASS" if passed is True else ("WARN" if passed is False else "INFO"),
+                "status": "PASS" if passed is True else "FAIL",
             }
         )
 
@@ -453,6 +456,9 @@ def main() -> None:
         logger.info("Wrote regime checks to %s", checks_path)
         logger.info("Wrote regime daily slices to %s", daily_path)
         logger.info("Wrote extreme component contributions to %s", component_path)
+        failed_checks = checks_df.loc[checks_df["status"].eq("FAIL"), "check_name"].astype(str).tolist()
+        if failed_checks and not args.warn_only:
+            raise SystemExit(f"Composite regime validation failed: {', '.join(failed_checks)}")
     finally:
         conn.close()
 

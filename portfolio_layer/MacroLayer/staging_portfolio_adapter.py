@@ -168,10 +168,19 @@ def latest_accepted_survivorship_panel(panel_root: Path | None = None) -> Path:
     root = (panel_root or SURVIVORSHIP_PANEL_DIR).resolve()
     if not root.exists():
         raise FileNotFoundError(f"Staging survivorship panel root does not exist: {root}")
-    builds = sorted(p for p in root.iterdir() if p.is_dir() and (p / "survivorship_manifest.json").exists())
-    if not builds:
-        raise FileNotFoundError(f"No survivorship panel builds found under {root}")
-    return builds[-1]
+    builds = sorted(
+        (p for p in root.iterdir() if p.is_dir() and (p / "survivorship_manifest.json").exists()),
+        reverse=True,
+    )
+    for build in builds:
+        manifest_path = build / "survivorship_manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(manifest.get("acceptance") or "").strip().upper() == "PASS":
+            return build
+    raise FileNotFoundError(f"No accepted survivorship panel builds found under {root}")
 
 
 def _read_price_csv(price_path: Path) -> pd.DataFrame:

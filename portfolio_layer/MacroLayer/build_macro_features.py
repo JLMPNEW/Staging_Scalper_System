@@ -5,10 +5,10 @@ import argparse
 import math
 import sqlite3
 import uuid
-from bisect import bisect_left, insort
+from bisect import bisect_right, insort
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -121,6 +121,9 @@ def _raw_candidate_from_row(row: sqlite3.Row) -> RawCandidate | None:
         observation_date=observation_date,
         release_date=release_date,
         vintage_date=vintage_date,
+        retrieved_at=str(row["retrieved_at"] or ""),
+        frequency=str(row["frequency"] or ""),
+        source_name=str(row["source_name"] or ""),
     )
     if available_date is None:
         return None
@@ -147,8 +150,11 @@ def _raw_candidate_from_row(row: sqlite3.Row) -> RawCandidate | None:
 
 
 def _iter_metric_candidates(raw_conn: sqlite3.Connection, metric_key: str, end_date: str) -> Iterable[RawCandidate]:
-    cursor = raw_conn.execute(
-        f"""
+    end = parse_calendar_date(end_date)
+    if end is None:
+        raise ValueError(f"Invalid feature end date: {end_date!r}")
+    rows = raw_conn.execute(
+        """
         SELECT
             o.registry_key,
             o.metric_key,
@@ -168,23 +174,16 @@ def _iter_metric_candidates(raw_conn: sqlite3.Connection, metric_key: str, end_d
           ON r.registry_key = o.registry_key
         WHERE r.enabled = 1
           AND o.metric_key = ?
-          AND {_AVAILABILITY_EXPR} != ''
-          AND {_AVAILABILITY_EXPR} <= ?
-        ORDER BY
-            {_AVAILABILITY_EXPR} ASC,
-            COALESCE(o.vintage_date, '') ASC,
-            COALESCE(o.release_date, '') ASC,
-            COALESCE(o.observation_date, '') ASC,
-            r.source_priority ASC,
-            o.retrieved_at ASC
         """,
-        (metric_key, end_date),
-    )
-    for row in cursor:
+        (metric_key,),
+    ).fetchall()
+    candidates = []
+    for row in rows:
         candidate = _raw_candidate_from_row(row)
-        if candidate is not None:
-            yield candidate
-
+        if candidate is not None and candidate.effective_available_date <= end:
+            candidates.append(candidate)
+    candidates.sort(key=lambda item: (item.effective_available_date, candidate_rank(item)))
+    yield from candidates
 
 def _group_candidates_by_date(candidates: Iterable[RawCandidate]) -> Iterable[tuple[date, list[RawCandidate]]]:
     current_date: date | None = None
@@ -346,12 +345,31 @@ def _lookup_lag_candidate(
     if lag <= 0:
         return None
     freq = policy.frequency.lower()
-    if freq == "monthly":
-        return best_by_period.get(_subtract_months(current_period, lag))
-    if freq == "quarterly":
-        return best_by_period.get(_subtract_months(current_period, lag * 3))
-    idx = bisect_left(sorted_periods, current_period)
-    target_idx = idx - lag
+    if freq in {"monthly", "quarterly"}:
+        target = _subtract_months(current_period, lag * (3 if freq == "quarterly" else 1))
+        exact = best_by_period.get(target)
+        if exact is not None:
+            return exact
+        # Monthly/quarterly providers do not consistently encode the period at
+        # the first day. Match the target calendar month without drifting into
+        # an adjacent period.
+        next_month = (
+            date(target.year + 1, 1, 1)
+            if target.month == 12
+            else date(target.year, target.month + 1, 1)
+        )
+        target_idx = bisect_right(sorted_periods, next_month - timedelta(days=1)) - 1
+        while target_idx >= 0:
+            candidate_period = sorted_periods[target_idx]
+            if (candidate_period.year, candidate_period.month) == (target.year, target.month):
+                return best_by_period.get(candidate_period)
+            if (candidate_period.year, candidate_period.month) < (target.year, target.month):
+                break
+            target_idx -= 1
+        return None
+    elapsed_days = lag * 7 if freq == "weekly" else lag
+    target_period = current_period - timedelta(days=elapsed_days)
+    target_idx = bisect_right(sorted_periods, target_period) - 1
     if target_idx < 0:
         return None
     return best_by_period.get(sorted_periods[target_idx])
@@ -509,25 +527,28 @@ def _build_panel_events(candidates: Iterable[RawCandidate], policy: FeaturePolic
 
 
 def _standardize_events(events: list[FeatureState], policy: FeaturePolicy) -> list[FeatureState]:
-    valid_values: list[float] = []
+    values_by_period: dict[str, float] = {}
+    period_order: list[str] = []
     out: list[FeatureState] = []
     for state in events:
         current = state.sign_adjusted_value
-        if current is not None:
-            valid_values.append(current)
+        period_key = state.observation_date_selected or state.observation_period_selected
+        if current is not None and period_key:
+            if period_key not in values_by_period:
+                period_order.append(period_key)
+                period_order.sort()
+            values_by_period[period_key] = current
         zscore_value: float | None = None
         percentile_value: float | None = None
         standardized_value: float | None = None
         if current is not None:
+            valid_values = [values_by_period[key] for key in period_order]
             z_window = valid_values[-policy.zscore_window :]
             if len(z_window) >= policy.min_history_periods:
                 mean_value = sum(z_window) / len(z_window)
                 variance = sum((item - mean_value) ** 2 for item in z_window) / len(z_window)
                 std_value = math.sqrt(max(variance, 0.0))
-                if std_value > 0:
-                    zscore_value = (current - mean_value) / std_value
-                else:
-                    zscore_value = 0.0
+                zscore_value = (current - mean_value) / std_value if std_value > 0 else 0.0
             p_window = valid_values[-policy.percentile_window :]
             if len(p_window) >= policy.min_history_periods:
                 less_count = sum(1 for item in p_window if item < current)
@@ -548,7 +569,6 @@ def _standardize_events(events: list[FeatureState], policy: FeaturePolicy) -> li
             )
         )
     return out
-
 
 def _load_metric_tasks(
     raw_conn: sqlite3.Connection,
@@ -641,7 +661,7 @@ def _daily_row_tuple(policy: FeaturePolicy, pit_row: PitDailyRow, latest_event: 
         pit_row.max_staleness_days,
         pit_row.source_quality_weight,
         pit_row.carry_forward_allowed,
-        0 if latest_event is None or latest_event.as_of_date_text == pit_row.as_of_date_text else 1,
+        pit_row.carry_forward_flag,
         pit_row.coverage_flag,
         utc_now_iso(),
     )

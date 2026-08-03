@@ -58,6 +58,8 @@ class DecisionConfig:
     min_confidence: float
     switch_margin: float
     confirm_periods: int
+    min_incumbent_probability: float = 0.15
+    incumbent_breach_periods: int = 2
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class TrackState:
     active_regime: str | None
     pending_regime: str | None
     pending_count: int
+    incumbent_breach_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -239,10 +242,46 @@ def _evaluate_track(
             reason="UNCOVERED",
         )
 
-    smoothed_regime, top_probability, confidence, top_idx = _regime_summary(probs)
+    smoothed_regime, top_probability, confidence, _ = _regime_summary(probs)
     if state.active_regime is None:
+        if not decision_date_flag:
+            return TrackOutcome(
+                state=state,
+                smoothed_regime=smoothed_regime,
+                top_probability=top_probability,
+                confidence=confidence,
+                switch_margin=None,
+                switch_flag=0,
+                reason="AWAITING_INITIALIZATION_DECISION_DATE",
+            )
+        failures = []
+        if top_probability < cfg.min_top_probability:
+            failures.append("LOW_TOP_PROBABILITY")
+        if confidence < cfg.min_confidence:
+            failures.append("LOW_CONFIDENCE")
+        if failures:
+            return TrackOutcome(
+                state=TrackState(None, None, 0, 0),
+                smoothed_regime=smoothed_regime,
+                top_probability=top_probability,
+                confidence=confidence,
+                switch_margin=None,
+                switch_flag=0,
+                reason="INITIALIZATION_" + "+".join(failures),
+            )
+        pending_count = state.pending_count + 1 if state.pending_regime == smoothed_regime else 1
+        if pending_count < cfg.confirm_periods:
+            return TrackOutcome(
+                state=TrackState(None, smoothed_regime, pending_count, 0),
+                smoothed_regime=smoothed_regime,
+                top_probability=top_probability,
+                confidence=confidence,
+                switch_margin=None,
+                switch_flag=0,
+                reason=f"INITIALIZATION_PENDING_{pending_count}_OF_{cfg.confirm_periods}",
+            )
         return TrackOutcome(
-            state=TrackState(active_regime=smoothed_regime, pending_regime=None, pending_count=0),
+            state=TrackState(smoothed_regime, None, 0, 0),
             smoothed_regime=smoothed_regime,
             top_probability=top_probability,
             confidence=confidence,
@@ -254,7 +293,8 @@ def _evaluate_track(
     if state.active_regime not in REGIME_ORDER:
         raise ValueError(f"Unknown active regime {state.active_regime!r}.")
     active_idx = REGIME_ORDER.index(state.active_regime)
-    margin = float(top_probability - float(probs[active_idx])) if smoothed_regime != state.active_regime else None
+    active_probability = float(probs[active_idx])
+    margin = float(top_probability - active_probability) if smoothed_regime != state.active_regime else None
 
     if not decision_date_flag:
         return TrackOutcome(
@@ -267,9 +307,10 @@ def _evaluate_track(
             reason="NON_DECISION_DATE",
         )
 
+    breach_count = state.incumbent_breach_count + 1 if active_probability < cfg.min_incumbent_probability else 0
     if smoothed_regime == state.active_regime:
         return TrackOutcome(
-            state=TrackState(active_regime=state.active_regime, pending_regime=None, pending_count=0),
+            state=TrackState(state.active_regime, None, 0, breach_count),
             smoothed_regime=smoothed_regime,
             top_probability=top_probability,
             confidence=confidence,
@@ -278,16 +319,19 @@ def _evaluate_track(
             reason="KEEP_INCUMBENT_TOP",
         )
 
+    incumbent_floor_breached = breach_count >= cfg.incumbent_breach_periods
     failures: list[str] = []
-    if top_probability < cfg.min_top_probability:
+    if not incumbent_floor_breached and top_probability < cfg.min_top_probability:
         failures.append("LOW_TOP_PROBABILITY")
-    if confidence < cfg.min_confidence:
+    if not incumbent_floor_breached and confidence < cfg.min_confidence:
         failures.append("LOW_CONFIDENCE")
     if margin is None or margin < cfg.switch_margin:
         failures.append("LOW_SWITCH_MARGIN")
     if failures:
+        decayed_count = max(state.pending_count - 1, 0)
+        pending_regime = state.pending_regime if decayed_count > 0 else None
         return TrackOutcome(
-            state=TrackState(active_regime=state.active_regime, pending_regime=None, pending_count=0),
+            state=TrackState(state.active_regime, pending_regime, decayed_count, breach_count),
             smoothed_regime=smoothed_regime,
             top_probability=top_probability,
             confidence=confidence,
@@ -298,17 +342,18 @@ def _evaluate_track(
 
     pending_count = state.pending_count + 1 if state.pending_regime == smoothed_regime else 1
     if pending_count >= cfg.confirm_periods:
+        reason = "INCUMBENT_FLOOR_SWITCH" if incumbent_floor_breached else "SWITCH_ACCEPTED"
         return TrackOutcome(
-            state=TrackState(active_regime=smoothed_regime, pending_regime=None, pending_count=0),
+            state=TrackState(smoothed_regime, None, 0, 0),
             smoothed_regime=smoothed_regime,
             top_probability=top_probability,
             confidence=confidence,
             switch_margin=margin,
             switch_flag=1,
-            reason=f"SWITCH_ACCEPTED_{pending_count}_OF_{cfg.confirm_periods}",
+            reason=f"{reason}_{pending_count}_OF_{cfg.confirm_periods}",
         )
     return TrackOutcome(
-        state=TrackState(active_regime=state.active_regime, pending_regime=smoothed_regime, pending_count=pending_count),
+        state=TrackState(state.active_regime, smoothed_regime, pending_count, breach_count),
         smoothed_regime=smoothed_regime,
         top_probability=top_probability,
         confidence=confidence,
@@ -316,7 +361,6 @@ def _evaluate_track(
         switch_flag=0,
         reason=f"PENDING_CONFIRMATION_{pending_count}_OF_{cfg.confirm_periods}",
     )
-
 
 def _build_decision_frame(
     smoothed_frame: pd.DataFrame,
@@ -422,7 +466,14 @@ def main() -> None:
             label="regime_layer.decision.switch_margin",
         ),
         confirm_periods=int(cfg_get(decision_cfg, "confirm_periods", default=2)),
+        min_incumbent_probability=_require_unit_interval(
+            cfg_get(decision_cfg, "min_incumbent_probability", default=0.15),
+            label="regime_layer.decision.min_incumbent_probability",
+        ),
+        incumbent_breach_periods=int(cfg_get(decision_cfg, "incumbent_breach_periods", default=2)),
     )
+    if cfg_obj.incumbent_breach_periods < 1:
+        raise ValueError("regime_layer.decision.incumbent_breach_periods must be >= 1.")
     if cfg_obj.confirm_periods < 1:
         raise ValueError("regime_layer.decision.confirm_periods must be >= 1.")
 
@@ -437,6 +488,13 @@ def main() -> None:
             start_override=args.start_date,
             end_override=args.end_date,
         )
+        if write_start != history_start:
+            logger.info(
+                "Ignoring partial decision start %s; hysteresis state is rebuilt from %s.",
+                write_start,
+                history_start,
+            )
+            write_start = history_start
         raw_ingest_run_id = _latest_smoothed_regime_run_raw_ingest_id(conn)
 
         start_serving_run(

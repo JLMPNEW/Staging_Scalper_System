@@ -169,6 +169,7 @@ class IndustryMacroConfig:
     min_industry_members: int
     min_aggregate_members: int
     min_sector_members: int
+    context_max_age_days: int
     lookback_weeks: int
     half_life_weeks: float
     min_effective_history_weeks: float
@@ -241,6 +242,7 @@ def _resolve_layer_config(cfg: dict[str, Any], config_path: Path) -> IndustryMac
         min_industry_members=max(1, int(raw_cfg.get("min_industry_members", 4))),
         min_aggregate_members=max(1, int(raw_cfg.get("min_aggregate_members", 8))),
         min_sector_members=max(1, int(raw_cfg.get("min_sector_members", 12))),
+        context_max_age_days=max(0, int(raw_cfg.get("context_max_age_days", 10))),
         lookback_weeks=max(4, int(raw_cfg.get("lookback_weeks", 52))),
         half_life_weeks=max(1.0, float(raw_cfg.get("half_life_weeks", 13.0))),
         min_effective_history_weeks=max(1.0, float(raw_cfg.get("min_effective_history_weeks", 12.0))),
@@ -576,17 +578,30 @@ def _resolve_history_bounds(
     feature_row = conn.execute("SELECT MIN(as_of_date) AS min_as_of_date, MAX(as_of_date) AS max_as_of_date FROM macro_feature_daily").fetchone()
     composite_row = conn.execute("SELECT MIN(as_of_date) AS min_as_of_date, MAX(as_of_date) AS max_as_of_date FROM macro_composite_daily").fetchone()
 
+    bound_rows = {
+        "regime decisions": regime_row,
+        "features": feature_row,
+        "composites": composite_row,
+    }
+    missing_bounds = [
+        name
+        for name, row in bound_rows.items()
+        if row is None or row["min_as_of_date"] is None or row["max_as_of_date"] is None
+    ]
+    if missing_bounds:
+        raise ValueError(f"Stage 9 cannot resolve history bounds; empty inputs: {', '.join(missing_bounds)}.")
+
     history_start = max(
         pd.Timestamp(weekly_dates.min()).date(),
-        parse_iso_date(regime_row["min_as_of_date"]) if regime_row is not None else pd.Timestamp(weekly_dates.min()).date(),
-        parse_iso_date(feature_row["min_as_of_date"]) if feature_row is not None else pd.Timestamp(weekly_dates.min()).date(),
-        parse_iso_date(composite_row["min_as_of_date"]) if composite_row is not None else pd.Timestamp(weekly_dates.min()).date(),
+        parse_iso_date(regime_row["min_as_of_date"]),
+        parse_iso_date(feature_row["min_as_of_date"]),
+        parse_iso_date(composite_row["min_as_of_date"]),
     )
     history_end = min(
         pd.Timestamp(weekly_dates.max()).date(),
-        parse_iso_date(regime_row["max_as_of_date"]) if regime_row is not None else pd.Timestamp(weekly_dates.max()).date(),
-        parse_iso_date(feature_row["max_as_of_date"]) if feature_row is not None else pd.Timestamp(weekly_dates.max()).date(),
-        parse_iso_date(composite_row["max_as_of_date"]) if composite_row is not None else pd.Timestamp(weekly_dates.max()).date(),
+        parse_iso_date(regime_row["max_as_of_date"]),
+        parse_iso_date(feature_row["max_as_of_date"]),
+        parse_iso_date(composite_row["max_as_of_date"]),
     )
     if history_end < history_start:
         raise ValueError("Stage 9 could not find overlapping history across score snapshots, features, and regime outputs.")
@@ -638,7 +653,14 @@ def _covered_context_rows(frame: pd.DataFrame, *, coverage_col: str) -> pd.DataF
     return frame.loc[coverage.eq(1)].copy()
 
 
-def _load_weekly_context(conn: sqlite3.Connection, *, start_date: str, end_date: str, weekly_dates: pd.DatetimeIndex) -> pd.DataFrame:
+def _load_weekly_context(
+    conn: sqlite3.Connection,
+    *,
+    start_date: str,
+    end_date: str,
+    weekly_dates: pd.DatetimeIndex,
+    max_age_days: int,
+) -> pd.DataFrame:
     weekly_frame = pd.DataFrame({"as_of_date": weekly_dates})
     regime_frame = pd.read_sql_query(
         f"""
@@ -699,10 +721,11 @@ def _load_weekly_context(conn: sqlite3.Connection, *, start_date: str, end_date:
     else:
         feature_wide = feature_frame.pivot_table(index="as_of_date", columns="metric_feature", values="standardized_value", aggfunc="last").reset_index()
 
-    merged = pd.merge_asof(weekly_frame.sort_values("as_of_date"), regime_frame.sort_values("as_of_date"), on="as_of_date", direction="backward")
-    merged = pd.merge_asof(merged.sort_values("as_of_date"), decision_frame.sort_values("as_of_date"), on="as_of_date", direction="backward")
-    merged = pd.merge_asof(merged.sort_values("as_of_date"), composite_frame.sort_values("as_of_date"), on="as_of_date", direction="backward")
-    merged = pd.merge_asof(merged.sort_values("as_of_date"), feature_wide.sort_values("as_of_date"), on="as_of_date", direction="backward")
+    tolerance = pd.Timedelta(days=int(max_age_days))
+    merged = pd.merge_asof(weekly_frame.sort_values("as_of_date"), regime_frame.sort_values("as_of_date"), on="as_of_date", direction="backward", tolerance=tolerance)
+    merged = pd.merge_asof(merged.sort_values("as_of_date"), decision_frame.sort_values("as_of_date"), on="as_of_date", direction="backward", tolerance=tolerance)
+    merged = pd.merge_asof(merged.sort_values("as_of_date"), composite_frame.sort_values("as_of_date"), on="as_of_date", direction="backward", tolerance=tolerance)
+    merged = pd.merge_asof(merged.sort_values("as_of_date"), feature_wide.sort_values("as_of_date"), on="as_of_date", direction="backward", tolerance=tolerance)
 
     for family, specs in SHOCK_FEATURE_SPECS.items():
         cols: list[pd.Series] = []
@@ -839,7 +862,9 @@ def _compute_level_fit_frame(
             similarity = np.clip(hist_probs @ current_probs, 0.0, 1.0)
             age_steps = np.arange(len(hist_returns) - 1, -1, -1, dtype=float)
             decay = np.power(0.5, age_steps / float(layer_cfg.half_life_weeks))
-            active_match = (active_regimes[max(0, idx - int(layer_cfg.lookback_weeks)):idx] == active_regimes[idx]).astype(float)
+            history_active = active_regimes[max(0, idx - int(layer_cfg.lookback_weeks)):idx]
+            current_active = active_regimes[idx]
+            active_match = ((history_active == current_active) & (history_active != "") & (current_active != "")).astype(float)
             weights = decay * (0.5 + 0.5 * similarity) * (1.0 + 0.25 * active_match)
             values = hist_returns.to_numpy(dtype=float)
             mask = np.isfinite(values)
@@ -891,7 +916,7 @@ def _compute_level_fit_frame(
                 "real_yield_shock_value": float(current_ctx.get("real_yield_shock_value", np.nan)),
                 "credit_shock_value": float(current_ctx.get("credit_shock_value", np.nan)),
                 "shock_composite_value": float(current_ctx.get("shock_composite_value", np.nan)),
-                "coverage_flag": int(current_ctx.get("coverage_flag", 0)) if member_count > 0 else 0,
+                "coverage_flag": int(current_ctx.get("coverage_flag", 0)) if member_count >= min_members else 0,
             }
             for col in ("sector", "industry_aggregate", "industry"):
                 if hasattr(row, col):
@@ -1027,6 +1052,7 @@ def main() -> None:
         start_date=history_dates.min().date().isoformat(),
         end_date=write_end_date.isoformat(),
         weekly_dates=history_dates,
+        max_age_days=layer_cfg.context_max_age_days,
     )
     regime_prior_frame, shock_prior_frame = _build_prior_frames(score_panel)
     _write_atomic_csv(layer_cfg.output_dir / "industry_regime_prior.csv", regime_prior_frame)

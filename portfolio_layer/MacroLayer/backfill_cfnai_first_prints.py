@@ -207,6 +207,20 @@ def _month_key(value: str) -> tuple[int, int]:
     return (dt.year, dt.month)
 
 
+def _iter_month_keys(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    if start > end:
+        raise ValueError(f"CFNAI start month {start} is after end month {end}.")
+    year, month = start
+    out: list[tuple[int, int]] = []
+    while (year, month) <= end:
+        out.append((year, month))
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+    return out
+
+
 def _obs_period(year: int, month: int) -> str:
     return f"{year:04d}-{month:02d}-01"
 
@@ -315,10 +329,16 @@ def main() -> None:
         logger.info("Fetched %s (%d bytes, sha256=%s)", url, len(content), payload_shas[url][:12])
 
     all_prints = collect_first_prints(url_payloads)
-    selected = sorted(
-        (fp for key, fp in all_prints.items() if start_key <= key <= end_key),
-        key=lambda fp: (fp.ref_year, fp.ref_month),
-    )
+    expected_keys = _iter_month_keys(start_key, end_key)
+    missing_keys = [key for key in expected_keys if key not in all_prints]
+    if missing_keys:
+        sample = ", ".join(f"{year:04d}-{month:02d}" for year, month in missing_keys[:12])
+        suffix = "..." if len(missing_keys) > 12 else ""
+        raise RuntimeError(
+            f"CFNAI backfill is incomplete: {len(missing_keys)} requested month(s) are unrecoverable "
+            f"from the downloaded workbooks ({sample}{suffix})."
+        )
+    selected = [all_prints[key] for key in expected_keys]
 
     cfnai_records, ma3_records = _build_records(
         selected, cfnai_spec=cfnai_spec, ma3_spec=ma3_spec, round_dp=args.round_dp

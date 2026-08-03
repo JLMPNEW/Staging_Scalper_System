@@ -19,6 +19,7 @@ DEFAULT_OUT_DIR = "MacroLayer/out/country_macro_checks"
 MIN_LATEST_COUNTRIES = 8
 MIN_LATEST_ELIGIBLE_COUNTRIES = 6
 MIN_ADJUSTED_SCORE_RANGE = 0.05
+MIN_EXTERNAL_COMPONENT_RANGE = 1e-6
 
 
 def parse_args() -> argparse.Namespace:
@@ -189,8 +190,8 @@ def _latest_checks(frame: pd.DataFrame, latest_date: str) -> pd.DataFrame:
         {
             "check_name": "latest_external_shock_component_varies",
             "value": external_range,
-            "threshold": ">0 or finite single-context fallback",
-            "passed": int(np.isfinite(external_range) and external_range >= 0.0),
+            "threshold": f">{MIN_EXTERNAL_COMPONENT_RANGE}",
+            "passed": int(np.isfinite(external_range) and external_range > MIN_EXTERNAL_COMPONENT_RANGE),
             "details": latest_date,
         }
     )
@@ -266,6 +267,48 @@ def _history_checks(conn: sqlite3.Connection) -> pd.DataFrame:
             "passed": int(int(rank_bad["bad_count"] or 0) == 0),
             "details": "",
         }
+    )
+    collapsed_dates = conn.execute(
+        """
+        SELECT COUNT(*) AS bad_count
+        FROM (
+            SELECT as_of_date
+            FROM country_macro_rank_daily
+            GROUP BY as_of_date
+            HAVING COUNT(*) >= ?
+               AND (MAX(confidence_adjusted_fit) - MIN(confidence_adjusted_fit)) < ?
+        )
+        """,
+        (MIN_LATEST_COUNTRIES, MIN_ADJUSTED_SCORE_RANGE),
+    ).fetchone()
+    nonunique_rank_dates = conn.execute(
+        """
+        SELECT COUNT(*) AS bad_count
+        FROM (
+            SELECT as_of_date
+            FROM country_macro_rank_daily
+            GROUP BY as_of_date
+            HAVING COUNT(*) != COUNT(DISTINCT country_rank)
+        )
+        """
+    ).fetchone()
+    rows.extend(
+        [
+            {
+                "check_name": "history_adjusted_scores_not_collapsed",
+                "value": int(collapsed_dates["bad_count"] or 0),
+                "threshold": "0 fully populated dates below score-range floor",
+                "passed": int(int(collapsed_dates["bad_count"] or 0) == 0),
+                "details": f"minimum range={MIN_ADJUSTED_SCORE_RANGE}",
+            },
+            {
+                "check_name": "history_rank_unique_by_date",
+                "value": int(nonunique_rank_dates["bad_count"] or 0),
+                "threshold": "0",
+                "passed": int(int(nonunique_rank_dates["bad_count"] or 0) == 0),
+                "details": "",
+            },
+        ]
     )
     return pd.DataFrame(rows)
 

@@ -148,9 +148,15 @@ def main() -> None:
                     try:
                         result = future.result()
                     except Exception as exc:
-                        error_count += 1
                         logger.exception("Fetch failed for registry_key=%s", task.spec.registry_key)
                         result = FetchResult(spec=task.spec, error_text=str(exc))
+                    if result.error_text:
+                        error_count += 1
+                        logger.error(
+                            "Fetch returned an error for registry_key=%s: %s",
+                            task.spec.registry_key,
+                            result.error_text,
+                        )
                     rows_written += write_fetch_result(conn, run_id, result)
         finish_run(
             conn,
@@ -178,6 +184,9 @@ def main() -> None:
     finally:
         conn.close()
 
+    if error_count:
+        raise SystemExit(f"Macro raw pipeline completed with {error_count} fetch error(s).")
+
 
 def build_fetch_tasks(
     *,
@@ -198,13 +207,9 @@ def build_fetch_tasks(
                 candidate = last_obs - timedelta(days=spec.revision_window_days)
                 if candidate > observation_start:
                     observation_start = candidate
-        vintage_start = history_start
-        if spec.vintage_policy == "true_vintage" and mode != "backfill":
-            last_vintage = parse_iso_date(sync.get("last_vintage_date"))
-            if last_vintage is not None:
-                candidate = last_vintage - timedelta(days=spec.revision_window_days)
-                if candidate > vintage_start:
-                    vintage_start = candidate
+        # ALFRED realtime bounds are independent from observation-history bounds.
+        # Truncating this range fabricates a recent vintage for old observations.
+        vintage_start = date(1776, 7, 4)
         tasks.append(
             FetchTask(
                 spec=spec,
@@ -214,7 +219,51 @@ def build_fetch_tasks(
                 as_of_date=as_of_date,
             )
         )
-    return tasks
+    return _normalize_oecd_bundle_windows(tasks)
+
+
+def _oecd_bundle_identity(task: FetchTask) -> tuple[str, str, str, tuple[tuple[str, str], ...]] | None:
+    if task.spec.source_name != "oecd_sdmx":
+        return None
+    source_params = dict(task.spec.source_params or {})
+    return (
+        str(source_params.pop("agency_id", "")),
+        str(task.spec.source_dataset or ""),
+        str(source_params.pop("dataset_version", "")),
+        tuple(sorted((str(key), str(value)) for key, value in source_params.items())),
+    )
+
+
+def _normalize_oecd_bundle_windows(tasks: list[FetchTask]) -> list[FetchTask]:
+    """Give every series in one OECD dataset request the same time window.
+
+    OECD returns the whole dataset bundle before local series filtering. A shared
+    window allows one network/cache fetch per dataset and prevents per-series
+    sync-state differences from defeating bundle reuse.
+    """
+    starts: dict[tuple[str, str, str, tuple[tuple[str, str], ...]], date] = {}
+    for task in tasks:
+        identity = _oecd_bundle_identity(task)
+        if identity is None or task.observation_start is None:
+            continue
+        starts[identity] = min(starts.get(identity, task.observation_start), task.observation_start)
+    normalized: list[FetchTask] = []
+    for task in tasks:
+        identity = _oecd_bundle_identity(task)
+        shared_start = starts.get(identity) if identity is not None else None
+        if shared_start is None or shared_start == task.observation_start:
+            normalized.append(task)
+            continue
+        normalized.append(
+            FetchTask(
+                spec=task.spec,
+                observation_start=shared_start,
+                observation_end=task.observation_end,
+                vintage_start=task.vintage_start,
+                as_of_date=task.as_of_date,
+            )
+        )
+    return normalized
 
 
 def cfg_default_history_start(mode: str) -> date:
@@ -302,10 +351,16 @@ def _required_env(*, env_name: str, source_name: str) -> str:
 
 
 def _required_source_api_key(*, cfg: dict[str, Any], source_name: str, default_env_name: str) -> str:
+    env_name = str(cfg_get(cfg, "sources", source_name, "api_key_env", default=default_env_name)).strip()
+    env_value = getenv_str(env_name)
+    if env_value:
+        return env_value
     configured_key = str(cfg_get(cfg, "sources", source_name, "api_key", default="") or "").strip()
     if configured_key:
-        return configured_key
-    env_name = str(cfg_get(cfg, "sources", source_name, "api_key_env", default=default_env_name))
+        raise ValueError(
+            f"Literal API keys are forbidden in config for source {source_name}; "
+            f"use environment variable {env_name}."
+        )
     return _required_env(env_name=env_name, source_name=source_name)
 
 

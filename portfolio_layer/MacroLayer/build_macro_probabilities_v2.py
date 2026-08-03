@@ -856,7 +856,18 @@ def main() -> None:
         end_date = _resolve_end_date(conn, args.end_date)
         configured_start = parse_iso_date(str(cfg_get(layer_cfg, "history_start_date", default="2002-01-01")))
         requested_start = parse_iso_date(args.start_date)
-        output_start = pd.Timestamp(requested_start or configured_start or end_date.date())
+        canonical_start = configured_start or requested_start or end_date.date()
+        if requested_start is not None and requested_start < canonical_start:
+            raise ValueError(
+                f"v2 output start {requested_start} is before configured history start {canonical_start}."
+            )
+        if requested_start is not None and requested_start > canonical_start:
+            logger.info(
+                "Ignoring partial v2 start %s; model-version history is rebuilt from %s.",
+                requested_start,
+                canonical_start,
+            )
+        output_start = pd.Timestamp(canonical_start)
         if output_start > end_date:
             raise ValueError(f"v2 output start {output_start.date()} is after end {end_date.date()}.")
         raw_ingest_run_id = _latest_composite_raw_ingest_id(conn)
@@ -1058,6 +1069,7 @@ def main() -> None:
             },
             "config_sha256": _sha256_file(config_path),
             "builder_sha256": _sha256_file(Path(__file__)),
+            "probability_engine_sha256": _sha256_file(Path(__file__).resolve().parent / "macro_probability_v2.py"),
             "files": {
                 probability_path.name: _sha256_file(probability_path),
                 regime_path.name: _sha256_file(regime_path),

@@ -41,6 +41,10 @@ class ShadowBacktestConfig:
     end_date: date | None
     holding_period_trading_days: int
     cash_weight: float
+    cash_annual_yield: float
+    round_trip_cost_bps: float
+    commission_per_order: float
+    aum_usd: float
     max_us_stocks: int
     enforce_rating_quotas: bool
     require_base_optimizer_eligible: bool
@@ -78,9 +82,18 @@ def _resolve_layer_config(cfg: dict[str, Any], config_path: Path, args: argparse
     base_cfg = _load_yaml(base_config_path)
     universe_cfg = dict(base_cfg.get("universe", {}) or {})
     allocation_cfg = dict(base_cfg.get("allocation", {}) or {})
+    transaction_cfg = dict(base_cfg.get("transaction_costs", {}) or {})
     cash_budget = dict(dict(allocation_cfg.get("region_budgets", {}) or {}).get("CASH", {}) or {})
     cash_weight = float(raw_cfg.get("cash_weight", cash_budget.get("max", 0.20)))
     cash_weight = min(1.0, max(0.0, cash_weight))
+    cash_annual_yield = float(raw_cfg.get("cash_annual_yield", 0.0))
+    default_round_trip_bps = 2.0 * float(transaction_cfg.get("half_spread_bps_default", 0.0))
+    round_trip_cost_bps = max(0.0, float(raw_cfg.get("round_trip_cost_bps", default_round_trip_bps)))
+    commission_cfg = dict(transaction_cfg.get("commission_per_order", {}) or {})
+    commission_per_order = max(0.0, float(raw_cfg.get("commission_per_order", commission_cfg.get("base", 0.0))))
+    aum_usd = float(raw_cfg.get("aum_usd", transaction_cfg.get("aum_usd", 0.0)))
+    if commission_per_order > 0.0 and aum_usd <= 0.0:
+        raise ValueError("shadow_validation_layer.aum_usd must be positive when commission_per_order is non-zero.")
     max_us_stocks = int(raw_cfg.get("max_us_stocks", universe_cfg.get("max_us_stocks_long_only", 25)))
 
     cases = [str(x).strip() for x in list(raw_cfg.get("cases", ["baseline_no_macro", "macro_stocks_only", "macro_full"]) or []) if str(x).strip()]
@@ -107,6 +120,10 @@ def _resolve_layer_config(cfg: dict[str, Any], config_path: Path, args: argparse
         end_date=end_date,
         holding_period_trading_days=max(1, int(raw_cfg.get("holding_period_trading_days", 5))),
         cash_weight=cash_weight,
+        cash_annual_yield=cash_annual_yield,
+        round_trip_cost_bps=round_trip_cost_bps,
+        commission_per_order=commission_per_order,
+        aum_usd=aum_usd,
         max_us_stocks=max(1, max_us_stocks),
         enforce_rating_quotas=parse_boolish(selection_cfg.get("enforce_rating_quotas"), default=True),
         require_base_optimizer_eligible=parse_boolish(selection_cfg.get("require_base_optimizer_eligible"), default=True),
@@ -222,6 +239,9 @@ def _eligible_stock_frame(day: pd.DataFrame, *, case_name: str, layer_cfg: Shado
 
 
 def _select_with_quotas(day: pd.DataFrame, *, score_col: str, quotas: dict[str, int], top_n: int) -> pd.DataFrame:
+    if not quotas:
+        allowed_ratings = {"Strong Buy", "Buy", "Hold"}
+        return day.loc[day["rating"].isin(allowed_ratings)].sort_values(score_col, ascending=False).head(top_n).copy()
     selected_parts: list[pd.DataFrame] = []
     selected_idx: set[int] = set()
     for rating, quota in quotas.items():
@@ -320,7 +340,7 @@ def _load_price_panel(holdings: pd.DataFrame, layer_cfg: ShadowBacktestConfig, b
     start = dates.min() - pd.Timedelta(days=10)
     end = dates.max() + pd.Timedelta(days=max(30, layer_cfg.holding_period_trading_days * 3))
     logger.info("Loading Staging prices for %d tickers from %s to %s", len(tickers), start.date(), end.date())
-    return load_staging_prices(tickers=tickers, start_date=start, end_date=end, freshness_as_of=dates.max())
+    return load_staging_prices(tickers=tickers, start_date=start, end_date=end, freshness_as_of=end)
 
 
 def _trade_date_map(signal_dates: pd.Series, price_index: pd.DatetimeIndex, holding_period_days: int) -> pd.DataFrame:
@@ -336,10 +356,8 @@ def _trade_date_map(signal_dates: pd.Series, price_index: pd.DatetimeIndex, hold
     return out[["as_of_date", "entry_date", "exit_date"]].reset_index(drop=True)
 
 
-def _cash_period_return(base_config_path: Path, holding_days: int) -> float:
-    cfg = _load_yaml(base_config_path)
-    cash_ann = float(dict(cfg.get("cash", {}) or {}).get("annual_yield", 0.0))
-    return (1.0 + cash_ann) ** (float(holding_days) / 252.0) - 1.0
+def _cash_period_return(layer_cfg: ShadowBacktestConfig, holding_days: int) -> float:
+    return (1.0 + layer_cfg.cash_annual_yield) ** (float(holding_days) / 252.0) - 1.0
 
 
 def _compute_period_returns(holdings: pd.DataFrame, prices: pd.DataFrame, layer_cfg: ShadowBacktestConfig) -> pd.DataFrame:
@@ -350,7 +368,7 @@ def _compute_period_returns(holdings: pd.DataFrame, prices: pd.DataFrame, layer_
     h = holdings.copy()
     h["as_of_date"] = pd.to_datetime(h["as_of_date"], errors="coerce").dt.normalize()
     h = h.merge(date_map, on="as_of_date", how="inner")
-    cash_ret = _cash_period_return(layer_cfg.base_config_path, layer_cfg.holding_period_trading_days)
+    cash_ret = _cash_period_return(layer_cfg, layer_cfg.holding_period_trading_days)
     rows: list[dict[str, Any]] = []
     for (case_name, as_of_date), sub in h.groupby(["case_name", "as_of_date"], sort=True):
         entry_date = pd.Timestamp(sub["entry_date"].iloc[0])
@@ -358,49 +376,98 @@ def _compute_period_returns(holdings: pd.DataFrame, prices: pd.DataFrame, layer_
         cash_weight = float(pd.to_numeric(sub.loc[sub["ticker"].eq("CASH"), "weight"], errors="coerce").fillna(0.0).sum())
         risky = sub.loc[sub["ticker"].ne("CASH")].copy()
         risky["weight"] = pd.to_numeric(risky["weight"], errors="coerce").fillna(0.0)
-        available_weight = 0.0
+        risky_weight = float(risky["weight"].sum())
+        modeled_weight = 0.0
         risky_return = 0.0
-        missing: list[str] = []
+        missing_entry: list[str] = []
+        missing_exit: list[str] = []
+        delisting_loss_weight = 0.0
         for row in risky.itertuples(index=False):
             ticker = str(row.ticker).upper()
             weight = float(row.weight)
             if ticker not in prices.columns:
-                missing.append(ticker)
+                missing_entry.append(ticker)
                 continue
             entry = pd.to_numeric(pd.Series([prices.at[entry_date, ticker] if entry_date in prices.index else np.nan]), errors="coerce").iloc[0]
             exit_ = pd.to_numeric(pd.Series([prices.at[exit_date, ticker] if exit_date in prices.index else np.nan]), errors="coerce").iloc[0]
-            if pd.isna(entry) or pd.isna(exit_) or float(entry) <= 0.0:
-                missing.append(ticker)
+            if pd.isna(entry) or float(entry) <= 0.0:
+                missing_entry.append(ticker)
                 continue
-            available_weight += weight
+            modeled_weight += weight
+            if pd.isna(exit_) or float(exit_) < 0.0:
+                missing_exit.append(ticker)
+                delisting_loss_weight += weight
+                risky_return -= weight
+                continue
             risky_return += weight * (float(exit_) / float(entry) - 1.0)
-        # Keep unavailable risky weight as cash-equivalent for conservative handling.
-        unavailable_weight = max(0.0, float(risky["weight"].sum()) - available_weight)
-        portfolio_return = risky_return + (cash_weight + unavailable_weight) * cash_ret
+        unavailable_weight = max(0.0, risky_weight - modeled_weight)
+        spread_cost = risky_weight * layer_cfg.round_trip_cost_bps / 10000.0
+        commission_cost = (
+            2.0 * float(len(risky)) * layer_cfg.commission_per_order / layer_cfg.aum_usd
+            if layer_cfg.aum_usd > 0.0
+            else 0.0
+        )
+        transaction_cost = spread_cost + commission_cost
+        period_valid = unavailable_weight <= 1e-9
+        portfolio_return = (
+            risky_return + cash_weight * cash_ret - transaction_cost
+            if period_valid
+            else np.nan
+        )
         bench_ret = np.nan
         bench = layer_cfg.benchmark_ticker
         if bench and bench in prices.columns and entry_date in prices.index and exit_date in prices.index:
             b0 = pd.to_numeric(pd.Series([prices.at[entry_date, bench]]), errors="coerce").iloc[0]
             b1 = pd.to_numeric(pd.Series([prices.at[exit_date, bench]]), errors="coerce").iloc[0]
             if pd.notna(b0) and pd.notna(b1) and float(b0) > 0.0:
-                bench_ret = float(b1) / float(b0) - 1.0
+                benchmark_risky_weight = max(0.0, 1.0 - cash_weight)
+                benchmark_cost = benchmark_risky_weight * layer_cfg.round_trip_cost_bps / 10000.0
+                if layer_cfg.aum_usd > 0.0:
+                    benchmark_cost += 2.0 * layer_cfg.commission_per_order / layer_cfg.aum_usd
+                bench_ret = (
+                    benchmark_risky_weight * (float(b1) / float(b0) - 1.0)
+                    + cash_weight * cash_ret
+                    - benchmark_cost
+                )
         rows.append(
             {
                 "case_name": case_name,
                 "as_of_date": pd.Timestamp(as_of_date).strftime("%Y-%m-%d"),
                 "entry_date": entry_date.strftime("%Y-%m-%d"),
                 "exit_date": exit_date.strftime("%Y-%m-%d"),
-                "portfolio_return": float(portfolio_return),
+                "portfolio_return": float(portfolio_return) if np.isfinite(portfolio_return) else np.nan,
                 "benchmark_return": bench_ret,
-                "benchmark_alpha": float(portfolio_return - bench_ret) if np.isfinite(bench_ret) else np.nan,
-                "available_risky_weight": available_weight,
+                "benchmark_alpha": float(portfolio_return - bench_ret) if np.isfinite(portfolio_return) and np.isfinite(bench_ret) else np.nan,
+                "gross_risky_return": float(risky_return),
+                "transaction_cost": float(transaction_cost),
+                "period_valid": int(period_valid),
+                "available_risky_weight": modeled_weight,
                 "missing_risky_weight": unavailable_weight,
-                "missing_ticker_count": len(set(missing)),
+                "delisting_loss_weight": float(delisting_loss_weight),
+                "missing_ticker_count": len(set(missing_entry + missing_exit)),
                 "holding_count": int(len(risky)),
             }
         )
     return pd.DataFrame(rows)
 
+
+def _non_overlapping_periods(periods: pd.DataFrame) -> pd.DataFrame:
+    """Select one common sequential holding schedule from potentially overlapping signals."""
+    if periods.empty:
+        return periods.copy()
+    windows = periods[["as_of_date", "entry_date", "exit_date"]].drop_duplicates().copy()
+    windows["entry_dt"] = pd.to_datetime(windows["entry_date"], errors="coerce")
+    windows["exit_dt"] = pd.to_datetime(windows["exit_date"], errors="coerce")
+    windows = windows.dropna(subset=["entry_dt", "exit_dt"]).sort_values(["entry_dt", "exit_dt", "as_of_date"])
+    selected_dates: list[str] = []
+    last_exit: pd.Timestamp | None = None
+    for row in windows.itertuples(index=False):
+        entry_dt = pd.Timestamp(row.entry_dt)
+        exit_dt = pd.Timestamp(row.exit_dt)
+        if last_exit is None or entry_dt >= last_exit:
+            selected_dates.append(str(row.as_of_date))
+            last_exit = exit_dt
+    return periods.loc[periods["as_of_date"].astype(str).isin(selected_dates)].copy()
 
 def _max_drawdown(returns: pd.Series) -> float:
     equity = (1.0 + pd.to_numeric(returns, errors="coerce").fillna(0.0)).cumprod()
@@ -411,16 +478,24 @@ def _max_drawdown(returns: pd.Series) -> float:
 
 def _summary(periods: pd.DataFrame, layer_cfg: ShadowBacktestConfig) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
-    periods_per_year = 252.0 / float(layer_cfg.holding_period_trading_days)
     for case_name, sub in periods.groupby("case_name", sort=True):
+        sub = sub.sort_values(["entry_date", "exit_date", "as_of_date"]).copy()
         returns = pd.to_numeric(sub["portfolio_return"], errors="coerce").dropna()
         bench = pd.to_numeric(sub["benchmark_return"], errors="coerce").dropna()
         alpha = pd.to_numeric(sub["benchmark_alpha"], errors="coerce").dropna()
+        entry_min = pd.to_datetime(sub["entry_date"], errors="coerce").min()
+        exit_max = pd.to_datetime(sub["exit_date"], errors="coerce").max()
+        elapsed_years = (
+            max((exit_max - entry_min).days, 1) / 365.25
+            if pd.notna(entry_min) and pd.notna(exit_max)
+            else np.nan
+        )
+        observed_periods_per_year = len(returns) / elapsed_years if np.isfinite(elapsed_years) and elapsed_years > 0.0 else np.nan
         total_return = float((1.0 + returns).prod() - 1.0) if not returns.empty else np.nan
-        ann_return = (1.0 + total_return) ** (periods_per_year / len(returns)) - 1.0 if len(returns) > 0 and total_return > -1.0 else np.nan
-        ann_vol = float(returns.std(ddof=1) * np.sqrt(periods_per_year)) if len(returns) > 1 else np.nan
+        ann_return = (1.0 + total_return) ** (1.0 / elapsed_years) - 1.0 if len(returns) > 0 and total_return > -1.0 and np.isfinite(elapsed_years) else np.nan
+        ann_vol = float(returns.std(ddof=1) * np.sqrt(observed_periods_per_year)) if len(returns) > 1 and np.isfinite(observed_periods_per_year) else np.nan
         bench_total = float((1.0 + bench).prod() - 1.0) if not bench.empty else np.nan
-        bench_ann = (1.0 + bench_total) ** (periods_per_year / len(bench)) - 1.0 if len(bench) > 0 and bench_total > -1.0 else np.nan
+        bench_ann = (1.0 + bench_total) ** (1.0 / elapsed_years) - 1.0 if len(bench) > 0 and bench_total > -1.0 and np.isfinite(elapsed_years) else np.nan
         rows.append(
             {
                 "case_name": case_name,
@@ -455,7 +530,10 @@ def _window_summary(periods: pd.DataFrame, layer_cfg: ShadowBacktestConfig) -> p
         "2020_COVID": ("2020-01-01", "2020-12-31"),
         "2022_INFLATION_SHOCK": ("2022-01-01", "2022-12-31"),
         "2023_2025_DISINFLATION": ("2023-01-01", "2025-12-31"),
-        "LATEST_12M": ((pd.Timestamp.today().normalize() - pd.DateOffset(months=12)).strftime("%Y-%m-%d"), "2099-12-31"),
+        "LATEST_12M": (
+            (pd.to_datetime(periods["as_of_date"], errors="coerce").max() - pd.DateOffset(months=12)).strftime("%Y-%m-%d"),
+            pd.to_datetime(periods["as_of_date"], errors="coerce").max().strftime("%Y-%m-%d"),
+        ),
     }
     rows: list[pd.DataFrame] = []
     dated = periods.copy()
@@ -504,19 +582,23 @@ def main() -> None:
 
     prices = _load_price_panel(holdings, layer_cfg, layer_cfg.base_config_path)
     periods = _compute_period_returns(holdings, prices, layer_cfg)
-    summary = _summary(periods, layer_cfg)
-    windows = _window_summary(periods, layer_cfg)
+    analysis_periods = _non_overlapping_periods(periods)
+    summary = _summary(analysis_periods, layer_cfg)
+    windows = _window_summary(analysis_periods, layer_cfg)
     common_dates: set[str] | None = None
     for _, sub in periods.groupby("case_name"):
-        dates = set(sub["as_of_date"].astype(str))
+        valid_sub = sub.loc[pd.to_numeric(sub["period_valid"], errors="coerce").fillna(0).astype(int).eq(1)]
+        dates = set(valid_sub["as_of_date"].astype(str))
         common_dates = dates if common_dates is None else common_dates.intersection(dates)
     common_periods = periods.loc[periods["as_of_date"].astype(str).isin(common_dates or set())].copy()
+    common_periods = _non_overlapping_periods(common_periods)
     common_summary = _summary(common_periods, layer_cfg) if not common_periods.empty else pd.DataFrame()
     common_windows = _window_summary(common_periods, layer_cfg) if not common_periods.empty else pd.DataFrame()
 
     out_dir = layer_cfg.output_dir
     _write_csv(out_dir / "shadow_backtest_holdings.csv", holdings)
     _write_csv(out_dir / "shadow_backtest_period_returns.csv", periods)
+    _write_csv(out_dir / "shadow_backtest_non_overlapping_period_returns.csv", analysis_periods)
     _write_csv(out_dir / "shadow_backtest_summary.csv", summary)
     _write_csv(out_dir / "shadow_backtest_window_summary.csv", windows)
     _write_csv(out_dir / "shadow_backtest_common_date_summary.csv", common_summary)

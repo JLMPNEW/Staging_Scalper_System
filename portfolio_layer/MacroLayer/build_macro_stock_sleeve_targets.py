@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from macro_allocation import bounded_normalize, hierarchical_bounded_normalize
 from macro_raw_config import (
     cfg_get,
     configure_pipeline_logging,
@@ -272,48 +273,9 @@ def _load_stock_inputs(conn: sqlite3.Connection, *, start_date: str, end_date: s
 
 
 def _weighted_cap_normalize(raw: pd.Series, *, cap: float, floor: float, renormalize: bool) -> pd.Series:
-    raw = pd.to_numeric(raw, errors="coerce").fillna(0.0).clip(lower=0.0)
-    active = raw.gt(0.0)
-    out = pd.Series(0.0, index=raw.index, dtype="float64")
-    if not active.any():
-        return out
-    values = raw.loc[active].copy()
-    values = values / float(values.sum())
-    if floor > 0.0:
-        values = values.clip(lower=floor)
-        values = values / float(values.sum())
-    if cap <= 0.0:
-        out.loc[active] = values
-        return out
     if not renormalize:
-        out.loc[active] = values.clip(upper=cap)
-        return out
-
-    remaining = values.index.tolist()
-    capped = pd.Series(0.0, index=values.index, dtype="float64")
-    budget = 1.0
-    while remaining:
-        current = values.loc[remaining]
-        if float(current.sum()) <= 0.0:
-            capped.loc[remaining] = budget / len(remaining)
-            break
-        scaled = current / float(current.sum()) * budget
-        over = scaled.gt(cap)
-        if not bool(over.any()):
-            capped.loc[remaining] = scaled
-            break
-        over_idx = scaled.loc[over].index.tolist()
-        capped.loc[over_idx] = cap
-        budget -= cap * len(over_idx)
-        remaining = [idx for idx in remaining if idx not in set(over_idx)]
-        if budget <= 1e-12:
-            break
-    total = float(capped.sum())
-    if total > 0.0:
-        capped = capped / total
-    out.loc[capped.index] = capped
-    return out
-
+        logger.warning("renormalize_after_caps=false is deprecated; exact bounded normalization is enforced.")
+    return bounded_normalize(raw, lower=floor, upper=cap, target_sum=1.0)
 
 def _rank_targets(frame: pd.DataFrame, weight_col: str) -> tuple[pd.Series, pd.Series]:
     ranks = (
@@ -346,6 +308,8 @@ def _add_bands(
     lower = (target - width).clip(lower=0.0)
     upper = target + width
     if max_weight > 0.0:
+        if bool(target.gt(max_weight + 1e-12).any()):
+            raise ValueError(f"Target weight exceeds configured maximum {max_weight:.6f}.")
         upper = upper.clip(upper=max_weight)
     upper = np.maximum(upper, target)
     out = frame.copy()
@@ -397,7 +361,8 @@ def _build_industry_targets(stock: pd.DataFrame, layer_cfg: StockSleeveTargetCon
             eligible_count >= layer_cfg.opportunity_min_eligible_members
             and top_member_count > 0
             and np.isfinite(float(industry_macro_fit))
-            and np.isfinite(float(opportunity_score)) if pd.notna(opportunity_score) else False
+            and pd.notna(opportunity_score)
+            and np.isfinite(float(opportunity_score))
         )
         rows.append(
             {
@@ -435,21 +400,22 @@ def _build_industry_targets(stock: pd.DataFrame, layer_cfg: StockSleeveTargetCon
     for _, sub in out.groupby("as_of_date", sort=True):
         raw = sub["raw_target_score"].copy()
         active = raw.gt(0.0)
-        if active.any() and layer_cfg.equal_weight_blend > 0.0:
-            raw_norm = raw / float(raw.sum())
-            equal = pd.Series(0.0, index=sub.index, dtype="float64")
-            equal.loc[active] = 1.0 / int(active.sum())
-            blended = (1.0 - layer_cfg.equal_weight_blend) * raw_norm + layer_cfg.equal_weight_blend * equal
-        else:
-            blended = raw
-        target_parts.append(
-            _weighted_cap_normalize(
-                blended,
-                cap=layer_cfg.max_industry_weight,
-                floor=layer_cfg.min_target_weight,
-                renormalize=layer_cfg.renormalize_after_caps,
+        weights = pd.Series(0.0, index=sub.index, dtype="float64")
+        if active.any():
+            raw_active = raw.loc[active]
+            if layer_cfg.equal_weight_blend > 0.0:
+                raw_norm = raw_active / float(raw_active.sum())
+                equal = pd.Series(1.0 / len(raw_active), index=raw_active.index, dtype="float64")
+                raw_active = (1.0 - layer_cfg.equal_weight_blend) * raw_norm + layer_cfg.equal_weight_blend * equal
+            weights.loc[active] = hierarchical_bounded_normalize(
+                raw_active,
+                sub.loc[active, "sector_name"],
+                item_cap=layer_cfg.max_industry_weight,
+                group_cap=layer_cfg.max_sector_weight,
+                item_floor=layer_cfg.min_target_weight,
+                target_sum=1.0,
             )
-        )
+        target_parts.append(weights)
     out["target_weight"] = pd.concat(target_parts).sort_index()
     out = _add_bands(
         out,

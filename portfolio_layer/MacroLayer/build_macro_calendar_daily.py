@@ -84,7 +84,14 @@ def main() -> None:
         )
         run_started = True
         rows = build_calendar_rows(start_date, end_date)
-        clear_table(serving_conn, "macro_calendar_daily")
+        if args.start_date is None and args.end_date is None:
+            clear_table(serving_conn, "macro_calendar_daily")
+        else:
+            serving_conn.execute(
+                "DELETE FROM macro_calendar_daily WHERE as_of_date BETWEEN ? AND ?",
+                (start_date.isoformat(), end_date.isoformat()),
+            )
+            serving_conn.commit()
         rows_written = insert_many(
             serving_conn,
             """

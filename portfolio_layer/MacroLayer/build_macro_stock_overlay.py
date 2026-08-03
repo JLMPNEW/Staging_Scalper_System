@@ -227,7 +227,7 @@ def _zscore_by_date(frame: pd.DataFrame, value_col: str, *, min_std: float, clip
             return pd.Series(0.0, index=group.index, dtype="float64")
         return ((finite - mean_value) / std_value).fillna(0.0)
 
-    out = values.groupby(frame["as_of_date"], group_keys=False).apply(transform)
+    out = values.groupby(frame["as_of_date"], group_keys=False).transform(transform)
     if clip_value > 0.0:
         out = out.clip(-clip_value, clip_value)
     return out.astype("float64")
@@ -321,7 +321,7 @@ def _load_sector_tactical_frame(layer_cfg: StockOverlayConfig, dates: pd.Datetim
         "sector_tactical_lift",
         min_std=layer_cfg.zscore_min_std,
         clip_value=layer_cfg.zscore_component_clip,
-    ).to_numpy()
+    )
     date_frame = pd.DataFrame({"as_of_date": dates})
     sectors = tactical["rotation_sector_name"].dropna().astype(str).unique().tolist()
     expanded = date_frame.assign(_key=1).merge(pd.DataFrame({"rotation_sector_name": sectors, "_key": 1}), on="_key").drop(columns=["_key"])
@@ -650,32 +650,35 @@ def _build_overlay_frames(
         out = out.merge(validation_returns, on=["as_of_date", "ticker"], how="left")
     else:
         out["validation_forward_return"] = np.nan
-    out["rotation_sector_name"] = out["source_pipeline"].where(
-        out["source_pipeline"].astype(str).str.strip().ne(""),
-        out["sector_name"].map(layer_cfg.stock_sector_to_rotation_sector).fillna(out["sector_name"]),
+    out["rotation_sector_name"] = (
+        out["sector_name"].map(layer_cfg.stock_sector_to_rotation_sector).fillna(out["sector_name"])
     )
-    out = out.merge(tactical, on=["as_of_date", "rotation_sector_name"], how="left")
-    out["sector_tactical_lift"] = pd.to_numeric(out["sector_tactical_lift"], errors="coerce")
-    out["sector_tactical_lift_z"] = pd.to_numeric(out["sector_tactical_lift_z"], errors="coerce")
-    if layer_cfg.sector_tactical_missing_policy == "neutral":
-        out["sector_tactical_lift"] = out["sector_tactical_lift"].fillna(layer_cfg.sector_tactical_neutral_value)
-        out["sector_tactical_lift_z"] = out["sector_tactical_lift_z"].fillna(0.0)
+    if not layer_cfg.sector_tactical_enabled:
+        out["sector_tactical_lift"] = layer_cfg.sector_tactical_neutral_value
+        out["sector_tactical_lift_z"] = 0.0
     else:
-        missing_count = int(out[["sector_tactical_lift", "sector_tactical_lift_z"]].isna().any(axis=1).sum())
-        if missing_count:
-            sample = (
-                out.loc[
-                    out[["sector_tactical_lift", "sector_tactical_lift_z"]].isna().any(axis=1),
-                    ["as_of_date", "sector_name", "rotation_sector_name"],
-                ]
-                .drop_duplicates()
-                .head(10)
-                .to_dict("records")
-            )
-            raise ValueError(
-                "Stage 11 sector tactical merge produced "
-                f"{missing_count} missing rows and missing_policy=strict. Sample: {sample}"
-            )
+        out = out.merge(tactical, on=["as_of_date", "rotation_sector_name"], how="left")
+        out["sector_tactical_lift"] = pd.to_numeric(out["sector_tactical_lift"], errors="coerce")
+        out["sector_tactical_lift_z"] = pd.to_numeric(out["sector_tactical_lift_z"], errors="coerce")
+        if layer_cfg.sector_tactical_missing_policy == "neutral":
+            out["sector_tactical_lift"] = out["sector_tactical_lift"].fillna(layer_cfg.sector_tactical_neutral_value)
+            out["sector_tactical_lift_z"] = out["sector_tactical_lift_z"].fillna(0.0)
+        else:
+            missing_count = int(out[["sector_tactical_lift", "sector_tactical_lift_z"]].isna().any(axis=1).sum())
+            if missing_count:
+                sample = (
+                    out.loc[
+                        out[["sector_tactical_lift", "sector_tactical_lift_z"]].isna().any(axis=1),
+                        ["as_of_date", "sector_name", "rotation_sector_name"],
+                    ]
+                    .drop_duplicates()
+                    .head(10)
+                    .to_dict("records")
+                )
+                raise ValueError(
+                    "Stage 11 sector tactical merge produced "
+                    f"{missing_count} missing rows and missing_policy=strict. Sample: {sample}"
+                )
 
     out["base_stock_z"] = _zscore_by_date(
         out,
@@ -691,27 +694,48 @@ def _build_overlay_frames(
         "sector_shock_prior_score",
     ):
         out[col] = pd.to_numeric(out[col], errors="coerce")
-    out["shock_fit"] = (
-        float(layer_cfg.shock_fit_weights["industry_shock_prior_weight"]) * out["industry_shock_prior_score"].fillna(0.0)
-        + float(layer_cfg.shock_fit_weights["sector_shock_prior_weight"]) * out["sector_shock_prior_score"].fillna(0.0)
-    ).clip(layer_cfg.shock_clip_min, layer_cfg.shock_clip_max)
-    out["macro_stock_fit_raw"] = (
-        float(layer_cfg.macro_fit_weights["industry_macro_fit"]) * out["industry_macro_fit"].fillna(0.0)
-        + float(layer_cfg.macro_fit_weights["sector_macro_fit"]) * out["sector_macro_fit"].fillna(0.0)
-        + float(layer_cfg.macro_fit_weights["shock_fit"]) * out["shock_fit"].fillna(0.0)
+    shock_components = pd.DataFrame(
+        {
+            "industry_shock_prior_weight": out["industry_shock_prior_score"],
+            "sector_shock_prior_weight": out["sector_shock_prior_score"],
+        },
+        index=out.index,
     )
-    out["macro_stock_fit_z"] = _zscore_by_date(
-        out,
-        "macro_stock_fit_raw",
-        min_std=layer_cfg.zscore_min_std,
-        clip_value=layer_cfg.zscore_component_clip,
+    shock_weights = pd.Series(layer_cfg.shock_fit_weights, dtype="float64")
+    shock_denominator = shock_components.notna().mul(shock_weights, axis=1).sum(axis=1)
+    out["shock_fit"] = (
+        shock_components.fillna(0.0).mul(shock_weights, axis=1).sum(axis=1)
+        .div(shock_denominator.where(shock_denominator > 0.0))
+        .clip(layer_cfg.shock_clip_min, layer_cfg.shock_clip_max)
+    )
+    macro_components = pd.DataFrame(
+        {
+            "industry_macro_fit": out["industry_macro_fit"],
+            "sector_macro_fit": out["sector_macro_fit"],
+            "shock_fit": out["shock_fit"],
+        },
+        index=out.index,
+    )
+    macro_weights = pd.Series(layer_cfg.macro_fit_weights, dtype="float64")
+    macro_denominator = macro_components.notna().mul(macro_weights, axis=1).sum(axis=1)
+    out["macro_stock_fit_raw"] = macro_components.fillna(0.0).mul(macro_weights, axis=1).sum(axis=1).div(
+        macro_denominator.where(macro_denominator > 0.0)
     )
     out["coverage_flag"] = (
         out["industry_macro_coverage_flag"].fillna(0).astype(int)
         & out["aggregate_macro_coverage_flag"].fillna(0).astype(int)
         & out["sector_macro_coverage_flag"].fillna(0).astype(int)
         & out["base_score"].notna().astype(int)
+        & out["macro_stock_fit_raw"].notna().astype(int)
     ).astype(int)
+    out["macro_stock_fit_for_z"] = out["macro_stock_fit_raw"].where(out["coverage_flag"].eq(1))
+    out["macro_stock_fit_z"] = _zscore_by_date(
+        out,
+        "macro_stock_fit_for_z",
+        min_std=layer_cfg.zscore_min_std,
+        clip_value=layer_cfg.zscore_component_clip,
+    )
+    out.drop(columns=["macro_stock_fit_for_z"], inplace=True)
     validation = _macro_validation_diagnostics(out, layer_cfg)
     out = out.merge(
         validation[["as_of_date", "macro_validation_multiplier"]],

@@ -159,15 +159,21 @@ def _wide_ads_to_long(
     if observation_start:
         wide = wide.loc[wide["observation_date"] >= observation_start].copy()
     rename_map: dict[str, str] = {}
+    parsed_header_count = 0
     for col in wide.columns:
         if col in {date_col, "observation_date"}:
             continue
         parsed = _parse_ads_vintage_header(col)
         if parsed is None:
             continue
+        parsed_header_count += 1
         if vintage_start and parsed < vintage_start:
             continue
         rename_map[col] = parsed
+    if parsed_header_count == 0:
+        raise RuntimeError(
+            "ADS all-vintages workbook contained no recognized ADS_INDEX_MMDDYY vintage columns."
+        )
     wide = wide.rename(columns=rename_map)
     value_cols = [col for col in wide.columns if col not in {date_col, "observation_date"} and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(col))]
     if not value_cols:

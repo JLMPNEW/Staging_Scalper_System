@@ -10,6 +10,7 @@ from macro_types import FetchResult, FetchTask, ObservationRecord, SourceArtifac
 
 logger = logging.getLogger(__name__)
 FRED_BASE_URL = "https://api.stlouisfed.org/fred"
+ALFRED_EARLIEST_REALTIME_DATE = "1776-07-04"
 
 
 class FredAlfredConnector:
@@ -161,9 +162,10 @@ class FredAlfredConnector:
             if task.observation_end is not None:
                 params["observation_end"] = task.observation_end.isoformat()
             if compact_revisions:
-                params["realtime_start"] = (
-                    task.vintage_start.isoformat() if task.vintage_start is not None else "1776-07-04"
-                )
+                # output_type=1 applies one realtime window to the entire observation
+                # range. Starting this window at the last successful vintage would
+                # relabel old observations as if they first existed on that date.
+                params["realtime_start"] = ALFRED_EARLIEST_REALTIME_DATE
                 params["realtime_end"] = task.as_of_date.isoformat()
             response = self.http_client.get(f"{FRED_BASE_URL}/series/observations", params=params)
             payload = response.json()

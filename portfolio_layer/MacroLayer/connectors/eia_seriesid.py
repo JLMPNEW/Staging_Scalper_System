@@ -86,6 +86,7 @@ class EiaSeriesIdConnector:
         length = 5000
         offset = 0
         pages: list[tuple[Any, list[dict[str, Any]]]] = []
+        seen_page_signatures: set[str] = set()
         while True:
             params = {
                 "api_key": self.api_key,
@@ -97,11 +98,25 @@ class EiaSeriesIdConnector:
             response = self.http_client.get(f"{self.base_url}/{spec.source_series_id}", params=params)
             payload = response.json()
             rows = _extract_rows(payload.get("response", {}).get("data") or payload.get("series", []))
+            page_signature = hashlib.sha256(repr(rows).encode("utf-8")).hexdigest()
+            if rows and page_signature in seen_page_signatures:
+                raise RuntimeError(
+                    f"EIA pagination repeated a page for {spec.registry_key}: offset={offset} rows={len(rows)}"
+                )
+            seen_page_signatures.add(page_signature)
             pages.append((response, rows))
-            total = _extract_total(payload, default=len(rows))
-            if offset + length >= total or len(rows) < length:
+            total = _extract_total(payload)
+            if not rows or len(rows) < length:
                 break
-            offset += length
+            if total is not None and offset + len(rows) >= total:
+                break
+            next_offset = offset + len(rows)
+            if next_offset <= offset:
+                raise RuntimeError(
+                    f"EIA pagination made no progress for {spec.registry_key}: "
+                    f"offset={offset} rows={len(rows)} total={total}"
+                )
+            offset = next_offset
         return pages
 
 
@@ -115,7 +130,7 @@ def _extract_rows(series_payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _extract_total(payload: dict[str, Any], *, default: int) -> int:
+def _extract_total(payload: dict[str, Any]) -> int | None:
     response = payload.get("response", {})
     if isinstance(response, dict):
         total = response.get("total")
@@ -124,13 +139,14 @@ def _extract_total(payload: dict[str, Any], *, default: int) -> int:
                 return int(str(total))
             except ValueError:
                 pass
-    return int(default)
+    return None
 
 
 def _parse_float(item: dict[str, Any]) -> float | None:
     for key in ("value", "series-value", "price", "close"):
         if key in item:
-            text = str(item.get(key) or "").strip()
+            raw_value = item.get(key)
+            text = "" if raw_value is None else str(raw_value).strip()
             if not text or text.lower() in {"null", "w", "*"}:
                 return None
             try:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
@@ -15,6 +15,13 @@ from macro_raw_config import cfg_get, parse_iso_date, resolve_db_path, resolve_p
 
 
 RELEASE_STALENESS_POLICY_VERSION = "release_business_days_v1"
+DEFAULT_PUBLICATION_LAG_DAYS = {
+    "daily": 1,
+    "weekly": 7,
+    "monthly": 30,
+    "quarterly": 60,
+    "annual": 90,
+}
 
 
 @dataclass(frozen=True)
@@ -120,17 +127,37 @@ def resolve_calendar_bounds(
 def load_metric_serving_specs(raw_conn: sqlite3.Connection) -> list[MetricServingSpec]:
     rows = raw_conn.execute(
         """
-        SELECT
-            r.metric_key,
-            MIN(r.ref_area) AS ref_area,
-            MIN(r.frequency) AS frequency,
-            COUNT(o.observation_id) AS observation_count
-        FROM macro_metric_registry r
-        LEFT JOIN macro_observation_raw o
-          ON o.registry_key = r.registry_key
-        WHERE r.enabled = 1
-        GROUP BY r.metric_key
-        ORDER BY observation_count DESC, r.metric_key
+        WITH registry_counts AS (
+            SELECT
+                r.registry_key,
+                r.metric_key,
+                r.ref_area,
+                r.frequency,
+                r.source_priority,
+                COUNT(o.observation_id) AS observation_count
+            FROM macro_metric_registry r
+            LEFT JOIN macro_observation_raw o
+              ON o.registry_key = r.registry_key
+            WHERE r.enabled = 1
+            GROUP BY
+                r.registry_key,
+                r.metric_key,
+                r.ref_area,
+                r.frequency,
+                r.source_priority
+        ), ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY metric_key
+                    ORDER BY observation_count DESC, source_priority ASC, registry_key ASC
+                ) AS registry_rank
+            FROM registry_counts
+        )
+        SELECT metric_key, ref_area, frequency, observation_count
+        FROM ranked
+        WHERE registry_rank = 1
+        ORDER BY observation_count DESC, metric_key
         """
     ).fetchall()
     return [
@@ -142,7 +169,6 @@ def load_metric_serving_specs(raw_conn: sqlite3.Connection) -> list[MetricServin
         )
         for row in rows
     ]
-
 
 def load_country_rows(raw_conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return raw_conn.execute(
@@ -200,28 +226,55 @@ def parse_calendar_date(value: str | None) -> date | None:
     return None
 
 
+def _retrieval_date(value: str | None) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        return parse_calendar_date(text[:10])
+
+
 def effective_available_date(
     *,
     observation_date: date | None,
     release_date: date | None,
     vintage_date: date | None,
+    retrieved_at: str | None = None,
+    frequency: str = "",
+    source_name: str = "",
+    publication_lag_days: int | None = None,
 ) -> date | None:
-    values = [item for item in (observation_date, release_date, vintage_date) if item is not None]
-    if not values:
-        return None
-    return max(values)
+    """Return the first date on which a raw value can safely be used.
+
+    Explicit release/vintage metadata wins. For providers that expose neither,
+    availability is conservatively bounded by both a cadence-based publication
+    lag and the date on which this system actually retrieved the snapshot.
+    """
+    if release_date is not None or vintage_date is not None:
+        values = [item for item in (observation_date, release_date, vintage_date) if item is not None]
+        return max(values) if values else None
+    if observation_date is None:
+        return _retrieval_date(retrieved_at)
+    lag_days = publication_lag_days
+    if lag_days is None:
+        lag_days = DEFAULT_PUBLICATION_LAG_DAYS.get(str(frequency or "").strip().lower(), 1)
+    inferred = period_end_date(observation_date, frequency) + timedelta(days=max(int(lag_days), 0))
+    retrieved = _retrieval_date(retrieved_at)
+    return max(inferred, retrieved) if retrieved is not None else inferred
 
 
-def candidate_rank(candidate: RawCandidate) -> tuple[date, date, date, int, str, str]:
+def candidate_rank(candidate: RawCandidate) -> tuple[date, date, date, str, int, str]:
+    # A newer observation period always outranks revisions to an older period.
     return (
+        candidate.observation_date or date.min,
         candidate.vintage_date or date.min,
         candidate.release_date or date.min,
-        candidate.observation_date or date.min,
-        -candidate.source_priority,
         candidate.retrieved_at,
+        -candidate.source_priority,
         candidate.registry_key,
     )
-
 
 def freshness_anchor_date(candidate: RawCandidate, policy: MetricPolicy) -> date:
     if candidate.release_date is not None:

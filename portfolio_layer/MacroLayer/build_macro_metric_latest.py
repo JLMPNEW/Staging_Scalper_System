@@ -42,6 +42,10 @@ def main() -> None:
             notes="Materializing latest metric snapshot from PIT.",
         )
         run_started = True
+        calendar_row = conn.execute("SELECT MAX(as_of_date) FROM macro_calendar_daily").fetchone()
+        calendar_end_date = str(calendar_row[0] or "") if calendar_row is not None else ""
+        if not calendar_end_date:
+            raise ValueError("macro_calendar_daily has no authoritative end date for metric-latest selection.")
         clear_table(conn, "macro_metric_latest")
         conn.execute(
             """
@@ -60,6 +64,7 @@ def main() -> None:
                         ORDER BY as_of_date DESC
                     ) AS rn
                 FROM macro_observation_daily_pit
+                WHERE as_of_date <= ?
             )
             SELECT
                 metric_key, as_of_date, registry_key, ref_area, source_name, source_series_id,
@@ -69,7 +74,8 @@ def main() -> None:
                 carry_forward_allowed, carry_forward_flag, coverage_flag, updated_at_utc
             FROM ranked
             WHERE rn = 1
-            """
+            """,
+            (calendar_end_date,),
         )
         rows_written = int(conn.execute("SELECT COUNT(*) FROM macro_metric_latest").fetchone()[0] or 0)
         conn.commit()

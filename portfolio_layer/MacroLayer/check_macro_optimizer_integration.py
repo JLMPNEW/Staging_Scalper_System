@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
 import sys
 from pathlib import Path
@@ -12,6 +14,9 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+OPTIMIZER_ROOT = REPO_ROOT / "optimizer"
+if str(OPTIMIZER_ROOT) not in sys.path:
+    sys.path.insert(0, str(OPTIMIZER_ROOT))
 
 from macro_raw_config import (  # noqa: E402
     cfg_get,
@@ -22,6 +27,11 @@ from macro_raw_config import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+from run_macro_optimizer_integration import (  # noqa: E402
+    _case_config,
+    _resolve_base_config as _resolve_accepted_base_config,
+)
 
 _TIER1_IMPORT_ERROR: Exception | None = None
 _TIER1: dict[str, Any] = {}
@@ -73,6 +83,64 @@ def _resolve_repo_path(raw_path: Any) -> Path:
     p = Path(str(raw_path)).expanduser()
     return p if p.is_absolute() else (REPO_ROOT / p).resolve()
 
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_errors(case_dir: Path, *, case_name: str, expected_run_id: str) -> list[str]:
+    manifest_path = case_dir / "stage12d_case_manifest.json"
+    if not manifest_path.exists():
+        return ["missing_case_manifest"]
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ["invalid_case_manifest"]
+    errors: list[str] = []
+    if payload.get("status") != "completed":
+        errors.append("manifest_status_not_completed")
+    if payload.get("case_name") != case_name:
+        errors.append("manifest_case_mismatch")
+    if not expected_run_id or payload.get("run_id") != expected_run_id:
+        errors.append("manifest_run_id_mismatch")
+    output_hashes = payload.get("output_sha256")
+    if not isinstance(output_hashes, dict) or not output_hashes:
+        errors.append("missing_output_hashes")
+    else:
+        for filename, expected_hash in output_hashes.items():
+            candidate = case_dir / str(filename)
+            if not candidate.exists() or _sha256_file(candidate) != str(expected_hash):
+                errors.append(f"output_hash_mismatch:{filename}")
+    input_files = payload.get("input_files")
+    if not isinstance(input_files, dict) or not input_files:
+        errors.append("missing_input_hashes")
+    else:
+        for name, item in input_files.items():
+            if not isinstance(item, dict):
+                errors.append(f"invalid_input_manifest:{name}")
+                continue
+            candidate = Path(str(item.get("path") or ""))
+            if not candidate.exists() or _sha256_file(candidate) != str(item.get("sha256") or ""):
+                errors.append(f"input_hash_mismatch:{name}")
+    return errors
+
+
+def _summary_run_id(output_dir: Path, *, case_names: set[str]) -> str:
+    summary_path = output_dir / "stage12d_optimizer_case_summary.csv"
+    if not summary_path.exists():
+        return ""
+    summary = pd.read_csv(summary_path)
+    if "run_id" not in summary.columns or "case_name" not in summary.columns:
+        return ""
+    selected = summary.loc[summary["case_name"].astype(str).isin(case_names)].copy()
+    if set(selected["case_name"].astype(str)) != case_names:
+        return ""
+    run_ids = {str(value).strip() for value in selected["run_id"] if str(value).strip()}
+    return next(iter(run_ids)) if len(run_ids) == 1 else ""
 
 def _latest_rows(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     if df.empty or date_col not in df.columns:
@@ -180,6 +248,7 @@ def _check_case(
     output_dir: Path,
     base_cfg: dict[str, Any],
     thresholds: dict[str, float],
+    expected_run_id: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     case_name = str(case.get("name", "")).strip()
     case_dir = output_dir / case_name
@@ -187,15 +256,33 @@ def _check_case(
     rows: list[dict[str, Any]] = []
     breaches: list[dict[str, Any]] = []
 
+    manifest_errors = _manifest_errors(case_dir, case_name=case_name, expected_run_id=expected_run_id)
+    rows.append({
+        "run_id": expected_run_id,
+        "case_name": case_name,
+        "check_name": "same_run_manifest_and_hashes",
+        "value": ";".join(manifest_errors),
+        "threshold": "no errors",
+        "passed": int(not manifest_errors),
+    })
     exists = weights_path.exists()
-    rows.append({"case_name": case_name, "check_name": "weights_long_only_exists", "value": int(exists), "threshold": "1", "passed": int(exists)})
+    rows.append({"run_id": expected_run_id, "case_name": case_name, "check_name": "weights_long_only_exists", "value": int(exists), "threshold": "1", "passed": int(exists)})
     if not exists:
         return rows, breaches
 
     weights = pd.read_csv(weights_path)
-    total_weight = float(pd.to_numeric(weights["Weight"], errors="coerce").fillna(0.0).sum())
+    required_columns = {"Ticker", "Weight", "Sleeve"}
+    schema_ok = required_columns.issubset(weights.columns)
+    rows.append({"run_id": expected_run_id, "case_name": case_name, "check_name": "weights_schema", "value": sorted(weights.columns), "threshold": sorted(required_columns), "passed": int(schema_ok)})
+    if not schema_ok:
+        return rows, breaches
+    numeric_weights = pd.to_numeric(weights["Weight"], errors="coerce")
+    valid_weights = numeric_weights.notna().all() and bool(numeric_weights.ge(0.0).all())
+    rows.append({"run_id": expected_run_id, "case_name": case_name, "check_name": "weights_finite_nonnegative", "value": int(valid_weights), "threshold": "1", "passed": int(valid_weights)})
+    total_weight = float(numeric_weights.fillna(0.0).sum())
     tol = float(thresholds["weight_sum_tolerance"])
     rows.append({
+        "run_id": expected_run_id,
         "case_name": case_name,
         "check_name": "weight_sum",
         "value": total_weight,
@@ -212,6 +299,7 @@ def _check_case(
         budget = _latest_foreign_budget(base_cfg) if foreign_enabled else 0.0
         breach_tol = float(thresholds["max_foreign_budget_breach"])
         rows.append({
+            "run_id": expected_run_id,
             "case_name": case_name,
             "check_name": "foreign_budget_respected",
             "value": foreign_weight,
@@ -221,6 +309,7 @@ def _check_case(
         target_breaches = _target_breaches(weights, base_cfg, float(thresholds["max_target_band_breach"]))
         breaches.extend({"case_name": case_name, **b} for b in target_breaches)
         rows.append({
+            "run_id": expected_run_id,
             "case_name": case_name,
             "check_name": "stock_target_max_breaches",
             "value": len(target_breaches),
@@ -236,7 +325,7 @@ def main() -> None:
     config_path, macro_cfg = load_macro_raw_config(args.config)
     layer_cfg = dict(cfg_get(macro_cfg, "optimizer_integration_layer", default={}) or {})
     output_dir = _resolve_output_dir(config_path, layer_cfg)
-    base_config_path = _resolve_base_config(config_path, layer_cfg, args.base_config)
+    base_config_path = _resolve_accepted_base_config(config_path, layer_cfg, args.base_config)
     load_yaml = _require_tier1("load_yaml")
     base_cfg = load_yaml(str(base_config_path))
     cases = list(layer_cfg.get("cases", []) or [])
@@ -253,10 +342,27 @@ def main() -> None:
         "max_target_band_breach": float(acceptance.get("max_target_band_breach", 1e-6)),
     }
 
+    case_names = {str(case.get("name", "")).strip() for case in cases}
+    expected_run_id = _summary_run_id(output_dir, case_names=case_names)
     rows: list[dict[str, Any]] = []
     breaches: list[dict[str, Any]] = []
     for case in cases:
-        case_rows, case_breaches = _check_case(case, output_dir=output_dir, base_cfg=base_cfg, thresholds=thresholds)
+        case_name = str(case.get("name", "")).strip()
+        case_cfg = _case_config(
+            base_cfg,
+            case,
+            output_dir / case_name,
+            base_config_path,
+            layer_cfg,
+            config_path,
+        )
+        case_rows, case_breaches = _check_case(
+            case,
+            output_dir=output_dir,
+            base_cfg=case_cfg,
+            thresholds=thresholds,
+            expected_run_id=expected_run_id,
+        )
         rows.extend(case_rows)
         breaches.extend(case_breaches)
 
@@ -267,9 +373,32 @@ def main() -> None:
     )
     checks_dir = output_dir / "checks"
     checks_dir.mkdir(parents=True, exist_ok=True)
-    summary.to_csv(checks_dir / "stage12d_optimizer_acceptance_summary.csv", index=False)
-    breach_frame.to_csv(checks_dir / "stage12d_target_breaches.csv", index=False)
-    passed = bool(summary["passed"].astype(int).eq(1).all()) if not summary.empty else False
+    acceptance_path = checks_dir / "stage12d_optimizer_acceptance_summary.csv"
+    breach_path = checks_dir / "stage12d_target_breaches.csv"
+    summary.to_csv(acceptance_path, index=False)
+    breach_frame.to_csv(breach_path, index=False)
+    passed = bool(expected_run_id) and (bool(summary["passed"].astype(int).eq(1).all()) if not summary.empty else False)
+    case_summary_path = output_dir / "stage12d_optimizer_case_summary.csv"
+    case_manifest_hashes = {
+        case_name: _sha256_file(output_dir / case_name / "stage12d_case_manifest.json")
+        for case_name in sorted(case_names)
+        if (output_dir / case_name / "stage12d_case_manifest.json").exists()
+    }
+    acceptance_manifest = {
+        "run_id": expected_run_id,
+        "acceptance": "PASS" if passed else "FAIL",
+        "case_names": sorted(case_names),
+        "case_summary_sha256": _sha256_file(case_summary_path) if case_summary_path.exists() else "",
+        "case_manifest_sha256": case_manifest_hashes,
+        "files": {
+            acceptance_path.name: _sha256_file(acceptance_path),
+            breach_path.name: _sha256_file(breach_path),
+        },
+    }
+    manifest_path = checks_dir / "stage12d_optimizer_acceptance_manifest.json"
+    temporary = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    temporary.write_text(json.dumps(acceptance_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(manifest_path)
     print(f"STAGE_12D_EXIT_GATE={'PASS' if passed else 'FAIL'}")
     logger.info("Stage 12D optimizer integration acceptance: %s", "PASS" if passed else "FAIL")
     if not passed:
