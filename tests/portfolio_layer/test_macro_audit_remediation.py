@@ -297,6 +297,29 @@ def test_non_vintage_availability_never_predates_retrieval() -> None:
     ) == date(2026, 2, 10)
 
 
+def test_daily_market_availability_is_not_clamped_to_retrieval() -> None:
+    # Daily market prints (yields, breakevens, spot prices, FX) are public and
+    # unrevised on their observation date; a backfill retrieved years later must
+    # not collapse their availability onto the ingest date.
+    assert effective_available_date(
+        observation_date=date(2005, 6, 1),
+        release_date=None,
+        vintage_date=None,
+        retrieved_at="2026-04-11T12:00:00Z",
+        frequency="daily",
+        source_name="fred_alfred",
+    ) == date(2005, 6, 2)
+    # Non-daily cadences keep the conservative retrieval bound.
+    assert effective_available_date(
+        observation_date=date(2005, 6, 1),
+        release_date=None,
+        vintage_date=None,
+        retrieved_at="2026-04-11T12:00:00Z",
+        frequency="weekly",
+        source_name="fred_alfred",
+    ) == date(2026, 4, 11)
+
+
 def test_newer_observation_period_outranks_later_revision_of_old_period() -> None:
     old_revised = _raw_candidate(period=date(2025, 12, 1), vintage=date(2026, 8, 1))
     newer_period = _raw_candidate(period=date(2026, 1, 1), vintage=date(2026, 2, 1))

@@ -251,16 +251,26 @@ def effective_available_date(
     Explicit release/vintage metadata wins. For providers that expose neither,
     availability is conservatively bounded by both a cadence-based publication
     lag and the date on which this system actually retrieved the snapshot.
+
+    Daily-frequency rows are exempt from the retrieval bound: they are market
+    prints (yields, breakevens, spot prices, FX, vol) that are public and
+    effectively unrevised on their observation date, so a later backfill
+    retrieval still reproduces exactly what was knowable then. Clamping them
+    to the retrieval date would collapse decades of daily history onto a
+    handful of ingest dates and starve every standardization window.
     """
     if release_date is not None or vintage_date is not None:
         values = [item for item in (observation_date, release_date, vintage_date) if item is not None]
         return max(values) if values else None
     if observation_date is None:
         return _retrieval_date(retrieved_at)
+    normalized_frequency = str(frequency or "").strip().lower()
     lag_days = publication_lag_days
     if lag_days is None:
-        lag_days = DEFAULT_PUBLICATION_LAG_DAYS.get(str(frequency or "").strip().lower(), 1)
+        lag_days = DEFAULT_PUBLICATION_LAG_DAYS.get(normalized_frequency, 1)
     inferred = period_end_date(observation_date, frequency) + timedelta(days=max(int(lag_days), 0))
+    if normalized_frequency == "daily":
+        return inferred
     retrieved = _retrieval_date(retrieved_at)
     return max(inferred, retrieved) if retrieved is not None else inferred
 
