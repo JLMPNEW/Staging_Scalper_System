@@ -238,16 +238,21 @@ def _eligible_stock_frame(day: pd.DataFrame, *, case_name: str, layer_cfg: Shado
     return out, score_col
 
 
+def _canonical_rating(value: Any) -> str:
+    return str(value).strip().lower().replace(" ", "_")
+
+
 def _select_with_quotas(day: pd.DataFrame, *, score_col: str, quotas: dict[str, int], top_n: int) -> pd.DataFrame:
+    ratings = day["rating"].map(_canonical_rating)
     if not quotas:
-        allowed_ratings = {"Strong Buy", "Buy", "Hold"}
-        return day.loc[day["rating"].isin(allowed_ratings)].sort_values(score_col, ascending=False).head(top_n).copy()
+        allowed_ratings = {"strong_buy", "buy", "hold"}
+        return day.loc[ratings.isin(allowed_ratings)].sort_values(score_col, ascending=False).head(top_n).copy()
     selected_parts: list[pd.DataFrame] = []
     selected_idx: set[int] = set()
     for rating, quota in quotas.items():
         if quota <= 0:
             continue
-        part = day.loc[day["rating"].eq(rating) & ~day.index.isin(selected_idx)].sort_values(score_col, ascending=False).head(quota)
+        part = day.loc[ratings.eq(_canonical_rating(rating)) & ~day.index.isin(selected_idx)].sort_values(score_col, ascending=False).head(quota)
         selected_parts.append(part)
         selected_idx.update(part.index.tolist())
     selected = pd.concat(selected_parts, axis=0) if selected_parts else pd.DataFrame(columns=day.columns)

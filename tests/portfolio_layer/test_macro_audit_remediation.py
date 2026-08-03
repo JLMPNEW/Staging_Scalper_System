@@ -533,6 +533,25 @@ def test_hierarchical_allocator_enforces_item_and_sector_caps() -> None:
     assert bool(weights.groupby(groups).sum().le(0.40 + 1e-12).all())
 
 
+def test_quota_selection_matches_snake_case_ratings() -> None:
+    from run_macro_shadow_backtest import _select_with_quotas
+
+    day = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "C", "D"],
+            "rating": ["strong_buy", "buy", "hold", "avoid"],
+            "score": [4.0, 3.0, 2.0, 9.0],
+        }
+    )
+    # No quotas: the fallback must match the data's snake_case vocabulary
+    # (a Title-Case filter previously matched nothing -> all-cash backtest).
+    picked = _select_with_quotas(day, score_col="score", quotas={}, top_n=10)
+    assert sorted(picked["ticker"]) == ["A", "B", "C"]
+    # Quota keys in any casing must match too.
+    quota_picked = _select_with_quotas(day, score_col="score", quotas={"Strong Buy": 1}, top_n=1)
+    assert list(quota_picked["ticker"]) == ["A"]
+
+
 def test_bounded_allocator_fails_on_infeasible_caps() -> None:
     with pytest.raises(ValueError, match="Infeasible allocation bounds"):
         bounded_normalize(pd.Series([1.0, 1.0]), upper=0.40, target_sum=1.0)
