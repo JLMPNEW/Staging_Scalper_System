@@ -147,3 +147,15 @@ def test_historical_catchup_suppresses_current_provider_event_cycle() -> None:
         "50_run_expectations_monitor_daily.py",
         group="monitor",
     ) == ["--skip-event-cycle"]
+
+
+def test_liquidity_attempt_precedes_authoritative_risk_gates() -> None:
+    orchestrator = _load_orchestrator()
+    scripts = [script for _subdir, script, _manifest in orchestrator.GROUPS["risk"]]
+    collector = scripts.index("05c_collect_ib_historical_spread_samples.py")
+    audit = scripts.index("05d_audit_liquidity_panel.py")
+    validator = scripts.index("08_validate_risk_panel.py")
+    assert collector < audit < validator
+    assert "05c_collect_ib_historical_spread_samples.py" in (
+        orchestrator.OPTIONAL_STEP_SCRIPTS
+    )

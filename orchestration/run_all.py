@@ -26,9 +26,9 @@ Trading calendar
 There is no calendar table in this repo; the authoritative calendar is
 portfolio_layer's SPY-from-Yahoo master_calendar, which needs the network. For
 offline planning (default target date, catch-up gap math, health windows) we
-derive trading dates from the UNION of dated publish directories across the
-reference sectors (actual dates the system already recognized as tradeable)
-combined forward with a weekday filter minus a standard NYSE holiday calendar
+derive trading dates from valid-session dated publish directories across the
+reference sectors, rejecting any weekend/holiday folders, and combine them
+with a weekday filter minus a standard NYSE holiday calendar
 (observed shifts included; e.g. 2026-07-03 is the observed Independence Day and
 therefore NOT tradeable). The default target date is the latest COMPLETED
 trading session (weekday + market-close aware, mirroring biotech 24's guard),
@@ -435,7 +435,14 @@ def last_published_date(sector: Sector, on_or_before: str) -> str | None:
 
 
 def known_trading_dates(reg: Registry) -> list[str]:
-    """Union of dated publish folders across the calendar reference sectors."""
+    """Union of valid trading-session folders across the reference sectors.
+
+    Dated publisher folders are evidence, not a market calendar. A manual run or
+    an upstream bug can create a weekend/holiday folder; retaining that date in
+    catch-up would then cause every other sector to manufacture the same invalid
+    session. Keep those folders on disk for audit, but never let them seed the
+    orchestration calendar.
+    """
     refs = reg.calendar_reference_sectors or reg.names
     seen: set[str] = set()
     for name in refs:
@@ -443,17 +450,18 @@ def known_trading_dates(reg: Registry) -> list[str]:
             sector = reg.by_name(name)
         except KeyError:
             continue
-        seen.update(sector_published_dates(sector, require_file=False))
+        for published in sector_published_dates(sector, require_file=False):
+            if is_trading_day(_to_date(published)):
+                seen.add(published)
     return sorted(seen)
 
 
 def trading_dates_in_range(reg: Registry, start: str, end: str) -> list[str]:
-    """Trading dates in [start, end]: the union of dates already published across the
-    reference sectors (authoritative) with a holiday-aware weekday fill for the rest.
+    """Trading dates in [start, end], using valid published sessions plus calendar fill.
 
     The weekday fill applies standard NYSE holiday rules (observed shifts included),
     so e.g. 2026-07-03 (observed Independence Day) is excluded even though it is a
-    Friday. Already-published dates are always retained.
+    Friday. Published weekend/holiday folders are ignored rather than propagated.
     """
     if start > end:
         return []
@@ -590,7 +598,28 @@ def repair_commands(sector: Sector, dates: list[str]) -> list[list[str]]:
     return cmds
 
 
-def catch_up_commands(reg: Registry, sector: Sector, target: str, *, force: bool) -> tuple[list[list[str]], list[str]]:
+def _catch_up_daily_command(
+    sector: Sector,
+    iso_date: str,
+    *,
+    force: bool,
+    live_completed_session: str,
+) -> list[str]:
+    """Build one catch-up command without backdating current-only provider events."""
+    command = daily_command(sector, iso_date, force=force)
+    if sector.name == "portfolio_layer" and iso_date < live_completed_session:
+        command.append("--historical-catchup")
+    return command
+
+
+def catch_up_commands(
+    reg: Registry,
+    sector: Sector,
+    target: str,
+    *,
+    force: bool,
+    live_completed_session: str | None = None,
+) -> tuple[list[list[str]], list[str]]:
     missing = missing_trading_dates(reg, sector, target)
     if not missing:
         return [], []
@@ -598,8 +627,16 @@ def catch_up_commands(reg: Registry, sector: Sector, target: str, *, force: bool
         cmds, _ = backfill_commands(sector, missing[0], missing[-1], reg)
         return cmds, missing
     commands: list[list[str]] = []
+    live_session = live_completed_session or latest_completed_trading_session()
     for iso_date in missing:
-        commands.append(daily_command(sector, iso_date, force=force))
+        commands.append(
+            _catch_up_daily_command(
+                sector,
+                iso_date,
+                force=force,
+                live_completed_session=live_session,
+            )
+        )
         # Catch-up is a sequence of ordinary dated publishes. Preserve the exact daily
         # post-publish contract (notably med-devices script 76 provenance) for every date.
         commands.extend(daily_post_commands(sector, iso_date))
@@ -2008,6 +2045,23 @@ def run_selftest() -> int:
     ok("backfill_range_single", len(bf) == 1 and "--start" in bf[0])
     bf_pit, _ = backfill_commands(defense, "2026-01-01", "2026-01-10", reg)
     ok("backfill_defense_pit", "--membership-mode" in bf_pit[0] and "pit" in bf_pit[0])
+    portfolio = Sector(**{**port.__dict__, "name": "portfolio_layer"})
+    historical_portfolio = _catch_up_daily_command(
+        portfolio,
+        "2026-07-16",
+        force=False,
+        live_completed_session="2026-07-17",
+    )
+    live_portfolio = _catch_up_daily_command(
+        portfolio,
+        "2026-07-17",
+        force=False,
+        live_completed_session="2026-07-17",
+    )
+    ok("catch_up_historical_portfolio_suppresses_event_cycle",
+       "--historical-catchup" in historical_portfolio)
+    ok("catch_up_live_portfolio_keeps_event_cycle",
+       "--historical-catchup" not in live_portfolio)
 
     # --- repair selection (two-stage) ---
     rmap = parse_repair_arg(reg, "alpha:s1,mach_x")
@@ -2044,6 +2098,18 @@ def run_selftest() -> int:
        span == ["2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-06", "2026-07-07"])
     span2 = trading_dates_in_range(reg, "2026-07-18", "2026-07-19")  # Sat..Sun
     ok("trading_span_weekend_empty", span2 == [])
+    saved_project_root = globals()["PROJECT_ROOT"]
+    calendar_root = Path(tempfile.mkdtemp())
+    try:
+        globals()["PROJECT_ROOT"] = calendar_root
+        for folder in ("2026-07-03", "2026-07-17", "2026-07-18"):
+            (calendar_root / "output" / "a" / folder).mkdir(parents=True)
+        known = known_trading_dates(reg)
+        ok("published_valid_session_seeds_calendar", "2026-07-17" in known)
+        ok("published_holiday_does_not_seed_calendar", "2026-07-03" not in known)
+        ok("published_weekend_does_not_seed_calendar", "2026-07-18" not in known)
+    finally:
+        globals()["PROJECT_ROOT"] = saved_project_root
     lastn = last_n_dates(reg, "2026-07-17", 3)
     ok("last_n_dates", lastn == ["2026-07-15", "2026-07-16", "2026-07-17"])
     try:

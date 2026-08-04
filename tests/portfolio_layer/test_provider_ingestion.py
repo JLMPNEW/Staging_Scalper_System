@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 
 import pytest
+import yaml
 
 from portfolio_layer.provider_ingestion.health import (
     capture_continuity_rows,
@@ -21,6 +22,15 @@ from portfolio_layer.provider_ingestion.store import (
     reject_historical_current_capture,
     verify_store,
 )
+
+
+def test_provider_service_start_is_quoted_iso_date() -> None:
+    config_path = Path(__file__).resolve().parents[2] / "portfolio_layer" / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    service_started_on = config["provider_ingestion"]["recovery"]["service_started_on"]
+
+    assert isinstance(service_started_on, str)
+    date.fromisoformat(service_started_on)
 
 
 def _request(*, received: str, average: float) -> dict[str, object]:

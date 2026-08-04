@@ -1,0 +1,100 @@
+# Transportation v3 research preflight contract.
+#
+# PRE-REGISTERED before any preflight diagnostic was executed (2026-08-03).
+# This file declares the peer-group architecture gates, the candidate signal
+# set, and the decision rule. Diagnostics computed under this contract are
+# research evidence for DESIGN decisions only: every historical window has
+# been revealed to the research process, so nothing measured here is eligible
+# promotion evidence. Promotion remains future-only (post-2026-07-30 shadow
+# observations) under the standard fail-closed gates.
+model_family: transportation
+contract_version: transportation_v3_preflight_v1
+preregistered_at: "2026-08-03"
+
+universe:
+  # Full point-in-time surface-freight membership, delisted included.
+  # This deliberately reverses the v2 survivor-only defect
+  # (point_in_time_membership_intersect_frozen_eligible_entities).
+  calibration_cohort: surface_freight_and_logistics
+  membership_source: transportation_historical_membership_seed
+  peer_group_map: transportation/data/transportation_v3_peer_groups.csv
+  # 60 usable members plus RRTS, which carries taxonomy identity only
+  # (provider-excluded, no usable membership row).
+  expected_member_count: 61
+
+panel:
+  # Hash-frozen v3 complete panel; read-only input.
+  complete_panel: >-
+    ../output/industrials/transportation/historical_features/
+    v3_conflict_resolved/transportation_v3_complete_panel.csv.gz
+  metric_family: generic
+  # Valuation metrics are excluded from the candidate set: fcf_yield and
+  # ev_operating_income are empty across the frozen panel (historical
+  # market-capitalization denominator was never backfilled). They enter the
+  # v3 build phase only after the PIT market-cap backfill exists.
+  excluded_metrics: [fcf_yield, ev_operating_income]
+
+outcomes:
+  benchmark: IYT
+  horizons_sessions: [21, 63]
+  # 63-session ICs use every third month-end panel date (~non-overlapping);
+  # 21-session ICs use every panel date (monthly, approximately
+  # non-overlapping).
+  non_overlap_stride: {"63": 3, "21": 1}
+  regime_split_date: "2022-12-31"
+
+candidate_signals:
+  # signal_id: [source_metric, transform, expected_sign]
+  # Transforms: level = value as-of date; yoy_change = value minus value 12
+  # panel months earlier (both must be observed).
+  operating_margin_level: [operating_margin, level, +1]
+  fcf_margin_level: [fcf_margin, level, +1]
+  asset_turnover_level: [asset_turnover, level, +1]
+  capex_to_revenue_level: [capex_to_revenue, level, -1]
+  net_debt_to_ebitda_level: [net_debt_to_ebitda, level, -1]
+  interest_coverage_level: [interest_coverage, level, +1]
+  fcf_conversion_level: [fcf_conversion, level, +1]
+  revenue_growth_level: [revenue_growth, level, +1]
+  operating_income_growth_level: [operating_income_growth, level, +1]
+  momentum_3m: [ret_3m, level, +1]
+  momentum_6m: [ret_6m, level, +1]
+  relative_strength_3m_level: [relative_strength_3m, level, +1]
+  realized_volatility_60d: [realized_volatility_60d, level, -1]
+  operating_margin_yoy_change: [operating_margin, yoy_change, +1]
+  fcf_margin_yoy_change: [fcf_margin, yoy_change, +1]
+  asset_turnover_yoy_change: [asset_turnover, yoy_change, +1]
+  capex_to_revenue_yoy_change: [capex_to_revenue, yoy_change, -1]
+
+gates:
+  breadth:
+    # A peer group is breadth-viable when its PIT membership averages at
+    # least minimum_mean_members across panel dates and never falls below
+    # minimum_floor_members. Groups that fail merge into merge_target
+    # (from the peer-group map) before signal gating.
+    minimum_mean_members: 8
+    minimum_floor_members: 6
+  signal_stability:
+    # Evaluated at the 63-session horizon on post-merge groups.
+    minimum_total_periods: 20
+    minimum_periods_per_regime: 8
+    minimum_abs_mean_ic: 0.05
+    required_sign: preregistered_expected_sign_in_both_regimes
+  group_model_eligible:
+    minimum_qualifying_signals: 2
+  decision:
+    build_submodels_if:
+      minimum_model_eligible_groups: 3
+      minimum_covered_membership_share: 0.60
+    otherwise: SLEEVE_ONLY
+
+null_model:
+  # Pre-registered benchmark any v3 ranking model must beat after costs on
+  # post-freeze evidence: equal weight across eligible operating members of
+  # each post-merge peer group, rebalanced on the monitoring cadence.
+  definition: equal_weight_eligible_members_per_post_merge_group
+  registered_before_outcomes: true
+
+promotion:
+  historical_windows_status: revealed_research_contaminated
+  eligible_evidence: post_2026_07_30_shadow_observations_only
+  production_promotion_from_preflight: forbidden

@@ -5,7 +5,9 @@ Runs the sealed per-as-of chain in dependency order, verifying each stage's mani
 before continuing:
 
   scores    01 -> 02 -> 03                       (Stage 1 contract)
-  risk      04 -> 05a -> 05 -> 06 -> 07 -> [05d] -> 08 (Stage 2 panel; 05a hydrates market instruments)
+  risk      04 -> 05a -> 05 -> 06 -> 07 -> [05c -> 05d] -> 08
+            (Stage 2 panel; 05a hydrates market instruments; 05c is an optional
+             after-hours IB attempt and 05d/08 remain authoritative)
   optimizer 09 -> 10                             (Stage 3 AQR baseline)
   costs     12 -> 13 -> 14 -> 15                 (Stage 4)
   rotation  17 -> 18                             (Stage 5, shadow)
@@ -21,12 +23,15 @@ before continuing:
 
 Cadences (config `orchestration`): `tactical` refreshes the fast loop, including rotation;
 `strategic` runs every group. Stages are immutable by default; `--force` explicitly rebuilds them.
-Each producer invalidates dependent seals first. IB liquidity collection (05c) is never launched here; it needs a live
-IB session and belongs to the overnight process; 13's spread_source fallback covers its absence.
+Each producer invalidates dependent seals first. IB liquidity collection (05c) is attempted by this
+overnight process when enabled; connection failure is WARN-only, while 05d/08 fail closed on any
+partial or invalid panel. Stage 4's explicit spread fallback covers a wholly absent panel.
 
 Every run writes runs/<as_of>/orchestration_meta.json with per-step durations, exit codes, and the
-acceptance read from each stage manifest. Forecast and hedging stay out of the DAG until Stage 11
-promotes them; payout/final composition are implemented as shadow-aware Stage 12 groups.
+acceptance read from each stage manifest. A narrowly scoped recovery run may select a different
+basename so it cannot overwrite the original full-run provenance. Forecast and hedging stay out of
+the DAG until Stage 11 promotes them; payout/final composition are implemented as shadow-aware
+Stage 12 groups.
 """
 from __future__ import annotations
 
@@ -164,6 +169,7 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
         ("risk", "05_build_return_panel.py", None),
         ("risk", "06_build_risk_coverage.py", None),
         ("risk", "07_build_covariance_model.py", None),
+        ("risk", "05c_collect_ib_historical_spread_samples.py", None),
         ("risk", "05d_audit_liquidity_panel.py", None),
         ("risk", "08_validate_risk_panel.py", "risk/risk_manifest.json"),
     ],
@@ -280,6 +286,7 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
 # Earnings remains advisory. The monitor is now a production Stage-3 entry input,
 # so its failure must stop the deployable pass rather than reuse an old state file.
 SOFT_GROUPS = {"earnings"}
+OPTIONAL_STEP_SCRIPTS = {"05c_collect_ib_historical_spread_samples.py"}
 # Scripts in this set do not expose a --force flag. The macro wrappers are
 # deterministic refresh entry points, while readiness is read-only.
 NO_FORCE_SCRIPTS = {
@@ -380,6 +387,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="Print the plan without executing.")
     p.add_argument("--continue-on-fail", action="store_true",
                    help="Keep running later groups after a failure (default: stop).")
+    p.add_argument(
+        "--orchestration-meta-name",
+        default="orchestration_meta.json",
+        help=(
+            "Run-local orchestration manifest basename. Recovery tools use a distinct name so "
+            "the original full-run manifest remains immutable."
+        ),
+    )
     return p.parse_args()
 
 
@@ -550,6 +565,18 @@ def run_pipeline() -> int:  # noqa: C901
         LOGGER.error("--as-of must use canonical YYYY-MM-DD form, got %r", run_as_of)
         return 1
     run_dir = runs_root / run_as_of
+    orchestration_meta_name = str(args.orchestration_meta_name).strip()
+    if (
+        not orchestration_meta_name
+        or Path(orchestration_meta_name).name != orchestration_meta_name
+        or not orchestration_meta_name.endswith(".json")
+    ):
+        LOGGER.error(
+            "--orchestration-meta-name must be a JSON basename, got %r",
+            args.orchestration_meta_name,
+        )
+        return 1
+    orchestration_meta_path = run_dir / orchestration_meta_name
     orch = cfg_get(config, "orchestration", {}) or {}
     step_timeout = float(orch.get("step_timeout_sec", 1800))
     macro_step_timeout = float(orch.get("macro_step_timeout_sec", 7200))
@@ -581,7 +608,11 @@ def run_pipeline() -> int:  # noqa: C901
     if args.dry_run:
         for g in planned:
             for subdir, script, _m in GROUPS[g]:
-                if script == "05d_audit_liquidity_panel.py" and not (run_dir / "risk" / "spread_snapshot.csv").exists():
+                if (
+                    script == "05d_audit_liquidity_panel.py"
+                    and not (run_dir / "risk" / "spread_snapshot.csv").exists()
+                    and not bool(cfg_get(config, "liquidity_panel.enhanced_intraday_enabled", False))
+                ):
                     LOGGER.info("  would skip %s/%s (no spread_snapshot.csv)", subdir, script)
                     continue
                 flags = script_args(args, script, group=g)
@@ -597,7 +628,7 @@ def run_pipeline() -> int:  # noqa: C901
 
     def persist(acceptance: str, *, active_group: str = "") -> None:
         write_manifest(
-            run_dir / "orchestration_meta.json",
+            orchestration_meta_path,
             {
                 "stage": "stage12_orchestration",
                 "acceptance": acceptance,
@@ -671,6 +702,16 @@ def run_pipeline() -> int:  # noqa: C901
             status = "OK" if rc == 0 else "FAIL"
             LOGGER.info("[%s] %-45s rc=%d %5.1fs %s", status, f"{subdir}/{script}", rc, elapsed,
                         acceptance or "")
+            if rc != 0 and script in OPTIONAL_STEP_SCRIPTS:
+                warning = f"{group}:{script}"
+                if warning not in soft_failed_groups:
+                    soft_failed_groups.append(warning)
+                LOGGER.warning(
+                    "Optional step %s failed; Stage 2 validation will decide whether "
+                    "an existing panel is usable or an absent panel may use fallback",
+                    script,
+                )
+                continue
             acceptance_ok = acceptance == "" or acceptance.startswith("PASS")  # PASS_WITH_DEFERRED is sealed-OK
             if rc != 0 or (manifest_rel and not acceptance_ok):
                 group_failed = True
@@ -726,7 +767,7 @@ def run_pipeline() -> int:  # noqa: C901
     persist(overall)
     LOGGER.info("PIPELINE %s: %d/%d groups clean -> %s",
                 overall, len(completed_groups),
-                len(planned), run_dir / "orchestration_meta.json")
+                len(planned), orchestration_meta_path)
     return 0 if not failed_groups else 1
 
 

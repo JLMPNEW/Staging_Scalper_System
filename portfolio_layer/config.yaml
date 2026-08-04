@@ -31,7 +31,7 @@ provider_ingestion:
   max_scheduled_attempts: 2
   recovery:
     policy_version: provider_delayed_run_recovery_v1
-    service_started_on: 2026-08-02
+    service_started_on: "2026-08-02"
     portfolio_catchup_lookback_sessions: 10
     continuity_lookback_calendar_days: 8
     missed_capture_action: flag_no_backfill
