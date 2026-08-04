@@ -10,7 +10,6 @@ from typing import Any, Mapping, Sequence
 from industrials.core.config import load_yaml
 from industrials.core.oos_research import finite_float, spearman, weighted_score
 from industrials.transportation.financial_contract import MetricDefinition
-from industrials.transportation.scoring import OBSERVED_STATUSES
 from industrials.transportation.surface_freight_score_engine import (
     metric_comparison_group as shared_metric_comparison_group,
     score_surface_metric_percentiles,

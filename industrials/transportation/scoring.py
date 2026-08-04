@@ -454,7 +454,6 @@ def build_scoring_rows(
     ]
     if not generic_definitions:
         raise ValueError("generic scoring definition set is empty")
-    overlay_active = any(weight > 0.0 for weight in overlay_weights.values())
     policies = load_eligibility_policy(
         policy_path,
         asof=policy_asof or asof,

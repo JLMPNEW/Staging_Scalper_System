@@ -34,7 +34,6 @@ from industrials.transportation.surface_freight_research import (  # noqa: E402
     positioning_research_definition,
     select_train_metrics,
     select_train_mean_reversion_metrics,
-    surface_freight_cohort_eligible,
     top_bottom_diagnostic,
     train_derived_candidate_registry,
 )

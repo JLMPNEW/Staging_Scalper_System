@@ -1,0 +1,62 @@
+ticker,membership_status,peer_group,merge_target,notes
+UNP,active,rail_networks,rail_networks,Class I railroad
+CSX,active,rail_networks,rail_networks,Class I railroad
+CP,active,rail_networks,rail_networks,Class I railroad (CPKC)
+CNI,active,rail_networks,rail_networks,Class I railroad
+NSC,active,rail_networks,rail_networks,Class I railroad
+BNI,delisted,rail_networks,rail_networks,Class I railroad; Berkshire acquisition 2010
+GWR,delisted,rail_networks,rail_networks,Short-line operator; Brookfield/GIC 2019
+KSU,delisted,rail_networks,rail_networks,Class I railroad; CPKC merger 2021
+PWX,delisted,rail_networks,rail_networks,Regional railroad; G&W acquisition 2016
+TRN,active,rail_equipment_leasing,rail_networks,Railcar manufacturer and lessor
+GBX,active,rail_equipment_leasing,rail_networks,Railcar manufacturer
+FSTR,active,rail_equipment_leasing,rail_networks,Rail infrastructure products
+RAIL,active,rail_equipment_leasing,rail_networks,Railcar manufacturer
+GATX,active,rail_equipment_leasing,rail_networks,Railcar lessor
+ODFL,active,ltl_carriers,truckload_carriers,Pure LTL network
+SAIA,active,ltl_carriers,truckload_carriers,Pure LTL network
+ARCB,active,ltl_carriers,truckload_carriers,Asset-based LTL plus asset-light logistics
+XPO,active,ltl_carriers,truckload_carriers,North American LTL after spins
+TFII,active,ltl_carriers,truckload_carriers,LTL-heavy diversified carrier
+FDXF,active,ltl_carriers,truckload_carriers,Largest LTL carrier; June 2026 spin with short history
+CNW,delisted,ltl_carriers,truckload_carriers,LTL and truckload; XPO acquisition 2015
+YELL,delisted,ltl_carriers,truckload_carriers,LTL; 2023 bankruptcy wipeout
+KNX,active,truckload_carriers,truckload_carriers,Truckload and LTL after US Xpress and Yellow assets
+SNDR,active,truckload_carriers,truckload_carriers,Truckload dedicated and intermodal
+WERN,active,truckload_carriers,truckload_carriers,Truckload and dedicated
+MRTN,active,truckload_carriers,truckload_carriers,Refrigerated truckload
+CVLG,active,truckload_carriers,truckload_carriers,Expedited truckload
+HTLD,active,truckload_carriers,truckload_carriers,Dry van truckload
+ULH,active,truckload_carriers,truckload_carriers,Trucking and contract logistics
+PAMT,active,truckload_carriers,truckload_carriers,Truckload carrier
+SWFT,delisted,truckload_carriers,truckload_carriers,Truckload; 2007 take-private
+USAK,delisted,truckload_carriers,truckload_carriers,Truckload; DB Schenker acquisition 2022
+USX,delisted,truckload_carriers,truckload_carriers,Truckload; Knight-Swift acquisition 2023
+CGI,delisted,truckload_carriers,truckload_carriers,Truckload; 2019 bankruptcy liquidation
+QLTY,delisted,truckload_carriers,truckload_carriers,Tank truckload; Apax buyout 2015
+DSKE,delisted,truckload_carriers,truckload_carriers,Flatbed and specialized; TFI acquisition 2024
+UPS,active,parcel_integrated,ltl_carriers,Integrated parcel network
+FDX,active,parcel_integrated,ltl_carriers,Integrated parcel and express network
+ZTO,active,parcel_integrated,ltl_carriers,China parcel network
+ABF,delisted,parcel_integrated,ltl_carriers,Air express; DHL acquisition 2003
+CHRW,active,asset_light_logistics,asset_light_logistics,Freight brokerage
+EXPD,active,asset_light_logistics,asset_light_logistics,International forwarding
+LSTR,active,asset_light_logistics,asset_light_logistics,Agent-based brokerage network
+RXO,active,asset_light_logistics,asset_light_logistics,Freight brokerage spin from XPO
+FWRD,active,asset_light_logistics,asset_light_logistics,Expedited LTL and intermodal drayage
+RLGT,active,asset_light_logistics,asset_light_logistics,Forwarding and brokerage
+HUBG,active,asset_light_logistics,asset_light_logistics,Intermodal marketing and brokerage
+ECHO,delisted,asset_light_logistics,asset_light_logistics,Brokerage; Jordan take-private 2021
+UTIW,delisted,asset_light_logistics,asset_light_logistics,Forwarding; DSV acquisition 2016
+PACR,delisted,asset_light_logistics,asset_light_logistics,Intermodal marketing; XPO acquisition 2014
+EGL,delisted,asset_light_logistics,asset_light_logistics,Forwarding; CEVA/Apollo 2007
+FRTZ,delisted,asset_light_logistics,asset_light_logistics,Forwarding; UPS acquisition 2001
+DDMX,delisted,asset_light_logistics,asset_light_logistics,Same-day logistics; TransForce 2011
+STMP,delisted,asset_light_logistics,asset_light_logistics,Shipping software; Thoma Bravo 2021
+RRTS,delisted,asset_light_logistics,asset_light_logistics,Brokerage/expedited; provider-excluded (no usable membership row); identity mapping only
+JBHT,active,contract_intermodal_specialized,asset_light_logistics,Intermodal dedicated and brokerage
+GXO,active,contract_intermodal_specialized,asset_light_logistics,Contract warehousing
+R,active,contract_intermodal_specialized,asset_light_logistics,Fleet leasing dedicated and supply chain
+PAL,active,contract_intermodal_specialized,asset_light_logistics,Finished-vehicle logistics
+CYRX,active,contract_intermodal_specialized,asset_light_logistics,Pharma cold-chain logistics
+PBI,active,contract_intermodal_specialized,asset_light_logistics,Mail presort and shipping services

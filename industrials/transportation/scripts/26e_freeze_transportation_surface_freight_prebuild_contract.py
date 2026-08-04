@@ -28,7 +28,6 @@ from industrials.transportation.surface_freight_score_engine import (  # noqa: E
     load_surface_freight_score_policy,
     metric_score_field,
     score_surface_metric_percentiles,
-    surface_freight_score_eligible,
 )
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG  # noqa: E402
 

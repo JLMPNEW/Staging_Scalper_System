@@ -1,0 +1,113 @@
+# Transportation shadow-monitor candidate registry.
+#
+# PRE-REGISTERED 2026-08-03, before any post-freeze outcome used by these
+# definitions has matured. These are the only candidates the ~Q2-2027
+# decision may evaluate; adding, removing, or re-weighting a candidate after
+# outcomes mature invalidates that candidate. All candidates are scored in
+# shadow only; promotion runs exclusively through the standard
+# 27/30/31 promote -> readiness -> lock chain on matured post-freeze
+# evidence.
+model_family: transportation
+contract_version: transportation_monitor_candidates_v1
+preregistered_at: "2026-08-03"
+
+evaluation:
+  benchmark: IYT
+  horizon_sessions: 63
+  signal_cadence: weekly_friday_completed_sessions
+  minimum_matured_signals: 26
+  earliest_decision: "2027-04-01"
+  costs_bps_per_one_way_turnover: 20
+  # Every candidate must also beat candidate C1_SLEEVE (the null model) to
+  # justify any ranking/tilting complexity.
+  null_candidate: C1_SLEEVE
+
+candidates:
+  C1_SLEEVE:
+    description: >-
+      Eligibility-screened equal-weight surface-freight sleeve. The null
+      model. Membership is mechanical per capture date: active surface
+      cohort rows in that day's published rank table with
+      rank_ready_flag=1; equal weights.
+    membership_rule: rank_table_surface_rank_ready
+    weighting: equal_weight
+    promotion_requires:
+      net_excess_vs_benchmark_positive: true
+      hit_rate_minimum: 0.50
+      no_single_name_dependency: true
+      drawdown_not_worse_than_benchmark_by: 0.10
+
+  C2_FROZEN_V2_RANK:
+    description: >-
+      The frozen surface_freight_v2 24-name ranked model exactly as sealed
+      2026-08-01; captured by the daily score/rank history builders
+      (scripts 25/25a/25b). No new capture is defined here; this entry
+      registers the sealed artifact stream as a decision candidate.
+    source: surface_freight_v2_daily_rank_history
+    promotion_requires:
+      validation_style_gates_on_matured_signals: true
+      beats_null_candidate_after_costs: true
+
+  C3_ASSET_LIGHT_THREE_SIGNAL:
+    description: >-
+      Fixed-weight score over the 13 active asset-light logistics names,
+      from the three signals that passed the pre-registered v3 preflight
+      stability gate. No optimization; weights and signs are frozen here.
+    universe:
+      - CHRW
+      - CYRX
+      - EXPD
+      - FWRD
+      - GXO
+      - HUBG
+      - JBHT
+      - LSTR
+      - PAL
+      - PBI
+      - R
+      - RLGT
+      - RXO
+    signals:
+      asset_turnover_yoy_change:
+        source: feature_financial_statement.asset_turnover
+        transform: value_minus_value_365d_earlier
+        sign: +1
+        weight: 0.3333333333
+      interest_coverage_level:
+        source: feature_financial_statement.interest_coverage
+        transform: level_with_no_debt_cap
+        # Asset-light brokers with no material interest burden carry NULL
+        # coverage in the financial features. When the financial row exists
+        # (asset_turnover observed) a NULL is the strongest coverage state
+        # and maps to the cap; a missing financial row remains missing.
+        no_debt_cap: 50.0
+        cap: 50.0
+        sign: +1
+        weight: 0.3333333333
+      realized_volatility_60d:
+        source: feature_market_technical.realized_vol_60d
+        transform: level
+        sign: -1
+        weight: 0.3333333334
+    scoring:
+      method: cross_sectional_zscore_then_weighted_sum
+      minimum_cross_section: 8
+      insufficient_cross_section_status: SKIPPED_INSUFFICIENT_CROSS_SECTION
+    portfolio_form:
+      # Small-group rule from the LTL analysis: full participation with
+      # constrained tilts, never a one-stock top slice.
+      base_weight: equal
+      tilt: score_proportional
+      floor: 0.04
+      cap: 0.14
+    promotion_requires:
+      beats_null_candidate_after_costs: true
+      positive_ic_on_matured_signals: true
+      leave_one_ticker_out_stable: true
+
+governance:
+  capture_script: scripts/21d_capture_transportation_monitor_candidates.py
+  capture_is_immutable_per_date: true
+  outcomes_accessed_at_capture_time: false
+  historical_windows_status: revealed_research_contaminated
+  production_promotion_from_this_contract: forbidden_without_27_30_31_chain

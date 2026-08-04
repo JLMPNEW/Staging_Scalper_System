@@ -82,6 +82,7 @@ tmpomvpuh6h/
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
 !SEC_fundamentals/sec_metric_mapping_full.csv
 !industrials/**/system_csvs/*.csv
+!industrials/transportation/data/transportation_v3_peer_groups.csv
 !industrials/transportation/data/transportation_specialized_metric_discovery_registry.csv
 !industrials/transportation/data/transportation_parser_supporting_metric_registry.csv
 !industrials/transportation/data/transportation_operating_archetypes.csv

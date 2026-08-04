@@ -34,7 +34,10 @@ defaults:
 # (defense publishes the oos-valid table machinery-adjacent stages depend on the
 # shared DB being consistent); technology order is stable but independent.
 group_order:
-  industrials: [defense, machinery]
+  # transportation runs last in the shared-industrials lane: it is the
+  # non-required shadow-monitor sector and must never delay defense or
+  # machinery on the shared SQLite database.
+  industrials: [defense, machinery, transportation]
   technology: [semiconductors, software_infrastructure, technology_hardware]
   biotech: [biotech]
   med_devices: [med_devices]
@@ -321,6 +324,57 @@ sectors:
       extra_args: []
 
   # ------------------------------------------------------- portfolio_layer
+  # --------------------------------------------------- transportation
+  # Shadow-monitor lane only: the family is COMPLETE_SHADOW_NOT_PROMOTED.
+  # Its whole purpose on the nightly rail is to accumulate outcome-blind
+  # post-freeze evidence for the ~Q2-2027 pre-registered decision
+  # (contract: industrials/transportation/data/
+  # transportation_monitor_candidates_v1.yaml). It must never block the
+  # production sectors, and its rank tables always carry
+  # oos_score_valid_flag=0 by design.
+  - name: transportation
+    db_group: industrials
+    dependency_tier: 0
+    required: false                     # shadow lane; never blocks the rail
+    network: true
+    entry_script: industrials/transportation/scripts/16_run_transportation_current_refresh.py
+    date_flag: "--asof"
+    args_template: ["--asof", "{date}"]
+    force_args: []
+    publish_glob: "output/industrials/transportation/dashboard/{date}/transportation_final_rank_table.csv"
+    publish_date_format: "%Y-%m-%d"
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: false            # sealed zero-overlay shadow model
+    staleness_tolerance_days: 5
+    health:
+      manifest: "output/industrials/transportation/orchestration/{date}/transportation_current_refresh_manifest.json"
+      status_keys: ["acceptance"]
+    # Candidate evidence accumulation after the daily publish:
+    # daily market features -> daily score history -> daily rank history
+    # (candidate C2, the frozen v2 model), then the pre-registered C1/C3
+    # candidate capture. All steps are append-only/immutable per date.
+    daily_post_steps:
+      - script: industrials/transportation/scripts/25a_materialize_transportation_daily_market_features.py
+        args_template: ["--start-date", "{date}", "--end-date", "{date}"]
+      - script: industrials/transportation/scripts/25_build_transportation_daily_score_history.py
+        args_template: ["--start-date", "{date}", "--end-date", "{date}"]
+      - script: industrials/transportation/scripts/25b_materialize_transportation_daily_rank_history.py
+        args_template: ["--start-date", "{date}", "--end-date", "{date}"]
+      - script: industrials/transportation/scripts/21d_capture_transportation_monitor_candidates.py
+        args_template: ["--asof", "{date}"]
+    weekly_pre_steps: []
+    backfill:
+      script: ""
+      args_template: []
+      per_date: false
+      note: "transportation history is hash-frozen; no automated backfill. Historical rebuilds require a new reviewed contract."
+    repair:
+      date_flag: "--asof"
+      selection_flag: "--from-step"
+      steps: []
+      rebuild_steps: []
+      extra_args: []
+
   - name: portfolio_layer
     db_group: portfolio
     dependency_tier: 1                  # runs only after the Tier-0 gate passes

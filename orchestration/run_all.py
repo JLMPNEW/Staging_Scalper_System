@@ -2395,13 +2395,17 @@ def run_selftest() -> int:
 
     # --- real registry loads and every entry_script exists ---
     real = load_registry(DEFAULT_REGISTRY)
-    ok("real_registry_sectors", len(real.sectors) == 8)
+    ok("real_registry_sectors", len(real.sectors) == 9)
     try:
         validate_registry_paths(real)
         ok("real_registry_all_script_paths_exist", True)
     except ValueError:
         ok("real_registry_all_script_paths_exist", False)
-    ok("real_industrials_order", real.group_order.get("industrials") == ["defense", "machinery"])
+    ok(
+        "real_industrials_order",
+        real.group_order.get("industrials")
+        == ["defense", "machinery", "transportation"],
+    )
     ok("real_portfolio_tier1", real.by_name("portfolio_layer").dependency_tier == 1)
     rdef = real.by_name("defense")
     ok("real_defense_weekly_no_promotion", not rdef.weekly_pre_steps)
