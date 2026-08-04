@@ -517,7 +517,11 @@ score_contract:
     # calibration, and production activation are complete and separately approved.
     - model_family: transportation
       adapter: industrial_family
-      enabled: false
+      # Enabled but fail-closed: require_oos_score_valid blocks allocation
+      # (sealed zero-overlay shadow). Daily publishes resumed 2026-08-03 via
+      # the orchestration transportation lane, so the staleness mute that
+      # briefly disabled this source is obsolete.
+      enabled: true
       required: false
       staleness_tolerance_days: 3
       sector: "Industrials"
