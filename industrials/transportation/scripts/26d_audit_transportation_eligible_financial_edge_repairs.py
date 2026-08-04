@@ -195,7 +195,7 @@ def _ranked(rows: list[dict[str, object]]) -> tuple[dict[str, int], set[str]]:
     ordered = sorted(
         rows,
         key=lambda row: (
-            -float(row["recomputed_generic_score"]),
+            -float(str(row["recomputed_generic_score"])),
             str(row.get("ticker") or ""),
         ),
     )
@@ -207,7 +207,7 @@ def _ranked(rows: list[dict[str, object]]) -> tuple[dict[str, int], set[str]]:
 def _delta(left: object, right: object) -> float | None:
     if left is None or right is None:
         return None
-    return float(right) - float(left)
+    return float(str(right)) - float(str(left))
 
 
 def main() -> int:
@@ -518,8 +518,8 @@ def main() -> int:
     }
 
     gates = policy["materiality_gates"]
-    max_abs_score_delta = max(abs(float(row["score_delta"])) for row in current_materiality_rows)
-    max_abs_rank_change = max(abs(int(row["rank_change"])) for row in current_materiality_rows)
+    max_abs_score_delta = max(abs(float(str(row["score_delta"]))) for row in current_materiality_rows)
+    max_abs_rank_change = max(abs(int(str(row["rank_change"]))) for row in current_materiality_rows)
     top_membership_changes = len(baseline_top.symmetric_difference(repaired_top))
     current_material = (
         max_abs_score_delta >= float(gates["minimum_current_max_abs_score_delta"])

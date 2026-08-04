@@ -192,8 +192,8 @@ def metric_ic_diagnostics(
             if len(members) < minimum_cross_section:
                 continue
             value = spearman(
-                [float(row[field]) for row in members],
-                [float(row["forward_excess_return"]) for row in members],
+                [float(str(row[field])) for row in members],
+                [float(str(row["forward_excess_return"])) for row in members],
             )
             if value is not None:
                 period_ics.append((asof, value))
@@ -244,17 +244,17 @@ def select_train_metrics(
         row = dict(source)
         failures: list[str] = []
         mean_ic = finite_float(row.get("mean_ic"))
-        if float(row.get("observation_coverage") or 0.0) < float(
+        if float(str(row.get("observation_coverage") or 0.0)) < float(
             gates["minimum_train_observation_coverage"]
         ):
             failures.append("coverage")
-        if int(row.get("ic_snapshot_count") or 0) < int(
+        if int(str(row.get("ic_snapshot_count") or 0)) < int(
             gates["minimum_train_ic_snapshot_count"]
         ):
             failures.append("history")
         if mean_ic is None or mean_ic <= 0:
             failures.append("nonpositive_train_ic")
-        if int(row.get("positive_subperiod_count") or 0) < int(
+        if int(str(row.get("positive_subperiod_count") or 0)) < int(
             gates["minimum_positive_train_subperiods"]
         ):
             failures.append("subperiod_instability")
@@ -262,15 +262,15 @@ def select_train_metrics(
         row["selection_failures"] = ";".join(failures)
         row["selection_strength"] = (
             float(mean_ic)
-            * float(row.get("observation_coverage") or 0.0)
-            * (1.0 + 0.1 * int(row.get("positive_subperiod_count") or 0))
+            * float(str(row.get("observation_coverage") or 0.0))
+            * (1.0 + 0.1 * int(str(row.get("positive_subperiod_count") or 0)))
             if not failures and mean_ic is not None
             else 0.0
         )
         eligible.append(row)
     passing = sorted(
         (row for row in eligible if row["selection_status"] == "PASS"),
-        key=lambda row: (-float(row["selection_strength"]), str(row["metric_id"])),
+        key=lambda row: (-float(str(row["selection_strength"])), str(row["metric_id"])),
     )
     selected: list[dict[str, object]] = []
     component_counts: defaultdict[str, int] = defaultdict(int)
@@ -299,16 +299,20 @@ def select_train_mean_reversion_metrics(
         if str(source.get("metric_id") or "") not in allowed:
             continue
         mean_ic = finite_float(source.get("mean_ic"))
+        raw_subperiods = source.get("subperiod_ics")
         subperiods = [
-            finite_float(value) for value in source.get("subperiod_ics", [])
+            finite_float(value)
+            for value in (
+                raw_subperiods if isinstance(raw_subperiods, list) else []
+            )
         ]
         negative_subperiods = sum(
             value is not None and value < 0 for value in subperiods
         )
         if (
-            float(source.get("observation_coverage") or 0.0)
+            float(str(source.get("observation_coverage") or 0.0))
             >= float(gates["minimum_train_observation_coverage"])
-            and int(source.get("ic_snapshot_count") or 0)
+            and int(str(source.get("ic_snapshot_count") or 0))
             >= int(gates["minimum_train_ic_snapshot_count"])
             and mean_ic is not None
             and mean_ic < 0
@@ -319,13 +323,13 @@ def select_train_mean_reversion_metrics(
             row["negative_subperiod_count"] = negative_subperiods
             row["selection_strength"] = (
                 abs(mean_ic)
-                * float(row.get("observation_coverage") or 0.0)
+                * float(str(row.get("observation_coverage") or 0.0))
                 * (1.0 + 0.1 * negative_subperiods)
             )
             output.append(row)
     return sorted(
         output,
-        key=lambda row: (-float(row["selection_strength"]), str(row["metric_id"])),
+        key=lambda row: (-float(str(row["selection_strength"])), str(row["metric_id"])),
     )
 
 
@@ -374,7 +378,7 @@ def train_derived_candidate_registry(
     equal = {field: 1.0 / len(fields) for field in fields}
     proportional = _capped_normalize(
         {
-            field: float(row["selection_strength"])
+            field: float(str(row["selection_strength"]))
             for field, row in fields.items()
         },
         cap=float(gates["maximum_single_metric_weight"]),
@@ -437,7 +441,7 @@ def top_bottom_diagnostic(
         outcome = finite_float(row.get("forward_excess_return"))
         if score is not None and outcome is not None:
             by_date[str(row.get("asof_date") or "")].append((row, score))
-    periods: list[dict[str, float]] = []
+    periods: list[dict[str, Any]] = []
     for asof in sorted(by_date):
         members = by_date[asof]
         if len(members) < minimum_cross_section:
@@ -452,8 +456,8 @@ def top_bottom_diagnostic(
         )
         top = ordered[:count]
         bottom = ordered[-count:]
-        top_return = mean(float(row["forward_excess_return"]) for row, _ in top)
-        bottom_return = mean(float(row["forward_excess_return"]) for row, _ in bottom)
+        top_return = mean(float(str(row["forward_excess_return"])) for row, _ in top)
+        bottom_return = mean(float(str(row["forward_excess_return"])) for row, _ in bottom)
         periods.append(
             {
                 "asof_date": asof,

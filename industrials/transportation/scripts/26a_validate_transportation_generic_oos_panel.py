@@ -189,9 +189,12 @@ def main() -> int:
                 f"{source['asof_date']}: source rank manifest hash mismatch"
             )
     return_audit = audit_panel_return_lineage(rows, price_rows)
+    return_issues = return_audit["issues"]
     issues.extend(
         f"return reconstruction: {item}"
-        for item in return_audit["issues"]
+        for item in (
+            return_issues if isinstance(return_issues, list) else []
+        )
     )
     split_counts = Counter(row["split"] for row in split_rows)
     for required in ("train", "validation", "holdout"):

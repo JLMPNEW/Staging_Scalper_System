@@ -252,19 +252,19 @@ def train_score_diagnostics(
         ordered = sorted(
             members,
             key=lambda row: (
-                -float(row["recomputed_generic_score"]),
+                -float(str(row["recomputed_generic_score"])),
                 str(row.get("ticker") or ""),
             ),
         )
         cross_ic = spearman(
-            [float(row["recomputed_generic_score"]) for row in ordered],
-            [float(row["forward_excess_return"]) for row in ordered],
+            [float(str(row["recomputed_generic_score"])) for row in ordered],
+            [float(str(row["forward_excess_return"])) for row in ordered],
         )
         if cross_ic is not None:
             ics.append(cross_ic)
         count = max(1, math.ceil(len(ordered) * top_fraction))
-        top_returns.append(mean(float(row["forward_excess_return"]) for row in ordered[:count]))
-        bottom_returns.append(mean(float(row["forward_excess_return"]) for row in ordered[-count:]))
+        top_returns.append(mean(float(str(row["forward_excess_return"])) for row in ordered[:count]))
+        bottom_returns.append(mean(float(str(row["forward_excess_return"])) for row in ordered[-count:]))
     return {
         "snapshot_count": len(ics),
         "mean_ic": mean(ics) if ics else None,

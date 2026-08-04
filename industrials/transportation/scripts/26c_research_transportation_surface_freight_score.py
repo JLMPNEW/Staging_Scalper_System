@@ -87,35 +87,35 @@ def gate_result(
 ) -> tuple[bool, list[str]]:
     checks = {
         "minimum_snapshot_count": (
-            float(metrics.get("snapshot_count") or 0)
+            float(str(metrics.get("snapshot_count") or 0))
             >= gates["minimum_snapshot_count"]
         ),
         "minimum_outcome_coverage": (
-            float(metrics.get("outcome_coverage") or 0)
+            float(str(metrics.get("outcome_coverage") or 0))
             >= gates["minimum_outcome_coverage"]
         ),
         "minimum_mean_ic": (
             finite_float(metrics.get("mean_ic")) is not None
-            and float(metrics["mean_ic"]) >= gates["minimum_mean_ic"]
+            and float(str(metrics["mean_ic"])) >= gates["minimum_mean_ic"]
         ),
         "minimum_mean_top_excess_net": (
             finite_float(metrics.get("mean_top_excess_net")) is not None
-            and float(metrics["mean_top_excess_net"])
+            and float(str(metrics["mean_top_excess_net"]))
             > gates["minimum_mean_top_excess_net"]
         ),
         "minimum_top_excess_hit_rate": (
             finite_float(metrics.get("top_excess_hit_rate")) is not None
-            and float(metrics["top_excess_hit_rate"])
+            and float(str(metrics["top_excess_hit_rate"]))
             >= gates["minimum_top_excess_hit_rate"]
         ),
         "minimum_max_drawdown": (
             finite_float(metrics.get("max_drawdown")) is not None
-            and float(metrics["max_drawdown"])
+            and float(str(metrics["max_drawdown"]))
             >= gates["minimum_max_drawdown"]
         ),
         "maximum_average_turnover": (
             finite_float(metrics.get("average_turnover")) is not None
-            and float(metrics["average_turnover"])
+            and float(str(metrics["average_turnover"]))
             <= gates["maximum_average_turnover"]
         ),
     }
@@ -135,9 +135,9 @@ def evaluate(
         weights=weights,
         split=split,
         horizon_sessions=63,
-        top_fraction=float(standards["top_fraction"]),
-        minimum_cross_section=int(standards["minimum_cross_section"]),
-        transaction_cost_bps=float(standards["transaction_cost_bps"]),
+        top_fraction=float(str(standards["top_fraction"])),
+        minimum_cross_section=int(str(standards["minimum_cross_section"])),
+        transaction_cost_bps=float(str(standards["transaction_cost_bps"])),
         require_complete_components=True,
     )
 
