@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # pyright: reportMissingImports=false
 
+import logging
 import sys
 from pathlib import Path
 
@@ -119,3 +120,82 @@ def test_block_bootstrap_clamps_block_to_short_series() -> None:
 def test_block_bootstrap_rejects_empty_input() -> None:
     with pytest.raises(ValueError):
         ablation.moving_block_bootstrap_ci(np.array([np.nan]))
+
+
+# --------------------------------------------------------------------------------------
+# Member-price data-artifact guards (price floor + return winsorization).
+# --------------------------------------------------------------------------------------
+def _one_week_guard_fixture(
+    prices: dict[str, list[float]],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+    """One evaluable signal week (entry 03-10, exit 03-17), all tickers in one industry."""
+    signal_dates = pd.DatetimeIndex(["2025-03-07", "2025-03-14"])
+    price_frame = pd.DataFrame(prices, index=pd.to_datetime(["2025-03-10", "2025-03-17"]))
+    membership = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2025-03-07")] * len(prices),
+            "Ticker": list(prices.keys()),
+            "industry_key": ["Tech||Software||software"] * len(prices),
+        }
+    )
+    return membership, price_frame, signal_dates
+
+
+def test_sub_floor_member_excluded_and_basket_renormalized(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # LLNW_EGIO-style sentinel print (0.000001) would be a fake +29,900% weekly return;
+    # the floor guard must drop it and the basket must renormalize over the survivors.
+    membership, prices, signal_dates = _one_week_guard_fixture(
+        {
+            "AAA": [10.0, 11.0],  # +10%
+            "BBB": [20.0, 19.0],  # -5%
+            "LLNW_EGIO": [0.000001, 0.0003],
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger=ablation.logger.name):
+        out = ablation.compute_industry_week_returns(
+            membership=membership,
+            prices=prices,
+            signal_dates=signal_dates,
+            min_member_price=0.01,
+        )
+    assert len(out) == 1
+    row = out.iloc[0]
+    assert int(row["priced_members"]) == 2
+    assert float(row["industry_return"]) == pytest.approx((0.10 - 0.05) / 2.0)
+    floor_warnings = [r for r in caplog.records if "price-floor" in r.getMessage()]
+    assert len(floor_warnings) == 1
+    message = floor_warnings[0].getMessage()
+    assert "LLNW_EGIO" in message
+    assert "2025-03-07" in message
+
+
+def test_extreme_member_return_winsorized_at_plus_minus_200pct(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # DDD clears the price floor but returns +2400%; it must be clamped to +200% and
+    # averaged with the untouched member, with a warning naming ticker and week.
+    membership, prices, signal_dates = _one_week_guard_fixture(
+        {
+            "AAA": [10.0, 11.0],  # +10%, untouched
+            "DDD": [0.02, 0.50],  # +2400% -> winsorized to +200%
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger=ablation.logger.name):
+        out = ablation.compute_industry_week_returns(
+            membership=membership,
+            prices=prices,
+            signal_dates=signal_dates,
+        )
+    assert len(out) == 1
+    row = out.iloc[0]
+    assert int(row["priced_members"]) == 2
+    assert float(row["industry_return"]) == pytest.approx(
+        (0.10 + ablation.MEMBER_RETURN_WINSOR_LIMIT) / 2.0
+    )
+    winsor_warnings = [r for r in caplog.records if "winsor guard" in r.getMessage()]
+    assert len(winsor_warnings) == 1
+    message = winsor_warnings[0].getMessage()
+    assert "DDD" in message
+    assert "2025-03-07" in message

@@ -38,6 +38,14 @@ PIT rules:
   an industry with no priced members that week is excluded from BOTH arms for fairness. Weights
   are built only from same-week signals (no lookahead).
 
+Member-price data-artifact guards:
+  Entry or exit closes below ``--min-member-price`` (default 0.01) are treated as price-panel
+  artifacts (e.g. sub-cent sentinel prints such as the 0.000001 LLNW_EGIO rows documented in
+  ``out/industry_ablation/analysis_2025``): the member is excluded for that week and the basket
+  renormalizes over the surviving members. Surviving member weekly returns are winsorized at
+  +/-200% (``MEMBER_RETURN_WINSOR_LIMIT``). Both guards log a per-member warning with ticker
+  and signal date.
+
 Costs:
   ``shadow_validation_layer.round_trip_cost_bps`` (config_macro_raw.yaml) applied to weekly
   one-way turnover: ``turnover_t = 0.5 * sum(|w_t - w_{t-1}|)`` (all-cash start) and
@@ -96,6 +104,8 @@ BOOTSTRAP_BLOCK_WEEKS = 8
 BOOTSTRAP_RESAMPLES = 1000
 BOOTSTRAP_SEED = 20260804
 DEFAULT_GROSS_SCALAR = 1.0
+DEFAULT_MIN_MEMBER_PRICE = 0.01
+MEMBER_RETURN_WINSOR_LIMIT = 2.0
 OUTPUT_SUBDIR = "MacroLayer/out/industry_ablation"
 PORTFOLIO_CONFIG_RELATIVE = "config.yaml"
 ARM_NAMES = ("neutral", "tilt", "gross")
@@ -361,8 +371,19 @@ def compute_industry_week_returns(
     membership: pd.DataFrame,
     prices: pd.DataFrame,
     signal_dates: pd.DatetimeIndex,
+    min_member_price: float = DEFAULT_MIN_MEMBER_PRICE,
 ) -> pd.DataFrame:
-    """Equal-weight member returns per (signal week, industry_key) with entry/exit PIT bars."""
+    """Equal-weight member returns per (signal week, industry_key) with entry/exit PIT bars.
+
+    Data-artifact guards (each fires a per-member warning with ticker and signal date):
+      * Members whose entry or exit close prints below ``min_member_price`` are excluded for
+        that week; the basket renormalizes over the surviving members.
+      * Surviving member weekly returns are winsorized at ``+/-MEMBER_RETURN_WINSOR_LIMIT``.
+    """
+    if not (math.isfinite(min_member_price) and min_member_price >= 0.0):
+        raise ValueError(
+            f"min_member_price must be a finite non-negative float; got {min_member_price!r}."
+        )
     ordered = pd.DatetimeIndex(signal_dates).sort_values()
     price_index = pd.DatetimeIndex(prices.index)
     entries = entry_dates_for_signals(ordered, price_index)
@@ -389,10 +410,38 @@ def compute_industry_week_returns(
         entry_px = prices.loc[entry, tickers].astype(float)
         exit_px = prices.loc[exit_, tickers].astype(float)
         valid = entry_px.notna() & exit_px.notna() & (entry_px > 0.0)
+        below_floor = valid & ((entry_px < min_member_price) | (exit_px < min_member_price))
+        if bool(below_floor.any()):
+            for ticker in entry_px.index[below_floor]:
+                logger.warning(
+                    "Member price-floor guard: excluding %s for signal week %s "
+                    "(entry %.6g @ %s, exit %.6g @ %s; floor %.6g).",
+                    ticker,
+                    signal_date.date(),
+                    float(entry_px[ticker]),
+                    entry.date(),
+                    float(exit_px[ticker]),
+                    exit_.date(),
+                    min_member_price,
+                )
+            valid &= ~below_floor
         if not bool(valid.any()):
             skipped_no_bars.append(signal_date.date().isoformat())
             continue
         member_returns = (exit_px[valid] / entry_px[valid] - 1.0).rename("member_return")
+        extreme = member_returns.abs() > MEMBER_RETURN_WINSOR_LIMIT
+        if bool(extreme.any()):
+            for ticker, raw_return in member_returns[extreme].items():
+                logger.warning(
+                    "Member winsor guard: clamping %s for signal week %s from %+.4f to +/-%.2f.",
+                    ticker,
+                    signal_date.date(),
+                    float(raw_return),
+                    MEMBER_RETURN_WINSOR_LIMIT,
+                )
+            member_returns = member_returns.clip(
+                lower=-MEMBER_RETURN_WINSOR_LIMIT, upper=MEMBER_RETURN_WINSOR_LIMIT
+            )
         keyed = members.set_index("Ticker")["industry_key"].reindex(member_returns.index)
         by_industry = (
             pd.DataFrame({"industry_key": keyed, "member_return": member_returns})
@@ -653,6 +702,15 @@ def parse_args() -> argparse.Namespace:
         help="Path to macro raw YAML config (default MacroLayer/config_macro_raw.yaml).",
     )
     parser.add_argument("--serving-db-path", type=Path, default=None, help="Optional serving SQLite path override.")
+    parser.add_argument(
+        "--min-member-price",
+        type=float,
+        default=DEFAULT_MIN_MEMBER_PRICE,
+        help=(
+            "Exclude members whose PIT entry or exit close prints below this floor "
+            f"(price-panel artifact guard; default {DEFAULT_MIN_MEMBER_PRICE})."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -721,6 +779,7 @@ def main() -> None:
         membership=membership,
         prices=prices,
         signal_dates=signal_dates,
+        min_member_price=float(args.min_member_price),
     )
     result = build_weekly_arms(
         signals=signals,
@@ -751,6 +810,8 @@ def main() -> None:
             "softplus_beta": TILT_SOFTPLUS_BETA,
             "industry_cap": TILT_INDUSTRY_CAP,
             "round_trip_cost_bps": round_trip_cost_bps,
+            "min_member_price": float(args.min_member_price),
+            "member_return_winsor_limit": MEMBER_RETURN_WINSOR_LIMIT,
             "regime_to_gross_scalar": regime_to_gross_scalar,
             "regime_context_max_age_days": context_max_age_days,
             "weeks_per_year": WEEKS_PER_YEAR,
