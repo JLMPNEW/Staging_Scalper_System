@@ -24,22 +24,22 @@ CONTRACT_VERSION = "factor_validation_v1"
 CALENDAR_DAYS_PER_TRADING_DAY = 365.25 / 252.0
 
 
-def _as_date(value: date | datetime | str) -> date:
+def _as_date(value: date | datetime | str, *, field_name: str = "as_of_date") -> date:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
     if not isinstance(value, str):
-        raise TypeError(f"as_of_date must be a date, datetime, or ISO string, got {type(value).__name__}")
+        raise TypeError(f"{field_name} must be a date, datetime, or ISO string, got {type(value).__name__}")
     text = value
     if len(text) != 10:
-        raise ValueError(f"as_of_date must be exact ISO YYYY-MM-DD, got {value!r}")
+        raise ValueError(f"{field_name} must be exact ISO YYYY-MM-DD, got {value!r}")
     try:
         parsed = date.fromisoformat(text)
     except ValueError as exc:
-        raise ValueError(f"as_of_date must be ISO YYYY-MM-DD, got {value!r}") from exc
+        raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
     if parsed.isoformat() != text:
-        raise ValueError(f"as_of_date must be canonical ISO YYYY-MM-DD, got {value!r}")
+        raise ValueError(f"{field_name} must be canonical ISO YYYY-MM-DD, got {value!r}")
     return parsed
 
 
@@ -146,7 +146,7 @@ class FactorValidationConfig:
         object.__setattr__(
             self,
             "holiday_dates",
-            tuple(sorted({_as_date(value) for value in self.holiday_dates})),
+            tuple(sorted({_as_date(value, field_name="holiday_dates") for value in self.holiday_dates})),
         )
         if not math.isfinite(self.round_trip_cost) or self.round_trip_cost < 0.0:
             raise ValueError("round_trip_cost must be finite and non-negative")
@@ -347,7 +347,7 @@ def _bucket_assignments(values: Sequence[float], quantile_count: int) -> tuple[i
         # center bucket, so a factor and its negation produce mirrored bucket
         # assignments (the sole exception is a tie group sitting exactly at the
         # scale midpoint, which has no mirror-symmetric bucket and is placed
-        # deterministically at the lower-middle bucket).
+        # deterministically at the upper-middle bucket).
         numerator = 2 * index * maximum_bucket
         denominator = 2 * maximum_group
         quotient, remainder = divmod(numerator, denominator)
@@ -756,11 +756,13 @@ def _transition_diagnostics(
     if not states:
         return (), None, None, None
     updated = [states[0]]
-    # Adjacency tolerance is keyed to the TYPICAL (median) cadence, not the
-    # minimum: a dense daily cluster inside a monthly panel must not disqualify
-    # the monthly transitions. floor(1.5x) additionally rejects a single
-    # dropped date in daily cadence (gap 2 > 1) while tolerating holiday-shifted
-    # weekly/monthly gaps; declared holidays remove the residual ambiguity.
+    # Adjacency tolerance is keyed to the TYPICAL (floored median) cadence,
+    # not the minimum: a dense daily cluster inside a monthly panel must not
+    # disqualify the monthly transitions. Flooring the median keeps a panel
+    # whose gaps are half dropped-date 2s at typical 1, so single dropped
+    # daily dates are never spanned; floor(1.5x) then tolerates
+    # holiday-shifted weekly/monthly gaps, and declared holidays remove the
+    # residual ambiguity.
     maximum_consecutive_gap = max(1, (typical_step_trading_days * 3) // 2)
     for previous, current in zip(states, states[1:], strict=False):
         gap = _business_day_gap(
@@ -919,7 +921,7 @@ def validate_factor(
     )
     states_tuple, persistence, turnover, two_leg_turnover = _transition_diagnostics(
         states,
-        typical_step_trading_days=max(1, math.ceil(cadence.median_step_trading_days)),
+        typical_step_trading_days=max(1, int(cadence.median_step_trading_days)),
         round_trip_cost=config.round_trip_cost,
         holidays=config.holiday_dates,
     )

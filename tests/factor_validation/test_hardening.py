@@ -233,6 +233,7 @@ def test_happy_path_yields_eligible_evidence_with_gating_p_value() -> None:
     assert result.mean_gross_top_minus_bottom_matched is not None
     assert result.mean_net_top_minus_bottom is not None
     assert result.mean_two_leg_turnover is not None
+    assert result.mean_two_leg_turnover > 0.0
     assert result.mean_gross_top_minus_bottom_matched - result.mean_net_top_minus_bottom == pytest.approx(
         config.round_trip_cost * result.mean_two_leg_turnover
     )
@@ -255,6 +256,14 @@ def test_bucket_assignment_mirrors_under_negation() -> None:
         forward = _bucket_assignments(values, quantile_count)
         mirrored = _bucket_assignments([-value for value in values], quantile_count)
         assert mirrored == tuple(quantile_count - 1 - bucket for bucket in forward)
+
+    # Midpoint half-tie groups (positions 0.5 and 1.5 on the 0..2 bucket scale)
+    # must break toward the center AND stay mirror-consistent; plain half-up
+    # rounding fails this exact case.
+    tie_case = _bucket_assignments([0.0, 1.0, 2.0, 3.0, 4.0], 3)
+    assert tie_case == (0, 1, 1, 1, 2)
+    tie_mirrored = _bucket_assignments([0.0, -1.0, -2.0, -3.0, -4.0], 3)
+    assert tie_mirrored == tuple(2 - bucket for bucket in tie_case)
 
 
 def test_hac_lag_cannot_be_undercut_by_config() -> None:
