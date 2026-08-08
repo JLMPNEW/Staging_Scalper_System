@@ -11,13 +11,15 @@ macro_raw:
   as_of_date: null
   # True-vintage series whose provider legitimately restates the full history on
   # (re)estimation: NFCI/ANFCI are re-estimated weekly by the Chicago Fed factor
-  # model; INDPRO is restated by the annual G.17 revisions. Exempt from the
-  # implausible_vintage_concentration QA error, which otherwise flags exactly the
-  # clamped-realtime fabrication signature.
+  # model; INDPRO is restated by the annual G.17 revisions; seasonally adjusted
+  # payrolls are revised by the annual CES benchmark and occasional historical
+  # reconstructions. Exempt only these named series from the concentration QA
+  # heuristic, which otherwise detects the clamped-realtime fabrication shape.
   qa_full_history_revision_registry_keys:
     - "us_nfci"
     - "us_anfci"
     - "us_industrial_production"
+    - "us_nonfarm_payrolls"
 
   serving:
     pit_workers: 2

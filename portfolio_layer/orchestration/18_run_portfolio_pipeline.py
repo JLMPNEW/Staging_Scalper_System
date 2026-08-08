@@ -14,18 +14,44 @@ before continuing:
   macro     20a raw -> 20 serving -> 21 -> 22    (Stage 6, shadow)
   bl        23 -> 24 -> 25 -> 26                 (Stage 7, shadow)
   sleeves   27 -> 28 -> 29                       (Stage 8, shadow)
-  ledger    31 -> 32                             (Stage 8.5; skipped unless broker imports exist)
-  exits     33 -> 34 -> 35                       (Stage 9, needs ledger)
+  ledger    30 -> 31 -> 32                       (Stage 8.5; skipped unless broker imports exist)
+  exits     33 -> 34 -> 35 -> 36                 (Stage 9, needs ledger)
   governor  19                                   (Stage 12 bounded gross directive)
   final     20                                   (immutable deployable target weights)
-  monitor   39 -> 64                             (shadow expectations + advisory levels)
+  monitor   39 -> 50                             (shadow expectations + advisory levels)
   final_report 21                                (enriched target/IB/monitor report)
 
 Cadences (config `orchestration`): `tactical` refreshes the fast loop, including rotation;
-`strategic` runs every group. Stages are immutable by default; `--force` explicitly rebuilds them.
-Each producer invalidates dependent seals first. IB liquidity collection (05c) is attempted by this
-overnight process when enabled; connection failure is WARN-only, while 05d/08 fail closed on any
-partial or invalid panel. Stage 4's explicit spread fallback covers a wholly absent panel.
+`strategic` runs every group. Both cadences intentionally run some scripts twice (the
+monitor_filter re-solve of Stage 3/4, the second rotation/governor pass, and the final book
+after the bootstrap book).
+
+Immutability contract:
+  * Sealed stages are immutable without an operator ``--force``.
+  * A repeat occurrence of a script inside one planned run is an intentional re-pass and is
+    self-forced (``--force`` appended for that step only), so a non-force run can complete a
+    shipped cadence end to end.
+  * A first occurrence whose gate acceptance manifest is already sealed PASS* for this as-of
+    (no date mismatch, no parent/provenance drift) is skipped as ALREADY_SEALED, giving
+    crash-resume without rebuilding sealed artifacts.
+  * A first occurrence whose gate manifest is absent or non-PASS and whose child refuses to
+    overwrite existing partial outputs is relaunched once with ``--force``: the step never
+    sealed, so its partial outputs are safe to rebuild. This never applies to sealed steps.
+  * ``--dry-run`` uses the same predicate functions and displays RE_PASS / RESUME_SKIP
+    markers so the printed plan cannot drift from execution.
+  * Without an explicit ``--as-of`` the default may only resolve to the current NYSE
+    session (previous trading day on/before today). If the latest started run dir is any
+    other date the run hard-errors instead of resuming it, because self-forced re-pass
+    steps would rebuild that prior day's sealed final book. ``--force`` always requires
+    an explicit ``--as-of``.
+
+Each producer invalidates dependent seals first. IB liquidity collection (05c) is attempted by
+this overnight process when enabled; a 05c connection failure is itself WARN-only, but with
+`liquidity_panel.enhanced_intraday_enabled: true` (the production setting) 05d ALWAYS runs and
+fails closed on a missing or partial spread_snapshot.csv, so an overnight IB outage hard-stops
+the risk group rather than silently falling through. 05d is skipped only when the panel is
+wholly absent AND enhanced intraday collection is disabled; only in that configuration does
+Stage 4's explicit spread fallback cover the absent panel.
 
 Every run writes runs/<as_of>/orchestration_meta.json with per-step durations, exit codes, and the
 acceptance read from each stage manifest. A narrowly scoped recovery run may select a different
@@ -42,9 +68,9 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
@@ -60,10 +86,14 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
+from portfolio_layer.expectations_monitor.monitor_common import monitor_output_subdir  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
 LOGGER = logging.getLogger("run_portfolio_pipeline")
+# Set by run_pipeline() once the run meta path is known; main() uses it to persist
+# a terminal FAIL meta when an exception escapes, so the meta never stays RUNNING.
+_TERMINAL_FAIL_PERSIST: Callable[[str], None] | None = None
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 GLOBAL_ORCHESTRATION_LOCK = PROJECT_ROOT / "orchestration" / ".orchestrator.lock"
 MASTER_PID_ENV = "STAGING_ORCHESTRATOR_PID"
@@ -283,9 +313,12 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
         ),
     ],
 }
-# Earnings remains advisory. The monitor is now a production Stage-3 entry input,
-# so its failure must stop the deployable pass rather than reuse an old state file.
-SOFT_GROUPS = {"earnings"}
+# No group is advisory. The monitor is a production Stage-3 entry input, and
+# 21_enrich_final_target_book (final_report) hard-requires a same-date sealed
+# earnings_calendar.csv, so an earnings failure must hard-stop the run early
+# instead of resurfacing hours later at the last step. The soft-fail mechanism
+# is retained for future genuinely advisory groups.
+SOFT_GROUPS: set[str] = set()
 OPTIONAL_STEP_SCRIPTS = {"05c_collect_ib_historical_spread_samples.py"}
 # Scripts in this set do not expose a --force flag. The macro wrappers are
 # deterministic refresh entry points, while readiness is read-only.
@@ -295,11 +328,16 @@ NO_FORCE_SCRIPTS = {
     "20_run_macro_serving.py",
     "38_validate_earnings_dates.py",
 }
+# Kept byte-identical to config.yaml `orchestration.cadences` (the shipped
+# defaults). plan_groups() logs whenever a config override differs from these
+# built-ins so cadence drift is visible in the run log. plan_groups() itself
+# normalizes one ledger pass before the first monitor group when holdings are
+# required, so ledger needs no fixed slot here beyond the config's.
 DEFAULT_CADENCES = {
     "tactical": [
         "scores", "risk", "optimizer", "costs", "rotation", "governor",
-        "bootstrap_final", "earnings", "monitor", "monitor_filter",
-        "rotation", "macro_contract", "governor", "final", "final_report",
+        "bootstrap_final", "earnings", "monitor", "monitor_filter", "rotation",
+        "macro_contract", "governor", "final", "final_report",
     ],
     "strategic": [
         "scores", "risk", "optimizer", "costs", "rotation", "macro", "governor",
@@ -309,6 +347,262 @@ DEFAULT_CADENCES = {
     ],
 }
 MACRO_REFRESH_SCRIPTS = {"20a_run_macro_raw.py", "20_run_macro_serving.py"}
+# The exact refusal raised by portfolio_layer.core.contracts.fail_if_exists when a
+# producer meets its own prior partial outputs. Used by the partial-step recovery
+# path (never for sealed steps).
+OVERWRITE_REFUSAL_SIGNATURE = "Refusing to overwrite existing run artifacts without --force"
+
+
+def resolved_groups(config: dict[str, Any]) -> dict[str, list[tuple[str, str, str | None]]]:
+    """GROUPS with the monitor gate manifests resolved from config.
+
+    Monitor producers and consumers resolve their run-dir output directory from
+    `expectations_monitor.output_subdir` (monitor_common.monitor_output_subdir,
+    default "expectations_monitor"). The orchestrator must evaluate gate
+    acceptance at that same configured location instead of a hardcoded subdir.
+    """
+    subdir = monitor_output_subdir(config)
+    groups = dict(GROUPS)
+    groups["monitor"] = [
+        (
+            "expectations_monitor",
+            "39_sync_monitor_universe.py",
+            f"{subdir}/monitor_universe_manifest.json",
+        ),
+        (
+            "expectations_monitor",
+            "50_run_expectations_monitor_daily.py",
+            f"{subdir}/daily_monitor_manifest.json",
+        ),
+    ]
+    return groups
+
+
+def skip_liquidity_audit(config: dict[str, Any], run_dir: Path) -> bool:
+    """Single skip predicate for 05d used by BOTH dry-run and execution.
+
+    05d is skipped only when there is no spread snapshot to audit AND the
+    enhanced intraday collection is disabled; with the collector enabled the
+    audit must run (and fail closed) rather than be silently skipped.
+    """
+    return (
+        not (run_dir / "risk" / "spread_snapshot.csv").exists()
+        and not bool(cfg_get(config, "liquidity_panel.enhanced_intraday_enabled", False))
+    )
+
+
+def build_step_plan(
+    planned: list[str], groups: dict[str, list[tuple[str, str, str | None]]]
+) -> list[list[dict[str, Any]]]:
+    """Executed step plan, one inner list per planned group pass.
+
+    Counts occurrences of every script basename across the WHOLE planned step
+    list: any repeat occurrence is an intentional re-pass (monitor_filter
+    re-solve, second rotation/governor pass, final after bootstrap_final) and is
+    self-forced so a non-force run can complete a shipped cadence. Each step also
+    carries its gate manifest: the step's own acceptance manifest when it has
+    one, else the next acceptance manifest at-or-after it inside the group (the
+    seal that certifies the step's outputs).
+    """
+    occurrences: dict[str, int] = {}
+    plan: list[list[dict[str, Any]]] = []
+    for group in planned:
+        steps = groups[group]
+        pass_steps: list[dict[str, Any]] = []
+        for index, (subdir, script, manifest_rel) in enumerate(steps):
+            gate_rel = manifest_rel
+            if gate_rel is None:
+                for _subdir, _script, later_rel in steps[index + 1:]:
+                    if later_rel:
+                        gate_rel = later_rel
+                        break
+            occurrences[script] = occurrences.get(script, 0) + 1
+            occurrence = occurrences[script]
+            if occurrence > 1 and script in NO_FORCE_SCRIPTS:
+                # Cannot self-force a script without a --force flag; the macro
+                # wrappers/readiness are internally idempotent so a re-pass is
+                # still safe, but surface the combination explicitly.
+                LOGGER.warning(
+                    "re-pass of %s cannot be self-forced (NO_FORCE_SCRIPTS); "
+                    "relying on the script's own idempotency",
+                    script,
+                )
+            pass_steps.append(
+                {
+                    "group": group,
+                    "subdir": subdir,
+                    "script": script,
+                    "manifest_rel": manifest_rel,
+                    "gate_rel": gate_rel,
+                    "occurrence": occurrence,
+                    "self_force": occurrence > 1 and script not in NO_FORCE_SCRIPTS,
+                }
+            )
+        plan.append(pass_steps)
+    return plan
+
+
+def step_resume_skip(run_dir: Path, step: dict[str, Any], *, operator_force: bool) -> bool:
+    """Skip-if-sealed resume predicate used by BOTH dry-run and execution.
+
+    A FIRST occurrence without operator --force is skipped when its gate
+    acceptance manifest is already sealed PASS* for this run dir.
+    manifest_acceptance() fail-closes on as-of mismatch and parent/provenance
+    drift (returns DATE_MISMATCH/STALE_PARENT/... rather than PASS*), so a PASS*
+    result here certifies a same-date, drift-free seal. Re-pass occurrences are
+    never skipped: they exist to rebuild on refreshed inputs.
+    """
+    if operator_force or int(step["occurrence"]) > 1:
+        return False
+    gate_rel = step["gate_rel"]
+    if not gate_rel:
+        return False
+    return manifest_acceptance(run_dir, str(gate_rel)).startswith("PASS")
+
+
+def _previous_nyse_trading_day(today: date) -> date:
+    """Latest plausible NYSE session on or before `today`.
+
+    The repo's authoritative NYSE holiday calendar lives in
+    orchestration/run_all.py, which is a script directory (not an importable
+    package), so it is loaded by file path. When that load is impossible the
+    fallback is weekday-only stepping: strictly better than raw date.today() on
+    weekends, and a holiday default still requires an explicit --as-of.
+    """
+    is_trading_day: Callable[[date], bool] | None = None
+    spec_name = "_staging_run_all_calendar"
+    try:
+        import importlib.util
+
+        run_all_path = PROJECT_ROOT / "orchestration" / "run_all.py"
+        spec = importlib.util.spec_from_file_location(spec_name, run_all_path)
+        if spec is not None and spec.loader is not None:
+            module = importlib.util.module_from_spec(spec)
+            # run_all defines dataclasses, whose creation resolves the owning
+            # module through sys.modules; register before exec, drop after.
+            sys.modules[spec_name] = module
+            try:
+                spec.loader.exec_module(module)
+                is_trading_day = module.is_trading_day
+            finally:
+                sys.modules.pop(spec_name, None)
+    except (ImportError, OSError, AttributeError, SyntaxError, SystemExit):
+        is_trading_day = None
+    candidate = today
+    if is_trading_day is None:
+        # Weekday-only fallback (explicit): NYSE holiday awareness could not be
+        # loaded from orchestration/run_all.py.
+        while candidate.weekday() >= 5:
+            candidate -= timedelta(days=1)
+        return candidate
+    while not is_trading_day(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def default_run_as_of(runs_root: Path, *, today: date | None = None) -> str:
+    """Fail-closed default as-of when the operator passes no ``--as-of``.
+
+    Re-pass occurrences (second rotation/governor pass, final, final_report,
+    the monitor_filter re-solve) are self-forced by design, so letting a bare
+    run default into an OLDER existing run dir would rebuild that prior day's
+    sealed second-pass artifacts without an operator ``--force``. The default
+    may therefore only be the current NYSE session (previous trading day
+    on/before today): resuming that session is allowed; if the latest started
+    run dir is any other date this raises ValueError instructing the operator
+    to pass an explicit ``--as-of``.
+    """
+    calendar_default = _previous_nyse_trading_day(today or date.today()).isoformat()
+    latest_started = latest_run_with(runs_root, "stocks_scores.csv")
+    if latest_started is not None and latest_started != calendar_default:
+        raise ValueError(
+            f"No --as-of given and the latest started run dir ({latest_started}) is not "
+            f"the current NYSE session ({calendar_default}). A bare default would resume "
+            f"{latest_started} and its self-forced re-pass steps would rebuild that day's "
+            f"sealed final book. Pass --as-of {calendar_default} to run the current "
+            f"session, or --as-of {latest_started} (with --force for sealed steps) to "
+            "intentionally rework the old run."
+        )
+    return calendar_default
+
+
+def _windows_descendant_pids(root_pid: int) -> list[int]:
+    """Best-effort transitive child PIDs of `root_pid`, deepest-first.
+
+    Used only when `taskkill /T /F` fails: killing just the direct child would
+    orphan grandchildren that may still hold SQLite locks. Enumerates the
+    process table via CIM (PowerShell) with a WMIC fallback; any failure returns
+    an empty list (the caller still calls proc.kill()).
+    """
+    pid_parent: list[tuple[int, int]] = []
+    source = ""
+    try:
+        completed = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object "
+                "{ \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+            ],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        if completed.returncode == 0:
+            source = completed.stdout
+    except (OSError, subprocess.SubprocessError):
+        source = ""
+    if source:
+        for line in source.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid_parent.append((int(parts[0]), int(parts[1])))
+            except ValueError:
+                continue
+    else:
+        try:
+            completed = subprocess.run(
+                ["wmic", "process", "get", "ProcessId,ParentProcessId"],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            if completed.returncode != 0:
+                return []
+        except (OSError, subprocess.SubprocessError):
+            return []
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        if not lines:
+            return []
+        # WMIC prints columns alphabetically regardless of the requested order;
+        # map them from the header row.
+        header = lines[0].split()
+        try:
+            pid_col = header.index("ProcessId")
+            parent_col = header.index("ParentProcessId")
+        except ValueError:
+            return []
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) != len(header):
+                continue
+            try:
+                pid_parent.append((int(parts[pid_col]), int(parts[parent_col])))
+            except ValueError:
+                continue
+    children: dict[int, list[int]] = {}
+    for pid, parent in pid_parent:
+        children.setdefault(parent, []).append(pid)
+    ordered: list[int] = []
+    frontier = [root_pid]
+    seen: set[int] = set()
+    while frontier:
+        next_frontier: list[int] = []
+        for parent in frontier:
+            for child in children.get(parent, []):
+                if child not in seen:
+                    seen.add(child)
+                    ordered.append(child)
+                    next_frontier.append(child)
+        frontier = next_frontier
+    return list(reversed(ordered))  # leaves first
 
 
 def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
@@ -322,7 +616,18 @@ def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
             check=False,
         )
         if completed.returncode != 0 and proc.poll() is None:
-            proc.kill()
+            # taskkill /T failed: proc.kill() alone would orphan grandchildren
+            # (which may hold SQLite locks). Kill enumerated descendants
+            # leaves-first, then the direct child.
+            for pid in _windows_descendant_pids(proc.pid):
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            if proc.poll() is None:
+                proc.kill()
     else:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -362,7 +667,14 @@ def run_command(cmd: list[str], *, timeout: float) -> tuple[int, str, str]:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Stage 12 one-command portfolio pipeline runner.")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    p.add_argument("--as-of", default=None, help="Run as-of date (default: latest run folder, else today).")
+    p.add_argument(
+        "--as-of",
+        default=None,
+        help=(
+            "Run as-of date (default: latest run folder, else the previous NYSE trading day). "
+            "REQUIRED with --force: a forced rebuild must name the run it destroys."
+        ),
+    )
     p.add_argument("--cadence", choices=("tactical", "strategic"), default="strategic")
     p.add_argument("--groups", default="", help="Comma-separated explicit group list (overrides cadence).")
     p.add_argument("--skip", default="", help="Comma-separated groups to skip.")
@@ -399,15 +711,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def script_args(
-    args: argparse.Namespace, script: str, *, group: str = ""
+    args: argparse.Namespace, script: str, *, group: str = "", self_force: bool = False
 ) -> list[str]:
     """Return the exact optional flags for a stage script.
 
     Dry-run and execution both call this function so the displayed plan cannot drift from the
-    command that is actually launched.
+    command that is actually launched. `self_force` marks an intentional re-pass occurrence
+    (see build_step_plan): the step gets --force even without operator --force, because the
+    re-pass exists to rebuild on refreshed inputs. Operator-only semantics
+    (--reuse-sealed-run-raw) stay tied to the operator flag.
     """
     flags: list[str] = []
-    if args.force and script not in NO_FORCE_SCRIPTS:
+    if (args.force or self_force) and script not in NO_FORCE_SCRIPTS:
         flags.append("--force")
     if args.force and script == "01_collect_sector_scores.py":
         flags.append("--reuse-sealed-run-raw")
@@ -517,9 +832,27 @@ def _broker_statement_available(config: dict[str, Any], config_path: Path, as_of
         return False
 
 
+def _sealed_ledger_available(run_dir: Path) -> bool:
+    return (
+        (run_dir / "ledger" / "broker_net_stock_positions.csv").is_file()
+        and manifest_acceptance(run_dir, "ledger/ledger_manifest.json") == "PASS"
+    )
+
+
 def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path) -> list[str]:
     orch = cfg_get(config, "orchestration", {}) or {}
-    cadences = {**DEFAULT_CADENCES, **(orch.get("cadences") or {})}
+    overrides = orch.get("cadences") or {}
+    for name, override in overrides.items():
+        if not isinstance(override, (list, tuple)):
+            continue
+        normalized = [str(group).strip() for group in override if str(group).strip()]
+        default = DEFAULT_CADENCES.get(str(name))
+        if default is not None and normalized != default:
+            LOGGER.info(
+                "cadence %r config override differs from built-in default: config=%s default=%s",
+                name, normalized, default,
+            )
+    cadences = {**DEFAULT_CADENCES, **overrides}
     explicit = [g.strip() for g in args.groups.split(",") if g.strip()]
     cadence_groups = cadences.get(args.cadence)
     if not explicit and not isinstance(cadence_groups, (list, tuple)):
@@ -533,15 +866,55 @@ def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path)
     if unknown:
         raise ValueError(f"unknown orchestration groups: {unknown}; valid={sorted(GROUPS)}")
     planned = [g for g in groups if g not in skip]
-    # ledger needs a broker statement dated exactly at this as-of (ledger/30 imports it as the first
-    # ledger step); exits need the ledger. Skip both gracefully when neither a sealed import nor a
-    # matching statement exists.
-    if "ledger" in planned and not (run_dir / "ledger" / "broker_statement_sources.csv").exists():
-        config_path = args.config.expanduser().resolve()
-        if not _broker_statement_available(config, config_path, run_dir.name):
-            LOGGER.info("group ledger skipped: no sealed import and no IB statement ending %s "
-                        "in the configured report dir", run_dir.name)
-            planned = [g for g in planned if g not in ("ledger", "exits")]
+    monitor_planned = bool({"monitor", "monitor_filter"} & set(planned))
+    require_holdings = bool(
+        cfg_get(
+            config,
+            "expectations_monitor.universe.require_broker_holdings",
+            True,
+        )
+    )
+    ledger_required = monitor_planned and require_holdings
+    ledger_ready = _sealed_ledger_available(run_dir)
+    ledger_sources = run_dir / "ledger" / "broker_statement_sources.csv"
+    config_path = args.config.expanduser().resolve()
+    statement_available = ledger_sources.is_file() or _broker_statement_available(
+        config,
+        config_path,
+        run_dir.name,
+    )
+
+    if ledger_required and not ledger_ready:
+        if "ledger" in skip:
+            raise ValueError(
+                "expectations monitor requires same-date broker holdings, "
+                "but group ledger was explicitly skipped"
+            )
+        if not statement_available:
+            raise ValueError(
+                "expectations monitor requires same-date broker holdings, "
+                f"but no sealed ledger or IB statement exists for {run_dir.name}"
+            )
+        # Custom group lists and configured cadences cannot place a required
+        # source after its consumer. Normalize one ledger pass immediately
+        # before the first monitor group.
+        planned = [group for group in planned if group != "ledger"]
+        monitor_index = min(
+            index
+            for index, group in enumerate(planned)
+            if group in {"monitor", "monitor_filter"}
+        )
+        planned.insert(monitor_index, "ledger")
+    elif "ledger" in planned and not statement_available:
+        if not ledger_ready:
+            LOGGER.info(
+                "group ledger skipped: no sealed import and no IB statement ending %s "
+                "in the configured report dir",
+                run_dir.name,
+            )
+            planned = [
+                group for group in planned if group not in {"ledger", "exits"}
+            ]
     return planned
 
 
@@ -555,7 +928,24 @@ def run_pipeline() -> int:  # noqa: C901
     startup_config_sha256 = sha256_file(config_path)
     paths = resolve_runtime_paths(config, config_path)
     runs_root = paths.output_dir / "runs"
-    run_as_of = args.as_of or latest_run_with(runs_root, "stocks_scores.csv") or date.today().isoformat()
+    if args.force and not args.as_of:
+        # A forced rebuild invalidates and rebuilds sealed artifacts, so it must
+        # name its target explicitly rather than inherit any default (a Monday
+        # --force defaulting into Friday would destroy Friday's sealed book).
+        LOGGER.error(
+            "--force requires an explicit --as-of: a forced run invalidates and rebuilds "
+            "sealed artifacts, so it must name its target run dir. "
+            "Pass --as-of YYYY-MM-DD for the run you intend to rebuild."
+        )
+        return 1
+    if args.as_of:
+        run_as_of = str(args.as_of)
+    else:
+        try:
+            run_as_of = default_run_as_of(runs_root)
+        except ValueError as exc:
+            LOGGER.error("%s", exc)
+            return 1
     try:
         parsed_as_of = date.fromisoformat(run_as_of)
     except ValueError:
@@ -591,12 +981,14 @@ def run_pipeline() -> int:  # noqa: C901
         return 1
     try:
         planned = plan_groups(args, config, run_dir)
+        groups_map = resolved_groups(config)
     except ValueError as exc:
         LOGGER.error("Invalid orchestration plan: %s", exc)
         return 1
     if not planned:
         LOGGER.error("Nothing to run (groups empty after skips)")
         return 1
+    step_plan = build_step_plan(planned, groups_map)
     LOGGER.info(
         "PIPELINE as_of=%s cadence=%s groups=%s force=%s reuse_risk_price_data=%s",
         run_as_of,
@@ -606,18 +998,27 @@ def run_pipeline() -> int:  # noqa: C901
         args.reuse_risk_price_data,
     )
     if args.dry_run:
-        for g in planned:
-            for subdir, script, _m in GROUPS[g]:
-                if (
-                    script == "05d_audit_liquidity_panel.py"
-                    and not (run_dir / "risk" / "spread_snapshot.csv").exists()
-                    and not bool(cfg_get(config, "liquidity_panel.enhanced_intraday_enabled", False))
-                ):
-                    LOGGER.info("  would skip %s/%s (no spread_snapshot.csv)", subdir, script)
+        # Same predicate functions as execution (skip_liquidity_audit,
+        # step_resume_skip, script_args) so the plan cannot drift from it.
+        for pass_steps in step_plan:
+            for step in pass_steps:
+                subdir, script = step["subdir"], step["script"]
+                if script == "05d_audit_liquidity_panel.py" and skip_liquidity_audit(config, run_dir):
+                    LOGGER.info(
+                        "  would skip %s/%s (no spread_snapshot.csv, enhanced intraday disabled)",
+                        subdir, script,
+                    )
                     continue
-                flags = script_args(args, script, group=g)
+                if step_resume_skip(run_dir, step, operator_force=args.force):
+                    LOGGER.info(
+                        "  RESUME_SKIP %s/%s (gate %s sealed PASS*)",
+                        subdir, script, step["gate_rel"],
+                    )
+                    continue
+                flags = script_args(args, script, group=step["group"], self_force=step["self_force"])
                 suffix = f" {' '.join(flags)}" if flags else ""
-                LOGGER.info("  would run %s/%s --as-of %s%s", subdir, script, run_as_of, suffix)
+                marker = " [RE_PASS]" if step["self_force"] else ""
+                LOGGER.info("  would run %s/%s --as-of %s%s%s", subdir, script, run_as_of, suffix, marker)
         return 0
 
     steps: list[dict[str, Any]] = []
@@ -626,42 +1027,60 @@ def run_pipeline() -> int:  # noqa: C901
     completed_groups: list[str] = []
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    def persist(acceptance: str, *, active_group: str = "") -> None:
-        write_manifest(
-            orchestration_meta_path,
-            {
-                "stage": "stage12_orchestration",
-                "acceptance": acceptance,
-                "run_as_of": run_as_of,
-                "cadence": args.cadence,
-                "groups_planned": planned,
-                "groups_completed": completed_groups,
-                "groups_failed": failed_groups,
-                "groups_soft_failed": soft_failed_groups,
-                "active_group": active_group,
-                "force": bool(args.force),
-                "reuse_risk_price_data": bool(args.reuse_risk_price_data),
-                "historical_catchup": bool(args.historical_catchup),
-                "steps": steps,
-                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                # Freeze provenance at process start. Re-reading these files for every
-                # progress write can falsely attribute newly edited source/config to an
-                # already-running interpreter that loaded the previous contents.
-                "inputs_sha256": {"config.yaml": startup_config_sha256},
-                "source_sha256": {"18_run_portfolio_pipeline.py": startup_source_sha256},
-            },
-        )
+    def persist(acceptance: str, *, active_group: str = "", error: str = "") -> None:
+        payload: dict[str, Any] = {
+            "stage": "stage12_orchestration",
+            "acceptance": acceptance,
+            "run_as_of": run_as_of,
+            "cadence": args.cadence,
+            "groups_planned": planned,
+            "groups_completed": completed_groups,
+            "groups_failed": failed_groups,
+            "groups_soft_failed": soft_failed_groups,
+            "active_group": active_group,
+            "force": bool(args.force),
+            "reuse_risk_price_data": bool(args.reuse_risk_price_data),
+            "historical_catchup": bool(args.historical_catchup),
+            "steps": steps,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            # Freeze provenance at process start. Re-reading these files for every
+            # progress write can falsely attribute newly edited source/config to an
+            # already-running interpreter that loaded the previous contents.
+            "inputs_sha256": {"config.yaml": startup_config_sha256},
+            "source_sha256": {"18_run_portfolio_pipeline.py": startup_source_sha256},
+        }
+        if error:
+            payload["error"] = error
+        write_manifest(orchestration_meta_path, payload)
+
+    # Terminal-failure hook: main() persists a FAIL meta (with the error string)
+    # if any exception escapes this function, so the meta can never stay frozen
+    # at acceptance=RUNNING after a crash/interrupt.
+    def _persist_terminal_fail(message: str) -> None:
+        persist("FAIL", error=message)
+
+    global _TERMINAL_FAIL_PERSIST
+    _TERMINAL_FAIL_PERSIST = _persist_terminal_fail
 
     persist("RUNNING")
-    for group in planned:
+    for pass_steps in step_plan:
+        if not pass_steps:
+            continue
+        group = str(pass_steps[0]["group"])
         group_failed = False
-        for subdir, script, manifest_rel in GROUPS[group]:
-            if script == "05d_audit_liquidity_panel.py" and not (run_dir / "risk" / "spread_snapshot.csv").exists():
+        failed_script = ""
+        for step in pass_steps:
+            subdir = str(step["subdir"])
+            script = str(step["script"])
+            manifest_rel = step["manifest_rel"]
+            gate_rel = step["gate_rel"]
+            if script == "05d_audit_liquidity_panel.py" and skip_liquidity_audit(config, run_dir):
                 steps.append({
                     "group": group,
                     "script": script,
                     "rc": 0,
                     "seconds": 0.0,
+                    "status": "SKIPPED_NO_SPREAD_SNAPSHOT",
                     "acceptance": "SKIPPED_NO_SPREAD_SNAPSHOT",
                     "manifest": "",
                     "manifest_sha256": "",
@@ -670,9 +1089,30 @@ def run_pipeline() -> int:  # noqa: C901
                 })
                 LOGGER.info("[SKIP] %-45s no spread_snapshot.csv", f"{subdir}/{script}")
                 continue
+            if step_resume_skip(run_dir, step, operator_force=args.force):
+                sealed_acceptance = manifest_acceptance(run_dir, str(gate_rel))
+                steps.append({
+                    "group": group,
+                    "script": script,
+                    "rc": 0,
+                    "seconds": 0.0,
+                    "status": "ALREADY_SEALED",
+                    "acceptance": sealed_acceptance,
+                    "manifest": str(gate_rel),
+                    "manifest_sha256": (
+                        sha256_file(run_dir / str(gate_rel))
+                        if (run_dir / str(gate_rel)).is_file()
+                        else ""
+                    ),
+                    "command": [],
+                    "tail": "",
+                })
+                LOGGER.info("[SEALED] %-45s gate=%s %s (resume skip)",
+                            f"{subdir}/{script}", gate_rel, sealed_acceptance)
+                continue
             cmd = [sys.executable, str(PACKAGE_ROOT / subdir / script), "--as-of", run_as_of,
                    "--config", str(config_path)]
-            cmd.extend(script_args(args, script, group=group))
+            cmd.extend(script_args(args, script, group=group, self_force=bool(step["self_force"])))
             # Persist the step's group before launch. Long-running refreshes (notably
             # MacroLayer raw/serving) must not leave active_group pointing at the prior
             # completed group for their entire runtime.
@@ -686,6 +1126,28 @@ def run_pipeline() -> int:  # noqa: C901
                 else step_timeout
             )
             rc, stdout, stderr = run_command(cmd, timeout=timeout)
+            recovered_with_force = False
+            if rc != 0 and int(step["occurrence"]) == 1 and not args.force:
+                # Partial-step recovery: the step's gate never sealed, so its
+                # partial outputs (from an earlier crashed/aborted run) are safe
+                # to rebuild. A sealed gate never reaches here: the step would
+                # have been resume-skipped above.
+                gate_sealed = bool(gate_rel) and manifest_acceptance(
+                    run_dir, str(gate_rel)
+                ).startswith("PASS")
+                if (
+                    not gate_sealed
+                    and script not in NO_FORCE_SCRIPTS
+                    and OVERWRITE_REFUSAL_SIGNATURE in f"{stdout}\n{stderr}"
+                ):
+                    LOGGER.warning(
+                        "Partial-step recovery: %s/%s refused to overwrite prior partial "
+                        "outputs and gate %s is not sealed PASS; relaunching once with --force",
+                        subdir, script, gate_rel or "<none>",
+                    )
+                    cmd = [*cmd, "--force"]
+                    rc, stdout, stderr = run_command(cmd, timeout=timeout)
+                    recovered_with_force = True
             tail = (stderr or stdout or "").strip().splitlines()[-2:]
             elapsed = round(time.monotonic() - started, 1)
             acceptance = manifest_acceptance(run_dir, manifest_rel) if manifest_rel else ""
@@ -694,12 +1156,14 @@ def run_pipeline() -> int:  # noqa: C901
                 if manifest_rel and (run_dir / manifest_rel).is_file()
                 else ""
             )
+            status = "OK" if rc == 0 else "FAIL"
             steps.append({"group": group, "script": script, "rc": rc, "seconds": elapsed,
+                          "status": status,
                           "acceptance": acceptance, "manifest": manifest_rel or "",
                           "manifest_sha256": stage_manifest_sha, "command": cmd,
+                          "recovered_with_force": recovered_with_force,
                           "tail": " | ".join(tail) if rc != 0 else ""})
             persist("RUNNING", active_group=group)
-            status = "OK" if rc == 0 else "FAIL"
             LOGGER.info("[%s] %-45s rc=%d %5.1fs %s", status, f"{subdir}/{script}", rc, elapsed,
                         acceptance or "")
             if rc != 0 and script in OPTIONAL_STEP_SCRIPTS:
@@ -715,20 +1179,29 @@ def run_pipeline() -> int:  # noqa: C901
             acceptance_ok = acceptance == "" or acceptance.startswith("PASS")  # PASS_WITH_DEFERRED is sealed-OK
             if rc != 0 or (manifest_rel and not acceptance_ok):
                 group_failed = True
+                failed_script = script
                 if rc == 0 and manifest_rel:
                     LOGGER.error("group %s: %s acceptance=%s", group, manifest_rel, acceptance)
                 break
         if group_failed:
             if group in SOFT_GROUPS:
-                soft_failed_groups.append(group)
+                soft_tag = f"{group}:{failed_script}"
+                if soft_tag not in soft_failed_groups:
+                    soft_failed_groups.append(soft_tag)
                 LOGGER.warning("Advisory group %s failed; WARN-only, pipeline continues", group)
             else:
-                failed_groups.append(group)
+                if group not in failed_groups:
+                    failed_groups.append(group)
+                # A group that passed an earlier pass but failed this one is
+                # failed-only: never list it in both completed and failed.
+                while group in completed_groups:
+                    completed_groups.remove(group)
                 if not args.continue_on_fail:
                     LOGGER.error("Stopping after failed group %s (use --continue-on-fail to proceed)", group)
                     break
         else:
-            completed_groups.append(group)
+            if group not in completed_groups and group not in failed_groups:
+                completed_groups.append(group)
 
     provenance_drift: list[str] = []
     try:
@@ -765,6 +1238,7 @@ def run_pipeline() -> int:  # noqa: C901
     else:
         overall = "PASS"
     persist(overall)
+    _TERMINAL_FAIL_PERSIST = None  # terminal acceptance persisted; disarm the crash hook
     LOGGER.info("PIPELINE %s: %d/%d groups clean -> %s",
                 overall, len(completed_groups),
                 len(planned), orchestration_meta_path)
@@ -772,13 +1246,30 @@ def run_pipeline() -> int:  # noqa: C901
 
 
 def main() -> int:
+    configure_utc_logging()
+    coordination = GlobalOrchestrationCoordination()
+    # Narrow lock-failure handling to lock ACQUISITION only: any failure inside
+    # run_pipeline() must not be mislabeled as a lock failure.
     try:
-        with GlobalOrchestrationCoordination():
-            return run_pipeline()
+        coordination.__enter__()
     except (OSError, RuntimeError) as exc:
-        configure_utc_logging()
         LOGGER.error("Portfolio orchestration lock failure: %s", exc)
         return 1
+    try:
+        return run_pipeline()
+    except SystemExit:
+        raise  # argparse --help/usage errors keep their exit semantics
+    except BaseException as exc:  # noqa: BLE001 - meta must not stay RUNNING
+        LOGGER.error("Portfolio orchestration failed: %s: %s", type(exc).__name__, exc)
+        persist_fail = _TERMINAL_FAIL_PERSIST
+        if persist_fail is not None:
+            try:
+                persist_fail(f"{type(exc).__name__}: {exc}")
+            except Exception as persist_exc:  # noqa: BLE001 - best effort only
+                LOGGER.error("Could not persist terminal FAIL orchestration meta: %s", persist_exc)
+        return 1
+    finally:
+        coordination.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

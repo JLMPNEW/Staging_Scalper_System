@@ -474,6 +474,14 @@ def main() -> int:  # noqa: C901
         "run_as_of": run_as_of,
         "generated_at": utc_now(),
         "acceptance": "PASS" if passed else "FAIL",
+        # Source-book lineage: this diagnostic book adjusts the ACTUAL broker holdings universe
+        # (ledger/holding_state.csv), not any composed target book. Consumers that would promote it
+        # in place of a composed book must compare inputs_sha256.book against the book they
+        # composed and fail closed on mismatch.
+        "book_source": "ledger/holding_state.csv",
+        "inputs_sha256": {
+            "book": sha256_file(art["holding_state"]),
+        },
         "mark_date": mark_date,
         "mark_source_counts": {
             "stage2_adjusted_close": len(holdings) - broker_mark_count,

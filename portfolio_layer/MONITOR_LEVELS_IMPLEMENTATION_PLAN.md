@@ -37,6 +37,9 @@ Implementation status (2026-08-02):
   (`final/bootstrap_target_weights.csv` plus `bootstrap_final_weights_manifest.json`). The
   post-monitor deployable book uses different artifacts. A final-book rebuild therefore cannot
   invalidate the monitor universe by overwriting its source.
+- Independent provider capture persists that universe in its own append-only registry. New sealed
+  monitor universes are optional membership handoffs; failed or delayed portfolio/monitor runs do
+  not block current FMP/Alpha capture and do not make current observations stale.
 - The sealed 2026-07-24 universe contains 1,147 names: 62 Tier 0, 292 Tier 1, and 793 Tier 2.
 - The first 50-symbol provisional snapshot cycle completed with zero provider/normalization errors:
   Alpha 40/50 and FMP 50/50; no raw payloads were retained.

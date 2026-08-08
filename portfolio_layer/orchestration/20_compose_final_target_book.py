@@ -8,7 +8,9 @@ Stage 12b enriches these immutable weights with monitor, levels, macro, earnings
                sleeves (sleeves.enabled_in_production)
                -> BL fusion (black_litterman_fusion.enabled_in_production)
                -> Stage 4 cost-adjusted AQR baseline (always available)
-  exits      = exit-adjusted book replaces the base iff exit_engine.apply_in_final (else shadow)
+  exits      = exit-adjusted book replaces the base iff exit_engine.apply_in_final AND its
+               manifest's inputs_sha256.book equals the composed base book sha (else shadow);
+               on replacement the superseded layers are recorded as superseded_by_exits
   payout     = payout-adjusted book replaces the base iff payout.enabled_in_production (else shadow)
   governor   = gross multiplier applied iff risk_governor.apply_directive (else shadow);
                freed weight moves to CASH, never silently dropped
@@ -112,23 +114,6 @@ def load_book(path: Path, *, weight_col: str = "weight") -> dict[str, float]:
     if abs(total - 1.0) > 1e-6:
         raise ValueError(f"{path}: weights sum to {total:.12f}, expected 1.0")
     return book
-
-
-def load_sealed_book(
-    path: Path,
-    manifest_path: Path,
-    *,
-    manifest_keys: tuple[str, ...],
-    run_as_of: str,
-    weight_col: str = "weight",
-) -> tuple[dict[str, float], dict[str, Any]]:
-    if not manifest_path.exists():
-        raise ValueError(f"Manifest missing: {manifest_path}")
-    manifest = read_manifest(manifest_path)
-    errors = sealed_artifact_errors(manifest, path, *manifest_keys, run_as_of=run_as_of)
-    if errors:
-        raise ValueError(f"Unsealed/stale artifact {path}: {errors}")
-    return load_book(path, weight_col=weight_col), manifest
 
 
 def read_manifest_or_error(path: Path) -> tuple[dict[str, Any], str]:
@@ -235,8 +220,25 @@ def main() -> int:  # noqa: C901
     config = load_yaml(config_path)
     paths = resolve_runtime_paths(config, config_path)
     runs_root = paths.output_dir / "runs"
+    if args.as_of:
+        try:
+            date.fromisoformat(args.as_of)
+        except ValueError:
+            LOGGER.error("Invalid --as-of %r: expected an ISO date (YYYY-MM-DD)", args.as_of)
+            return 1
     run_as_of = args.as_of or latest_run_with(runs_root, "stocks_scores.csv") or date.today().isoformat()
     run_dir = runs_root / run_as_of
+
+    # A stale-prior marker means the governor for this date was built against a superseded
+    # directive chain; composing on top of it would launder a stale risk state into the book.
+    stale_marker = run_dir / "governor" / "PRIOR_DIRECTIVE_STALE.json"
+    if stale_marker.exists():
+        LOGGER.error(
+            "Governor prior-directive stale marker present (%s); re-run the governor for %s "
+            "before composing the final book",
+            stale_marker, run_as_of,
+        )
+        return 1
 
     out_dir = run_dir / "final"
     weights_name = (
@@ -261,10 +263,6 @@ def main() -> int:  # noqa: C901
     except FileExistsError as exc:
         LOGGER.error("%s", exc)
         return 1
-    if args.force and not args.monitor_bootstrap:
-        # Recomputed target weights invalidate the downstream human/reporting view.
-        enriched_path.unlink(missing_ok=True)
-        enriched_manifest_path.unlink(missing_ok=True)
 
     sleeves_on = bool(cfg_get(config, "sleeves.enabled_in_production", False))
     bl_on = bool(cfg_get(config, "black_litterman_fusion.enabled_in_production", False))
@@ -290,7 +288,6 @@ def main() -> int:  # noqa: C901
     base_name = ""
     book: dict[str, float] = {}
     current_book_sha256 = ""
-    base_seal_errors: list[str] = []
     base_manifest: dict[str, Any] = {}
     for name, enabled, path, mpath, wcol, manifest_keys in candidates:
         manifest: dict[str, Any] = {}
@@ -302,7 +299,9 @@ def main() -> int:  # noqa: C901
                 manifest_error = str(exc)
         acceptance = manifest_acceptance_value(manifest) if manifest else ("UNREADABLE" if manifest_error else "MISSING")
         seal_errors = (
-            sealed_artifact_errors(manifest, path, *manifest_keys, run_as_of=run_as_of)
+            sealed_artifact_errors(
+                manifest, path, *manifest_keys, run_as_of=run_as_of, allow_deferred=False,
+            )
             if manifest else [manifest_error or f"manifest_missing={mpath}"]
         )
         status = "absent" if not path.exists() else "shadow"
@@ -319,7 +318,6 @@ def main() -> int:  # noqa: C901
             base_manifest = manifest
             current_book_sha256 = sha256_file(path)
             status = "applied_base"
-            base_seal_errors = seal_errors
         elif path.exists() and seal_errors:
             status = "shadow_stale"
         layers.append({
@@ -378,22 +376,48 @@ def main() -> int:  # noqa: C901
     exits_seal = (
         sealed_artifact_errors(
             exits_manifest, exits_book, "exit_adjusted_book.csv", run_as_of=run_as_of,
+            allow_deferred=False,
         ) if exits_manifest else [exits_manifest_error]
     )
     exits_status = "absent"
+    exits_replaced_book_sha256 = ""
     if exits_book.exists():
         exits_status = "shadow"
         if exits_on:
             if exits_seal:
                 LOGGER.error("exit_engine.apply_in_final=true but exit book is unsealed/stale: %s", exits_seal)
                 return 1
+            # Lineage guard: the exit-adjusted book may only REPLACE the composed base book if its
+            # producer declares it adjusted exactly that book. A book adjusted from another source
+            # (e.g. broker holdings) is a different universe and must not be promoted here.
+            exits_inputs = exits_manifest.get("inputs_sha256")
+            exits_source_sha = (
+                str(exits_inputs.get("book", "")).strip() if isinstance(exits_inputs, dict) else ""
+            )
+            exits_book_source = str(exits_manifest.get("book_source", "")).strip()
+            if not exits_source_sha or exits_source_sha != current_book_sha256:
+                LOGGER.error(
+                    "exit_engine.apply_in_final=true but the exit-adjusted book was not built from "
+                    "the composed base book: exits inputs_sha256.book=%s (book_source=%s) != base "
+                    "%s sha256=%s; refusing to replace the deployable book",
+                    exits_source_sha or "MISSING", exits_book_source or "MISSING",
+                    base_name, current_book_sha256,
+                )
+                return 1
             try:
                 book = load_book(exits_book, weight_col="post_exit_weight")
             except ValueError as exc:
                 LOGGER.error("Exit-adjusted book is malformed: %s", exc)
                 return 1
+            exits_replaced_book_sha256 = current_book_sha256
             current_book_sha256 = sha256_file(exits_book)
             exits_status = "applied"
+            # The earlier layers' weights do not survive the replacement; record that truthfully.
+            for layer in layers:
+                if layer["status"] in ("applied_base", "applied"):
+                    layer["status"] = "superseded_by_exits"
+            if monitor_lineage.get("status") == "applied":
+                monitor_lineage["weights_superseded_by_exits"] = True
         elif exits_seal:
             exits_status = "shadow_stale"
     elif exits_on:
@@ -403,7 +427,9 @@ def main() -> int:  # noqa: C901
                    "artifact": "exits/exit_adjusted_book.csv" if exits_book.exists() else "",
                    "artifact_sha256": sha256_file(exits_book) if exits_book.exists() else "",
                    "manifest_sha256": sha256_file(exits_meta) if exits_meta.exists() else "",
-                   "manifest_acceptance": exits_acc, "seal_errors": exits_seal})
+                   "manifest_acceptance": exits_acc,
+                   "replaced_book_sha256": exits_replaced_book_sha256,
+                   "seal_errors": exits_seal})
 
     # payout overlay
     payout_book = run_dir / "payout" / "payout_adjusted_book.csv"
@@ -413,6 +439,7 @@ def main() -> int:  # noqa: C901
     payout_seal = (
         sealed_artifact_errors(
             payout_manifest, payout_book, "payout_adjusted_book.csv", run_as_of=run_as_of,
+            allow_deferred=False,
         ) if payout_manifest else [payout_manifest_error]
     )
     payout_status = "absent"
@@ -456,31 +483,58 @@ def main() -> int:  # noqa: C901
     governor_status = "absent"
     directive: dict[str, Any] = {}
     governor_seal: list[str] = []
+    governor_acc = "MISSING"
     if directive_path.exists():
+        # A present-but-unreadable/corrupt directive is a hard error even in shadow mode:
+        # silently composing with the 1.0 default would bury the failure in seal_errors.
         try:
             directive = read_manifest(directive_path)
-            governor_manifest = read_manifest(governor_manifest_path)
+            raw_multiplier = directive.get("gross_exposure_multiplier")
+            if raw_multiplier is None:
+                raise ValueError("gross_exposure_directive is missing gross_exposure_multiplier")
+            multiplier = float(raw_multiplier)
+            if not math.isfinite(multiplier):
+                raise ValueError(f"gross_exposure_multiplier is non-finite: {raw_multiplier!r}")
+        except (OSError, ValueError, TypeError) as exc:
+            LOGGER.error("Governor directive %s is unreadable/corrupt; refusing to compose: %s",
+                         directive_path, exc)
+            return 1
+        governor_manifest, governor_manifest_error = read_manifest_or_error(governor_manifest_path)
+        if governor_manifest:
+            governor_acc = manifest_acceptance_value(governor_manifest)
             governor_seal = sealed_artifact_errors(
                 governor_manifest,
                 directive_path,
                 "gross_exposure_directive.json",
                 run_as_of=run_as_of,
             )
-            raw_multiplier = directive.get("gross_exposure_multiplier")
-            if raw_multiplier is None:
-                raise ValueError("gross_exposure_directive is missing gross_exposure_multiplier")
-            multiplier = float(raw_multiplier)
-            if not math.isfinite(multiplier) or not 0.0 <= multiplier <= 1.0:
-                governor_seal.append(f"gross_exposure_multiplier_out_of_range={raw_multiplier!r}")
-            if str(directive.get("run_as_of", "")) != run_as_of:
-                governor_seal.append(f"directive_run_as_of={directive.get('run_as_of')} expected={run_as_of}")
-        except (OSError, ValueError, TypeError) as exc:
-            governor_seal.append(str(exc))
+        else:
+            governor_acc = "UNREADABLE" if "unreadable" in governor_manifest_error else "MISSING"
+            governor_seal = [governor_manifest_error]
+        if not 0.0 <= multiplier <= 1.0:
+            governor_seal.append(f"gross_exposure_multiplier_out_of_range={multiplier!r}")
+        if str(directive.get("run_as_of", "")) != run_as_of:
+            governor_seal.append(f"directive_run_as_of={directive.get('run_as_of')} expected={run_as_of}")
+        # Lineage guard: the multiplier was measured on a specific book; applying it to any other
+        # book (sleeves/BL base, exits- or payout-replaced) is a different risk state.
+        governor_inputs = governor_manifest.get("inputs_sha256")
+        governor_book_sha = (
+            str(governor_inputs.get("book", "")).strip() if isinstance(governor_inputs, dict) else ""
+        )
+        if governor_book_sha != current_book_sha256:
+            governor_seal.append(
+                "directive_book_lineage_mismatch: governor measured inputs_sha256.book="
+                f"{governor_book_sha or 'MISSING'} (directive book_source="
+                f"{directive.get('book_source', 'MISSING')}) but the book being scaled has "
+                f"sha256={current_book_sha256}"
+            )
         governor_status = "shadow_stale" if governor_seal else "shadow"
         if governor_on and not governor_seal:
             governor_status = "applied"
         elif governor_on:
-            LOGGER.error("risk_governor.apply_directive=true but directive is unsealed/invalid: %s", governor_seal)
+            LOGGER.error(
+                "risk_governor.apply_directive=true but directive is unsealed/invalid or was "
+                "measured on a different book than the one being scaled: %s", governor_seal)
             return 1
     elif governor_on:
         LOGGER.error("risk_governor.apply_directive=true but no directive in this run; refusing")
@@ -489,7 +543,8 @@ def main() -> int:  # noqa: C901
                    "artifact": "governor/gross_exposure_directive.json" if directive_path.exists() else "",
                    "artifact_sha256": sha256_file(directive_path) if directive_path.exists() else "",
                    "manifest_sha256": sha256_file(governor_manifest_path) if governor_manifest_path.exists() else "",
-                   "manifest_acceptance": f"multiplier={multiplier}" if directive_path.exists() else "MISSING",
+                   "manifest_acceptance": governor_acc,
+                   "gross_exposure_multiplier": multiplier if directive_path.exists() else None,
                    "seal_errors": governor_seal})
 
     gross_before = sum(book.values())
@@ -507,24 +562,34 @@ def main() -> int:  # noqa: C901
         if reserved > 0.0:
             book[PAYOUT_RESERVED_TICKER] = reserved
 
-    malformed_final = [f"{ticker}={weight}" for ticker, weight in book.items()
-                       if not math.isfinite(weight) or weight < -1e-12]
-
     rows = [{"ticker": t, "weight": round(w, 10)}
             for t, w in sorted(book.items(), key=lambda kv: (-kv[1], kv[0]))]
     gross_after = sum(float(r["weight"]) for r in rows)
 
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.force and not args.monitor_bootstrap:
+        # Recomputed target weights invalidate the downstream human/reporting view. Deleted only
+        # now, after composition succeeded, so a failed forced rerun cannot destroy a still-
+        # consistent enriched view.
+        enriched_path.unlink(missing_ok=True)
+        enriched_manifest_path.unlink(missing_ok=True)
+    write_csv(weights_path, WEIGHT_FIELDS, rows)
+    # Re-validate the WRITTEN artifact end-to-end (long-only, finite, unique tickers, exactly one
+    # CASH row, conservation after rounding) so the acceptance reflects what consumers will read.
+    written_book_error = ""
+    try:
+        load_book(weights_path)
+    except (OSError, ValueError) as exc:
+        written_book_error = str(exc)
+
     checks = [
-        {"check": "base_layer_sealed",
-         "status": "PASS" if not base_seal_errors else "FAIL",
-         "detail": f"base={base_name}; seal_errors={base_seal_errors}"},
         {"check": "conservation_weights_sum",
          "status": "PASS" if abs(gross_before - 1.0) < 1e-6 and abs(gross_after - 1.0) < 1e-6 else "FAIL",
          "detail": f"weights {round(gross_before, 10)} -> {round(gross_after, 10)} (multiplier {applied_multiplier})"},
-        {"check": "long_only_finite_unique_cash",
-         "status": "PASS" if not malformed_final and list(book).count(CASH_TICKER) == 1 else "FAIL",
-         "detail": "finite non-negative unique ticker weights with exactly one CASH row"
-         if not malformed_final else str(malformed_final[:8])},
+        {"check": "written_book_valid",
+         "status": "PASS" if not written_book_error else "FAIL",
+         "detail": "written weights re-loaded: long-only finite unique tickers, exactly one CASH "
+         "row, weights sum to 1.0" if not written_book_error else written_book_error},
         {"check": "promotion_gates_fail_closed",
          "status": "PASS" if all(
              layer["status"] != "applied" or layer["enabled_in_production"]
@@ -551,8 +616,10 @@ def main() -> int:  # noqa: C901
     ]
     acceptance = "PASS" if all(c["status"] == "PASS" for c in checks) else "FAIL"
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(weights_path, WEIGHT_FIELDS, rows)
+    n_positions = sum(
+        1 for r in rows
+        if r["ticker"] not in (CASH_TICKER, PAYOUT_RESERVED_TICKER) and _f(r["weight"]) > 0
+    )
     manifest_payload = {
         "stage": (
             "stage12a_monitor_bootstrap_target"
@@ -568,8 +635,7 @@ def main() -> int:  # noqa: C901
         "governor_multiplier_observed": multiplier,
         "governor_multiplier_applied": applied_multiplier,
         "gross_exposure": round(gross_after, 10),
-        "n_positions": sum(1 for r in rows if r["ticker"] not in (CASH_TICKER, "PAYOUT_RESERVED")
-                           and _f(r["weight"]) > 0),
+        "n_positions": n_positions,
         "layers": layers,
         "monitor_entry_policy": monitor_lineage,
         "checks": checks,
@@ -603,8 +669,7 @@ def main() -> int:  # noqa: C901
     for c in checks:
         LOGGER.info("[%s] %s -- %s", c["status"], c["check"], c["detail"])
     LOGGER.info("FINAL TARGET WEIGHTS (%s): base=%s positions=%s gross=%.6f multiplier=%.2f -> %s",
-                acceptance, base_name,
-                sum(1 for r in rows if _f(r["weight"]) > 0), gross_after, applied_multiplier, out_dir)
+                acceptance, base_name, n_positions, gross_after, applied_multiplier, out_dir)
     return 0 if acceptance == "PASS" else 1
 
 

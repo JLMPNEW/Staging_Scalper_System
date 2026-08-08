@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,9 @@ from industrials.transportation.selected_feature_history import (
     choose_point_in_time_evidence,
     evidence_lineage,
     normalized_accepted_evidence,
+    sha256,
+    stable_json_sha256,
+    verify_v2_snapshots,
 )
 
 
@@ -43,18 +47,14 @@ def test_point_in_time_evidence_excludes_future_and_stale_values() -> None:
         ),
     ]
 
-    assert (
-        choose_point_in_time_evidence(
-            evidence, asof_date="2022-01-31", max_staleness_days=550
-        ).source_record_id
-        == "old"
+    old = choose_point_in_time_evidence(
+        evidence, asof_date="2022-01-31", max_staleness_days=550
     )
-    assert (
-        choose_point_in_time_evidence(
-            evidence, asof_date="2022-02-28", max_staleness_days=550
-        ).source_record_id
-        == "new"
+    new = choose_point_in_time_evidence(
+        evidence, asof_date="2022-02-28", max_staleness_days=550
     )
+    assert old is not None and old.source_record_id == "old"
+    assert new is not None and new.source_record_id == "new"
     assert (
         choose_point_in_time_evidence(
             evidence, asof_date="2024-01-31", max_staleness_days=550
@@ -149,6 +149,54 @@ def test_preflight_marks_all_dates_for_explicit_new_registry_state() -> None:
 
     assert rows[0]["first_affected_snapshot_date"] == "2020-02-28"
     assert rows[0]["affected_snapshot_count"] == 2
+
+
+def test_frozen_snapshot_prefix_allows_later_snapshots_but_detects_prefix_changes(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "2026-07-22" / "financial_features.csv"
+    later = tmp_path / "2026-07-30" / "financial_features.csv"
+    first.parent.mkdir(parents=True)
+    later.parent.mkdir(parents=True)
+    first.write_text("ticker,value\nAAA,1\n", encoding="utf-8")
+    later.write_text("ticker,value\nAAA,2\n", encoding="utf-8")
+    validation = {
+        "acceptance": "PASS",
+        "panel_status": "FROZEN",
+        "snapshot_sha256": {
+            "2026-07-22": {"financial_features.csv": sha256(first)},
+            "2026-07-30": {"financial_features.csv": sha256(later)},
+        },
+    }
+
+    frozen = verify_v2_snapshots(
+        historical_root=tmp_path,
+        validation_manifest=validation,
+        through_date="2026-07-22",
+    )
+    frozen_digest = stable_json_sha256(frozen)
+    later.write_text("ticker,value\nAAA,3\n", encoding="utf-8")
+
+    assert stable_json_sha256(
+        verify_v2_snapshots(
+            historical_root=tmp_path,
+            validation_manifest=validation,
+            through_date="2026-07-22",
+        )
+    ) == frozen_digest
+    with pytest.raises(ValueError, match="frozen v2 hash changed"):
+        verify_v2_snapshots(
+            historical_root=tmp_path,
+            validation_manifest=validation,
+        )
+
+    first.write_text("ticker,value\nAAA,9\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="frozen v2 hash changed"):
+        verify_v2_snapshots(
+            historical_root=tmp_path,
+            validation_manifest=validation,
+            through_date="2026-07-22",
+        )
 
 
 def _lineage_connection() -> sqlite3.Connection:

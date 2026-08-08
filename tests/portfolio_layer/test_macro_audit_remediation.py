@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+# This regression module intentionally uses lightweight SimpleNamespace and
+# protocol-shaped client doubles instead of constructing every production
+# dataclass. Runtime behavior is asserted by pytest; keep Pyright focused on
+# the implementation surface rather than nominal test-double compatibility.
+# pyright: reportArgumentType=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false
+
 import json
+import hashlib
 import os
 import sqlite3
 import sys
@@ -25,7 +32,14 @@ from connectors.fred_alfred import (  # noqa: E402
     FredAlfredConnector,
 )
 from macro_raw_config import load_macro_raw_config  # noqa: E402
-from macro_storage import _upsert_observations, _upsert_sync_state, init_db  # noqa: E402
+from macro_storage import (  # noqa: E402
+    _make_dedupe_key,
+    _true_vintage_dedupe_key,
+    _upsert_observations,
+    _upsert_sync_state,
+    init_db,
+    repair_true_vintage_dedupe_keys,
+)
 from macro_types import FetchResult, FetchTask, ObservationRecord  # noqa: E402
 from run_macro_raw_pipeline import (  # noqa: E402
     _normalize_oecd_bundle_windows,
@@ -77,6 +91,196 @@ def _observation(value: float, retrieved_at: str) -> ObservationRecord:
         revision_flag=0,
         notes_hash=None,
     )
+
+
+def _vintage_observation(
+    value: float = 1.0,
+    *,
+    observation_date: str = "2026-01-01",
+    retrieved_at: str = "2026-08-01T00:00:00Z",
+) -> ObservationRecord:
+    return ObservationRecord(
+        metric_key="metric",
+        source_name="fred_alfred",
+        source_dataset="fred",
+        source_series_id="SERIES",
+        ref_area="USA",
+        frequency="monthly",
+        seasonal_adjustment="SA",
+        units="index",
+        observation_period="2026-01",
+        observation_date=observation_date,
+        release_date="2026-02-01",
+        vintage_date="2026-02-01",
+        value=value,
+        source_last_updated=None,
+        retrieved_at=retrieved_at,
+        revision_flag=0,
+        notes_hash=None,
+    )
+
+
+def _insert_test_registry(conn: sqlite3.Connection) -> None:
+    now = "2026-08-01T00:00:00Z"
+    conn.execute(
+        """
+        INSERT INTO macro_metric_registry (
+            registry_key, metric_key, regime_block, source_name, ref_area, frequency,
+            vintage_policy, update_cadence, revision_window_days, source_priority,
+            worker_hint, enabled, created_at_utc, updated_at_utc
+        ) VALUES ('metric|fred', 'metric', 'growth', 'fred_alfred', 'USA', 'monthly',
+                  'true_vintage', 'monthly', 0, 1, 1, 1, ?, ?)
+        """,
+        (now, now),
+    )
+    conn.commit()
+
+
+def _insert_buggy_vintage_copy(
+    conn: sqlite3.Connection,
+    *,
+    observation: ObservationRecord,
+    run_id: str,
+) -> None:
+    buggy_text = "|".join(
+        [
+            "metric|fred",
+            observation.metric_key,
+            observation.source_name,
+            observation.source_series_id or "",
+            observation.observation_period,
+            observation.release_date or "",
+            observation.vintage_date or "",
+            "",
+        ]
+    )
+    buggy_key = hashlib.sha1(buggy_text.encode("utf-8")).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO macro_observation_raw (
+            dedupe_key, registry_key, metric_key, source_name, source_dataset,
+            source_series_id, ref_area, frequency, seasonal_adjustment, units,
+            observation_period, observation_date, release_date, vintage_date, value,
+            retrieved_at, revision_flag, ingest_run_id
+        ) VALUES (?, 'metric|fred', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        """,
+        (
+            buggy_key,
+            observation.metric_key,
+            observation.source_name,
+            observation.source_dataset,
+            observation.source_series_id,
+            observation.ref_area,
+            observation.frequency,
+            observation.seasonal_adjustment,
+            observation.units,
+            observation.observation_period,
+            observation.observation_date,
+            observation.release_date,
+            observation.vintage_date,
+            observation.value,
+            observation.retrieved_at,
+            run_id,
+        ),
+    )
+    conn.commit()
+
+
+def test_true_vintage_dedupe_key_keeps_historical_format() -> None:
+    observation = _vintage_observation()
+    expected = _true_vintage_dedupe_key(
+        "metric|fred",
+        observation.metric_key,
+        observation.source_name,
+        observation.source_series_id,
+        observation.observation_period,
+        observation.release_date,
+        observation.vintage_date,
+    )
+    assert _make_dedupe_key("metric|fred", observation) == expected
+    assert _make_dedupe_key(
+        "metric|fred", replace(observation, retrieved_at="2026-08-04T00:00:00Z")
+    ) == expected
+    assert _make_dedupe_key(
+        "metric|eia", _observation(1.0, "2026-08-01T00:00:00Z")
+    ) != _make_dedupe_key(
+        "metric|eia", _observation(1.0, "2026-08-02T00:00:00Z")
+    )
+
+
+def test_true_vintage_dedupe_migration_removes_exact_copy_and_is_idempotent() -> None:
+    conn = sqlite3.connect(":memory:")
+    init_db(conn)
+    _insert_test_registry(conn)
+    observation = _vintage_observation()
+    assert _upsert_observations(
+        conn,
+        run_id="canonical",
+        registry_key="metric|fred",
+        observations=[observation],
+    ) == 1
+    conn.commit()
+    _insert_buggy_vintage_copy(
+        conn,
+        observation=replace(observation, retrieved_at="2026-08-04T00:00:00Z"),
+        run_id="buggy",
+    )
+
+    result = repair_true_vintage_dedupe_keys(conn)
+    assert result["rows_examined"] == 1
+    assert result["rows_deleted"] == 1
+    assert result["rows_updated"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM macro_observation_raw").fetchone()[0] == 1
+    assert repair_true_vintage_dedupe_keys(conn)["status"] == "already_complete"
+
+
+def test_true_vintage_dedupe_migration_keeps_newest_corrected_value() -> None:
+    conn = sqlite3.connect(":memory:")
+    init_db(conn)
+    _insert_test_registry(conn)
+    observation = _vintage_observation()
+    _upsert_observations(
+        conn,
+        run_id="canonical",
+        registry_key="metric|fred",
+        observations=[observation],
+    )
+    conn.commit()
+    _insert_buggy_vintage_copy(
+        conn,
+        observation=replace(observation, value=2.0),
+        run_id="buggy",
+    )
+
+    result = repair_true_vintage_dedupe_keys(conn)
+    assert result["rows_deleted"] == 1
+    assert conn.execute(
+        "SELECT value, revision_flag FROM macro_observation_raw"
+    ).fetchone() == (2.0, 1)
+
+
+def test_true_vintage_dedupe_migration_fails_closed_on_date_conflict() -> None:
+    conn = sqlite3.connect(":memory:")
+    init_db(conn)
+    _insert_test_registry(conn)
+    observation = _vintage_observation()
+    _upsert_observations(
+        conn,
+        run_id="canonical",
+        registry_key="metric|fred",
+        observations=[observation],
+    )
+    conn.commit()
+    _insert_buggy_vintage_copy(
+        conn,
+        observation=replace(observation, observation_date="2026-01-02"),
+        run_id="buggy",
+    )
+
+    with pytest.raises(RuntimeError, match="manual adjudication required"):
+        repair_true_vintage_dedupe_keys(conn)
+    assert conn.execute("SELECT COUNT(*) FROM macro_observation_raw").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM macro_storage_migration").fetchone()[0] == 0
 
 
 def test_true_vintage_task_never_truncates_realtime_history() -> None:
@@ -655,7 +859,7 @@ from build_macro_stock_overlay import (  # noqa: E402
 def test_stock_zscore_preserves_nonconsecutive_index_alignment() -> None:
     frame = pd.DataFrame(
         {"as_of_date": pd.to_datetime(["2026-01-01", "2026-01-01"]), "value": [1.0, 3.0]},
-        index=[10, 30],
+        index=pd.Index([10, 30]),
     )
     z = _stock_zscore_by_date(frame, "value", min_std=1e-9, clip_value=3.0)
     assert list(z.index) == [10, 30]

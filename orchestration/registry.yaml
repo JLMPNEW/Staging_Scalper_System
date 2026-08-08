@@ -16,13 +16,33 @@
 # db_group: sectors sharing a SQLite file are serialized within one group so two
 # refreshes never mutate the same DB concurrently. Within-group execution order
 # is the order sectors appear under `group_order`.
+#
+# freshness_probes (optional, per sector): upstream data-freshness sentinels the
+# master run evaluates read-only (sqlite mode=ro URIs, 10s hard timeout each)
+# and records in master_manifest.json. Statuses: CURRENT | WARN_APPROACHING |
+# STALE | ERROR. Probes NEVER block publication; the one exception is
+# required: true -- a STALE required probe forces the master acceptance to FAIL
+# so the operator must see it. kinds: sqlite_max_date {db, sql},
+# manifest_date {path, key}, deadline_schedule {db, sql, cadence
+# quarterly|semi_monthly, deadline_days, publication_lag_days} which derives the
+# currently-required period from the source's own publication calendar and never
+# demands data before the source can publish it.
 
 defaults:
   timeout_sec: 21600            # 6h per-sector subprocess ceiling
-  retries: 1                    # attempts AFTER the first (so 2 total)
+  retries: 1                    # attempts AFTER the first (so 2 total); a TIMEOUT (rc 124) is never retried
   max_concurrent_network_lanes: 2   # global cap on simultaneous network-heavy lanes (SEC/Yahoo rate limits)
-  catch_up_gap_backfill_threshold: 10   # gap (trading days) above which catch-up uses the native backfill entry
-  catch_up_window_days: 45      # calendar-day lookback catch-up scans for INTERNAL gaps (not just dates after the last publish)
+  # Catch-up policy (2026-08-07 redesign): the CURRENT target date always runs FIRST
+  # and alone decides the sector's health; historical backfill follows newest-first,
+  # best-effort (failed dates -> PASS_WITH_BACKFILL_GAPS + per-date manifest records,
+  # never a master FAIL). Auto-run backfill is bounded per sector by
+  # backfill_window_days (default: that sector's staleness_tolerance_days); older
+  # in-window holes are surfaced as historical_gaps only. An optional per-sector
+  # publish_epoch exempts dates before a publish_glob convention change.
+  catch_up_gap_backfill_threshold: 10   # gap (trading days) above which catch-up uses the native backfill entry, CHUNKED to this many dates per command
+  catch_up_window_days: 45      # calendar-day lookback for gap REPORTING (auto-run is bounded by backfill_window_days)
+  permanent_gap_after_failures: 3   # consecutive failures after which a backfill date is auto-tombstoned (see run_all --mark-gap/--clear-gap; store: orchestration/backfill_gap_markers.json)
+  market_closures: []           # ad-hoc full-day NYSE closures (mourning/disaster days) as ISO dates; excluded from every expected-session calculation
   repair_days: 5                # default trailing dates a --repair pass re-runs (>=1)
   calendar_reference_sectors:   # sectors whose dated publish dirs seed the trading calendar
     - semiconductors
@@ -61,6 +81,17 @@ sectors:
     oos_column: "oos_score_valid_flag"
     require_oos_valid: true
     staleness_tolerance_days: 3
+    # 12h = 2x the 6h default. Derivation: 24's configured per-step budget is
+    # biotech_refresh.step_timeout_sec = 28800s (8h, biotech_index/config.yaml),
+    # so the 21600s default ceiling could kill the sector while a single step was
+    # still legitimately inside its own budget (2026-08-05 post-mortem: the
+    # master killed a running attempt at 6h). The ~24-step daily chain completes
+    # in ~4-5h healthy; the worst observed full run was ~9h (a 4h39m sec_events
+    # incremental scan plus the normal chain). 43200 dominates the 8h per-step
+    # ceiling (run_all --selftest asserts timeout_sec >= that documented
+    # ceiling) and covers the worst observed run with headroom; 24's
+    # ALREADY_COMPLETE resume-skip keeps retry attempts far below it.
+    timeout_sec: 43200
     health:                             # no acceptance/status manifest -> artifact presence + rc==0
       manifest: null
       status_keys: []
@@ -76,6 +107,15 @@ sectors:
       steps: ["ib_market", "market_positioning"]
       rebuild_steps: ["biotech_features", "biotech_scores", "biotech_reports"]
       extra_args: []
+    freshness_probes:
+      - name: ibkr_borrow_age
+        kind: sqlite_max_date
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(asof_date) FROM ibkr_borrow_fee_rate_daily WHERE ticker IN ('VRTX','REGN','ALNY','INCY','NBIX','EXEL')"
+        tolerance_days: 10          # mirrors biotech market_positioning.ibkr_borrow.max_fee_staleness_days
+        warn_lead_days: 3
+        notes: "IBKR borrow feed age over durable biotech anchor tickers. Biotech's 25_update sweep degrades gracefully on IBKR connection loss (status=degraded, step continues), so this probe is the days-early alarm before the borrow export's per-ticker staleness filter zeroes borrow_pressure_score (validated-null shadow signal, weight 0.04-0.05) across the universe."
 
   # ------------------------------------------------------------- med_devices
   - name: med_devices
@@ -290,6 +330,41 @@ sectors:
       steps: ["13_sync_positioning", "14_validate_positioning", "10_validate_eligibility", "17_publish"]
       rebuild_steps: []
       extra_args: ["--positioning-through-publish-only"]
+    # Upstream data-freshness sentinels (2026-08-05): the defense fail-closed gates
+    # (max_13f_staleness_days=120, max_borrow_staleness_days=10) fire only when
+    # features are already degraded; these probes surface the upstream feed age
+    # days earlier. All read-only against the shared market_positioning DB.
+    freshness_probes:
+      - name: ibkr_borrow_age
+        kind: sqlite_max_date
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(asof_date) FROM ibkr_borrow_fee_rate_daily WHERE ticker IN ('LMT','RTX','NOC','GD','LHX','HEI')"
+        tolerance_days: 10          # mirrors industrials max_borrow_staleness_days
+        warn_lead_days: 3
+        notes: "IBKR borrow feed age over the defense anchor tickers; the daily rail's script-13 --daily-refresh sweep must keep this current."
+      - name: finra_short_interest_cycle
+        kind: deadline_schedule
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(settlement_date) FROM short_interest_snapshots WHERE ticker IN ('LMT','RTX','NOC','GD','LHX','HEI')"
+          cadence: semi_monthly     # FINRA settlement cycles: the 15th + last day of each month
+          publication_lag_days: 12  # FINRA disseminates ~12 days after settlement
+        tolerance_days: 7           # grace for the (manual full-mode) sweep to consume the file
+        warn_lead_days: 3
+        notes: "No fail-closed FINRA staleness gate exists in 14_validate; this probe is the only alarm when cycles are missed (defense missed 2026-06-30 + 2026-07-15 silently)."
+      - name: institutional_13f_period
+        kind: deadline_schedule
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(period_of_report) FROM institutional_13f_holdings WHERE ticker IN ('LMT','RTX','NOC','GD','LHX','HEI')"
+          cadence: quarterly
+          deadline_days: 45         # SEC 13F filing deadline: quarter_end + 45d
+          publication_lag_days: 35  # SEC DERA archive closes quarter_end+~62d and publishes <=~2.5wk later (observed mar-may-2026: <= 06-17); 45+35 never demands a period before DERA can publish it (Q2-2026 required from 2026-09-18, WARN from 09-11)
+        tolerance_days: 0
+        warn_lead_days: 7
+        required: true              # defense pins institutional_13f_data_gate; a missed DERA pickup must be impossible to overlook
+        notes: "Q2-2026 archive 01jun2026-31aug2026_form13f.zip expected ~09-04..09-15; the 120d feature-staleness clock arms 09-06 (BA). This probe plus a September full-mode script-13 run is the pickup contract."
 
   # -------------------------------------------------------------- machinery
   - name: machinery
@@ -322,6 +397,38 @@ sectors:
       steps: ["12_sync_sec_ownership", "13_sync_positioning"]
       rebuild_steps: ["09_import_positioning", "14_validate_positioning", "10_validate_eligibility", "06a_build_scoring", "06a_validate_scoring", "10_build_scores", "10b_publish", "10b_validate", "20_validate_portfolio"]
       extra_args: []
+    # Surveillance-only (machinery's 13F availability gate is disabled:
+    # required_period_of_report "" in machinery/config.yaml). Anchors CAT/DE/PCAR.
+    freshness_probes:
+      - name: ibkr_borrow_age
+        kind: sqlite_max_date
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(asof_date) FROM ibkr_borrow_fee_rate_daily WHERE ticker IN ('CAT','DE','PCAR')"
+        tolerance_days: 10
+        warn_lead_days: 3
+        notes: "IBKR borrow feed age over the machinery anchor tickers."
+      - name: finra_short_interest_cycle
+        kind: deadline_schedule
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(settlement_date) FROM short_interest_snapshots WHERE ticker IN ('CAT','DE','PCAR')"
+          cadence: semi_monthly
+          publication_lag_days: 12
+        tolerance_days: 7
+        warn_lead_days: 3
+        notes: "Machinery is on the same manual full-mode FINRA sweep as defense and missed the same 2026-06-30/07-15 cycles."
+      - name: institutional_13f_period
+        kind: deadline_schedule
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(period_of_report) FROM institutional_13f_holdings WHERE ticker IN ('CAT','DE','PCAR')"
+          cadence: quarterly
+          deadline_days: 45
+          publication_lag_days: 35
+        tolerance_days: 0
+        warn_lead_days: 7
+        notes: "Advisory (gate disabled for machinery); same DERA publication calendar as defense."
 
   # ------------------------------------------------------- portfolio_layer
   # --------------------------------------------------- transportation
@@ -374,6 +481,37 @@ sectors:
       steps: []
       rebuild_steps: []
       extra_args: []
+    # Surveillance-only (shadow lane; never blocks). Anchors UNP/CSX/ODFL/AAL.
+    freshness_probes:
+      - name: ibkr_borrow_age
+        kind: sqlite_max_date
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(asof_date) FROM ibkr_borrow_fee_rate_daily WHERE ticker IN ('UNP','CSX','ODFL','AAL')"
+        tolerance_days: 10
+        warn_lead_days: 3
+        notes: "IBKR borrow feed age over the transportation anchor tickers."
+      - name: finra_short_interest_cycle
+        kind: deadline_schedule
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(settlement_date) FROM short_interest_snapshots WHERE ticker IN ('UNP','CSX','ODFL','AAL')"
+          cadence: semi_monthly
+          publication_lag_days: 12
+        tolerance_days: 7
+        warn_lead_days: 3
+        notes: "Transportation last swept FINRA in its 2026-07-30 full-mode run (settlement 2026-07-15)."
+      - name: institutional_13f_period
+        kind: deadline_schedule
+        target:
+          db: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+          sql: "SELECT MAX(period_of_report) FROM institutional_13f_holdings WHERE ticker IN ('UNP','CSX','ODFL','AAL')"
+          cadence: quarterly
+          deadline_days: 45
+          publication_lag_days: 35
+        tolerance_days: 0
+        warn_lead_days: 7
+        notes: "Advisory; transportation's own gate is pinned to 2026-03-31 and satisfied."
 
   - name: portfolio_layer
     db_group: portfolio
@@ -384,13 +522,35 @@ sectors:
     date_flag: "--as-of"                # NOTE: hyphenated, unlike sectors' --asof
     args_template: ["--as-of", "{date}"]
     force_args: ["--force"]
-    publish_glob: "portfolio_layer/output/runs/{date}/stocks_scores.csv"
+    # Publish/health must gate on END-of-run artifacts, not Stage-1 outputs:
+    # stocks_scores.csv + manifest.json[hard_gate_acceptance] exist minutes into a
+    # run, so a run dying after scores used to count as published+healthy and was
+    # never re-run. final/final_manifest.json is written only by the last step
+    # (final_report/21), and orchestration_meta.json["acceptance"] is 18's
+    # whole-run verdict (PASS_WITH_ADVISORY_WARNINGS = advisory-only soft fails).
+    publish_glob: "portfolio_layer/output/runs/{date}/final/final_manifest.json"
     publish_date_format: "%Y-%m-%d"
+    # Publish-convention epoch (2026-08-07): final/final_manifest.json is written only
+    # by runs since 2026-07-02 (verified: earliest final_manifest.json on disk).
+    # ~1,900 older run dirs sealed under the previous convention must never be
+    # re-classified as missing when this glob changes -- pre-epoch dates are exempt
+    # from catch-up missing-detection. Bump this date whenever publish_glob is
+    # repointed to an artifact that older runs do not have.
+    publish_epoch: "2026-07-02"
     oos_column: null
     staleness_tolerance_days: 10
+    # 12h = 2x the 6h default. Derivation: 18's configured per-step budgets sum to
+    # ~19h absolute worst case (strategic cadence: ~50 steps x step_timeout_sec
+    # 1800 plus the 7200s macro + monitor ceilings), but that ceiling is only
+    # reachable if nearly every step hangs to its own timeout; a healthy strategic
+    # run completes in a small fraction of 12h. 43200 lets 18 absorb several
+    # step-level timeouts and still persist its own terminal FAIL meta instead of
+    # being killed mid-run by the master at the 6h default.
+    timeout_sec: 43200
     health:
-      manifest: "portfolio_layer/output/runs/{date}/manifest.json"
-      status_keys: ["hard_gate_acceptance"]
+      manifest: "portfolio_layer/output/runs/{date}/orchestration_meta.json"
+      status_keys: ["acceptance"]
+      healthy_values: ["PASS", "PASS_WITH_ADVISORY_WARNINGS"]
     # Portfolio has no native per-date backfill entry. In --mode backfill the
     # orchestrator records a NOTE that research/65 snapshot capture is the
     # intended path and does NOT auto-run the stage11 chain.
@@ -400,3 +560,22 @@ sectors:
       per_date: false
       note: "portfolio_layer stage11/research chain is NOT auto-run; capture snapshots via portfolio_layer research/65 manually."
     repair: null
+    # Surveillance-only: age of the two portfolio-side upstream stores nothing
+    # else watches (publish-artifact staleness covers only the published runs).
+    freshness_probes:
+      - name: macro_serving_age
+        kind: sqlite_max_date
+        target:
+          db: "portfolio_layer/MacroLayer/macro_serving.sqlite"
+          sql: "SELECT MAX(as_of_date) FROM macro_regime_decision_daily"
+        tolerance_days: 5
+        warn_lead_days: 2
+        notes: "Macro serving regime decisions must track the trading calendar; stale serving silently degrades Stage-1 inputs."
+      - name: holdings_ledger_age
+        kind: sqlite_max_date
+        target:
+          db: "portfolio_layer/db/portfolio_layer.sqlite"
+          sql: "SELECT MAX(run_as_of) FROM holding_state"
+        tolerance_days: 7
+        warn_lead_days: 2
+        notes: "Holdings ledger snapshot age (ledger/31); sizing against a stale book is silent otherwise."

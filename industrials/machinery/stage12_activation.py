@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -97,6 +98,9 @@ class ActivationPaths:
             / "machinery_stage11_survivorship_calibration_panel_shadow_backup.csv"
         )
         self.shadow_manifest_backup_json = self.root / "machinery_final_rank_table_shadow_manifest_backup.json"
+        self.shadow_state_backup_json = (
+            self.root / "machinery_dashboard_pre_activation_state.json"
+        )
         self.activation_json = self.root / "machinery_activation_result.json"
 
 
@@ -118,6 +122,84 @@ def _write_bytes_atomic(path: Path, payload: bytes) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _capture_dashboard_state(
+    paths: ActivationPaths,
+    *,
+    live_rank: Path,
+    live_sidecar: Path,
+    live_manifest: Path,
+) -> dict[str, Any]:
+    """Seal the exact pre-activation state, including absent files."""
+    targets = {
+        "rank": (live_rank, paths.shadow_backup_csv),
+        "sidecar": (live_sidecar, paths.shadow_sidecar_backup_csv),
+        "manifest": (live_manifest, paths.shadow_manifest_backup_json),
+    }
+    records: dict[str, dict[str, Any]] = {}
+    for name, (target, backup) in targets.items():
+        if target.exists() and not target.is_file():
+            raise ValueError(f"Activation dashboard target is not a file: {target}")
+        existed = target.is_file()
+        payload = target.read_bytes() if existed else None
+        if payload is None:
+            backup.unlink(missing_ok=True)
+        else:
+            _write_bytes_atomic(backup, payload)
+        records[name] = {
+            "path": str(target.resolve()),
+            "backup": str(backup.resolve()),
+            "existed": existed,
+            "sha256": sha256(payload).hexdigest() if payload is not None else "",
+        }
+    snapshot = {
+        "artifact_family": "machinery_dashboard_pre_activation_state",
+        "complete_dashboard": all(row["existed"] for row in records.values()),
+        "files": records,
+    }
+    write_json_atomic(paths.shadow_state_backup_json, snapshot)
+    return snapshot
+
+
+def _restore_dashboard_state(
+    paths: ActivationPaths,
+    *,
+    live_rank: Path,
+    live_sidecar: Path,
+    live_manifest: Path,
+) -> dict[str, Any]:
+    """Restore files to their exact pre-activation existence and bytes."""
+    if not paths.shadow_state_backup_json.is_file():
+        raise FileNotFoundError(paths.shadow_state_backup_json)
+    snapshot = json.loads(
+        paths.shadow_state_backup_json.read_text(encoding="utf-8")
+    )
+    records = snapshot.get("files")
+    if not isinstance(records, dict):
+        raise ValueError("Activation dashboard state has no file records")
+    targets = {
+        "rank": live_rank,
+        "sidecar": live_sidecar,
+        "manifest": live_manifest,
+    }
+    for name, target in targets.items():
+        record = records.get(name)
+        if not isinstance(record, dict):
+            raise ValueError(f"Activation dashboard state is missing {name}")
+        if Path(str(record.get("path") or "")).resolve() != target.resolve():
+            raise ValueError(f"Activation dashboard state path changed for {name}")
+        if bool(record.get("existed")):
+            backup = Path(str(record.get("backup") or ""))
+            if not backup.is_file():
+                raise FileNotFoundError(backup)
+            payload = backup.read_bytes()
+            if sha256(payload).hexdigest() != str(record.get("sha256") or ""):
+                raise ValueError(f"Activation dashboard backup hash changed for {name}")
+            _write_bytes_atomic(target, payload)
+        else:
+            target.unlink(missing_ok=True)
+    return snapshot
 
 
 def _activation_date_checks(lock: Mapping[str, Any], asof: str) -> None:
@@ -745,32 +827,24 @@ def activate_candidate(
             )
         )
     )
-    if (
-        not live_rank.is_file()
-        or not live_sidecar.is_file()
-        or not live_manifest.is_file()
-    ):
-        raise FileNotFoundError(
-            "Activation publish target dashboard is incomplete"
-        )
-    original_rank = live_rank.read_bytes()
-    original_sidecar = live_sidecar.read_bytes()
-    original_manifest = live_manifest.read_bytes()
-    _write_bytes_atomic(paths.shadow_backup_csv, original_rank)
-    _write_bytes_atomic(
-        paths.shadow_sidecar_backup_csv,
-        original_sidecar,
+    dashboard_state = _capture_dashboard_state(
+        paths,
+        live_rank=live_rank,
+        live_sidecar=live_sidecar,
+        live_manifest=live_manifest,
     )
-    _write_bytes_atomic(
-        paths.shadow_manifest_backup_json,
-        original_manifest,
+    source_manifest = Path(str(manifest["source_shadow_manifest"]))
+    manifest_template = (
+        live_manifest.read_bytes()
+        if bool(dashboard_state["complete_dashboard"])
+        else source_manifest.read_bytes()
     )
     candidate_rows = read_rows(paths.rank_csv)
     sidecar_rows = survivorship_sidecar(candidate_rows)
     try:
         _write_bytes_atomic(live_rank, paths.rank_csv.read_bytes())
         write_rank_rows(live_sidecar, sidecar_rows)
-        dashboard_manifest = json.loads(original_manifest.decode("utf-8"))
+        dashboard_manifest = json.loads(manifest_template.decode("utf-8"))
         dashboard_manifest.update(
             {
                 "acceptance": "PASS",
@@ -820,9 +894,12 @@ def activate_candidate(
                 f"Published dashboard adapter count mismatch expected={expected_count} actual={actual_count}"
             )
     except BaseException:
-        _write_bytes_atomic(live_rank, original_rank)
-        _write_bytes_atomic(live_sidecar, original_sidecar)
-        _write_bytes_atomic(live_manifest, original_manifest)
+        _restore_dashboard_state(
+            paths,
+            live_rank=live_rank,
+            live_sidecar=live_sidecar,
+            live_manifest=live_manifest,
+        )
         raise
     result = {
         "acceptance": "PASS",
@@ -840,6 +917,7 @@ def activate_candidate(
         "rollback_rank": str(paths.shadow_backup_csv),
         "rollback_sidecar": str(paths.shadow_sidecar_backup_csv),
         "rollback_manifest": str(paths.shadow_manifest_backup_json),
+        "rollback_state": str(paths.shadow_state_backup_json),
     }
     write_json_atomic(paths.activation_json, result)
     return result
@@ -853,11 +931,7 @@ def rollback_published_candidate(
 ) -> dict[str, Any]:
     """Restore the exact shadow dashboard after a failed post-publish smoke."""
     paths = ActivationPaths(governance_root, asof)
-    required = (
-        paths.manifest_json,
-        paths.shadow_backup_csv,
-        paths.shadow_manifest_backup_json,
-    )
+    required = (paths.manifest_json,)
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError("Activation rollback artifacts are incomplete: " + ", ".join(missing))
@@ -876,8 +950,6 @@ def rollback_published_candidate(
             or ""
         )
     )
-    if not live_rank.is_file() or not live_manifest.is_file():
-        raise FileNotFoundError("Activation rollback targets are missing from the candidate manifest")
     live_sidecar = Path(
         str(
             manifest.get("publish_sidecar")
@@ -886,29 +958,46 @@ def rollback_published_candidate(
             )
         )
     )
-    restore_sidecar = paths.shadow_sidecar_backup_csv.is_file()
-    if restore_sidecar and not live_sidecar.is_file():
-        raise FileNotFoundError(
-            "Activation rollback sidecar target is missing"
+    if paths.shadow_state_backup_json.is_file():
+        snapshot = _restore_dashboard_state(
+            paths,
+            live_rank=live_rank,
+            live_sidecar=live_sidecar,
+            live_manifest=live_manifest,
         )
-    _write_bytes_atomic(live_rank, paths.shadow_backup_csv.read_bytes())
-    if restore_sidecar:
+        restore_sidecar = bool(snapshot["files"]["sidecar"]["existed"])
+        complete_dashboard = bool(snapshot.get("complete_dashboard"))
+    else:
+        legacy_required = (
+            paths.shadow_backup_csv,
+            paths.shadow_manifest_backup_json,
+        )
+        legacy_missing = [str(path) for path in legacy_required if not path.exists()]
+        if legacy_missing:
+            raise FileNotFoundError(
+                "Activation rollback artifacts are incomplete: "
+                + ", ".join(legacy_missing)
+            )
+        restore_sidecar = paths.shadow_sidecar_backup_csv.is_file()
+        _write_bytes_atomic(live_rank, paths.shadow_backup_csv.read_bytes())
+        if restore_sidecar:
+            _write_bytes_atomic(
+                live_sidecar,
+                paths.shadow_sidecar_backup_csv.read_bytes(),
+            )
         _write_bytes_atomic(
-            live_sidecar,
-            paths.shadow_sidecar_backup_csv.read_bytes(),
+            live_manifest,
+            paths.shadow_manifest_backup_json.read_bytes(),
         )
-    _write_bytes_atomic(
-        live_manifest,
-        paths.shadow_manifest_backup_json.read_bytes(),
-    )
-    restored_manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
-    if (
-        restored_manifest.get("acceptance") != "PASS"
-        or restored_manifest.get("rank_table_sha256")
-        != file_sha256(live_rank)
-        or restored_manifest.get("asof_date") != asof
-    ):
-        raise ValueError("Restored dashboard failed manifest validation")
+        complete_dashboard = True
+    if complete_dashboard:
+        restored_manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
+        if (
+            restored_manifest.get("acceptance") != "PASS"
+            or restored_manifest.get("rank_table_sha256") != file_sha256(live_rank)
+            or restored_manifest.get("asof_date") != asof
+        ):
+            raise ValueError("Restored dashboard failed manifest validation")
     result = {
         "acceptance": "PASS",
         "activation_status": ACTIVATION_STATUS_ROLLED_BACK,
@@ -916,13 +1005,16 @@ def rollback_published_candidate(
         "asof_date": asof,
         "reason": reason,
         "rank_table": str(live_rank),
-        "rank_table_sha256": file_sha256(live_rank),
+        "rank_table_sha256": file_sha256(live_rank) if live_rank.is_file() else "",
         "rank_manifest": str(live_manifest),
-        "rank_manifest_sha256": file_sha256(live_manifest),
+        "rank_manifest_sha256": (
+            file_sha256(live_manifest) if live_manifest.is_file() else ""
+        ),
         "sidecar": str(live_sidecar) if restore_sidecar else "",
         "sidecar_sha256": (
             file_sha256(live_sidecar) if restore_sidecar else ""
         ),
+        "pre_activation_dashboard_complete": complete_dashboard,
         "production_promotion_performed": False,
         "full_portfolio_smoke_required": True,
     }

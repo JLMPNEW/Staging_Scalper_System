@@ -1,0 +1,17 @@
+paths:
+  database_path: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_active_model_replacement_0\portfolio.sqlite
+  output_dir: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_active_model_replacement_0\portfolio_output
+  cache_dir: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_active_model_replacement_0\cache
+  macro_serving_db_path: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_active_model_replacement_0\macro.sqlite
+score_contract:
+  sector_output_root: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_active_model_replacement_0\sector_output
+  sectors:
+  - model_family: machinery
+    required: true
+    file_mode: dated
+    file_path: industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv
+optimizer:
+  sector_weight_caps:
+    machinery: 0.05
+  fixed_equal_weight_sleeves:
+  - machinery

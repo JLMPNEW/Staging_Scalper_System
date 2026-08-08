@@ -486,6 +486,10 @@ def main() -> int:
         elif not av_error:
             errors.append("alpha_vantage:not_in_bulk_calendar")
 
+        # True only when a fallback provider was actually consulted and cleanly
+        # reported no upcoming date; distinguishes "providers unavailable"
+        # (budget/errors - carry the prior forward) from "definitively none".
+        definitive_empty = False
         if next_date is None and yahoo_enabled:
             if yahoo_calls >= yahoo_budget:
                 errors.append("yahoo:call_budget_exhausted")
@@ -497,6 +501,8 @@ def main() -> int:
                     source = "yahoo_finance"
                 elif yahoo_err:
                     errors.append(f"yahoo:{yahoo_err}")
+                else:
+                    definitive_empty = True
                 if yahoo_pause > 0:
                     time.sleep(yahoo_pause)
 
@@ -515,6 +521,8 @@ def main() -> int:
                 if found:
                     next_date = found
                     source = "gemini_search_grounded"
+                elif not gem_err:
+                    definitive_empty = True
                 confidence = conf or ""
                 if gem_err:
                     errors.append(f"gemini:{gem_err}")
@@ -524,6 +532,14 @@ def main() -> int:
                     time.sleep(gemini_pause)
 
         prior = prior_dates.get(ticker, "")
+        # Provider unavailability (budget exhaustion, provider errors, or no
+        # fallback configured) must not destroy a previously-captured date that
+        # is still at-or-after the floor: carry it forward, clearly sourced.
+        # A definitive empty answer from a consulted provider still blanks.
+        if next_date is None and prior and prior >= floor.isoformat() and not definitive_empty:
+            next_date = prior
+            source = "carried_forward_prior"
+            errors.append("carried_forward:providers_unavailable_this_run")
         rows.append(
             {
                 "run_as_of_date": run_as_of,

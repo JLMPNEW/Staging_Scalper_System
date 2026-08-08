@@ -5,6 +5,8 @@ from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,6 +85,10 @@ def test_monitor_filter_is_mandatory_second_pass() -> None:
     orchestrator = _load_orchestrator()
     for cadence in ("tactical", "strategic"):
         groups = orchestrator.DEFAULT_CADENCES[cadence]
+        # Ledger-before-monitor is NOT a static cadence property: tactical has no
+        # ledger pass and strategic lists ledger after monitor. When holdings are
+        # required, plan_groups() normalizes one ledger pass before the first
+        # monitor group (covered by the dedicated plan_groups tests below).
         assert groups.index("monitor") < groups.index("monitor_filter")
         post_filter = groups.index("monitor_filter")
         assert post_filter < groups.index("rotation", post_filter)
@@ -159,3 +165,126 @@ def test_liquidity_attempt_precedes_authoritative_risk_gates() -> None:
     assert "05c_collect_ib_historical_spread_samples.py" in (
         orchestrator.OPTIONAL_STEP_SCRIPTS
     )
+
+
+def test_missing_ledger_fails_fast_for_holdings_required_monitor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_broker_statement_available",
+        lambda *_args, **_kwargs: False,
+    )
+    args = SimpleNamespace(
+        groups="ledger,exits,monitor,monitor_filter,final",
+        cadence="strategic",
+        skip="",
+        config=tmp_path / "config.yaml",
+    )
+    config = {
+        "orchestration": {"cadences": {}},
+        "expectations_monitor": {
+            "universe": {"require_broker_holdings": True}
+        },
+    }
+
+    with pytest.raises(ValueError, match="requires same-date broker holdings"):
+        orchestrator.plan_groups(args, config, tmp_path / "2026-08-03")
+
+
+def test_holdings_required_monitor_normalizes_ledger_before_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_broker_statement_available",
+        lambda *_args, **_kwargs: True,
+    )
+    args = SimpleNamespace(
+        groups="monitor,monitor_filter,ledger,final",
+        cadence="strategic",
+        skip="",
+        config=tmp_path / "config.yaml",
+    )
+    config = {
+        "orchestration": {"cadences": {}},
+        "expectations_monitor": {
+            "universe": {"require_broker_holdings": True}
+        },
+    }
+
+    planned = orchestrator.plan_groups(
+        args,
+        config,
+        tmp_path / "2026-08-03",
+    )
+
+    assert planned == ["ledger", "monitor", "monitor_filter", "final"]
+
+
+def test_default_run_as_of_rejects_stale_latest_run_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import date
+
+    orchestrator = _load_orchestrator()
+    # Hermetic calendar: 2026-08-03 is a regular Monday session.
+    monkeypatch.setattr(
+        orchestrator,
+        "_previous_nyse_trading_day",
+        lambda today: today,
+    )
+    today = date(2026, 8, 3)
+    runs_root = tmp_path / "runs"
+    friday = runs_root / "2026-07-31"
+    friday.mkdir(parents=True)
+    (friday / "stocks_scores.csv").write_text("ticker\n", encoding="utf-8")
+
+    # A bare default may not resume a prior session: self-forced re-pass steps
+    # would rebuild Friday's sealed final book without operator --force.
+    with pytest.raises(ValueError, match=r"Pass --as-of 2026-08-03"):
+        orchestrator.default_run_as_of(runs_root, today=today)
+
+    # Resuming the current session is allowed.
+    monday = runs_root / "2026-08-03"
+    monday.mkdir()
+    (monday / "stocks_scores.csv").write_text("ticker\n", encoding="utf-8")
+    assert orchestrator.default_run_as_of(runs_root, today=today) == "2026-08-03"
+
+    # A fresh runs root defaults to the current calendar session.
+    assert (
+        orchestrator.default_run_as_of(tmp_path / "empty", today=today)
+        == "2026-08-03"
+    )
+
+
+def test_holdings_required_monitor_rejects_explicit_ledger_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_broker_statement_available",
+        lambda *_args, **_kwargs: True,
+    )
+    args = SimpleNamespace(
+        groups="ledger,monitor,monitor_filter,final",
+        cadence="strategic",
+        skip="ledger",
+        config=tmp_path / "config.yaml",
+    )
+    config = {
+        "orchestration": {"cadences": {}},
+        "expectations_monitor": {
+            "universe": {"require_broker_holdings": True}
+        },
+    }
+
+    with pytest.raises(ValueError, match="explicitly skipped"):
+        orchestrator.plan_groups(args, config, tmp_path / "2026-08-03")

@@ -540,6 +540,14 @@ positioning_import:
   # PS-6: staleness bounds for point-in-time positioning lookups (days before the
   # evaluation asof). Rows older than these must not satisfy the gates or be used
   # in features marked 'complete'.
+  # A13-7 (2026-08-05): script 09 applies max_13f_staleness_days as a
+  # publication-calendar-capped clock (industrials/core/sec_13f_calendar.py): a
+  # ticker's 13F only counts as stale once BOTH the snapshot age exceeds this
+  # bound AND the SEC DERA archive that must carry the next filing round has
+  # been publishable in the worst observed case (window end + ~17d lag + 3d
+  # grace). The gate never demands a filing the source cannot yet publish —
+  # e.g. last-filing 2026-05-08 + 120d would have armed 2026-09-06 while the
+  # jun-aug archive can land ~2026-09-17; the capped clock arms 2026-09-20.
   max_13f_staleness_days: 120
   max_borrow_staleness_days: 10
   require_upstream_13f_for_gate: true

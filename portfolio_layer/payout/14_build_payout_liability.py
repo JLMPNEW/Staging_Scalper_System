@@ -16,8 +16,11 @@ funding: the cost-adjusted book's weights are post-trade targets, so sell procee
 allocated inside them. True gains-staggering (lot-aware) starts when the broker ledger supplies
 cost basis; until then trim priority is weakest-thesis-first.
 
-Book source: exits/exit_adjusted_book.csv when present with a passing meta (Stage 9 P2), else
-costs/cost_adjusted_target_weights.csv. Outputs runs/<as_of>/payout/{payout_plan.csv,
+Book source follows the SAME promotion rule as Stage 12a (20_compose_final_target_book):
+exits/exit_adjusted_book.csv only when exit_engine.apply_in_final is true (sealed meta required,
+fail closed), else costs/cost_adjusted_target_weights.csv — a merely-present sealed exits artifact
+stays shadow so the payout book_sha256 handshake keys to the book Stage 12a actually composes.
+Outputs runs/<as_of>/payout/{payout_plan.csv,
 payout_adjusted_book.csv, payout_manifest.json}; the adjusted book moves the distribution to an
 explicit PAYOUT_RESERVED line so conservation is provable.
 """
@@ -272,11 +275,20 @@ def main() -> int:  # noqa: C901
         LOGGER.error("Stage 4 cost book is unsealed/stale: %s", cost_seal_errors)
         return 1
 
-    # book source: Stage 9 P2 exit-adjusted book when sealed and passing, else the Stage 4 book
+    # Book source must follow the SAME promotion rule as Stage 12a (20_compose): the exit-adjusted
+    # book feeds payout only when exit_engine.apply_in_final=true. A sealed exits artifact that is
+    # merely PRESENT stays shadow — otherwise payout keys its book_sha256 handshake to a book
+    # Stage 12a never composes and promotion deadlocks.
+    exits_in_final = bool(cfg_get(config, "exit_engine.apply_in_final", False))
     book_source = "costs/cost_adjusted_target_weights.csv"
     exits_book_path = run_dir / "exits" / "exit_adjusted_book.csv"
     exits_meta_path = run_dir / "exits" / "exit_adjusted_book_meta.json"
-    if exits_book_path.exists() and exits_meta_path.exists():
+    if exits_in_final:
+        if not exits_book_path.exists() or not exits_meta_path.exists():
+            LOGGER.error(
+                "exit_engine.apply_in_final=true but exits/exit_adjusted_book.csv or its meta is "
+                "missing in this run; refusing")
+            return 1
         exits_meta = read_manifest(exits_meta_path)
         exit_seal_errors = sealed_artifact_errors(
             exits_meta,
@@ -284,8 +296,12 @@ def main() -> int:  # noqa: C901
             "exit_adjusted_book.csv",
             run_as_of=run_as_of,
         )
-        if not exit_seal_errors:
-            book_source = "exits/exit_adjusted_book.csv"
+        if exit_seal_errors:
+            LOGGER.error(
+                "exit_engine.apply_in_final=true but the exit-adjusted book is unsealed/stale: %s",
+                exit_seal_errors)
+            return 1
+        book_source = "exits/exit_adjusted_book.csv"
     if book_source.startswith("exits"):
         book = [{"ticker": r["ticker"], "weight": r.get("post_exit_weight", "0")}
                 for r in read_csv(exits_book_path)]

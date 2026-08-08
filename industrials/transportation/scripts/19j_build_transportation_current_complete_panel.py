@@ -53,6 +53,8 @@ DEFAULT_OUTPUT_ROOT = (
     / "transportation"
     / "current_panels"
 )
+FROZEN_PANEL_MANIFEST = "transportation_v3_panel_manifest.json"
+FROZEN_PANEL_VALIDATION = "transportation_v3_panel_validation.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,6 +96,8 @@ def _valid_existing(
     asof: str,
     snapshot_hash: str,
     preflight_hash: str,
+    frozen_panel_hash: str,
+    frozen_validation_hash: str,
     generator_hash: str,
 ) -> bool:
     if not all(
@@ -124,6 +128,10 @@ def _valid_existing(
         == snapshot_hash
         and str((inputs.get("dp8_preflight") or {}).get("sha256") or "")
         == preflight_hash
+        and str((inputs.get("frozen_v3_panel_manifest") or {}).get("sha256") or "")
+        == frozen_panel_hash
+        and str((inputs.get("frozen_v3_panel_validation") or {}).get("sha256") or "")
+        == frozen_validation_hash
         and str((manifest.get("generator") or {}).get("sha256") or "")
         == generator_hash
         and str((artifacts.get("complete_panel") or {}).get("sha256") or "")
@@ -174,10 +182,51 @@ def main() -> int:
         != "GO_ALL_SPECIALIZED_PARTITIONS_ONLY"
     ):
         raise ValueError("the frozen DP8 v3 evidence contract is not passing")
-    for label, reference in (preflight.get("inputs") or {}).items():
-        if label == "v2_snapshot_hash_set_sha256":
+    preflight_inputs = preflight.get("inputs") or {}
+    for label, reference in preflight_inputs.items():
+        if label in {
+            "v2_build_manifest",
+            "v2_snapshot_hash_set_sha256",
+            "v2_validation_manifest",
+        }:
             continue
         verify_artifact(reference, label=f"frozen DP8 input {label}")
+    # The v2 build/validation manifests are rolling operational indexes and
+    # legitimately change as later snapshots accrue or source snapshots are
+    # repaired.  The immutable calibration input is the materialized v3 panel.
+    # Anchor current builds to that sealed panel and its original DP8 contract.
+    frozen_panel_manifest_path = frozen_dir / FROZEN_PANEL_MANIFEST
+    frozen_panel_validation_path = frozen_dir / FROZEN_PANEL_VALIDATION
+    frozen_panel_manifest = read_json(frozen_panel_manifest_path)
+    frozen_panel_validation = read_json(frozen_panel_validation_path)
+    if (
+        frozen_panel_manifest.get("acceptance") != "PASS"
+        or frozen_panel_manifest.get("panel_status") != "HASH_FROZEN"
+        or frozen_panel_manifest.get("asof_date") != preflight.get("asof_date")
+        or frozen_panel_manifest.get("last_snapshot_date")
+        != preflight.get("last_snapshot_date")
+    ):
+        raise ValueError("the immutable transportation v3 panel contract is not passing")
+    sealed_preflight = (
+        (frozen_panel_manifest.get("inputs") or {}).get("dp8_preflight") or {}
+    )
+    if str(sealed_preflight.get("sha256") or "") != sha256(preflight_path):
+        raise ValueError("the immutable v3 panel does not seal the active DP8 preflight")
+    frozen_artifacts = frozen_panel_manifest.get("artifacts") or {}
+    for label, reference in frozen_artifacts.items():
+        verify_artifact(reference, label=f"frozen v3 panel artifact {label}")
+    frozen_complete_hash = str(
+        (frozen_artifacts.get("complete_panel") or {}).get("sha256") or ""
+    )
+    if (
+        frozen_panel_validation.get("acceptance") != "PASS"
+        or frozen_panel_validation.get("panel_status") != "FROZEN"
+        or str(
+            frozen_panel_validation.get("calibration_input_panel_sha256") or ""
+        )
+        != frozen_complete_hash
+    ):
+        raise ValueError("the immutable transportation v3 panel validation is not passing")
 
     dispositions_path = Path(
         preflight["inputs"]["final_dispositions"]["path"]
@@ -237,6 +286,8 @@ def main() -> int:
     generator_path = Path(__file__).resolve()
     snapshot_hash = sha256(availability_path)
     preflight_hash = sha256(preflight_path)
+    frozen_panel_hash = sha256(frozen_panel_manifest_path)
+    frozen_validation_hash = sha256(frozen_panel_validation_path)
     generator_hash = sha256(generator_path)
     if _valid_existing(
         manifest_path=manifest_path,
@@ -246,6 +297,8 @@ def main() -> int:
         asof=asof,
         snapshot_hash=snapshot_hash,
         preflight_hash=preflight_hash,
+        frozen_panel_hash=frozen_panel_hash,
+        frozen_validation_hash=frozen_validation_hash,
         generator_hash=generator_hash,
     ):
         print(manifest_path.read_text(encoding="utf-8"), end="")
@@ -331,6 +384,8 @@ def main() -> int:
                 row_count=len(read_csv(availability_path)),
             ),
             "dp8_preflight": _artifact(preflight_path),
+            "frozen_v3_panel_manifest": _artifact(frozen_panel_manifest_path),
+            "frozen_v3_panel_validation": _artifact(frozen_panel_validation_path),
             "scope": _artifact(scope_path, row_count=len(scope_rows)),
             "final_coverage": _artifact(
                 coverage_input_path,

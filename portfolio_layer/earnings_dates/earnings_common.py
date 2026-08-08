@@ -42,7 +42,15 @@ EARNINGS_CALENDAR_FIELDS = [
     "error_detail",              # per-provider error trail when no date found
 ]
 
-ALLOWED_SOURCES = ("alpha_vantage_bulk", "yahoo_finance", "gemini_search_grounded", "none")
+ALLOWED_SOURCES = (
+    "alpha_vantage_bulk",
+    "yahoo_finance",
+    "gemini_search_grounded",
+    # Prior still-future date retained when every provider was unavailable this
+    # run (budget exhaustion / errors); never used after a definitive empty.
+    "carried_forward_prior",
+    "none",
+)
 
 HISTORY_RELATIVE_PATH = Path("earnings_dates") / "earnings_calendar_history.csv"
 RUN_ARTIFACT_NAME = "earnings_calendar.csv"

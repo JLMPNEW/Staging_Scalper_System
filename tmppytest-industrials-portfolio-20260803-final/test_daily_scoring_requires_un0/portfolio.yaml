@@ -1,0 +1,9 @@
+optimizer:
+  fixed_equal_weight_sleeves:
+  - machinery
+  sector_weight_caps:
+    machinery: 0.05
+score_contract:
+  sectors:
+  - model_family: machinery
+    required: true

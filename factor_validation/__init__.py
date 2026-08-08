@@ -1,8 +1,29 @@
-"""Shared, production-neutral factor validation primitives.
+"""Shared, production-neutral factor validation and evidence primitives.
 
-The package deliberately contains no sector adapters, configuration loaders, or file I/O.
-Sector pipelines remain responsible for point-in-time data construction and promotion policy.
+The package deliberately contains no sector adapters or production configuration loaders. Its only
+I/O publishes explicitly requested immutable evidence packages. Sector pipelines remain responsible
+for point-in-time data construction and promotion policy.
 """
+
+from factor_validation.acceptance import (
+    ACCEPTANCE_SCHEMA_VERSION,
+    AcceptanceGate,
+    AcceptanceRecord,
+    build_acceptance_record,
+    registered_fdr_decision,
+    transition_evidence_state,
+)
+from factor_validation.artifacts import (
+    MANIFEST_SCHEMA_VERSION,
+    EvidencePackage,
+    VerificationReport,
+    campaign_registry_path,
+    evidence_package_path,
+    load_campaign_registry,
+    register_campaign,
+    verify_evidence_package,
+    write_evidence_package,
+)
 
 from factor_validation.core import (
     CONTRACT_VERSION,
@@ -30,28 +51,61 @@ from factor_validation.fdr import (
     FDRFamily,
     apply_benjamini_hochberg,
 )
+from factor_validation.registry import (
+    REGISTRY_SCHEMA_VERSION,
+    CampaignRegistry,
+    FileSeal,
+    ObservedProvenance,
+    ValidationCellRegistration,
+    canonical_json_bytes,
+    sha256_bytes,
+    sha256_file,
+)
 
 __all__ = [
+    "ACCEPTANCE_SCHEMA_VERSION",
+    "AcceptanceGate",
+    "AcceptanceRecord",
+    "CampaignRegistry",
     "CONTRACT_VERSION",
     "EvaluationCadence",
+    "EvidencePackage",
     "FDRDecision",
     "FDRFamily",
     "FactorObservation",
     "FactorValidationConfig",
     "FactorValidationResult",
+    "FileSeal",
     "HACInference",
     "IndependentWindowInference",
+    "MANIFEST_SCHEMA_VERSION",
+    "ObservedProvenance",
     "PerDateDiagnostic",
     "QuantileDiagnostics",
+    "REGISTRY_SCHEMA_VERSION",
     "RegimeDiagnostic",
+    "ValidationCellRegistration",
+    "VerificationReport",
     "apply_benjamini_hochberg",
     "average_ranks",
+    "build_acceptance_record",
+    "campaign_registry_path",
+    "canonical_json_bytes",
+    "evidence_package_path",
     "evaluation_cadence",
     "hac_lag_for_overlapping_labels",
     "infer_evaluation_step_trading_days",
     "independent_window_mean_inference",
+    "load_campaign_registry",
     "newey_west_mean_inference",
     "quantile_diagnostics",
+    "register_campaign",
+    "registered_fdr_decision",
+    "sha256_bytes",
+    "sha256_file",
     "spearman_rank_correlation",
+    "transition_evidence_state",
     "validate_factor",
+    "verify_evidence_package",
+    "write_evidence_package",
 ]

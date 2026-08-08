@@ -121,6 +121,7 @@ issuer_ir:
   pdf_extraction_timeout_sec: 30.0
 
 dedicated_parser:
+  python_executable: '${DEDICATED_PARSER_PYTHON:-C:/Users/josel/miniconda3/envs/scalper-staging/python.exe}'
   # Accepted evidence is promoted through the gated supplemental source below;
   # ambiguous and rejected evidence remains in shadow/review tables.
   output_root: "../../output/industrials/machinery/dedicated_parser"
@@ -461,6 +462,9 @@ machinery_stage12:
   # separate operator-approved action and may not overwrite dated history.
   output_root: "../../output/industrials/machinery/stage12"
   portfolio_config_path: "../../portfolio_layer/config.yaml"
+  # The activation transaction must not inherit an arbitrary caller runtime.
+  # This interpreter owns both the portfolio smoke and optional refresh child.
+  python_executable: '${PORTFOLIO_LAYER_PYTHON:-C:/Users/josel/miniconda3/envs/scalper-staging/python.exe}'
   promotion_candidate_asof: "2026-07-28"
   production_start_date: "2026-07-24"
   score_model_version: "machinery_oos_v1.4.1_equal_components"

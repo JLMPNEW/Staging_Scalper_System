@@ -30,6 +30,8 @@ class PhillyFedAdsConnector:
 
     def fetch_task(self, task: FetchTask) -> FetchResult:
         spec = task.spec
+        as_of_iso = task.as_of_date.isoformat() if task.as_of_date is not None else None
+        observation_start_iso = task.observation_start.isoformat() if task.observation_start is not None else None
         page_response = self.http_client.get(self.page_url)
         html = page_response.text()
         current_url = _extract_href(html, CURRENT_FILE_RE)
@@ -51,13 +53,20 @@ class PhillyFedAdsConnector:
             )
         ]
         observations: list[ObservationRecord] = []
+        all_vintages_long: pd.DataFrame | None = None
         if all_vintages_url:
             vintages_response = self.http_client.get(all_vintages_url)
             wide_frame = _read_ads_wide_frame(vintages_response.content, all_vintages_url)
-            long_frame = _wide_ads_to_long(
+            all_vintages_long = _wide_ads_to_long(
                 wide_frame,
-                observation_start=task.observation_start.isoformat() if task.observation_start is not None else None,
+                observation_start=observation_start_iso,
                 vintage_start=task.vintage_start.isoformat() if task.vintage_start is not None else None,
+            )
+            long_frame = _enforce_ads_pit_window(
+                all_vintages_long,
+                as_of_date=as_of_iso,
+                fetched_date=_fetched_date_utc(vintages_response.fetched_at),
+                context="all_vintages",
             )
             observations.extend(_frame_to_observations(spec=spec, frame=long_frame, retrieved_at=vintages_response.fetched_at))
             artifacts.append(
@@ -74,7 +83,17 @@ class PhillyFedAdsConnector:
             )
         if current_url:
             current_response = self.http_client.get(current_url)
-            current_frame = _read_ads_current_frame(current_response.content)
+            current_frame = _read_ads_current_frame(
+                current_response.content,
+                observation_start=observation_start_iso,
+                all_vintages_long=all_vintages_long,
+            )
+            current_frame = _enforce_ads_pit_window(
+                current_frame,
+                as_of_date=as_of_iso,
+                fetched_date=_fetched_date_utc(current_response.fetched_at),
+                context="current_vintage",
+            )
             current_obs = _frame_to_observations(spec=spec, frame=current_frame, retrieved_at=current_response.fetched_at)
             if current_obs:
                 observations.extend(current_obs)
@@ -122,14 +141,43 @@ def _read_ads_wide_frame(payload: bytes, request_url: str) -> pd.DataFrame:
     return pd.read_excel(io.BytesIO(payload))
 
 
-def _read_ads_current_frame(payload: bytes) -> pd.DataFrame:
+def _empty_ads_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["observation_date", "value", "release_date", "vintage_date"])
+
+
+def _read_ads_current_frame(
+    payload: bytes,
+    *,
+    observation_start: str | None = None,
+    all_vintages_long: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     frame = pd.read_excel(io.BytesIO(payload))
-    return _coerce_current_ads_frame(frame)
+    return _coerce_current_ads_frame(
+        frame,
+        observation_start=observation_start,
+        all_vintages_long=all_vintages_long,
+    )
 
 
-def _coerce_current_ads_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def _coerce_current_ads_frame(
+    frame: pd.DataFrame,
+    *,
+    observation_start: str | None = None,
+    all_vintages_long: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Coerce the current-vintage workbook into vintage-stamped long rows.
+
+    The vintage identity always comes from provider data: the value-column
+    header when it carries an ADS_INDEX_MMDDYY stamp, otherwise an exact
+    value-match against the newest vintages in the all-vintages archive. Rows
+    are never emitted with a NULL release/vintage (that produced natural-key
+    duplicates for this true-vintage series) and a vintage is never fabricated
+    from wall-clock time; if no provider identity can be resolved, the
+    current-file rows are skipped and the all-vintages archive - which contains
+    every vintage including the current one - remains authoritative.
+    """
     if frame.empty:
-        return pd.DataFrame(columns=["observation_date", "value", "release_date", "vintage_date"])
+        return _empty_ads_frame()
     date_col = _find_ads_date_column(frame)
     value_col = _find_ads_value_column(frame, exclude={date_col})
     out = pd.DataFrame(
@@ -139,9 +187,117 @@ def _coerce_current_ads_frame(frame: pd.DataFrame) -> pd.DataFrame:
         }
     )
     out = out.dropna(subset=["observation_date", "value"]).copy()
-    out["release_date"] = None
-    out["vintage_date"] = None
-    return _filter_iso_date_rows(out, date_columns=["observation_date"])
+    if observation_start:
+        out = out.loc[out["observation_date"] >= observation_start].copy()
+    vintage_date = _parse_ads_vintage_header(value_col)
+    if vintage_date is None:
+        vintage_date = _infer_current_vintage(out, all_vintages_long)
+    if vintage_date is None:
+        logger.warning(
+            "PhillyFed ADS: could not resolve a provider vintage identity for the current-vintage "
+            "workbook (value column %r); skipping its %d row(s) - the all-vintages archive remains "
+            "authoritative for this true-vintage series.",
+            value_col,
+            len(out),
+        )
+        return _empty_ads_frame()
+    out["release_date"] = vintage_date
+    out["vintage_date"] = vintage_date
+    return _filter_iso_date_rows(out, date_columns=["observation_date", "release_date", "vintage_date"])
+
+
+_CURRENT_VINTAGE_MATCH_CANDIDATES = 5
+_CURRENT_VINTAGE_MIN_OVERLAP = 100
+_CURRENT_VINTAGE_ATOL = 1e-9
+
+
+def _infer_current_vintage(
+    current_frame: pd.DataFrame,
+    all_vintages_long: pd.DataFrame | None,
+) -> str | None:
+    """Identify the current workbook's vintage by exact value match to the archive.
+
+    Both workbooks are published together per release, so the current file must
+    reproduce one of the newest archive vintages. Newest candidates are checked
+    first; a candidate matches only when every shared observation agrees to
+    within float tolerance and the overlap is large enough to be conclusive.
+    """
+    if all_vintages_long is None or all_vintages_long.empty or current_frame.empty:
+        return None
+    current_values = (
+        current_frame.drop_duplicates(subset=["observation_date"], keep="last")
+        .set_index("observation_date")["value"]
+    )
+    vintages = sorted({str(v) for v in all_vintages_long["vintage_date"].dropna()}, reverse=True)
+    for candidate in vintages[:_CURRENT_VINTAGE_MATCH_CANDIDATES]:
+        candidate_frame = all_vintages_long.loc[all_vintages_long["vintage_date"] == candidate]
+        candidate_values = (
+            candidate_frame.drop_duplicates(subset=["observation_date"], keep="last")
+            .set_index("observation_date")["value"]
+        )
+        shared = current_values.index.intersection(candidate_values.index)
+        if len(shared) < _CURRENT_VINTAGE_MIN_OVERLAP:
+            continue
+        diffs = (current_values.loc[shared].astype(float) - candidate_values.loc[shared].astype(float)).abs()
+        if bool((diffs <= _CURRENT_VINTAGE_ATOL).all()):
+            return candidate
+    return None
+
+
+def _fetched_date_utc(fetched_at: str) -> str | None:
+    text = str(fetched_at or "").strip()
+    if ISO_DATE_RE.match(text):
+        return text[:10]
+    return None
+
+
+def _enforce_ads_pit_window(
+    frame: pd.DataFrame,
+    *,
+    as_of_date: str | None,
+    fetched_date: str | None,
+    context: str,
+) -> pd.DataFrame:
+    """Fail on impossible vintage stamps and drop rows after the run's as-of date.
+
+    A provider vintage can never postdate the moment we fetched it, so any
+    release/vintage beyond ``fetched_date`` is a header misparse and aborts the
+    fetch (fail closed). Vintages published between the run's as-of date and the
+    physical fetch time are legitimate provider vintages, but they do not belong
+    in an as-of-dated ingest; they are dropped here and picked up unchanged by
+    the next run whose as-of date covers them.
+    """
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    if fetched_date:
+        misparse_mask = (out["release_date"] > fetched_date) | (out["vintage_date"] > fetched_date)
+        if bool(misparse_mask.any()):
+            sample = sorted(
+                set(out.loc[misparse_mask, "vintage_date"].astype(str))
+                | set(out.loc[misparse_mask, "release_date"].astype(str))
+            )[:5]
+            raise RuntimeError(
+                f"ADS {context}: {int(misparse_mask.sum())} row(s) carry release/vintage dates after the "
+                f"fetch date {fetched_date} (sample: {sample}); this indicates a vintage-header misparse."
+            )
+    if as_of_date:
+        keep_mask = (
+            (out["release_date"] <= as_of_date)
+            & (out["vintage_date"] <= as_of_date)
+            & (out["observation_date"] <= as_of_date)
+        )
+        dropped = int(len(out) - int(keep_mask.sum()))
+        if dropped > 0:
+            logger.info(
+                "PhillyFed ADS %s: dropped %d row(s) with release/vintage/observation after as-of %s "
+                "(post-as-of provider vintage; a later as-of run will ingest it).",
+                context,
+                dropped,
+                as_of_date,
+            )
+        out = out.loc[keep_mask].copy()
+    return out
 
 
 def _wide_ads_to_long(
@@ -313,3 +469,134 @@ def _filter_iso_date_rows(frame: pd.DataFrame, *, date_columns: list[str]) -> pd
     if dropped > 0:
         logger.warning("PhillyFed ADS: dropped %d row(s) with non-ISO dates in columns %s", dropped, ",".join(date_columns))
     return out
+
+
+def _selftest() -> None:
+    import sqlite3
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import macro_storage
+
+    spec = SimpleNamespace(
+        registry_key="us_ads_index",
+        metric_key="us_ads_index",
+        source_name="phillyfed_ads",
+        source_dataset="ads",
+        source_series_id="ADS_INDEX",
+        ref_area="USA",
+        frequency="daily",
+        seasonal_adjustment="sa",
+        units="index level",
+        notes="selftest",
+    )
+
+    # 1) Wide all-vintages frame: MMDDYY headers become ISO vintage dates with release == vintage.
+    wide = pd.DataFrame(
+        {
+            "Date": ["2026:07:31", "2026:08:01"],
+            "ADS_INDEX_073026": [0.10, None],
+            "ADS_INDEX_080626": [0.20, 0.25],
+            "not_a_vintage": ["x", "y"],
+        }
+    )
+    long = _wide_ads_to_long(wide, observation_start="2008-01-01", vintage_start=None)
+    assert set(long["vintage_date"]) == {"2026-07-30", "2026-08-06"}, long
+    assert (long["release_date"] == long["vintage_date"]).all()
+    assert long["release_date"].notna().all() and long["vintage_date"].notna().all()
+
+    # 2) Current-vintage frame with a dated header: vintage identity comes from
+    #    the value-column header; release == vintage, never NULL.
+    current = pd.DataFrame({"Date": ["2026:07:31", "2026:08:01"], "ADS_Index_080626": [0.20, 0.25]})
+    coerced = _coerce_current_ads_frame(current, observation_start="2008-01-01")
+    assert len(coerced) == 2, coerced
+    assert (coerced["vintage_date"] == "2026-08-06").all()
+    assert (coerced["release_date"] == "2026-08-06").all()
+
+    # 2b) Header-less current workbook (live format uses a bare 'ADS_Index' column):
+    #     the vintage identity is inferred by exact value match against the newest
+    #     archive vintages; unresolvable rows are skipped, never emitted vintage-less.
+    inference_dates = [d.strftime("%Y-%m-%d") for d in pd.date_range("2026-01-01", periods=120, freq="D")]
+    inference_values = [round(0.001 * i, 6) for i in range(120)]
+    archive = pd.DataFrame(
+        {
+            "observation_date": inference_dates * 2,
+            "value": [v - 0.5 for v in inference_values] + inference_values,
+            "release_date": ["2026-07-30"] * 120 + ["2026-08-06"] * 120,
+            "vintage_date": ["2026-07-30"] * 120 + ["2026-08-06"] * 120,
+        }
+    )
+    headerless = pd.DataFrame(
+        {"Date": [d.replace("-", ":") for d in inference_dates], "ADS_Index": inference_values}
+    )
+    inferred = _coerce_current_ads_frame(headerless, observation_start="2008-01-01", all_vintages_long=archive)
+    assert len(inferred) == 120, len(inferred)
+    assert (inferred["vintage_date"] == "2026-08-06").all()
+    assert (inferred["release_date"] == "2026-08-06").all()
+    perturbed = headerless.copy()
+    perturbed["ADS_Index"] = [v + 1.0 for v in inference_values]
+    skipped = _coerce_current_ads_frame(perturbed, observation_start="2008-01-01", all_vintages_long=archive)
+    assert skipped.empty, skipped
+    no_archive = _coerce_current_ads_frame(headerless, observation_start="2008-01-01", all_vintages_long=None)
+    assert no_archive.empty, no_archive
+
+    # 3) Future-dating guard: vintages after the run's as-of date are dropped;
+    #    vintages after the physical fetch date abort the fetch (header misparse).
+    gated = _enforce_ads_pit_window(long, as_of_date="2026-08-05", fetched_date="2026-08-06", context="selftest")
+    assert set(gated["vintage_date"]) == {"2026-07-30"}, gated
+    assert (gated["vintage_date"] <= "2026-08-05").all() and (gated["release_date"] <= "2026-08-05").all()
+    try:
+        _enforce_ads_pit_window(long, as_of_date="2026-08-05", fetched_date="2026-08-01", context="selftest")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("vintage after the fetch date must raise (misparse guard)")
+
+    # 4) Idempotent same-vintage re-ingest: two fetches of identical vintages carry
+    #    stable natural keys, so re-upserting never duplicates rows.
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(macro_storage.DDL)
+        obs_first = _frame_to_observations(spec=spec, frame=gated, retrieved_at="2026-08-06T23:00:00Z")
+        obs_second = _frame_to_observations(spec=spec, frame=gated, retrieved_at="2026-08-07T00:08:00Z")
+        assert obs_first and all(o.release_date and o.vintage_date for o in obs_first)
+        macro_storage._upsert_observations(conn, run_id="run_a", registry_key=spec.registry_key, observations=obs_first)
+        count_first = int(conn.execute("SELECT COUNT(*) FROM macro_observation_raw").fetchone()[0])
+        macro_storage._upsert_observations(conn, run_id="run_b", registry_key=spec.registry_key, observations=obs_second)
+        count_second = int(conn.execute("SELECT COUNT(*) FROM macro_observation_raw").fetchone()[0])
+        assert count_first == count_second == len(obs_first), (count_first, count_second, len(obs_first))
+
+        # 5) Restatement-as-new-vintage: a re-estimated value for the same observation
+        #    under a NEW provider vintage lands as a distinct row; the first print stays.
+        restated = gated.copy()
+        restated["release_date"] = "2026-08-06"
+        restated["vintage_date"] = "2026-08-06"
+        restated["value"] = restated["value"] + 0.05
+        obs_restated = _frame_to_observations(spec=spec, frame=restated, retrieved_at="2026-08-07T23:00:00Z")
+        macro_storage._upsert_observations(conn, run_id="run_c", registry_key=spec.registry_key, observations=obs_restated)
+        count_third = int(conn.execute("SELECT COUNT(*) FROM macro_observation_raw").fetchone()[0])
+        assert count_third == count_second + len(obs_restated), (count_third, count_second)
+        first_print = conn.execute(
+            "SELECT value FROM macro_observation_raw WHERE vintage_date='2026-07-30' ORDER BY observation_period LIMIT 1"
+        ).fetchone()
+        assert first_print is not None and abs(float(first_print[0]) - 0.10) < 1e-12, first_print
+        dup_groups = conn.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT observation_period, COALESCE(release_date,''), COALESCE(vintage_date,''), COUNT(*) c
+                FROM macro_observation_raw
+                GROUP BY 1, 2, 3 HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()
+        assert int(dup_groups[0]) == 0, dup_groups
+    finally:
+        conn.close()
+
+    print("phillyfed_ads selftest OK")
+
+
+if __name__ == "__main__":
+    _selftest()

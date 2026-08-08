@@ -19,7 +19,12 @@ PROJECT_ROOT = PACKAGE_ROOT.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from industrials.core.config import (  # noqa: E402
+    cfg_get,
+    expand_env_vars,
+    load_yaml,
+    resolve_path,
+)
 from industrials.core.refresh_lock import RefreshLock  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
 from industrials.machinery.scoring import parse_asof  # noqa: E402
@@ -104,6 +109,45 @@ def validate_non_regressive_asof(*, requested_asof: str, committed_asof: str) ->
             "Refusing regressive machinery current refresh: "
             f"requested_asof={requested_asof} latest_committed_asof={committed_asof}. "
             "Use the historical backfill runner for older dates."
+        )
+
+
+def resolve_dedicated_parser_python(
+    *,
+    cli_value: Path | None,
+    config: dict[str, Any],
+    base_dir: Path,
+) -> Path:
+    raw: object = (
+        cli_value
+        or cfg_get(config, "dedicated_parser.python_executable")
+        or sys.executable
+    )
+    path = Path(expand_env_vars(raw)).expanduser()
+    resolved = path.resolve() if path.is_absolute() else (base_dir / path).resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(
+            f"Dedicated-parser Python executable not found: {resolved}"
+        )
+    return resolved
+
+
+def validate_dedicated_parser_python(python_executable: Path) -> None:
+    probe = subprocess.run(
+        [str(python_executable), "-c", "import arelle.Cntlr, edgar.sgml"],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if probe.returncode != 0:
+        detail = (
+            probe.stderr or probe.stdout or "provider import probe failed"
+        ).strip()
+        raise RuntimeError(
+            "Dedicated-parser Python lacks Arelle or EdgarTools: "
+            f"{python_executable}: {detail}"
         )
 
 
@@ -531,6 +575,25 @@ def main() -> int:
             print(f"{step.step_id}\t{step.stage}\t{'network' if step.network else 'local'}\t{step.script}")
         return 0
     selected = select_steps(steps, args)
+    has_parser_steps = any(
+        step.step_id
+        in {
+            "08d_dedicated_parser_shadow",
+            "08e_dedicated_parser_production",
+        }
+        for step in selected
+    )
+    dedicated_parser_python = (
+        resolve_dedicated_parser_python(
+            cli_value=args.dedicated_parser_python,
+            config=config,
+            base_dir=base_dir,
+        )
+        if has_parser_steps
+        else None
+    )
+    if dedicated_parser_python is not None and not args.dry_run:
+        validate_dedicated_parser_python(dedicated_parser_python)
     run_id = datetime.now(timezone.utc).strftime("machinery_refresh_%Y%m%dT%H%M%SZ")
     logs_dir = orchestration_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -553,13 +616,13 @@ def main() -> int:
             python_executable = (
                 str(args.norgate_python.expanduser().resolve())
                 if step.step_id == "15_norgate_backfill" and args.norgate_python is not None
-                else str(args.dedicated_parser_python.expanduser().resolve())
+                else str(dedicated_parser_python)
                 if step.step_id
                 in {
                     "08d_dedicated_parser_shadow",
                     "08e_dedicated_parser_production",
                 }
-                and args.dedicated_parser_python is not None
+                and dedicated_parser_python is not None
                 else sys.executable
             )
             command = [python_executable, str(script_path), "--config", str(config_path)]

@@ -350,8 +350,9 @@ def stage_commands(
                 str(
                     PROJECT_ROOT
                     / "industrials"
+                    / "transportation"
                     / "scripts"
-                    / "08_build_industrials_financial_features.py"
+                    / "08_build_transportation_financial_features.py"
                 ),
                 *common,
                 "--model-family",

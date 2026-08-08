@@ -33,6 +33,7 @@ from macro_storage import (
     finish_run,
     init_db,
     load_sync_state,
+    repair_true_vintage_dedupe_keys,
     seed_country_metadata,
     seed_release_calendar,
     start_run,
@@ -91,6 +92,8 @@ def main() -> None:
             raise ValueError("macro_raw.registry_csv is required.")
         all_specs = load_metric_registry(registry_csv)
         upsert_metric_registry(conn, all_specs)
+        if not args.dry_run:
+            repair_true_vintage_dedupe_keys(conn)
         specs = enabled_specs(all_specs)
         specs = filter_specs_by_sources(specs, set(args.sources or []))
         if args.limit and args.limit > 0:

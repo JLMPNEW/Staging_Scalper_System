@@ -20,7 +20,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from portfolio_layer.core.config import load_yaml  # noqa: E402
+from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     fail_if_exists,
     manifest_acceptance_value,
@@ -33,6 +33,7 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
+from portfolio_layer.ledger.ledger_common import parse_number  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.expectations_monitor.monitor_common import (  # noqa: E402
     monitor_output_subdir,
@@ -73,6 +74,7 @@ IB_REALIZED_ROWS = {
 }
 BOOK_FIELDS = [
     "ticker",
+    "ib_symbol",
     "weight",
     "IB_Holding",
     "IB_quantity",
@@ -90,6 +92,7 @@ BOOK_FIELDS = [
     "rel_ret_5d",
     "rel_ret_20d",
     "current_price",
+    "price_source",
     "ma50",
     "ma200",
     "below_ma50",
@@ -198,7 +201,15 @@ def _sealed_csv(
     return read_csv(artifact), manifest
 
 
-def _latest_ledger_run(runs_root: Path, run_as_of: str) -> Path:
+def _latest_ledger_run(
+    runs_root: Path, run_as_of: str, *, max_staleness_days: int
+) -> tuple[Path, int, list[dict[str, str]]]:
+    """Newest PASS ledger run on or before run_as_of, bounded by max_staleness_days.
+
+    Returns (run_dir, ledger_age_days, skipped_newer) where skipped_newer records every
+    newer candidate that was passed over because its manifest is FAIL/corrupt, so the
+    consumer manifest can surface them instead of silently walking past.
+    """
     candidates = sorted(
         (
             path
@@ -212,14 +223,39 @@ def _latest_ledger_run(runs_root: Path, run_as_of: str) -> Path:
     )
     if not candidates:
         raise FileNotFoundError(f"No accepted broker ledger exists on or before {run_as_of}")
+    run_date = date.fromisoformat(run_as_of)
+    skipped: list[dict[str, str]] = []
     for candidate in candidates:
+        manifest_path = candidate / "ledger" / "ledger_manifest.json"
         try:
-            manifest = read_manifest(candidate / "ledger" / "ledger_manifest.json")
-        except (OSError, ValueError):
+            manifest = read_manifest(manifest_path)
+        except ValueError as exc:
+            skipped.append({"run": candidate.name, "reason": f"corrupt_manifest: {exc}"})
             continue
-        if manifest_acceptance_value(manifest) == "PASS":
-            return candidate
-    raise ValueError(f"No PASS broker ledger exists on or before {run_as_of}")
+        acceptance = manifest_acceptance_value(manifest)
+        if acceptance != "PASS":
+            skipped.append(
+                {"run": candidate.name, "reason": f"acceptance={acceptance or 'MISSING'}"}
+            )
+            continue
+        try:
+            ledger_date = date.fromisoformat(candidate.name)
+        except ValueError as exc:
+            raise ValueError(
+                f"Ledger run directory name is not an ISO date: {candidate.name}"
+            ) from exc
+        age_days = (run_date - ledger_date).days
+        if age_days > max_staleness_days:
+            raise ValueError(
+                f"Newest PASS broker ledger {candidate.name} is {age_days} days old for run "
+                f"{run_as_of}, beyond holdings_ledger.max_staleness_days={max_staleness_days}; "
+                f"newer non-PASS ledgers skipped: {skipped or 'none'}"
+            )
+        return candidate, age_days, skipped
+    raise ValueError(
+        f"No PASS broker ledger exists on or before {run_as_of}; "
+        f"candidates skipped: {skipped}"
+    )
 
 
 def _current_price(level: dict[str, str] | None) -> float | None:
@@ -227,9 +263,15 @@ def _current_price(level: dict[str, str] | None) -> float | None:
         return None
     try:
         market = json.loads(str(level.get("market_structure_json", "{}")))
-    except json.JSONDecodeError:
-        return None
-    return _finite(market.get("latest_price")) if isinstance(market, dict) else None
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid levels market_structure_json for {level.get('ticker', '')!r}"
+        ) from exc
+    if not isinstance(market, dict):
+        raise ValueError(
+            f"Levels market_structure_json is not an object for {level.get('ticker', '')!r}"
+        )
+    return _finite(market.get("latest_price"))
 
 
 def _market_context(signal: dict[str, str] | None) -> dict[str, Any]:
@@ -310,22 +352,38 @@ def _ib_performance(path: Path, *, as_of: str) -> dict[str, Any]:
             if section == performance_section:
                 if mapped.get("Asset Category") != "Total (All Assets)":
                     continue
-                values = tuple(
-                    _finite(mapped.get(field))
-                    for field in (
-                        "Mark-to-Market MTD",
-                        "Mark-to-Market YTD",
-                        "Realized S/T MTD",
-                        "Realized S/T YTD",
-                        "Realized L/T MTD",
-                        "Realized L/T YTD",
+                # IB statement cells use ledger importer semantics: "--" sentinel,
+                # parenthesized negatives, thousands commas (ledger_common.parse_number).
+                parsed_values: list[float] = []
+                missing_fields: list[str] = []
+                for field in (
+                    "Mark-to-Market MTD",
+                    "Mark-to-Market YTD",
+                    "Realized S/T MTD",
+                    "Realized S/T YTD",
+                    "Realized L/T MTD",
+                    "Realized L/T YTD",
+                ):
+                    parsed = parse_number(mapped.get(field))
+                    if parsed is None:
+                        missing_fields.append(f"{field}={mapped.get(field)!r}")
+                    else:
+                        parsed_values.append(parsed)
+                if missing_fields:
+                    raise ValueError(
+                        "IB Total (All Assets) performance values are "
+                        f"missing/non-numeric: {', '.join(missing_fields)}"
+                    )
+                totals.append(
+                    (
+                        parsed_values[0],
+                        parsed_values[1],
+                        parsed_values[2],
+                        parsed_values[3],
+                        parsed_values[4],
+                        parsed_values[5],
                     )
                 )
-                if any(value is None for value in values):
-                    raise ValueError(
-                        "IB Total (All Assets) performance values are non-numeric"
-                    )
-                totals.append(values)  # type: ignore[arg-type]
                 continue
             component = mapped.get("Currency Summary", "")
             if (
@@ -333,11 +391,12 @@ def _ib_performance(path: Path, *, as_of: str) -> dict[str, Any]:
                 or mapped.get("Currency") != "Base Currency Summary"
             ):
                 continue
-            mtd = _finite(mapped.get("Month to Date"))
-            ytd = _finite(mapped.get("Year to Date"))
+            mtd = parse_number(mapped.get("Month to Date"))
+            ytd = parse_number(mapped.get("Year to Date"))
             if mtd is None or ytd is None:
                 raise ValueError(
-                    f"IB Cash Report {component} MTD/YTD values are non-numeric"
+                    f"IB Cash Report {component} MTD/YTD values are missing/non-numeric: "
+                    f"mtd={mapped.get('Month to Date')!r} ytd={mapped.get('Year to Date')!r}"
                 )
             cash_values[component].append((mtd, ytd))
     if not totals:
@@ -434,19 +493,104 @@ def _weights(rows: list[dict[str, str]]) -> dict[str, float]:
     return result
 
 
+def _normalize_ib_symbol(value: object) -> str:
+    """Map raw IB class-share symbols ("BRK B") onto the score/monitor form ("BRK.B")."""
+    return ".".join(str(value if value is not None else "").strip().upper().split())
+
+
+def _stock_holdings(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
+    """Key IB stock positions by normalized symbol, dropping zero-share stubs."""
+    holdings: dict[str, dict[str, str]] = {}
+    for row in rows:
+        raw_symbol = str(row.get("symbol", "")).strip()
+        ticker = _normalize_ib_symbol(raw_symbol)
+        if not ticker:
+            raise ValueError(f"Blank IB holding symbol in ledger row: {row!r}")
+        shares = _finite(row.get("net_shares"))
+        if shares is None:
+            raise ValueError(
+                f"Non-numeric net_shares for IB holding {raw_symbol!r}: "
+                f"{row.get('net_shares')!r}"
+            )
+        # net_shares nets out securities lending: a position fully lent under
+        # IB's Stock Yield Enhancement Program reports shares_at_ib=100,
+        # shares_lent=-100, net_shares=0 while the owner keeps full economic
+        # exposure. Add lent shares back so a lent-out holding is never
+        # mistaken for a closed one.
+        lent_raw = str(row.get("shares_lent", "")).strip()
+        lent = _finite(lent_raw) if lent_raw else 0.0
+        if lent is None:
+            raise ValueError(
+                f"Non-numeric shares_lent for IB holding {raw_symbol!r}: "
+                f"{row.get('shares_lent')!r}"
+            )
+        economic = shares - lent
+        if abs(economic) <= 1e-12:
+            continue
+        row["net_shares"] = f"{economic:g}"
+        if ticker in holdings:
+            raise ValueError(
+                f"Duplicate IB holding symbol after normalization: {ticker!r}"
+            )
+        holdings[ticker] = row
+    return holdings
+
+
+def _stock_holding_prices(rows: list[dict[str, str]]) -> dict[str, float]:
+    """Ledger close price per normalized stock symbol; duplicates fail closed."""
+    prices: dict[str, float] = {}
+    for row in rows:
+        if str(row.get("asset_category", "")) != "Stocks":
+            continue
+        ticker = _normalize_ib_symbol(row.get("symbol", ""))
+        if not ticker:
+            continue
+        value = _finite(row.get("close_price"))
+        if value is None:
+            continue
+        if ticker in prices:
+            raise ValueError(
+                f"Duplicate holding_state symbol after normalization: {ticker!r}"
+            )
+        prices[ticker] = value
+    return prices
+
+
+def _published_row_count(
+    output_root: Path, run_as_of: str, *, monitor_subdir: str
+) -> int:
+    """Rows already published for run_as_of, regardless of the publication flag."""
+    ledger_path = (
+        output_root / monitor_subdir / "outcomes" / "state_publication_ledger.csv"
+    )
+    if not ledger_path.is_file():
+        return 0
+    return sum(
+        str(row.get("published_as_of", "")) == run_as_of
+        for row in read_csv(ledger_path)
+    )
+
+
 def _published_states(
     output_root: Path, run_as_of: str, *, monitor_subdir: str
 ) -> tuple[dict[str, dict[str, str]], list[Path]]:
     outcome_dir = output_root / monitor_subdir / "outcomes"
     ledger_path = outcome_dir / "state_publication_ledger.csv"
     manifest_path = outcome_dir / "state_outcome_ledger_manifest.json"
-    if not ledger_path.exists() and not manifest_path.exists():
-        return {}, []
     if not ledger_path.is_file() or not manifest_path.is_file():
-        raise ValueError("Monitor state publication ledger is only partially present")
+        raise ValueError(
+            "state_publication_enabled but the monitor state publication ledger "
+            f"is missing or partial under {outcome_dir}"
+        )
     manifest = read_manifest(manifest_path)
     if manifest_acceptance_value(manifest) not in {"PASS", "PASS_WITH_DEFERRED"}:
         raise ValueError("Monitor state publication ledger did not pass")
+    ledger_as_of = str(manifest.get("as_of_date", "")).strip()
+    if ledger_as_of != run_as_of:
+        raise ValueError(
+            "Monitor state publication ledger is stale: manifest as_of_date="
+            f"{ledger_as_of or 'MISSING'} expected {run_as_of}"
+        )
     if manifest.get("publication_chain_errors") or manifest.get(
         "resolution_chain_errors"
     ):
@@ -491,10 +635,15 @@ def compose_rows(
         earnings_row = earnings.get(ticker)
         holding = holdings.get(ticker)
         price = _current_price(level)
+        price_source = "levels_market_structure" if price is not None else ""
         if price is None:
-            price = holding_prices.get(ticker)
+            fallback = holding_prices.get(ticker)
+            if fallback is not None:
+                price = fallback
+                price_source = "ledger_close"
         row = {
             "ticker": ticker,
+            "ib_symbol": str(holding.get("symbol", "")).strip() if holding else "",
             "weight": round(weights.get(ticker, 0.0), 10),
             "IB_Holding": int(holding is not None),
             "IB_quantity": holding.get("net_shares", "") if holding else "",
@@ -518,6 +667,7 @@ def compose_rows(
             "rel_ret_5d": market["rel_ret_5d"],
             "rel_ret_20d": market["rel_ret_20d"],
             "current_price": price,
+            "price_source": price_source,
             "ma50": market["ma50"],
             "ma200": market["ma200"],
             "below_ma50": market["below_ma50"],
@@ -538,7 +688,60 @@ def compose_rows(
     return rows
 
 
+def _missing_market_context(row: dict[str, Any]) -> bool:
+    """True when a scored row lacks a benchmark or a real (typed) current price."""
+    if not int(row["is_scored"]):
+        return False
+    price = row["current_price"]
+    price_missing = price is None or str(price).strip() in {"", "None"}
+    return price_missing or not str(row["benchmark_ticker"]).strip()
+
+
 def run_selftest() -> None:
+    # IB class-share symbol normalization (M7): "BRK B" joins as "BRK.B".
+    assert _normalize_ib_symbol(" brk b ") == "BRK.B"
+    assert _normalize_ib_symbol("AAPL") == "AAPL"
+    holdings = _stock_holdings(
+        [
+            {"symbol": "BRK B", "net_shares": "25"},
+            {"symbol": "ZERO", "net_shares": "0"},
+            {"symbol": "SMR", "net_shares": "0", "shares_lent": "-100"},
+        ]
+    )
+    # Zero-share stubs drop; a fully-lent SYEP holding (net 0, lent -100) is
+    # still economically held and must survive with the lent shares added back.
+    assert set(holdings) == {"BRK.B", "SMR"}
+    assert holdings["SMR"]["net_shares"] == "100"
+    try:
+        _stock_holdings(
+            [
+                {"symbol": "BRK B", "net_shares": "1"},
+                {"symbol": "BRK.B", "net_shares": "2"},
+            ]
+        )
+        raise AssertionError("duplicate normalized holding symbol must raise")
+    except ValueError:
+        pass
+    try:
+        _stock_holding_prices(
+            [
+                {"asset_category": "Stocks", "symbol": "BRK B", "close_price": "7.5"},
+                {"asset_category": "Stocks", "symbol": "BRK.B", "close_price": "7.6"},
+            ]
+        )
+        raise AssertionError("duplicate holding_state symbol must raise")
+    except ValueError:
+        pass
+    assert _stock_holding_prices(
+        [{"asset_category": "Stocks", "symbol": "BRK B", "close_price": "7.5"}]
+    ) == {"BRK.B": 7.5}
+    # Corrupt levels JSON fails closed (M6) instead of degrading to the ledger close.
+    try:
+        _current_price({"ticker": "AAA", "market_structure_json": "{corrupt"})
+        raise AssertionError("corrupt market_structure_json must raise")
+    except ValueError:
+        pass
+
     rows = compose_rows(
         weights={"AAA": 0.8, "CASH": 0.2},
         scores={"AAA": {"sector": "Tech", "rating": "buy", "final_score": "0.1", "score_confidence": "0.8"}},
@@ -567,19 +770,40 @@ def run_selftest() -> None:
             }
         },
         earnings={"AAA": {"next_earnings_date": "2026-08-05"}},
-        holdings={"BBB": {"net_shares": "25"}},
-        holding_prices={"BBB": 7.5},
+        holdings={"BRK.B": {"net_shares": "25", "symbol": "BRK B"}},
+        holding_prices={"BRK.B": 7.5},
         holding_as_of="2026-07-31",
     )
     by_ticker = {row["ticker"]: row for row in rows}
     assert by_ticker["AAA"]["current_price"] == 12.5
+    assert by_ticker["AAA"]["price_source"] == "levels_market_structure"
     assert by_ticker["AAA"]["benchmark_ticker"] == "XLK"
     assert by_ticker["AAA"]["ma50"] == 11.5
-    assert by_ticker["BBB"]["weight"] == 0.0
-    assert by_ticker["BBB"]["IB_Holding"] == 1
-    assert by_ticker["BBB"]["is_scored"] == 0
+    assert by_ticker["BRK.B"]["weight"] == 0.0
+    assert by_ticker["BRK.B"]["IB_Holding"] == 1
+    assert by_ticker["BRK.B"]["is_scored"] == 0
+    assert by_ticker["BRK.B"]["ib_symbol"] == "BRK B"  # raw IB symbol preserved
+    assert by_ticker["BRK.B"]["current_price"] == 7.5
+    assert by_ticker["BRK.B"]["price_source"] == "ledger_close"
+    assert by_ticker["CASH"]["price_source"] == ""
+    # H3: a scored row with a typed-None price is missing market context; the old
+    # str() form turned None into the truthy "None" and could never fail.
+    assert not _missing_market_context(by_ticker["AAA"])
+    assert not _missing_market_context(by_ticker["BRK.B"])  # unscored rows exempt
+    assert _missing_market_context(
+        {"is_scored": 1, "current_price": None, "benchmark_ticker": "XLK"}
+    )
+    assert _missing_market_context(
+        {"is_scored": 1, "current_price": "None", "benchmark_ticker": "XLK"}
+    )
+    assert _missing_market_context(
+        {"is_scored": 1, "current_price": 12.5, "benchmark_ticker": " "}
+    )
     assert "layer_source" not in BOOK_FIELDS
     assert not set(MACRO_FIELDS) & set(BOOK_FIELDS)
+    # IB statement cells reuse ledger parse_number semantics (sentinel/parens/commas).
+    assert parse_number("--") is None
+    assert parse_number("(1,234.50)") == -1234.5
     print("final target book enrichment selftest: PASS")
 
 
@@ -597,7 +821,12 @@ def main() -> int:  # noqa: C901
     run_as_of = args.as_of or latest_run_with(runs_root, "final/final_target_weights.csv")
     if not run_as_of:
         raise ValueError("No target-weight run exists")
-    date.fromisoformat(run_as_of)
+    try:
+        date.fromisoformat(run_as_of)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid --as-of value {run_as_of!r}: expected an ISO date (YYYY-MM-DD)"
+        ) from exc
     run_dir = runs_root / run_as_of
     out_dir = run_dir / "final"
     output_path = out_dir / "final_target_book.csv"
@@ -656,7 +885,7 @@ def main() -> int:  # noqa: C901
         ]
     )
 
-    state_rows, _ = _sealed_csv(
+    state_rows, state_manifest = _sealed_csv(
         run_dir / monitor_subdir / "expectations_state.csv",
         run_dir / monitor_subdir / "expectations_state_manifest.json",
         keys=("expectations_state.csv",),
@@ -685,6 +914,15 @@ def main() -> int:  # noqa: C901
         ]
     )
     states = _keyed(state_rows)
+    # Pre-overlay snapshot: the recomputed monitor-state source of record, used to
+    # derive (not assert) the state-source policy check after rows are composed.
+    recomputed_states = {
+        ticker: {
+            field: str(row.get(field, ""))
+            for field in ("internal_state", "action_state")
+        }
+        for ticker, row in states.items()
+    }
     market_signal_rows, _ = _sealed_csv(
         run_dir / monitor_subdir / "signals" / "market_signals.csv",
         run_dir / monitor_subdir / "signals" / "market_signals_manifest.json",
@@ -712,6 +950,16 @@ def main() -> int:  # noqa: C901
         else ({}, [])
     )
     input_paths.extend(published_state_paths)
+    # The ledger row count for run_as_of is read regardless of the flag so that
+    # flipping state_publication_enabled after publication cannot silently revert
+    # the book to recomputed states without a manifest FAIL.
+    published_rows_for_run = (
+        len(published_states)
+        if publication_enabled
+        else _published_row_count(
+            paths.output_dir, run_as_of, monitor_subdir=monitor_subdir
+        )
+    )
     first_write_overlays = 0
     first_write_differences = 0
     for ticker, published in published_states.items():
@@ -726,7 +974,7 @@ def main() -> int:  # noqa: C901
         states[ticker] = replacement
         first_write_overlays += 1
 
-    level_rows, _ = _sealed_csv(
+    level_rows, levels_manifest = _sealed_csv(
         run_dir / "levels" / "levels.csv",
         run_dir / "levels" / "levels_manifest.json",
         keys=("levels.csv",),
@@ -737,7 +985,20 @@ def main() -> int:  # noqa: C901
         [run_dir / "levels" / "levels.csv", run_dir / "levels" / "levels_manifest.json"]
     )
 
-    ledger_run = _latest_ledger_run(runs_root, run_as_of)
+    raw_staleness = cfg_get(config, "holdings_ledger.max_staleness_days", 7)
+    try:
+        max_staleness_days = int(str(raw_staleness))
+    except ValueError as exc:
+        raise ValueError(
+            f"holdings_ledger.max_staleness_days must be an integer, got {raw_staleness!r}"
+        ) from exc
+    if max_staleness_days < 0:
+        raise ValueError(
+            f"holdings_ledger.max_staleness_days must be >= 0, got {max_staleness_days}"
+        )
+    ledger_run, ledger_age_days, ledger_runs_skipped = _latest_ledger_run(
+        runs_root, run_as_of, max_staleness_days=max_staleness_days
+    )
     ledger_as_of = ledger_run.name
     ledger_dir = ledger_run / "ledger"
     statement_source_rows, _ = _sealed_csv(
@@ -789,14 +1050,8 @@ def main() -> int:  # noqa: C901
         ]
     )
 
-    holdings = _keyed(holding_rows, "symbol")
-    holding_prices = {
-        str(row.get("symbol", "")).strip().upper(): float(row["close_price"])
-        for row in holding_state_rows
-        if str(row.get("asset_category", "")) == "Stocks"
-        and str(row.get("symbol", "")).strip()
-        and _finite(row.get("close_price")) is not None
-    }
+    holdings = _stock_holdings(holding_rows)
+    holding_prices = _stock_holding_prices(holding_state_rows)
     rows = compose_rows(
         weights=weights,
         scores=_keyed(score_rows),
@@ -810,11 +1065,51 @@ def main() -> int:  # noqa: C901
     )
 
     by_ticker = {str(row["ticker"]): row for row in rows}
+    expected_union = set(weights) | set(holdings)
+    row_tickers = [str(row["ticker"]) for row in rows]
+    union_missing = sorted(expected_union - set(row_tickers))
+    union_unexpected = sorted(set(row_tickers) - expected_union)
+    union_duplicates = sorted(
+        {ticker for ticker in row_tickers if row_tickers.count(ticker) > 1}
+    )
+    holding_row_errors: list[str] = []
+    for ticker, holding in holdings.items():
+        row = by_ticker.get(ticker)
+        if (
+            row is None
+            or int(row.get("IB_Holding", 0)) != 1
+            or str(row.get("IB_quantity", "")) != str(holding.get("net_shares", ""))
+            or str(row.get("ib_symbol", "")) != str(holding.get("symbol", "")).strip()
+        ):
+            holding_row_errors.append(ticker)
+    policy_mismatches: list[str] = []
+    for ticker, row in by_ticker.items():
+        recomputed = recomputed_states.get(ticker)
+        if recomputed is None:
+            continue
+        published = published_states.get(ticker) if publication_enabled else None
+        expected_source = published if published is not None else recomputed
+        if any(
+            str(row.get(field, "")) != str(expected_source.get(field, ""))
+            for field in ("internal_state", "action_state")
+        ):
+            policy_mismatches.append(ticker)
+    publication_flag_mismatch = (
+        publication_enabled and published_rows_for_run == 0
+    ) or (not publication_enabled and published_rows_for_run > 0)
     checks = [
         {
             "check": "complete_unique_union",
-            "status": "PASS" if len(rows) == len(by_ticker) == len(set(weights) | set(holdings)) else "FAIL",
-            "detail": f"rows={len(rows)} target={len(weights)} holdings={len(holdings)}",
+            "status": (
+                "PASS"
+                if not union_missing and not union_unexpected and not union_duplicates
+                else "FAIL"
+            ),
+            "detail": (
+                f"rows={len(rows)} target={len(weights)} holdings={len(holdings)}; "
+                f"missing={union_missing}; unexpected={union_unexpected}; "
+                f"duplicates={union_duplicates}"
+            ),
         },
         {
             "check": "target_weights_conserved",
@@ -823,8 +1118,12 @@ def main() -> int:  # noqa: C901
         },
         {
             "check": "all_ib_stock_holdings_included",
-            "status": "PASS" if all(by_ticker[ticker]["IB_Holding"] == 1 for ticker in holdings) else "FAIL",
-            "detail": f"ledger_as_of={ledger_as_of}; stock_holdings={len(holdings)}",
+            "status": "PASS" if not holding_row_errors else "FAIL",
+            "detail": (
+                f"ledger_as_of={ledger_as_of}; ledger_age_days={ledger_age_days}; "
+                f"stock_holdings={len(holdings)}; "
+                f"rows_missing_or_mismatched={holding_row_errors}"
+            ),
         },
         {
             "check": "macro_context_complete",
@@ -871,19 +1170,12 @@ def main() -> int:  # noqa: C901
             "check": "scored_names_have_market_context",
             "status": (
                 "PASS"
-                if all(
-                    not int(row["is_scored"])
-                    or (
-                        str(row["benchmark_ticker"]).strip()
-                        and str(row["current_price"]).strip()
-                    )
-                    for row in rows
-                )
+                if not any(_missing_market_context(row) for row in rows)
                 else "FAIL"
             ),
             "detail": (
                 f"scored={sum(int(row['is_scored']) for row in rows)}; "
-                f"missing={sum(int(row['is_scored']) and (not str(row['benchmark_ticker']).strip() or not str(row['current_price']).strip()) for row in rows)}"
+                f"missing={sum(_missing_market_context(row) for row in rows)}"
             ),
         },
         {
@@ -906,11 +1198,6 @@ def main() -> int:  # noqa: C901
             "detail": "same-date market-signal and levels prices agree when both exist",
         },
         {
-            "check": "layer_source_removed",
-            "status": "PASS" if "layer_source" not in BOOK_FIELDS else "FAIL",
-            "detail": "enriched schema contains no layer_source column",
-        },
-        {
             "check": "unscored_unmonitored_visible",
             "status": "PASS",
             "detail": (
@@ -920,11 +1207,22 @@ def main() -> int:  # noqa: C901
         },
         {
             "check": "monitor_state_source_policy_honored",
-            "status": "PASS",
+            "status": "PASS" if not policy_mismatches else "FAIL",
             "detail": (
                 f"publication_enabled={publication_enabled}; "
                 f"published_as_of={run_as_of}; overlays={first_write_overlays}; "
-                f"field_differences_restored={first_write_differences}"
+                f"field_differences_restored={first_write_differences}; "
+                f"recomputed_vs_published_mismatches={policy_mismatches[:10]}"
+                f" (count={len(policy_mismatches)})"
+            ),
+        },
+        {
+            "check": "state_publication_flag_consistent",
+            "status": "FAIL" if publication_flag_mismatch else "PASS",
+            "detail": (
+                f"state_publication_enabled={publication_enabled}; "
+                f"ledger_rows_for_{run_as_of}={published_rows_for_run}; "
+                "flag and publication ledger must agree at book-build time"
             ),
         },
         {
@@ -938,6 +1236,11 @@ def main() -> int:  # noqa: C901
     ]
     failures = [check for check in checks if check["status"] == "FAIL"]
     acceptance = "FAIL" if failures else "PASS"
+    if manifest_path.exists():
+        # --force republish: retract the previous seal BEFORE publishing the new CSV
+        # so a crash between the two writes leaves a missing manifest (fail closed
+        # downstream) instead of a stale PASS manifest fronting a different book.
+        manifest_path.unlink()
     write_final_report(
         output_path,
         ib_performance=ib_performance,
@@ -946,7 +1249,7 @@ def main() -> int:  # noqa: C901
     )
     manifest = {
         "stage": "stage12b_enriched_final_target_book",
-        "schema_version": "final_target_book_report_v5_realized_ib_performance",
+        "schema_version": "final_target_book_report_v6_price_source_ib_symbol",
         "generated_at": utc_now(),
         "run_as_of": run_as_of,
         "acceptance": acceptance,
@@ -956,9 +1259,36 @@ def main() -> int:  # noqa: C901
         "ib_stock_holding_count": len(holdings),
         "holding_only_count": len(set(holdings) - set(weights)),
         "ledger_as_of": ledger_as_of,
+        "ledger_age_days": ledger_age_days,
+        "ledger_max_staleness_days": max_staleness_days,
+        "ledger_runs_skipped": ledger_runs_skipped,
         "first_write_monitor_state_count": first_write_overlays,
         "first_write_monitor_state_differences_restored": first_write_differences,
         "state_publication_enabled": publication_enabled,
+        "published_state_rows_for_run": published_rows_for_run,
+        "advisory_column_groups": {
+            "price_bands": {
+                "columns": [
+                    "price_band_status",
+                    "price_band_basis",
+                    "starter_band_low",
+                    "starter_band_high",
+                    "add_band_low",
+                    "add_band_high",
+                    "trim_band_low",
+                    "trim_band_high",
+                ],
+                "advisory": True,
+                "shadow_only": bool(levels_manifest.get("shadow_only", False)),
+                "source_manifest": "levels/levels_manifest.json",
+            },
+            "monitor_states": {
+                "columns": ["internal_state", "action_state", "is_monitored"],
+                "advisory": True,
+                "shadow_only": bool(state_manifest.get("shadow_only", False)),
+                "source_manifest": f"{monitor_subdir}/expectations_state_manifest.json",
+            },
+        },
         "report_layout": {
             "ib_performance_first_row": IB_PERFORMANCE_FIELDS,
             "ib_realized_performance_rows": IB_REALIZED_ROWS,

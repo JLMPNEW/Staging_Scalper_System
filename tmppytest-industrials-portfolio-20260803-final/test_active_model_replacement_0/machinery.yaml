@@ -1,0 +1,4 @@
+machinery_stage12:
+  activation_approval_token: APPROVE
+  output_root: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_active_model_replacement_0\stage12
+  portfolio_config_path: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_active_model_replacement_0\portfolio.yaml

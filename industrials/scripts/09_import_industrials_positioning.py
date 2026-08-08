@@ -23,6 +23,7 @@ from industrials.core.config import cfg_get, expand_env_vars, load_yaml, resolve
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
+from industrials.core.sec_13f_calendar import sec_13f_snapshot_is_stale  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from industrials.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
 
@@ -1197,17 +1198,32 @@ def source_rank_case(source_ids: list[str]) -> str:
     return f"CASE source_id {whens} ELSE 9 END"
 
 
-def latest_row(conn: Any, table: str, ticker: str, date_col: str, asof_iso: str, *, source_ids: list[str]) -> sqlite3.Row | None:
+def latest_row(
+    conn: Any,
+    table: str,
+    ticker: str,
+    date_col: str,
+    asof_iso: str,
+    *,
+    source_ids: list[str],
+    tiebreak_cols: tuple[str, ...] = (),
+) -> sqlite3.Row | None:
     # SC-17: positioning fact tables are keyed by source_id, so a second registered
     # source would otherwise bleed into features nondeterministically. Restrict to
     # the configured source_id(s); the freshest date wins, with the configured rank
     # breaking same-date ties (mirrors import_short_interest's PS-3 preference).
+    # tiebreak_cols: tables bucketed below {date_col} can hold several buckets that
+    # share one {date_col} value (e.g. fact_13f_positioning stamps every period in
+    # a DERA archive with the same import asof_date), and SQLite returns an
+    # arbitrary row on equal ORDER BY keys. Each tiebreak column sorts DESC ahead
+    # of the source rank so the newest bucket wins deterministically.
+    tiebreak_sql = "".join(f"{col} DESC, " for col in tiebreak_cols)
     return conn.execute(
         f"""
         SELECT * FROM {table}
         WHERE ticker = ? AND {date_col} <= ?
           AND source_id IN ({qmarks(source_ids)})
-        ORDER BY {date_col} DESC, {source_rank_case(source_ids)} ASC
+        ORDER BY {date_col} DESC, {tiebreak_sql}{source_rank_case(source_ids)} ASC
         LIMIT 1
         """,
         (ticker, asof_iso, *source_ids, *source_ids),
@@ -1275,23 +1291,42 @@ def build_positioning_features(
     max_13f_staleness_days: int,
     max_borrow_staleness_days: int,
     preferred_source_ids: list[str],
+    full_snapshot_replace: bool = True,
 ) -> dict[str, str]:
     now = utc_now()
     statuses: dict[str, str] = {}
     insider_start = (asof - timedelta(days=insider_days)).isoformat()
     short_prior_cutoff = (asof - timedelta(days=short_change_days)).isoformat()
-    # Replace one exact family/source/date snapshot. Upserts alone retain rows
-    # that leave the family-scoped feature universe (for example, a ticker
-    # that is active in another family but delisted in this one).
-    conn.execute(
-        """
-        DELETE FROM feature_positioning
-        WHERE asof_date = ?
-          AND source_id = ?
-          AND model_family = ?
-        """,
-        (asof.isoformat(), feature_source_id, model_family),
-    )
+    if full_snapshot_replace:
+        # Replace one exact family/source/date snapshot. Upserts alone retain rows
+        # that leave the family-scoped feature universe (for example, a ticker
+        # that is active in another family but delisted in this one).
+        conn.execute(
+            """
+            DELETE FROM feature_positioning
+            WHERE asof_date = ?
+              AND source_id = ?
+              AND model_family = ?
+            """,
+            (asof.isoformat(), feature_source_id, model_family),
+        )
+    else:
+        # A --tickers subset rebuild (e.g. transportation's score-history runner
+        # invokes this per date for its ~24 rank-ready members) must NOT replace
+        # the whole family snapshot: the family-wide delete above would shrink a
+        # full 112-ticker import down to the subset, which is exactly how the
+        # family feature snapshots were silently clobbered after every
+        # score-history run. Scope the replace to the tickers being rebuilt.
+        conn.execute(
+            f"""
+            DELETE FROM feature_positioning
+            WHERE asof_date = ?
+              AND source_id = ?
+              AND model_family = ?
+              AND ticker IN ({qmarks(tickers)})
+            """,
+            (asof.isoformat(), feature_source_id, model_family, *tickers),
+        )
     for ticker in tickers:
         insider_source = preferred_form4_source(
             conn,
@@ -1342,13 +1377,39 @@ def build_positioning_features(
             """,
             (ticker, insider_source, insider_start, asof.isoformat()),
         ).fetchone()
-        inst = latest_row(conn, "fact_13f_positioning", ticker, "asof_date", asof.isoformat(), source_ids=preferred_source_ids)
+        inst = latest_row(
+            conn,
+            "fact_13f_positioning",
+            ticker,
+            "asof_date",
+            asof.isoformat(),
+            source_ids=preferred_source_ids,
+            # Multiple period buckets share one asof_date when a DERA archive
+            # stamps every period it carries with the import date; the newest
+            # period must win deterministically.
+            tiebreak_cols=("period_of_report",),
+        )
         # A snapshot older than the policy window must not satisfy the gate or
         # populate features as if current; NULL the fields and flag for review.
+        # A13-7: the age bound is publication-calendar-capped. SEC DERA (the
+        # only 13F source) publishes filing-window archives only a few weeks
+        # after each 3-month window closes, so plain wall-clock age could
+        # demand a filing the source cannot yet have published (e.g. a
+        # last-filing of 2026-05-08 breaches 120d on 2026-09-06 while the
+        # jun-aug archive carrying the next round can land ~2026-09-17). The
+        # snapshot counts as stale only once BOTH the age exceeds
+        # max_13f_staleness_days AND the archive that must carry the next
+        # filing round has (worst case) been publishable for a few grace days
+        # (see industrials/core/sec_13f_calendar.py).
         inst_stale = False
         if inst is not None and max_13f_staleness_days > 0:
             inst_asof = parse_date(inst["asof_date"])
-            if inst_asof is None or (asof - inst_asof).days > max_13f_staleness_days:
+            if inst_asof is None or sec_13f_snapshot_is_stale(
+                asof=asof,
+                last_filing=inst_asof,
+                period_of_report=parse_date(inst["period_of_report"]),
+                max_staleness_days=max_13f_staleness_days,
+            ):
                 inst = None
                 inst_stale = True
         short = latest_short_row(conn, ticker, asof.isoformat(), source_ids=preferred_source_ids)
@@ -1779,6 +1840,9 @@ def main() -> None:
                         max_13f_staleness_days=max_13f_staleness_days,
                         max_borrow_staleness_days=max_borrow_staleness_days,
                         preferred_source_ids=preferred_source_ids,
+                        # A --tickers subset run must not replace the whole
+                        # family/date snapshot with its subset.
+                        full_snapshot_replace=not ticker_filter,
                     )
                     rows: list[dict[str, Any]] = []
                     for ticker in fact_tickers:

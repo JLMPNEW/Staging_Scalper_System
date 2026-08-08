@@ -803,6 +803,7 @@ def compose_rows(
     provenance_version: str,
     score_model_version: str,
     membership_mode: str,
+    borrow_asof_by_ticker: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     ranks = rank_percentiles(scores)
     out: list[dict[str, str]] = []
@@ -948,7 +949,15 @@ def compose_rows(
             "short_interest_asof_date": asof if row.get("positioning_latest_short_interest_shares") is not None else "",
             "institutional_data_asof_date": asof if row.get("positioning_latest_institutional_shares") is not None else "",
             "insider_data_asof_date": asof,
-            "borrow_data_asof_date": asof if row.get("positioning_latest_borrow_fee_rate") is not None else "",
+            # The borrow OBSERVATION date, not the feature asof: within the
+            # staleness tolerance the feature build carries the newest borrow
+            # row at-or-before asof, so a carried value must be dated by that
+            # observation instead of masquerading as same-day data.
+            "borrow_data_asof_date": (
+                (borrow_asof_by_ticker or {}).get(ticker, "")
+                if row.get("positioning_latest_borrow_fee_rate") is not None
+                else ""
+            ),
             "forward_catalyst_event_date": "",
             "forward_catalyst_event_type": "",
             "forward_catalyst_nearest_days": "",
@@ -1368,6 +1377,18 @@ def main() -> int:
             base_dir=base_dir,
             membership_mode=args.membership_mode,
         )
+        # Newest borrow observation at-or-before asof per ticker: the truthful
+        # date for borrow_data_asof_date (the feature build consumes exactly
+        # this row via its latest<=asof + staleness rule; one registered borrow
+        # source exists, so an unscoped MAX matches what features consumed).
+        borrow_asof_by_ticker = {
+            str(r["ticker"]): str(r["max_asof"] or "")
+            for r in conn.execute(
+                "SELECT ticker, MAX(asof_date) AS max_asof FROM fact_ibkr_borrow_snapshot"
+                " WHERE asof_date <= ? GROUP BY ticker",
+                (asof,),
+            )
+        }
     if not rows:
         raise ValueError(f"No defense rows found for asof={asof} membership_mode={args.membership_mode}")
     missing_feature = [
@@ -1389,6 +1410,7 @@ def main() -> int:
         provenance_version=provenance_version,
         score_model_version=score_model_version,
         membership_mode=args.membership_mode,
+        borrow_asof_by_ticker=borrow_asof_by_ticker,
     )
     if args.research_candidate:
         out_rows = apply_research_candidate_stamps(out_rows, scoring_mode=scoring_mode)

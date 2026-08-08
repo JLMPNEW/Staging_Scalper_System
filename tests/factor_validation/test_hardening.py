@@ -184,7 +184,7 @@ def test_non_finite_intermediate_portfolio_statistics_are_rejected() -> None:
 
     assert FactorValidationConfig(horizon_trading_days=21).primary_inference == "independent_window"
     with pytest.raises(ValueError, match="diagnostic-only"):
-        FactorValidationConfig(horizon_trading_days=21, primary_inference="hac")
+        FactorValidationConfig(horizon_trading_days=21, primary_inference="hac")  # type: ignore[arg-type]
 
 
 def _monthly_signal_observations(
@@ -319,6 +319,75 @@ def test_single_dropped_daily_date_is_not_spanned() -> None:
     by_date = {item.as_of_date: item for item in result.per_date}
     assert by_date[date(2026, 1, 8)].two_leg_turnover is None
     assert by_date[date(2026, 1, 9)].two_leg_turnover is not None
+
+
+def test_mixed_cadence_does_not_span_a_dropped_daily_cluster_date() -> None:
+    result = validate_factor(
+        _monthly_signal_observations(daily_cluster=5, drop_wednesday=True),
+        factor_id="MIXED_GAP",
+        config=FactorValidationConfig(horizon_trading_days=21, round_trip_cost=0.001),
+    )
+    by_date = {item.as_of_date: item for item in result.per_date}
+    assert result.evaluation_cadence.median_step_trading_days > 10
+    assert by_date[date(2026, 3, 5)].two_leg_turnover is None
+    assert by_date[date(2026, 3, 6)].two_leg_turnover is not None
+
+
+def test_primary_p_value_fails_closed_below_configured_evidence_minimums() -> None:
+    rng = np.random.default_rng(8)
+    observations: list[FactorObservation] = []
+    for date_index in range(8):
+        as_of = date(2026, 1, 5) + timedelta(days=7 * date_index)
+        factors = np.arange(20, dtype=float)
+        returns = (0.2 + 0.1 * date_index) * factors + rng.normal(0.0, 5.0, size=20)
+        for entity_index in range(20):
+            observations.append(
+                FactorObservation(as_of, f"E{entity_index}", factors[entity_index], returns[entity_index])
+            )
+    result = validate_factor(
+        observations,
+        factor_id="BELOW_MINIMUM",
+        config=FactorValidationConfig(
+            horizon_trading_days=21,
+            min_dates=3,
+            min_independent_windows=3,
+        ),
+    )
+    assert result.independent_window.independent_window_count == 2
+    assert result.independent_window.two_sided_p_value is not None
+    assert result.evidence_eligible is False
+    assert result.primary_p_value is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("horizon_trading_days", 21.5),
+        ("horizon_trading_days", np.nan),
+        ("quantile_count", 5.5),
+        ("hac_max_lag", np.nan),
+    ],
+)
+def test_configuration_rejects_non_integer_count_fields(field_name: str, value: float) -> None:
+    kwargs = {"horizon_trading_days": 21, field_name: value}
+    with pytest.raises(TypeError, match="integer"):
+        FactorValidationConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_exported_inference_helpers_reject_invalid_window_parameters() -> None:
+    dates = [date(2026, 1, 2), date(2026, 1, 9)]
+    with pytest.raises(ValueError, match="positive"):
+        independent_window_mean_inference(
+            [0.1, 0.2], dates, horizon_trading_days=0, entry_lag_trading_days=0
+        )
+    with pytest.raises(ValueError, match="at least 0"):
+        independent_window_mean_inference(
+            [0.1, 0.2], dates, horizon_trading_days=1, entry_lag_trading_days=-1
+        )
+    with pytest.raises(ValueError, match="positive"):
+        newey_west_mean_inference(
+            [0.1, 0.2, 0.3], max_lag=0, evaluation_step_trading_days=0
+        )
 
 
 def test_zero_dimensional_numpy_arrays_serialize_or_fail_cleanly() -> None:

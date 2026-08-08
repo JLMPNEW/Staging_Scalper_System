@@ -219,6 +219,7 @@ def verify_v2_snapshots(
     *,
     historical_root: Path,
     validation_manifest: Mapping[str, Any],
+    through_date: str | None = None,
 ) -> dict[str, str]:
     if (
         validation_manifest.get("acceptance") != "PASS"
@@ -230,6 +231,9 @@ def verify_v2_snapshots(
         raise ValueError("The v2 validation manifest has no snapshot hashes")
     aggregate: dict[str, str] = {}
     for asof, files in sorted(expected.items()):
+        asof = str(asof)
+        if through_date is not None and asof > through_date:
+            continue
         if not isinstance(files, dict):
             raise ValueError(f"{asof}: invalid snapshot hash mapping")
         for name, expected_hash in sorted(files.items()):
@@ -243,6 +247,12 @@ def verify_v2_snapshots(
                     f"expected={expected_hash} actual={actual}"
                 )
             aggregate[f"{asof}/{name}"] = actual
+    if through_date is not None and through_date not in expected:
+        raise ValueError(
+            f"Frozen v2 validation manifest does not contain boundary {through_date}"
+        )
+    if not aggregate:
+        raise ValueError("The v2 PIT panel has no snapshots in the requested prefix")
     return aggregate
 
 

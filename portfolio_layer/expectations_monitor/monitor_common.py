@@ -534,6 +534,10 @@ def build_universe_rows(
         if not ticker:
             continue
         shares = _number(row.get("net_shares", row.get("quantity", 0.0)))
+        # Add back SYEP-lent shares: net_shares=0 with shares_lent=-100 is a
+        # fully-lent holding the owner still economically holds, not a closed
+        # position.
+        shares -= _number(row.get("shares_lent", 0.0))
         if abs(shares) <= 1e-12:
             continue
         if ticker in holdings:

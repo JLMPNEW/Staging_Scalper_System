@@ -26,6 +26,9 @@ provider endpoints while rebuilding historical dates.
   `decision_cutoff_local`. Otherwise the observation becomes effective next session.
 - Capture runs form an append-order SHA-256 chain. Artifacts record exact observation
   dependencies.
+- Scheduled capture reads only its provider-owned universe registry. Portfolio and
+  monitor artifacts can refresh that registry through a sealed handoff but cannot
+  prevent an otherwise due capture from running.
 
 ## Commands
 
@@ -64,11 +67,13 @@ reconstruct each missing portfolio date from observations genuinely available an
 effective on that date. If provider ingestion itself was offline, the missing
 interval remains disclosed.
 
-Each capture also stamps monitor-universe freshness. Premarket, priority, Sunday,
-and intraday captures expect the prior exchange session's sealed universe; postclose
-expects the current session. A stale universe still captures known names but changes
-the run to `PASS_WITH_WARNINGS`, preserving coverage while disclosing that newly
-eligible names may be absent until the portfolio catch-up refreshes the universe.
+Provider capture owns an append-only universe registry in
+provider_observations.sqlite. A hash-valid monitor-universe artifact is an optional
+handoff that can append a newer registry version; it is never a runtime dependency.
+If portfolio or monitor processing fails, scheduled capture continues from the last
+accepted registry. The registry source date remains recorded for lineage, but it does
+not make current provider observations stale and cannot downgrade an otherwise clean
+capture. A newly accepted handoff updates membership on the next scheduled cycle.
 
 Recommended Windows Task Scheduler jobs (America/New_York): Sunday 18:00 baseline;
 business-day 07:30 premarket; 08:45 priority refresh; 18:00 post-close. The robust

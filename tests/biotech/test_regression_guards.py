@@ -108,6 +108,8 @@ def test_sec_event_incremental_clears_events_when_latest_document_text_is_missin
         """
     )
 
+    # The metadata-only stale scan no longer reads text_content, so a blank body
+    # behind an intact manifest row is not cleared here...
     cleared = module.clear_stale_events_for_missing_document_text(
         conn,
         cutoff="2025-05-08",
@@ -115,11 +117,43 @@ def test_sec_event_incremental_clears_events_when_latest_document_text_is_missin
         ticker_filter={"TST"},
         parser_signature="new-signature",
     )
+    assert cleared == 0
 
-    assert cleared == 1
+    # ...it is detected at fetch time instead: the filing is eligible (signature
+    # mismatch), comes back as a phantom, and reset gives the same end state.
+    filings, phantoms = module.load_filing_texts_to_parse(
+        conn,
+        cutoff="2025-05-08",
+        asof="2026-05-08",
+        ticker_filter={"TST"},
+        max_filings=0,
+        offset=0,
+        reparse_signature_mismatch=True,
+        parser_signature="new-signature",
+    )
+    assert filings == []
+    assert [candidate.accession_nodash for candidate in phantoms] == ["0001"]
+    module.reset_blank_text_parse_state(conn, ["0001"], "new-signature")
+
     assert conn.execute("SELECT COUNT(*) FROM sec_events").fetchone()[0] == 0
     state = conn.execute("SELECT text_hash, parser_signature, event_count FROM sec_event_parse_state").fetchone()
     assert dict(state) == {"text_hash": "", "parser_signature": "new-signature", "event_count": 0}
+
+    # Metadata breakage (manifest row gone) is still cleared by the cheap scan.
+    conn.execute(
+        "INSERT INTO sec_events(event_id, company_id, accession_nodash, filing_date, form, event_type)"
+        " VALUES (2, 1, '0001', '2026-05-08', '10-Q', 'pdufa_date')"
+    )
+    conn.execute("DELETE FROM sec_filing_latest_document WHERE accession_nodash = '0001'")
+    cleared = module.clear_stale_events_for_missing_document_text(
+        conn,
+        cutoff="2025-05-08",
+        asof="2026-05-08",
+        ticker_filter={"TST"},
+        parser_signature="new-signature",
+    )
+    assert cleared == 1
+    assert conn.execute("SELECT COUNT(*) FROM sec_events").fetchone()[0] == 0
 
 
 def test_sec_event_incremental_can_skip_parser_signature_only_reparse() -> None:
@@ -173,7 +207,7 @@ def test_sec_event_incremental_can_skip_parser_signature_only_reparse() -> None:
         """
     )
 
-    skipped = module.load_filing_texts_to_parse(
+    skipped, skipped_phantoms = module.load_filing_texts_to_parse(
         conn,
         cutoff="2025-05-08",
         asof="2026-05-08",
@@ -183,7 +217,7 @@ def test_sec_event_incremental_can_skip_parser_signature_only_reparse() -> None:
         reparse_signature_mismatch=False,
         parser_signature="new-signature",
     )
-    strict = module.load_filing_texts_to_parse(
+    strict, strict_phantoms = module.load_filing_texts_to_parse(
         conn,
         cutoff="2025-05-08",
         asof="2026-05-08",
@@ -194,8 +228,19 @@ def test_sec_event_incremental_can_skip_parser_signature_only_reparse() -> None:
         parser_signature="new-signature",
     )
 
-    assert skipped == []
+    assert skipped == [] and skipped_phantoms == []
+    assert strict_phantoms == []
     assert [filing.accession_nodash for filing in strict] == ["0001"]
+
+
+def test_sec_event_zero_work_scan_reads_no_text_content() -> None:
+    # Runs the script's embedded selftest: zero-eligible scans must issue no
+    # text_content reads (sqlite trace assertion) within a timing sanity bound,
+    # eligible filings must load byte-identical to the full-rescan path, and
+    # blank-text phantoms must be cleared and skipped.
+    module = load_script_module("07_parse_sec_biotech_events.py", "sec_events_zero_work_selftest")
+
+    module._selftest()
 
 
 def test_forward_guidance_worker_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:

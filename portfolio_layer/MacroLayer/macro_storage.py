@@ -97,6 +97,17 @@ CREATE TABLE IF NOT EXISTS macro_ingest_run (
     notes                    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS macro_storage_migration (
+    migration_id             TEXT PRIMARY KEY,
+    started_at_utc           TEXT NOT NULL,
+    completed_at_utc         TEXT NOT NULL,
+    status                   TEXT NOT NULL,
+    rows_examined            INTEGER NOT NULL DEFAULT 0,
+    rows_deleted             INTEGER NOT NULL DEFAULT 0,
+    rows_updated             INTEGER NOT NULL DEFAULT 0,
+    details_json             TEXT
+);
+
 CREATE TABLE IF NOT EXISTS macro_source_artifact (
     artifact_id              INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id                   TEXT NOT NULL,
@@ -559,10 +570,48 @@ def _insert_artifacts(conn: sqlite3.Connection, run_id: str, artifacts: Iterable
     )
 
 
+TRUE_VINTAGE_DEDUPE_MIGRATION_ID = "restore_true_vintage_dedupe_key_v1"
+
+
+def _true_vintage_dedupe_key(
+    registry_key: str,
+    metric_key: str,
+    source_name: str,
+    source_series_id: str | None,
+    observation_period: str,
+    release_date: str | None,
+    vintage_date: str | None,
+) -> str:
+    """Return the stable natural-key hash used by true-vintage observations."""
+    text = "|".join(
+        [
+            registry_key,
+            metric_key,
+            source_name,
+            source_series_id or "",
+            observation_period,
+            release_date or "",
+            vintage_date or "",
+        ]
+    )
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
 def _make_dedupe_key(registry_key: str, obs: ObservationRecord) -> str:
+    base_key = _true_vintage_dedupe_key(
+        registry_key,
+        obs.metric_key,
+        obs.source_name,
+        obs.source_series_id,
+        obs.observation_period,
+        obs.release_date,
+        obs.vintage_date,
+    )
+    if obs.release_date is not None or obs.vintage_date is not None:
+        return base_key
+
     # Providers without release/vintage metadata are snapshot-versioned by
     # retrieval time. Unchanged values are filtered before insertion below.
-    snapshot_id = obs.retrieved_at if obs.release_date is None and obs.vintage_date is None else ""
     text = "|".join(
         [
             registry_key,
@@ -570,12 +619,295 @@ def _make_dedupe_key(registry_key: str, obs: ObservationRecord) -> str:
             obs.source_name,
             obs.source_series_id or "",
             obs.observation_period,
-            obs.release_date or "",
-            obs.vintage_date or "",
-            snapshot_id,
+            "",
+            "",
+            obs.retrieved_at,
         ]
     )
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def repair_true_vintage_dedupe_keys(conn: sqlite3.Connection) -> dict[str, int | str]:
+    """Repair the short-lived hash-format regression without masking conflicts.
+
+    A prior implementation appended an empty snapshot component to true-vintage
+    keys. That changed stable natural keys and allowed a second copy of each
+    observation to be inserted. This one-time migration deletes only exact
+    semantic duplicates and re-keys unmatched rows. Conflicting values or dates
+    abort the transaction for manual adjudication.
+    """
+    completed = conn.execute(
+        "SELECT status FROM macro_storage_migration WHERE migration_id = ?",
+        (TRUE_VINTAGE_DEDUPE_MIGRATION_ID,),
+    ).fetchone()
+    if completed is not None:
+        if str(completed[0]) != "complete":
+            raise RuntimeError(
+                f"Macro storage migration has non-complete state: {completed[0]}"
+            )
+        return {
+            "migration_id": TRUE_VINTAGE_DEDUPE_MIGRATION_ID,
+            "status": "already_complete",
+            "rows_examined": 0,
+            "rows_deleted": 0,
+            "rows_updated": 0,
+        }
+
+    conn.create_function(
+        "macro_true_vintage_dedupe_key",
+        7,
+        _true_vintage_dedupe_key,
+        deterministic=True,
+    )
+    started_at = utc_now_iso()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DROP TABLE IF EXISTS temp.macro_true_vintage_dedupe_repair")
+        conn.execute(
+            """
+            CREATE TEMP TABLE macro_true_vintage_dedupe_repair AS
+            SELECT
+                o.observation_id,
+                macro_true_vintage_dedupe_key(
+                    o.registry_key,
+                    o.metric_key,
+                    o.source_name,
+                    o.source_series_id,
+                    o.observation_period,
+                    o.release_date,
+                    o.vintage_date
+                ) AS expected_dedupe_key
+            FROM macro_observation_raw o
+            JOIN macro_metric_registry r
+              ON r.registry_key = o.registry_key
+            WHERE r.vintage_policy = 'true_vintage'
+              AND (o.release_date IS NOT NULL OR o.vintage_date IS NOT NULL)
+              AND o.dedupe_key != macro_true_vintage_dedupe_key(
+                    o.registry_key,
+                    o.metric_key,
+                    o.source_name,
+                    o.source_series_id,
+                    o.observation_period,
+                    o.release_date,
+                    o.vintage_date
+              )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX temp.idx_macro_dedupe_repair_observation "
+            "ON macro_true_vintage_dedupe_repair(observation_id)"
+        )
+        conn.execute(
+            "CREATE INDEX temp.idx_macro_dedupe_repair_expected "
+            "ON macro_true_vintage_dedupe_repair(expected_dedupe_key)"
+        )
+        rows_examined = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM temp.macro_true_vintage_dedupe_repair"
+            ).fetchone()[0]
+        )
+
+        conflict = conn.execute(
+            """
+            SELECT
+                victim.observation_id,
+                canonical.observation_id,
+                victim.registry_key,
+                victim.observation_period,
+                victim.observation_date,
+                canonical.observation_date,
+                victim.value,
+                canonical.value
+            FROM temp.macro_true_vintage_dedupe_repair repair
+            JOIN macro_observation_raw victim
+              ON victim.observation_id = repair.observation_id
+            JOIN macro_observation_raw canonical
+              ON canonical.dedupe_key = repair.expected_dedupe_key
+             AND canonical.observation_id != victim.observation_id
+            WHERE victim.registry_key != canonical.registry_key
+               OR victim.metric_key != canonical.metric_key
+               OR victim.source_name != canonical.source_name
+               OR COALESCE(victim.source_series_id, '') != COALESCE(canonical.source_series_id, '')
+               OR victim.observation_period != canonical.observation_period
+               OR COALESCE(victim.observation_date, '') != COALESCE(canonical.observation_date, '')
+               OR COALESCE(victim.release_date, '') != COALESCE(canonical.release_date, '')
+               OR COALESCE(victim.vintage_date, '') != COALESCE(canonical.vintage_date, '')
+            LIMIT 1
+            """
+        ).fetchone()
+        if conflict is not None:
+            raise RuntimeError(
+                "Conflicting true-vintage rows share a repaired natural key; "
+                f"manual adjudication required: {tuple(conflict)}"
+            )
+
+        conn.execute(
+            """
+            CREATE TEMP TABLE macro_true_vintage_dedupe_winner AS
+            WITH group_rows AS (
+                SELECT repair.expected_dedupe_key, victim.observation_id
+                FROM temp.macro_true_vintage_dedupe_repair repair
+                JOIN macro_observation_raw victim
+                  ON victim.observation_id = repair.observation_id
+                UNION
+                SELECT repair.expected_dedupe_key, canonical.observation_id
+                FROM temp.macro_true_vintage_dedupe_repair repair
+                JOIN macro_observation_raw canonical
+                  ON canonical.dedupe_key = repair.expected_dedupe_key
+            ), ranked AS (
+                SELECT
+                    group_rows.expected_dedupe_key,
+                    candidate.observation_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY group_rows.expected_dedupe_key
+                        ORDER BY candidate.retrieved_at DESC, candidate.observation_id DESC
+                    ) AS row_rank
+                FROM group_rows
+                JOIN macro_observation_raw candidate
+                  ON candidate.observation_id = group_rows.observation_id
+            )
+            SELECT expected_dedupe_key, observation_id
+            FROM ranked
+            WHERE row_rank = 1
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX temp.idx_macro_dedupe_winner_expected "
+            "ON macro_true_vintage_dedupe_winner(expected_dedupe_key)"
+        )
+        conn.execute(
+            """
+            UPDATE macro_observation_raw AS canonical
+            SET
+                value = (
+                    SELECT winner.value
+                    FROM temp.macro_true_vintage_dedupe_winner selected
+                    JOIN macro_observation_raw winner
+                      ON winner.observation_id = selected.observation_id
+                    WHERE selected.expected_dedupe_key = canonical.dedupe_key
+                ),
+                source_last_updated = (
+                    SELECT winner.source_last_updated
+                    FROM temp.macro_true_vintage_dedupe_winner selected
+                    JOIN macro_observation_raw winner
+                      ON winner.observation_id = selected.observation_id
+                    WHERE selected.expected_dedupe_key = canonical.dedupe_key
+                ),
+                retrieved_at = (
+                    SELECT winner.retrieved_at
+                    FROM temp.macro_true_vintage_dedupe_winner selected
+                    JOIN macro_observation_raw winner
+                      ON winner.observation_id = selected.observation_id
+                    WHERE selected.expected_dedupe_key = canonical.dedupe_key
+                ),
+                revision_flag = CASE
+                    WHEN canonical.value != (
+                        SELECT winner.value
+                        FROM temp.macro_true_vintage_dedupe_winner selected
+                        JOIN macro_observation_raw winner
+                          ON winner.observation_id = selected.observation_id
+                        WHERE selected.expected_dedupe_key = canonical.dedupe_key
+                    ) THEN 1
+                    ELSE MAX(
+                        canonical.revision_flag,
+                        (
+                            SELECT winner.revision_flag
+                            FROM temp.macro_true_vintage_dedupe_winner selected
+                            JOIN macro_observation_raw winner
+                              ON winner.observation_id = selected.observation_id
+                            WHERE selected.expected_dedupe_key = canonical.dedupe_key
+                        )
+                    )
+                END,
+                notes_hash = (
+                    SELECT winner.notes_hash
+                    FROM temp.macro_true_vintage_dedupe_winner selected
+                    JOIN macro_observation_raw winner
+                      ON winner.observation_id = selected.observation_id
+                    WHERE selected.expected_dedupe_key = canonical.dedupe_key
+                ),
+                ingest_run_id = (
+                    SELECT winner.ingest_run_id
+                    FROM temp.macro_true_vintage_dedupe_winner selected
+                    JOIN macro_observation_raw winner
+                      ON winner.observation_id = selected.observation_id
+                    WHERE selected.expected_dedupe_key = canonical.dedupe_key
+                )
+            WHERE canonical.dedupe_key IN (
+                SELECT expected_dedupe_key
+                FROM temp.macro_true_vintage_dedupe_winner
+            )
+            """
+        )
+
+        delete_cursor = conn.execute(
+            """
+            DELETE FROM macro_observation_raw
+            WHERE observation_id IN (
+                SELECT victim.observation_id
+                FROM temp.macro_true_vintage_dedupe_repair repair
+                JOIN macro_observation_raw victim
+                  ON victim.observation_id = repair.observation_id
+                JOIN macro_observation_raw canonical
+                  ON canonical.dedupe_key = repair.expected_dedupe_key
+                 AND canonical.observation_id != victim.observation_id
+            )
+            """
+        )
+        rows_deleted = max(int(delete_cursor.rowcount), 0)
+        update_cursor = conn.execute(
+            """
+            UPDATE macro_observation_raw
+            SET dedupe_key = (
+                SELECT repair.expected_dedupe_key
+                FROM temp.macro_true_vintage_dedupe_repair repair
+                WHERE repair.observation_id = macro_observation_raw.observation_id
+            )
+            WHERE observation_id IN (
+                SELECT repair.observation_id
+                FROM temp.macro_true_vintage_dedupe_repair repair
+            )
+            """
+        )
+        rows_updated = max(int(update_cursor.rowcount), 0)
+        conn.execute("DROP TABLE temp.macro_true_vintage_dedupe_winner")
+        conn.execute("DROP TABLE temp.macro_true_vintage_dedupe_repair")
+        completed_at = utc_now_iso()
+        details = {
+            "policy": "keep_newest_payload_delete_duplicates_rekey_orphans_fail_on_identity_conflict",
+            "true_vintage_only": True,
+        }
+        conn.execute(
+            """
+            INSERT INTO macro_storage_migration (
+                migration_id, started_at_utc, completed_at_utc, status,
+                rows_examined, rows_deleted, rows_updated, details_json
+            ) VALUES (?, ?, ?, 'complete', ?, ?, ?, ?)
+            """,
+            (
+                TRUE_VINTAGE_DEDUPE_MIGRATION_ID,
+                started_at,
+                completed_at,
+                rows_examined,
+                rows_deleted,
+                rows_updated,
+                json.dumps(details, separators=(",", ":"), sort_keys=True),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    result: dict[str, int | str] = {
+        "migration_id": TRUE_VINTAGE_DEDUPE_MIGRATION_ID,
+        "status": "complete",
+        "rows_examined": rows_examined,
+        "rows_deleted": rows_deleted,
+        "rows_updated": rows_updated,
+    }
+    logger.info("Macro true-vintage dedupe migration: %s", result)
+    return result
 
 
 def _upsert_observations(

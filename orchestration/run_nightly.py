@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Fail-closed scheduled entry for the cross-sector nightly pipeline."""
+"""Fail-closed scheduled entry for the cross-sector nightly pipeline.
+
+Policy (2026-08-07): a stale/broken HISTORICAL input must never prevent CURRENT
+production. The late-IB-statement reconciler still runs first and its failure
+still fails the nightly's acceptance (FAIL_LATE_STATEMENT_RECONCILIATION, loud),
+but it no longer blocks the master run -- sector refreshes and the current
+portfolio are always attempted. --mode daily provides a scheduled plain-daily
+lane (no catch-up scanning) as an operator escape hatch.
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +19,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
+
+import run_all as run_all_mod
 
 
 ORCH_DIR = Path(__file__).resolve().parent
@@ -29,9 +39,62 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scheduled nightly portfolio refresh.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--as-of", default="", help="Optional explicit target session.")
+    parser.add_argument(
+        "--mode",
+        choices=["catch-up", "daily"],
+        default="catch-up",
+        help="Master mode: catch-up (default; current-target-first with best-effort "
+        "backfill) or daily (current session only, no gap scanning).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     return parser.parse_args()
+
+
+def master_command(mode: str, as_of: str, dry_run: bool) -> list[str]:
+    """The run_all invocation for this nightly. catch-up is CURRENT-TARGET-FIRST in
+    run_all (an unbuildable historical date can no longer wedge the current book);
+    daily is the plain single-session lane."""
+    command = [sys.executable, str(MASTER_RUNNER)]
+    if mode == "catch-up":
+        command.append("--catch-up")
+    if as_of:
+        command.extend(["--as-of", as_of])
+    if dry_run:
+        command.append("--dry-run")
+    return command
+
+
+def reconcile_abandoned_nightly_runs(root: Path = NIGHTLY_ROOT) -> list[Path]:
+    """Fail-close nightly manifests stuck at RUNNING whose recorded process is gone.
+
+    A killed/crashed nightly bypasses main()'s tail and would otherwise read
+    acceptance=RUNNING as a terminal state forever (master manifests are reconciled
+    by run_all; nightly manifests had no equivalent). Only a manifest that recorded
+    its nightly_pid AND whose pid is provably dead (PID-identity aware via the
+    recorded start time) is amended.
+    """
+    reconciled: list[Path] = []
+    if not root.is_dir():
+        return reconciled
+    for manifest_path in sorted(root.glob("*/nightly_manifest.json")):
+        payload = _load_json(manifest_path)
+        if str(payload.get("acceptance") or "").upper() != "RUNNING":
+            continue
+        pid_raw = payload.get("nightly_pid")
+        if not isinstance(pid_raw, int) or pid_raw <= 0:
+            continue  # pre-v3 manifest without a pid: cannot verify, leave as-is
+        started_iso = str(payload.get("started_at_utc") or "")
+        if run_all_mod._holder_alive(pid_raw, started_iso) is not False:
+            continue
+        payload["acceptance"] = "ABORTED"
+        payload["aborted_reason"] = (
+            f"nightly process pid={pid_raw} is no longer alive; run did not seal"
+        )
+        payload["reconciled_at_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _atomic_json(manifest_path, payload)
+        reconciled.append(manifest_path)
+    return reconciled
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -104,13 +167,73 @@ def _new_master_manifest(before: set[Path]) -> tuple[Path | None, dict[str, Any]
 
 
 def _selftest() -> int:
+    checks = 0
     root = Path(tempfile.mkdtemp())
     path = root / "manifest.json"
     _atomic_json(path, {"acceptance": "PASS", "value": 1})
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert loaded == {"acceptance": "PASS", "value": 1}
-    print("NIGHTLY SELFTEST PASS: 1 check")
+    checks += 1
+
+    # master command construction: catch-up default, daily escape lane
+    cmd_cu = master_command("catch-up", "", False)
+    assert "--catch-up" in cmd_cu and "--as-of" not in cmd_cu
+    cmd_daily = master_command("daily", "2026-08-06", True)
+    assert "--catch-up" not in cmd_daily
+    assert cmd_daily[-3:] == ["--as-of", "2026-08-06", "--dry-run"]
+    checks += 1
+
+    # abandoned-nightly reconciliation: dead pid -> ABORTED; live/unknown pid kept
+    nightly_root = root / "nightly_runs"
+    dead_dir = nightly_root / "dead"
+    dead_dir.mkdir(parents=True)
+    _atomic_json(dead_dir / "nightly_manifest.json",
+                 {"acceptance": "RUNNING", "nightly_pid": 2_000_000_000,
+                  "started_at_utc": "2020-01-01T00:00:00+00:00"})
+    live_dir = nightly_root / "live"
+    live_dir.mkdir(parents=True)
+    _atomic_json(live_dir / "nightly_manifest.json",
+                 {"acceptance": "RUNNING", "nightly_pid": os.getpid(),
+                  "started_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    nopid_dir = nightly_root / "nopid"
+    nopid_dir.mkdir(parents=True)
+    _atomic_json(nopid_dir / "nightly_manifest.json", {"acceptance": "RUNNING"})
+    sealed_dir = nightly_root / "sealed"
+    sealed_dir.mkdir(parents=True)
+    _atomic_json(sealed_dir / "nightly_manifest.json", {"acceptance": "PASS", "nightly_pid": 1})
+    reconciled = reconcile_abandoned_nightly_runs(nightly_root)
+    assert [p.parent.name for p in reconciled] == ["dead"], reconciled
+    dead_payload = _load_json(dead_dir / "nightly_manifest.json")
+    assert dead_payload["acceptance"] == "ABORTED" and "aborted_reason" in dead_payload
+    assert _load_json(live_dir / "nightly_manifest.json")["acceptance"] == "RUNNING"
+    assert _load_json(nopid_dir / "nightly_manifest.json")["acceptance"] == "RUNNING"
+    assert _load_json(sealed_dir / "nightly_manifest.json")["acceptance"] == "PASS"
+    checks += 1
+
+    # nightly acceptance resolution: reconciliation failure is loud but never blocks
+    assert _resolve_acceptance(reconciliation_failed=False, passed=True) == "PASS"
+    assert _resolve_acceptance(reconciliation_failed=False, passed=False) == "FAIL_MASTER"
+    assert (
+        _resolve_acceptance(reconciliation_failed=True, passed=True)
+        == "FAIL_LATE_STATEMENT_RECONCILIATION"
+    )
+    assert (
+        _resolve_acceptance(reconciliation_failed=True, passed=False)
+        == "FAIL_LATE_STATEMENT_RECONCILIATION"
+    )
+    checks += 1
+
+    print(f"NIGHTLY SELFTEST PASS: {checks} checks")
     return 0
+
+
+def _resolve_acceptance(*, reconciliation_failed: bool, passed: bool) -> str:
+    """Final nightly acceptance. A reconciliation failure stays a FAILING verdict
+    (fail-closed reporting) but -- by policy -- the master has still run, so the
+    current book is produced either way."""
+    if reconciliation_failed:
+        return "FAIL_LATE_STATEMENT_RECONCILIATION"
+    return "PASS" if passed else "FAIL_MASTER"
 
 
 def main() -> int:
@@ -122,6 +245,19 @@ def main() -> int:
     if not config.is_file():
         raise FileNotFoundError(f"Config not found: {config}")
 
+    if args.as_of:
+        # Fail fast on a non-session target BEFORE the reconciler/master touch
+        # anything (loads the real registry so ad-hoc closures are known).
+        run_all_mod.load_registry(run_all_mod.DEFAULT_REGISTRY)
+        args.as_of = run_all_mod.parse_iso(args.as_of)
+        if not run_all_mod.is_trading_day(run_all_mod._to_date(args.as_of)):
+            raise SystemExit(
+                f"--as-of {args.as_of} is not a trading session (weekend/holiday/closure)"
+            )
+
+    for reconciled in reconcile_abandoned_nightly_runs():
+        print(f"reconciled abandoned RUNNING nightly manifest -> ABORTED: {reconciled}", flush=True)
+
     started = datetime.now(timezone.utc)
     run_stamp = started.strftime("%Y%m%dT%H%M%S_%fZ")
     run_dir = NIGHTLY_ROOT / run_stamp
@@ -129,10 +265,12 @@ def main() -> int:
     log_path = run_dir / "nightly.log"
     manifest_path = run_dir / "nightly_manifest.json"
     manifest: dict[str, Any] = {
-        "schema_version": "nightly_orchestration_manifest_v2",
+        "schema_version": "nightly_orchestration_manifest_v3",
         "acceptance": "RUNNING",
         "started_at_utc": started.isoformat(timespec="seconds"),
+        "nightly_pid": os.getpid(),
         "requested_as_of": args.as_of,
+        "mode": args.mode,
         "dry_run": bool(args.dry_run),
         "provider_validation_rc": None,
         "late_statement_reconciliation_rc": None,
@@ -189,20 +327,24 @@ def main() -> int:
         )
         _atomic_json(manifest_path, manifest)
         accepted_reconciliation = reconciliation_acceptance in {"PASS", "PASS_DRY_RUN"}
-        if reconciliation_rc != 0 or not accepted_reconciliation:
-            manifest["acceptance"] = "FAIL_LATE_STATEMENT_RECONCILIATION"
-            manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
+        reconciliation_failed = reconciliation_rc != 0 or not accepted_reconciliation
+        if reconciliation_failed:
+            # POLICY (2026-08-07): a broken/unparsable HISTORICAL statement must not
+            # block current production. The failure stays a failing nightly verdict
+            # (FAIL_LATE_STATEMENT_RECONCILIATION below) so it cannot be overlooked,
+            # but the master still runs and the current book is still produced.
+            log.write(
+                "\n=== late-statement reconciliation FAILED; continuing to the master "
+                "run per current-production policy (nightly acceptance will FAIL)\n"
             )
-            _atomic_json(manifest_path, manifest)
-            return 1
+            log.flush()
+            print(
+                "late-statement reconciliation FAILED; continuing to master run "
+                "(nightly acceptance will be FAIL_LATE_STATEMENT_RECONCILIATION)",
+                flush=True,
+            )
 
-        command = [sys.executable, str(MASTER_RUNNER), "--catch-up"]
-        if args.as_of:
-            command.extend(["--as-of", args.as_of])
-        if args.dry_run:
-            command.append("--dry-run")
-        master_rc = _run_logged(command, log)
+        master_rc = _run_logged(master_command(args.mode, args.as_of, args.dry_run), log)
 
     master_path, master_payload = _new_master_manifest(before)
     master_acceptance = str((master_payload or {}).get("acceptance", ""))
@@ -218,10 +360,12 @@ def main() -> int:
         passed = master_rc == 0
     else:
         passed = master_rc == 0 and master_path is not None and master_acceptance == "PASS"
-    manifest["acceptance"] = "PASS" if passed else "FAIL_MASTER"
+    manifest["acceptance"] = _resolve_acceptance(
+        reconciliation_failed=reconciliation_failed, passed=passed
+    )
     _atomic_json(manifest_path, manifest)
     print(f"nightly_manifest: {manifest_path}", flush=True)
-    return 0 if passed else 1
+    return 0 if manifest["acceptance"] == "PASS" else 1
 
 
 if __name__ == "__main__":

@@ -24,6 +24,22 @@ CONTRACT_VERSION = "factor_validation_v1"
 CALENDAR_DAYS_PER_TRADING_DAY = 365.25 / 252.0
 
 
+def _strict_int(value: Any, *, field_name: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{field_name} must be an integer")
+    parsed = int(value)
+    if parsed < minimum:
+        qualifier = "positive" if minimum == 1 else f"at least {minimum}"
+        raise ValueError(f"{field_name} must be {qualifier}")
+    return parsed
+
+
+def _strict_optional_int(value: Any, *, field_name: str, minimum: int) -> int | None:
+    if value is None:
+        return None
+    return _strict_int(value, field_name=field_name, minimum=minimum)
+
+
 def _as_date(value: date | datetime | str, *, field_name: str = "as_of_date") -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -127,35 +143,44 @@ class FactorValidationConfig:
     holiday_dates: tuple[date, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.horizon_trading_days <= 0:
-            raise ValueError("horizon_trading_days must be positive")
-        if self.entry_lag_trading_days < 0:
-            raise ValueError("entry_lag_trading_days must be non-negative")
-        if self.min_cross_section < 3:
-            raise ValueError("min_cross_section must be at least 3")
-        if self.min_dates < 3:
-            raise ValueError("min_dates must be at least 3")
-        if self.min_independent_windows < 2:
-            raise ValueError("min_independent_windows must be at least 2")
-        if self.min_regime_dates < 1:
-            raise ValueError("min_regime_dates must be positive")
-        if self.quantile_count < 2:
-            raise ValueError("quantile_count must be at least 2")
-        if self.min_extreme_bucket_size < 1:
-            raise ValueError("min_extreme_bucket_size must be at least 1")
+        integer_fields = (
+            ("horizon_trading_days", 1),
+            ("entry_lag_trading_days", 0),
+            ("min_cross_section", 3),
+            ("min_dates", 3),
+            ("min_independent_windows", 2),
+            ("min_regime_dates", 1),
+            ("quantile_count", 2),
+            ("min_extreme_bucket_size", 1),
+        )
+        for field_name, minimum in integer_fields:
+            object.__setattr__(
+                self,
+                field_name,
+                _strict_int(getattr(self, field_name), field_name=field_name, minimum=minimum),
+            )
+        object.__setattr__(
+            self,
+            "hac_max_lag",
+            _strict_optional_int(self.hac_max_lag, field_name="hac_max_lag", minimum=0),
+        )
         object.__setattr__(
             self,
             "holiday_dates",
             tuple(sorted({_as_date(value, field_name="holiday_dates") for value in self.holiday_dates})),
         )
-        if not math.isfinite(self.round_trip_cost) or self.round_trip_cost < 0.0:
+        if isinstance(self.round_trip_cost, bool):
+            raise TypeError("round_trip_cost must be numeric, not boolean")
+        round_trip_cost = float(self.round_trip_cost)
+        if not math.isfinite(round_trip_cost) or round_trip_cost < 0.0:
             raise ValueError("round_trip_cost must be finite and non-negative")
-        if self.hac_max_lag is not None and self.hac_max_lag < 0:
-            raise ValueError("hac_max_lag must be non-negative when supplied")
+        object.__setattr__(self, "round_trip_cost", round_trip_cost)
         if self.primary_inference != "independent_window":
             raise ValueError("HAC is diagnostic-only; primary_inference must be 'independent_window'")
-        if not str(self.target_name).strip():
+        target_name = str(self.target_name).strip()
+        if not target_name:
             raise ValueError("target_name must not be blank")
+        object.__setattr__(self, "target_name", target_name)
 
 
 @dataclass(frozen=True)
@@ -330,8 +355,7 @@ def spearman_rank_correlation(xs: Sequence[float], ys: Sequence[float]) -> float
 
 
 def _bucket_assignments(values: Sequence[float], quantile_count: int) -> tuple[int, ...]:
-    if quantile_count < 2:
-        raise ValueError("quantile_count must be at least 2")
+    quantile_count = _strict_int(quantile_count, field_name="quantile_count", minimum=2)
     data = tuple(float(value) for value in values)
     if not data:
         return ()
@@ -385,10 +409,17 @@ def quantile_diagnostics(
 ) -> QuantileDiagnostics:
     """Compute tie-safe quantile diagnostics, charging cost only when turnover is measured."""
 
+    quantile_count = _strict_int(quantile_count, field_name="quantile_count", minimum=2)
+    min_extreme_bucket_size = _strict_int(
+        min_extreme_bucket_size,
+        field_name="min_extreme_bucket_size",
+        minimum=1,
+    )
+    if isinstance(round_trip_cost, bool):
+        raise TypeError("round_trip_cost must be numeric, not boolean")
+    round_trip_cost = float(round_trip_cost)
     if not math.isfinite(round_trip_cost) or round_trip_cost < 0.0:
         raise ValueError("round_trip_cost must be finite and non-negative")
-    if min_extreme_bucket_size < 1:
-        raise ValueError("min_extreme_bucket_size must be at least 1")
     if two_leg_turnover is not None and (
         not math.isfinite(two_leg_turnover) or not 0.0 <= two_leg_turnover <= 2.0
     ):
@@ -486,9 +517,12 @@ def evaluation_cadence(
     conservative for the HAC lag but can exclude that pair from transition diagnostics.
     """
 
+    normalized_holidays = tuple(
+        sorted({_as_date(value, field_name="holidays") for value in holidays})
+    )
     unique = sorted({_as_date(value) for value in dates})
     gaps = [
-        _business_day_gap(left, right, holidays=holidays)
+        _business_day_gap(left, right, holidays=normalized_holidays)
         for left, right in zip(unique, unique[1:], strict=False)
     ]
     if not gaps:
@@ -521,12 +555,17 @@ def hac_lag_for_overlapping_labels(
 ) -> int:
     """Return the overlap HAC lag, including signal-to-entry lag in the label window."""
 
-    if horizon_trading_days <= 0:
-        raise ValueError("horizon_trading_days must be positive")
-    if evaluation_step_trading_days <= 0:
-        raise ValueError("evaluation_step_trading_days must be positive")
-    if entry_lag_trading_days < 0:
-        raise ValueError("entry_lag_trading_days must be non-negative")
+    horizon_trading_days = _strict_int(
+        horizon_trading_days, field_name="horizon_trading_days", minimum=1
+    )
+    evaluation_step_trading_days = _strict_int(
+        evaluation_step_trading_days,
+        field_name="evaluation_step_trading_days",
+        minimum=1,
+    )
+    entry_lag_trading_days = _strict_int(
+        entry_lag_trading_days, field_name="entry_lag_trading_days", minimum=0
+    )
     occupied_steps = math.ceil(
         (horizon_trading_days + entry_lag_trading_days) / evaluation_step_trading_days
     )
@@ -541,8 +580,12 @@ def newey_west_mean_inference(
 ) -> HACInference:
     """Diagnostic Newey-West inference with explicit lag and small-sample adequacy."""
 
-    if max_lag < 0:
-        raise ValueError("max_lag must be non-negative")
+    max_lag = _strict_int(max_lag, field_name="max_lag", minimum=0)
+    evaluation_step_trading_days = _strict_int(
+        evaluation_step_trading_days,
+        field_name="evaluation_step_trading_days",
+        minimum=1,
+    )
     data = np.asarray(values, dtype=float)
     if data.ndim != 1 or not np.isfinite(data).all():
         raise ValueError("HAC inputs must be a one-dimensional finite series")
@@ -618,20 +661,29 @@ def _independent_window_count(
 
 def independent_window_mean_inference(
     values: Sequence[float],
-    dates: Sequence[date],
+    dates: Sequence[date | datetime | str],
     *,
     horizon_trading_days: int,
     entry_lag_trading_days: int,
 ) -> IndependentWindowInference:
+    horizon_trading_days = _strict_int(
+        horizon_trading_days, field_name="horizon_trading_days", minimum=1
+    )
+    entry_lag_trading_days = _strict_int(
+        entry_lag_trading_days, field_name="entry_lag_trading_days", minimum=0
+    )
     data = np.asarray(values, dtype=float)
     if data.ndim != 1 or not np.isfinite(data).all():
         raise ValueError("independent-window inputs must be a one-dimensional finite series")
     if len(data) != len(dates):
         raise ValueError("independent-window values and dates must have equal length")
+    normalized_dates = tuple(_as_date(value, field_name="dates") for value in dates)
+    if len(set(normalized_dates)) != len(normalized_dates):
+        raise ValueError("independent-window dates must be unique")
     n = len(data)
     mean_value = _finite_mean(data.tolist(), context="independent-window mean") if n else None
     independent_count = _independent_window_count(
-        dates,
+        normalized_dates,
         horizon_trading_days=horizon_trading_days,
         entry_lag_trading_days=entry_lag_trading_days,
     )
@@ -756,20 +808,29 @@ def _transition_diagnostics(
     if not states:
         return (), None, None, None
     updated = [states[0]]
-    # Adjacency tolerance is keyed to the TYPICAL (floored median) cadence,
-    # not the minimum: a dense daily cluster inside a monthly panel must not
-    # disqualify the monthly transitions. Flooring the median keeps a panel
-    # whose gaps are half dropped-date 2s at typical 1, so single dropped
-    # daily dates are never spanned; floor(1.5x) then tolerates
-    # holiday-shifted weekly/monthly gaps, and declared holidays remove the
-    # residual ambiguity.
-    maximum_consecutive_gap = max(1, (typical_step_trading_days * 3) // 2)
-    for previous, current in zip(states, states[1:], strict=False):
-        gap = _business_day_gap(
+    gaps = [
+        _business_day_gap(
             previous.diagnostic.as_of_date,
             current.diagnostic.as_of_date,
             holidays=holidays,
         )
+        for previous, current in zip(states, states[1:], strict=False)
+    ]
+    # A global median cannot distinguish a dropped daily date embedded inside
+    # an otherwise monthly panel. Use neighboring gaps as the local cadence;
+    # the smaller neighbor deliberately breaks a transition at cadence-regime
+    # boundaries. The global typical step is only a two-date fallback.
+    for transition_index, (previous, current) in enumerate(
+        zip(states, states[1:], strict=False)
+    ):
+        neighboring_gaps = []
+        if transition_index > 0:
+            neighboring_gaps.append(gaps[transition_index - 1])
+        if transition_index + 1 < len(gaps):
+            neighboring_gaps.append(gaps[transition_index + 1])
+        local_step = min(neighboring_gaps) if neighboring_gaps else typical_step_trading_days
+        maximum_consecutive_gap = max(1, (local_step * 3) // 2)
+        gap = gaps[transition_index]
         if gap > maximum_consecutive_gap:
             updated.append(current)
             continue
@@ -932,9 +993,12 @@ def validate_factor(
         reasons.append("insufficient_ic_dates")
     if independent.independent_window_count < config.min_independent_windows:
         reasons.append("insufficient_independent_windows")
-    primary_p = independent.two_sided_p_value
-    if primary_p is None:
+    diagnostic_primary_p = independent.two_sided_p_value
+    if diagnostic_primary_p is None:
         reasons.append("independent_window_inference_unavailable")
+    # The nested inference p-value remains available for diagnosis, but the
+    # promotion-facing field fails closed whenever any evidence minimum fails.
+    primary_p = diagnostic_primary_p if not reasons else None
 
     return FactorValidationResult(
         contract_version=CONTRACT_VERSION,

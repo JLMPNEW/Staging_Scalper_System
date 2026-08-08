@@ -522,6 +522,21 @@ def test_nonpositive_net_income_makes_fcf_conversion_not_applicable(
     assert metric["status_reason"] == (
         "fcf_conversion_not_meaningful_nonpositive_net_income"
     )
+    metric_validator = load_script("08a_validate_transportation_specialized_metrics.py")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_metrics.py",
+            "--db",
+            str(db_path),
+            "--asof",
+            ASOF,
+            "--output-json",
+            str(tmp_path / "metric_validation.json"),
+        ],
+    )
+    assert metric_validator.main() == 0
 
 
 def test_shadow_publish_is_deterministic_and_portfolio_adapter_fails_closed(

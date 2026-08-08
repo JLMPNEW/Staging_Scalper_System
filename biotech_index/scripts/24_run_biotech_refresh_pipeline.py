@@ -105,6 +105,18 @@ class Step:
     script: str
     args: tuple[str, ...] = ()
     supports_asof: bool = True
+    # Resume policy (2026-08-05 post-mortem: a retry restarted every completed
+    # step from step 1 and burned hours re-doing sealed work).
+    #   * always_rerun=True marks PROVIDER-REFRESH steps: they fetch external
+    #     state (CTGov / SEC / IB / Yahoo / positioning feeds) whose upstream may
+    #     have changed since the killed attempt, so a prior PASS never certifies
+    #     the current provider state and the step re-runs on every attempt.
+    #   * always_rerun=False marks DETERMINISTIC steps: they recompute purely
+    #     from the local DB/outputs for the given --asof, so a sealed PASS
+    #     completion marker for the SAME asof (see step_resume_skip) lets a
+    #     retry skip them with status ALREADY_COMPLETE and resume from the
+    #     first incomplete step.
+    always_rerun: bool = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,6 +174,19 @@ def parse_args() -> argparse.Namespace:
         "--history-fridays-only",
         action="store_true",
         help="Restrict --history-restatement source-table date grid to Fridays.",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "Disable resume: re-run deterministic steps even when a sealed "
+            "ALREADY_COMPLETE marker exists for the same --asof."
+        ),
+    )
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="In-process validation of the step table + resume-skip semantics; no subprocess, no config/db access.",
     )
     return parser.parse_args()
 
@@ -628,30 +653,41 @@ def pipeline_steps(
     commercial_args: tuple[str, ...] = ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     multibagger_feature_args: tuple[str, ...] = ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     # 08_scan_ctgov_reactivation_candidates.py is an audit/discovery utility, not a deterministic refresh step.
+    #
+    # always_rerun marking (resume policy, see Step): every network *_sync /
+    # *_update provider-refresh step re-runs on each attempt; builders, parsers
+    # and audits are deterministic over the local DB/outputs for the asof and
+    # resume-skip on a sealed PASS marker. Rows a re-run provider sync ingests
+    # AFTER a downstream deterministic step already sealed for this asof are
+    # picked up by the next daily cycle (normal incremental cadence), and
+    # final_output_validation still re-validates the full output contract at the
+    # end of every resumed run, so a skip can never publish an unvalidated book.
     steps = [
         Step("company_master", "02_build_company_master.py", supports_asof=False),
     ]
     if not skip_ctgov:
         steps.extend(
             [
-                Step("ctgov_trials", "03_sync_ctgov_trials.py"),
+                Step("ctgov_trials", "03_sync_ctgov_trials.py", always_rerun=True),
                 Step("trial_links", "04_link_trials_to_companies.py", supports_asof=False),
             Step("ctgov_audit", "05_audit_ctgov_trial_links.py"),
             ]
         )
     steps.extend(
         [
-            Step("sec_filings", "06_sync_sec_filings.py", sec_filings_args),
+            Step("sec_filings", "06_sync_sec_filings.py", sec_filings_args, always_rerun=True),
             Step("sec_events", "07_parse_sec_biotech_events.py", sec_event_args),
             Step("forward_catalyst_calendar", "09_build_forward_catalyst_calendar.py"),
-            Step("sec_companyfacts", "15_sync_sec_companyfacts_history.py", companyfacts_args),
+            Step("sec_companyfacts", "15_sync_sec_companyfacts_history.py", companyfacts_args, always_rerun=True),
             Step("financial_survival", "16_build_financial_survival_features.py"),
         ]
     )
     if not skip_ib:
-        steps.append(Step("ib_market", "17_sync_market_data_ib.py", ib_args))
+        steps.append(Step("ib_market", "17_sync_market_data_ib.py", ib_args, always_rerun=True))
     if not skip_yahoo:
-        steps.append(Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", yahoo_args))
+        steps.append(
+            Step("yahoo_market_adjusted", "17_sync_market_data_yahoo_adjusted.py", yahoo_args, always_rerun=True)
+        )
     if not (skip_ib and skip_yahoo):
         steps.append(Step("market_policy_audit", "31_audit_market_data_policy.py"))
     steps.extend(
@@ -662,10 +698,10 @@ def pipeline_steps(
         ]
     )
     if not skip_market_positioning:
-        steps.append(Step("market_positioning", "25_update_market_positioning.py"))
+        steps.append(Step("market_positioning", "25_update_market_positioning.py", always_rerun=True))
     steps.extend(
         [
-            Step("fda_adcom_calendar", "14_sync_fda_adcom_calendar.py"),
+            Step("fda_adcom_calendar", "14_sync_fda_adcom_calendar.py", always_rerun=True),
             Step("biotech_features", "10_build_biotech_features.py"),
             Step("biotech_scores", "11_score_biotech_index.py"),
             Step("biotech_reports", "12_publish_biotech_reports.py"),
@@ -808,6 +844,158 @@ def text_tail(raw: str, limit: int = 4000) -> str:
     return text[-limit:] if len(text) > limit else text
 
 
+# --------------------------------------------------------------------------- #
+# Resume-skip framework (portfolio 18 ALREADY_SEALED pattern): each completed
+# step seals a per-step/per-asof completion marker; a retry after a timeout kill
+# skips deterministic steps whose marker seals PASS for the SAME asof (status
+# ALREADY_COMPLETE) and resumes from the first incomplete step. Skips gate on
+# the sealed marker only, never on rc alone; date-mismatch, args/mode-mismatch,
+# FAIL or unreadable markers never skip.
+# --------------------------------------------------------------------------- #
+STEP_STATE_SCHEMA_VERSION = 1
+ALREADY_COMPLETE_STATUS = "already_complete"
+
+
+def resume_state_dir(config: dict[str, Any], *, base_dir: Path) -> Path:
+    return resolve_path(
+        cfg_get(
+            config,
+            "biotech_refresh.resume.state_dir",
+            "../output/biotech_index_reports/orchestration/step_state",
+        ),
+        base_dir=base_dir,
+    )
+
+
+def step_marker_path(state_dir: Path, asof: str, step_name: str) -> Path:
+    return state_dir / compact_asof(asof) / f"{step_name}.json"
+
+
+def load_step_marker(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def record_step_marker(
+    path: Path,
+    *,
+    step: Step,
+    asof: str,
+    mode: str,
+    row: dict[str, Any],
+    run_started_at: str,
+) -> None:
+    """Atomically seal the step's completion marker from its finished timing row.
+
+    status success -> PASS (resume-skippable for deterministic steps);
+    anything else -> FAIL (never skippable, but preserved as evidence). A marker
+    write failure only degrades resume (next attempt re-runs the step), so it
+    warns instead of failing an otherwise-successful step.
+    """
+    payload = {
+        "schema_version": STEP_STATE_SCHEMA_VERSION,
+        "step": step.name,
+        "script": step.script,
+        "args": list(step.args),
+        "always_rerun": bool(step.always_rerun),
+        "asof_date": asof,
+        "mode": mode,
+        "status": "PASS" if str(row.get("status")) == "success" else "FAIL",
+        "returncode": row.get("returncode", ""),
+        "elapsed_sec": row.get("elapsed_sec", ""),
+        "run_started_at": run_started_at,
+        "completed_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "command": str(row.get("command") or ""),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        LOGGER.warning("Could not seal step completion marker %s: %s", path, exc)
+
+
+def step_resume_skip(
+    marker: dict[str, Any] | None,
+    step: Step,
+    *,
+    asof: str,
+    mode: str,
+) -> bool:
+    """True only when a sealed PASS marker certifies this exact step run.
+
+    Requires schema, PASS status, identical asof/mode and identical step
+    identity (script + args -- mode-dependent args therefore also invalidate a
+    marker sealed under another mode). always_rerun provider-refresh steps are
+    never skipped regardless of marker state.
+    """
+    if step.always_rerun:
+        return False
+    if not isinstance(marker, dict):
+        return False
+    try:
+        schema = int(marker.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return False
+    if schema != STEP_STATE_SCHEMA_VERSION:
+        return False
+    if str(marker.get("status")) != "PASS":
+        return False
+    if str(marker.get("asof_date")) != asof:
+        return False
+    if str(marker.get("mode")) != mode:
+        return False
+    if str(marker.get("script")) != step.script:
+        return False
+    if list(marker.get("args") or []) != list(step.args):
+        return False
+    return True
+
+
+def already_complete_row(
+    step_name: str,
+    *,
+    mode: str,
+    run_started_at: str,
+    marker_path: Path,
+) -> dict[str, Any]:
+    return {
+        "run_started_at": run_started_at,
+        "mode": mode,
+        "step": step_name,
+        "status": ALREADY_COMPLETE_STATUS,
+        "elapsed_sec": 0.0,
+        "returncode": 0,
+        "command": f"resume skip: sealed PASS marker {marker_path}",
+    }
+
+
+def earliest_epoch(current_epoch: str, marker_run_started_at: object) -> str:
+    """Min of two ISO UTC timestamps; unparseable marker values keep current.
+
+    Used to widen the snapshot freshness window back to the killed attempt that
+    actually produced resume-skipped outputs, so those outputs are not treated
+    as stale leftovers by snapshot_direct_output_files.
+    """
+    text = str(marker_run_started_at or "").strip()
+    if not text:
+        return current_epoch
+    try:
+        candidate = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        current = datetime.fromisoformat(str(current_epoch).replace("Z", "+00:00"))
+    except ValueError:
+        return current_epoch
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current_epoch if current <= candidate else text
+
+
 def terminate_process_tree(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -850,7 +1038,12 @@ def snapshot_direct_output_files(
     run_started_at: str,
     mode: str,
     selected_steps: set[str],
+    freshness_epoch: str | None = None,
 ) -> dict[str, Any]:
+    # freshness_epoch widens the "refreshed since run start" window back to the
+    # earliest killed attempt whose sealed outputs this run resume-skipped
+    # (ALREADY_COMPLETE); without it those legitimate same-asof outputs would be
+    # excluded as stale and their dated snapshot copies removed.
     start = time.monotonic()
     source_dir = resolve_path(
         cfg_get(config, "biotech_refresh.snapshot_outputs.source_dir", cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports")),
@@ -869,7 +1062,8 @@ def snapshot_direct_output_files(
     }
     snapshot_dir = snapshot_root / asof.replace("-", "")
     snapshot_dir.mkdir(parents=True, exist_ok=True)
-    run_start = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
+    effective_epoch = str(freshness_epoch or run_started_at)
+    run_start = datetime.fromisoformat(effective_epoch.replace("Z", "+00:00"))
     if run_start.tzinfo is None:
         run_start = run_start.replace(tzinfo=timezone.utc)
     copy_only_refreshed = as_bool(
@@ -951,6 +1145,7 @@ def snapshot_direct_output_files(
         "asof_date": asof,
         "created_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "run_started_at_utc": run_started_at,
+        "freshness_epoch_utc": effective_epoch,
         "mode": mode,
         "selected_steps": sorted(selected_steps),
         "source_dir": str(source_dir),
@@ -2101,9 +2296,247 @@ def validate_final_outputs(
     }
 
 
+def run_selftest() -> int:
+    """In-process validation of the step table + resume-skip semantics.
+
+    No subprocess, config, network, or database access: exercises the sealed
+    ALREADY_COMPLETE skip path AND every no-skip path (missing/corrupt/FAIL
+    markers, date/mode/args/script/schema mismatch, always_rerun provider
+    refreshes, and the resume-from-first-incomplete-step contract).
+    """
+    import tempfile
+
+    checks: list[str] = []
+
+    def ok(name: str, cond: bool) -> None:
+        assert cond, f"SELFTEST FAIL: {name}"
+        checks.append(name)
+
+    daily = pipeline_steps(
+        "daily_delta",
+        skip_ctgov=False,
+        skip_ib=False,
+        skip_yahoo=False,
+        skip_market_positioning=False,
+    )
+    by_name = {step.name: step for step in daily}
+    expected_always_rerun = {
+        "ctgov_trials",
+        "sec_filings",
+        "sec_companyfacts",
+        "ib_market",
+        "yahoo_market_adjusted",
+        "market_positioning",
+        "fda_adcom_calendar",
+    }
+    ok(
+        "step_table_provider_refresh_always_rerun",
+        {step.name for step in daily if step.always_rerun} == expected_always_rerun,
+    )
+    # The expensive deterministic SEC-event incremental scan (4h39m observed
+    # 2026-08-05) MUST stay resumable; that is the whole point of this feature.
+    ok("step_table_sec_events_resumable", not by_name["sec_events"].always_rerun)
+    ok(
+        "step_table_derived_chain_resumable",
+        all(
+            not by_name[name].always_rerun
+            for name in (
+                "company_master",
+                "trial_links",
+                "ctgov_audit",
+                "forward_catalyst_calendar",
+                "financial_survival",
+                "market_policy_audit",
+                "commercial_value",
+                "forward_guidance",
+                "governance_events",
+                "biotech_features",
+                "biotech_scores",
+                "biotech_reports",
+                "multibagger_features",
+                "multibagger_scores",
+                "multibagger_reports",
+                "universe_coverage_audit",
+            )
+        ),
+    )
+
+    asof = "2026-08-05"
+    mode = "daily_delta"
+    state_dir = Path(tempfile.mkdtemp())
+    try:
+        sec_events = by_name["sec_events"]
+        marker_path = step_marker_path(state_dir, asof, sec_events.name)
+        ok("marker_path_compact_dated_dir", marker_path.parent.name == "20260805")
+
+        # missing / unreadable markers never skip
+        ok(
+            "resume_no_marker_never_skips",
+            not step_resume_skip(load_step_marker(marker_path), sec_events, asof=asof, mode=mode),
+        )
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text("{not json", encoding="utf-8")
+        ok(
+            "resume_corrupt_marker_never_skips",
+            load_step_marker(marker_path) is None
+            and not step_resume_skip(load_step_marker(marker_path), sec_events, asof=asof, mode=mode),
+        )
+
+        # FAIL marker never skips (a prior rc alone can never certify)
+        record_step_marker(
+            marker_path,
+            step=sec_events,
+            asof=asof,
+            mode=mode,
+            row={"status": "failed", "returncode": 1, "elapsed_sec": 2.0, "command": "x"},
+            run_started_at="2026-08-05T18:00:00+00:00",
+        )
+        fail_marker = load_step_marker(marker_path)
+        assert fail_marker is not None
+        ok("marker_failed_row_seals_fail", fail_marker["status"] == "FAIL")
+        ok("resume_fail_marker_never_skips", not step_resume_skip(fail_marker, sec_events, asof=asof, mode=mode))
+
+        # a later PASS overwrites the FAIL and seals the ALREADY_COMPLETE skip
+        record_step_marker(
+            marker_path,
+            step=sec_events,
+            asof=asof,
+            mode=mode,
+            row={"status": "success", "returncode": 0, "elapsed_sec": 2.0, "command": "x"},
+            run_started_at="2026-08-05T18:00:00+00:00",
+        )
+        pass_marker = load_step_marker(marker_path)
+        assert pass_marker is not None
+        ok("marker_success_row_seals_pass", pass_marker["status"] == "PASS")
+        ok("resume_sealed_pass_skips", step_resume_skip(pass_marker, sec_events, asof=asof, mode=mode))
+
+        # mismatches never skip: date, mode, args (mode-dependent), script, schema
+        ok(
+            "resume_date_mismatch_never_skips",
+            not step_resume_skip(pass_marker, sec_events, asof="2026-08-06", mode=mode),
+        )
+        ok(
+            "resume_mode_mismatch_never_skips",
+            not step_resume_skip(pass_marker, sec_events, asof=asof, mode="weekly_reconcile"),
+        )
+        backfill_sec_events = next(
+            step
+            for step in pipeline_steps(
+                "full_backfill",
+                skip_ctgov=False,
+                skip_ib=False,
+                skip_yahoo=False,
+                skip_market_positioning=False,
+            )
+            if step.name == "sec_events"
+        )
+        ok(
+            "resume_args_mismatch_never_skips",
+            not step_resume_skip(pass_marker, backfill_sec_events, asof=asof, mode=mode),
+        )
+        wrong_script = Step("sec_events", "99_other.py", sec_events.args)
+        ok(
+            "resume_script_mismatch_never_skips",
+            not step_resume_skip(pass_marker, wrong_script, asof=asof, mode=mode),
+        )
+        ok(
+            "resume_schema_mismatch_never_skips",
+            not step_resume_skip({**pass_marker, "schema_version": 99}, sec_events, asof=asof, mode=mode),
+        )
+
+        # always_rerun provider refresh never skips, even over a sealed PASS
+        ib_market = by_name["ib_market"]
+        ib_path = step_marker_path(state_dir, asof, ib_market.name)
+        record_step_marker(
+            ib_path,
+            step=ib_market,
+            asof=asof,
+            mode=mode,
+            row={"status": "success", "returncode": 0, "elapsed_sec": 1.0, "command": "x"},
+            run_started_at="2026-08-05T18:00:00+00:00",
+        )
+        ok(
+            "resume_always_rerun_never_skips",
+            not step_resume_skip(load_step_marker(ib_path), ib_market, asof=asof, mode=mode),
+        )
+
+        # timeout-kill retry contract: seal PASS for the full prefix before
+        # market_positioning (the observed 2026-08-05 kill point) and confirm the
+        # retry skips exactly the sealed deterministic prefix, re-runs every
+        # always_rerun provider refresh, and resumes at the first incomplete step.
+        kill_index = [step.name for step in daily].index("market_positioning")
+        for step in daily[:kill_index]:
+            record_step_marker(
+                step_marker_path(state_dir, asof, step.name),
+                step=step,
+                asof=asof,
+                mode=mode,
+                row={"status": "success", "returncode": 0, "elapsed_sec": 1.0, "command": "x"},
+                run_started_at="2026-08-05T13:00:00+00:00",
+            )
+        skipped = [
+            step.name
+            for step in daily
+            if step_resume_skip(
+                load_step_marker(step_marker_path(state_dir, asof, step.name)),
+                step,
+                asof=asof,
+                mode=mode,
+            )
+        ]
+        ok(
+            "resume_prefix_skips_all_sealed_deterministic",
+            skipped == [step.name for step in daily[:kill_index] if not step.always_rerun],
+        )
+        ok("resume_first_incomplete_step_runs", "market_positioning" not in skipped)
+        ok("resume_unsealed_tail_runs", all(step.name not in skipped for step in daily[kill_index:]))
+
+        # skip evidence row: explicit ALREADY_COMPLETE status that cannot be
+        # mistaken for a failure (rc 0) and names the sealing marker
+        row = already_complete_row(
+            "sec_events",
+            mode=mode,
+            run_started_at="2026-08-06T01:00:00+00:00",
+            marker_path=marker_path,
+        )
+        ok(
+            "already_complete_row_shape",
+            row["status"] == ALREADY_COMPLETE_STATUS
+            and row["returncode"] == 0
+            and str(marker_path) in row["command"],
+        )
+
+        # snapshot freshness epoch widens back to the sealed attempt's start
+        ok(
+            "epoch_min_marker_earlier",
+            earliest_epoch("2026-08-06T01:00:00+00:00", "2026-08-05T18:00:00+00:00")
+            == "2026-08-05T18:00:00+00:00",
+        )
+        ok(
+            "epoch_min_marker_later",
+            earliest_epoch("2026-08-05T18:00:00+00:00", "2026-08-06T01:00:00+00:00")
+            == "2026-08-05T18:00:00+00:00",
+        )
+        ok(
+            "epoch_min_garbage_keeps_current",
+            earliest_epoch("2026-08-06T01:00:00+00:00", "not-a-date") == "2026-08-06T01:00:00+00:00",
+        )
+        ok(
+            "epoch_min_blank_keeps_current",
+            earliest_epoch("2026-08-06T01:00:00+00:00", None) == "2026-08-06T01:00:00+00:00",
+        )
+    finally:
+        shutil.rmtree(state_dir, ignore_errors=True)
+
+    print(f"SELFTEST PASS: {len(checks)} checks")
+    return 0
+
+
 def main() -> None:
     configure_logging()
     args = parse_args()
+    if args.selftest:
+        raise SystemExit(run_selftest())
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     validate_config(config)
@@ -2190,6 +2623,18 @@ def main() -> None:
 
     run_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     timing_rows: list[dict[str, Any]] = []
+    # Resume-skip state (see the Resume-skip framework block). Markers are
+    # tracked for every operational run so a later retry can resume; historical
+    # restatement is an explicit operator rebuild over a date grid and neither
+    # writes nor honors markers. Skipping additionally requires a full-pipeline
+    # run (--steps selection means the operator explicitly wants those steps
+    # re-run, e.g. run_all --repair) and no --no-resume override.
+    resume_tracking = not args.history_restatement
+    resume_enabled = resume_tracking and not selected_steps and not args.no_resume
+    state_dir = resume_state_dir(config, base_dir=base_dir)
+    # Earliest run-start across sealed markers this run skipped: the snapshot
+    # step must treat outputs from those killed-but-sealed attempts as fresh.
+    resume_epoch = run_started_at
     try:
         if ibkr_preflight_needed and ibkr_preflight_enabled:
             timing_rows.append(
@@ -2363,6 +2808,29 @@ def main() -> None:
                     )
                     write_timing_csv(timing_csv, timing_rows)
                     continue
+                marker_path = (
+                    step_marker_path(state_dir, run_asof, step.name) if resume_tracking else None
+                )
+                if resume_enabled and marker_path is not None:
+                    marker = load_step_marker(marker_path)
+                    if step_resume_skip(marker, step, asof=run_asof, mode=effective_mode):
+                        resume_epoch = earliest_epoch(resume_epoch, (marker or {}).get("run_started_at"))
+                        LOGGER.info(
+                            "Skipping %s: ALREADY_COMPLETE (sealed PASS marker for asof=%s: %s)",
+                            timing_step.name,
+                            run_asof,
+                            marker_path,
+                        )
+                        timing_rows.append(
+                            already_complete_row(
+                                timing_step.name,
+                                mode=effective_mode,
+                                run_started_at=run_started_at,
+                                marker_path=marker_path,
+                            )
+                        )
+                        write_timing_csv(timing_csv, timing_rows)
+                        continue
                 command = build_step_command(command_step, config_path=config_path, db_path=db_path, asof=run_asof)
                 if args.history_restatement and step.name == "ctgov_audit":
                     historical_output_root = resolve_path(
@@ -2388,6 +2856,15 @@ def main() -> None:
                     run_started_at=run_started_at,
                     timeout_sec=step_timeout_sec,
                 )
+                if marker_path is not None:
+                    record_step_marker(
+                        marker_path,
+                        step=step,
+                        asof=run_asof,
+                        mode=effective_mode,
+                        row=timing_rows[-1],
+                        run_started_at=run_started_at,
+                    )
                 write_timing_csv(timing_csv, timing_rows)
                 if timing_rows[-1]["status"] != "success":
                     try:
@@ -2460,6 +2937,7 @@ def main() -> None:
                     run_started_at=run_started_at,
                     mode=args.mode,
                     selected_steps=selected_steps,
+                    freshness_epoch=resume_epoch,
                 )
             )
             write_timing_csv(timing_csv, timing_rows)

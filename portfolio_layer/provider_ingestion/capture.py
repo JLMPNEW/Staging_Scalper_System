@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
+import csv
+import json
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -29,12 +30,13 @@ from portfolio_layer.expectations_monitor.provider_common import (  # noqa: E402
     fetch_capability_payload,
     load_entitlements,
 )
-from portfolio_layer.provider_ingestion.health import universe_freshness  # noqa: E402
 from portfolio_layer.provider_ingestion.store import (  # noqa: E402
     connect_store,
     digest,
     freeze_universe,
+    load_provider_universe,
     persist_capture,
+    register_provider_universe,
     reject_historical_current_capture,
     utc_now,
     verify_store,
@@ -93,32 +95,143 @@ def _phase_tiers(phase: str, *, weekday: int) -> set[str]:
     raise ValueError(f"Unsupported capture phase: {phase}")
 
 
-def _load_universe(
-    db_path: Path,
+def _sealed_universe_candidate(
+    output_root: Path,
     *,
+    actual_date: date,
+    output_subdir: str,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Return the newest hash-valid universe handoff, without requiring one to exist."""
+    runs_root = output_root / "runs"
+    if not runs_root.is_dir():
+        return None, ["monitor_runs_root_missing"]
+    errors: list[str] = []
+    candidates = sorted(
+        (
+            path
+            for path in runs_root.iterdir()
+            if path.is_dir()
+            and len(path.name) == 10
+            and path.name <= actual_date.isoformat()
+        ),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for run_dir in candidates:
+        universe_dir = run_dir / output_subdir
+        manifest_path = universe_dir / "monitor_universe_manifest.json"
+        universe_path = universe_dir / "monitor_universe.csv"
+        if not manifest_path.is_file() and not universe_path.is_file():
+            continue
+        if not manifest_path.is_file() or not universe_path.is_file():
+            errors.append(f"incomplete_handoff:{run_dir.name}")
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"invalid_manifest:{run_dir.name}:{exc}")
+            continue
+        outputs = manifest.get("outputs_sha256", {})
+        expected_sha = (
+            str(outputs.get("monitor_universe.csv", ""))
+            if isinstance(outputs, dict)
+            else ""
+        )
+        actual_sha = sha256_file(universe_path)
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("acceptance") != "PASS"
+            or manifest.get("run_as_of") != run_dir.name
+            or not expected_sha
+            or expected_sha != actual_sha
+        ):
+            errors.append(f"invalid_or_unsealed_handoff:{run_dir.name}")
+            continue
+        with universe_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        required = {"ticker", "tier", "sector", "source_pipeline"}
+        if not rows or not required <= set(rows[0]):
+            errors.append(f"invalid_universe_schema:{run_dir.name}")
+            continue
+        return {
+            "source_run_as_of": run_dir.name,
+            "source_artifact_path": str(universe_path.resolve()),
+            "source_artifact_sha256": actual_sha,
+            "members": rows,
+        }, errors
+    return None, errors
+
+
+def _load_independent_universe(
+    *,
+    store_path: Path,
+    output_root: Path,
+    output_subdir: str,
     phase: str,
     actual_date: date,
     timeout_sec: float,
-) -> tuple[str, list[dict[str, Any]]]:
-    conn = sqlite3.connect(str(db_path), timeout=timeout_sec)
-    conn.row_factory = sqlite3.Row
-    try:
-        latest = conn.execute(
-            "SELECT MAX(run_as_of) FROM monitor_universe WHERE run_as_of<=?",
-            (actual_date.isoformat(),),
-        ).fetchone()[0]
-        if not latest:
-            raise ValueError(f"No monitor universe exists on or before {actual_date}")
-        tiers = _phase_tiers(phase, weekday=actual_date.weekday())
-        placeholders = ",".join("?" for _ in tiers)
-        rows = conn.execute(
-            f"SELECT ticker,tier,sector,source_pipeline FROM monitor_universe "
-            f"WHERE run_as_of=? AND tier IN ({placeholders}) AND ticker<>'CASH' ORDER BY ticker",
-            (str(latest), *sorted(tiers)),
-        ).fetchall()
-        return str(latest), [dict(row) for row in rows]
-    finally:
-        conn.close()
+    providers: Sequence[str],
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Refresh opportunistically, then read only the provider-owned registry."""
+    candidate, sync_errors = _sealed_universe_candidate(
+        output_root,
+        actual_date=actual_date,
+        output_subdir=output_subdir,
+    )
+    lock_path = store_path.with_suffix(store_path.suffix + ".writer.lock")
+    with writer_lock(lock_path, timeout_sec=timeout_sec):
+        conn = connect_store(store_path, timeout_sec=timeout_sec)
+        try:
+            prior = conn.execute(
+                "SELECT source_run_as_of,source_artifact_sha256 "
+                "FROM provider_universe_registry "
+                "ORDER BY source_run_as_of DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+            prior_as_of = "" if prior is None else str(prior["source_run_as_of"])
+            prior_sha = "" if prior is None else str(prior["source_artifact_sha256"])
+            sync_status = "NO_NEW_HANDOFF"
+            candidate_is_new = (
+                candidate is not None
+                and (
+                    str(candidate["source_run_as_of"]) > prior_as_of
+                    or (
+                        str(candidate["source_run_as_of"]) == prior_as_of
+                        and str(candidate["source_artifact_sha256"]) != prior_sha
+                    )
+                )
+            )
+            if candidate_is_new and candidate is not None:
+                register_provider_universe(
+                    conn,
+                    source_run_as_of=str(candidate["source_run_as_of"]),
+                    members=list(candidate["members"]),
+                    providers=providers,
+                    source_artifact_path=str(candidate["source_artifact_path"]),
+                    source_artifact_sha256=str(candidate["source_artifact_sha256"]),
+                    activated_at_utc=utc_now(),
+                )
+                sync_status = "INITIALIZED" if not prior_as_of else "UPDATED"
+            elif candidate is not None:
+                sync_status = "UNCHANGED"
+            registry, members = load_provider_universe(
+                conn,
+                tiers=_phase_tiers(phase, weekday=actual_date.weekday()),
+                actual_date=actual_date,
+            )
+        finally:
+            conn.close()
+    health = {
+        "status": "ACTIVE_REGISTRY",
+        "capture_independent": True,
+        "registry_id": str(registry["registry_id"]),
+        "source_universe_as_of": str(registry["source_run_as_of"]),
+        "source_artifact_path": str(registry["source_artifact_path"]),
+        "source_artifact_sha256": str(registry["source_artifact_sha256"]),
+        "registry_member_count": int(registry["member_count"]),
+        "sync_status": sync_status,
+        "sync_diagnostics": sync_errors,
+    }
+    return str(registry["source_run_as_of"]), members, health
 
 
 def _explicit_universe(symbols: Sequence[str]) -> tuple[str, list[dict[str, str]]]:
@@ -201,6 +314,22 @@ def main() -> int:
         raise ValueError("provider_ingestion.network_owner must be independent_service")
     if ingestion.get("raw_payload_retention_enabled") is not False:
         raise ValueError("Raw provider payload retention must be false")
+    recovery_cfg = ingestion.get("recovery", {})
+    if not isinstance(recovery_cfg, dict):
+        raise ValueError("provider_ingestion.recovery must be a mapping")
+    expected_registry_contract = {
+        "universe_registry_policy": "provider_owned_append_only",
+        "universe_source_refresh": "opportunistic_sealed_handoff",
+        "universe_source_age_is_capture_warning": False,
+    }
+    configured_registry_contract = {
+        key: recovery_cfg.get(key) for key in expected_registry_contract
+    }
+    if configured_registry_contract != expected_registry_contract:
+        raise ValueError(
+            "Independent provider universe registry contract mismatch: "
+            f"{configured_registry_contract}"
+        )
     timezone_name = str(ingestion.get("timezone", "America/New_York"))
     calendar_name = str(ingestion.get("exchange_calendar", "XNYS"))
     decision_cutoff = str(ingestion.get("decision_cutoff_local", "09:25"))
@@ -223,34 +352,32 @@ def main() -> int:
             raise RuntimeError(f"{provider} normalized retention is not authorized")
         if retention.get("raw_payloads") != "do_not_retain":
             raise RuntimeError(f"{provider} raw-payload policy is not fail-closed")
-    monitor_db = ensure_not_prod_path(
+    timeout = float(ingestion.get("writer_lock_timeout_sec", 30.0))
+    store_path = ensure_not_prod_path(
         resolve_path(
-            monitor.get("database_path", "db/expectations_monitor.sqlite"),
+            ingestion.get("database_path", "db/provider_observations.sqlite"),
             base_dir=config_path.parent,
         ),
-        label="expectations monitor database",
+        label="provider observation database",
     )
-    timeout = float(ingestion.get("writer_lock_timeout_sec", 30.0))
     if args.symbols:
         universe_as_of, members = _explicit_universe(args.symbols)
         universe_health: dict[str, Any] = {
             "status": "EXPLICIT",
-            "universe_as_of": universe_as_of,
-            "expected_universe_as_of": "",
-            "lag_sessions": 0,
+            "capture_independent": True,
+            "source_universe_as_of": universe_as_of,
+            "sync_status": "EXPLICIT",
+            "sync_diagnostics": [],
         }
     else:
-        universe_as_of, members = _load_universe(
-            monitor_db,
+        universe_as_of, members, universe_health = _load_independent_universe(
+            store_path=store_path,
+            output_root=paths.output_dir,
+            output_subdir=str(monitor.get("output_subdir", "expectations_monitor")),
             phase=args.phase,
             actual_date=actual_date,
             timeout_sec=timeout,
-        )
-        universe_health = universe_freshness(
-            calendar_name,
-            actual_date=actual_date,
-            phase=args.phase,
-            universe_as_of=universe_as_of,
+            providers=providers,
         )
     if args.limit is not None:
         if args.limit <= 0:
@@ -293,13 +420,6 @@ def main() -> int:
     batch_size = int(ingestion.get("batch_size", 50))
     requests: list[dict[str, Any]] = []
     started_at = utc_now()
-    store_path = ensure_not_prod_path(
-        resolve_path(
-            ingestion.get("database_path", "db/provider_observations.sqlite"),
-            base_dir=config_path.parent,
-        ),
-        label="provider observation database",
-    )
     service_lock = store_path.with_suffix(store_path.suffix + ".capture.lock")
     with writer_lock(service_lock, timeout_sec=timeout):
         preflight_conn = connect_store(store_path, timeout_sec=timeout)
@@ -365,8 +485,7 @@ def main() -> int:
                             time.sleep(pause)
         completed_at = utc_now()
         acceptance = _provider_status(requests, providers)
-        if universe_health["status"] == "STALE" and acceptance == "PASS":
-            acceptance = "PASS_WITH_WARNINGS"
+
         conn = connect_store(store_path, timeout_sec=timeout)
         try:
             source_hashes = _source_hashes()

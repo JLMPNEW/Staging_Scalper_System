@@ -17,7 +17,9 @@ Then open http://localhost:8501 (or the port Streamlit prints).
   `portfolio_layer/output/runs/<date>/final/final_target_book.csv`
   (macro-regime preamble + book table), `final_manifest.json`, and the
   cumulative `broker_trades` table in `portfolio_layer/db/portfolio_layer.sqlite`.
-  Shows manifest acceptance, regime context, KPI tiles, IB realized P&L
+  Shows manifest acceptance, regime context (active V1 source plus the H1
+  shadow-candidate estimate from MacroLayer/out/regime_h1, latest as-of ≤ run
+  date), KPI tiles, IB realized P&L
   (MTD/YTD tiles + per-symbol breakdown; computed from deduplicated IB
   statement trades by trade date ≤ run date), an IB positions chart
   (stacked cost-vs-market bars incl. cash, green/red tips = unrealized

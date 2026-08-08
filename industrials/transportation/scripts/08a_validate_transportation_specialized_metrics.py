@@ -131,7 +131,7 @@ def main() -> int:
         ]
         financial_rows = conn.execute(
             """
-            SELECT ticker, cash_burn_ttm_usd
+            SELECT ticker, cash_burn_ttm_usd, net_income_ttm_usd, net_income_usd
             FROM feature_financial_statement
             WHERE model_family=? AND asof_date<=?
             ORDER BY ticker, asof_date DESC, source_id ASC
@@ -139,11 +139,18 @@ def main() -> int:
             (MODEL_FAMILY, args.asof),
         ).fetchall()
         cash_burn_by_ticker: dict[str, float | None] = {}
+        net_income_by_ticker: dict[str, float | None] = {}
         for financial_row in financial_rows:
             ticker = str(financial_row["ticker"])
             if ticker not in cash_burn_by_ticker:
                 value = financial_row["cash_burn_ttm_usd"]
                 cash_burn_by_ticker[ticker] = float(value) if finite(value) else None
+                net_income = financial_row["net_income_ttm_usd"]
+                if not finite(net_income):
+                    net_income = financial_row["net_income_usd"]
+                net_income_by_ticker[ticker] = (
+                    float(net_income) if finite(net_income) else None
+                )
     expected = {(str(member["ticker"]), metric.metric_id) for member in members for metric in definitions}
     actual = {(str(row["ticker"]), str(row["metric_name"])) for row in rows}
     if len(actual) != len(rows):
@@ -172,6 +179,7 @@ def main() -> int:
             cohort=str(member["calibration_cohort_id"]), industry=str(member["industry"])
         ) and (not definition.birthdate or args.asof >= definition.birthdate)
         cash_burn = cash_burn_by_ticker.get(ticker)
+        net_income = net_income_by_ticker.get(ticker)
         extraction_method = str(row.get("extraction_method") or "")
         reviewed_inapplicable = (
             status == "NOT_APPLICABLE"
@@ -185,6 +193,10 @@ def main() -> int:
             metric_name == "cash_runway_years"
             and cash_burn is not None
             and cash_burn <= 0
+        ) or (
+            metric_name == "fcf_conversion"
+            and net_income is not None
+            and net_income <= 0
         ) or reviewed_inapplicable
         applies = registry_applies and not conditionally_inapplicable
         if not applies and status != "NOT_APPLICABLE":

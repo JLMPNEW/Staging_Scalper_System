@@ -36,6 +36,44 @@ never a value derived from published artifacts.
 
 Modes: daily (default) | catch-up | backfill | repair | health-check.
 Validate with --selftest (no subprocess) and --dry-run (prints the command matrix).
+
+Catch-up policy (2026-08-07 redesign)
+-------------------------------------
+An unavailable HISTORICAL date must never prevent producing the CURRENT
+portfolio. Catch-up therefore:
+  * runs the CURRENT target date FIRST for every sector; older missing dates
+    are backfilled afterwards, newest-first, best-effort;
+  * accepts the sector on the current date alone: failed backfill dates are
+    recorded per-date in the manifest (status PASS_WITH_BACKFILL_GAPS) and
+    never fail the master; only a current-date failure fails the sector;
+  * bounds the auto-run backfill window by the sector's backfill_window_days
+    (default: staleness_tolerance_days). Older in-window gaps are surfaced in
+    the manifest as historical_gaps, never auto-run;
+  * respects an optional per-sector publish_epoch: dates before the epoch are
+    exempt from missing-detection, so repointing a publish_glob can never
+    retroactively manufacture missing history;
+  * honours permanent-gap markers (orchestration/backfill_gap_markers.json):
+    a backfill date that keeps failing is auto-marked permanent after
+    defaults.permanent_gap_after_failures consecutive failures (operators can
+    mark/clear via --mark-gap/--clear-gap) and is skipped by future scans
+    while remaining visible in the manifest.
+
+Freshness sentinel
+------------------
+Optional per-sector `freshness_probes` in the registry are evaluated once per
+executed master run (read-only, sqlite opened with mode=ro URIs, hard 10s
+timeout per probe; a probe error yields status ERROR, never a crash). Results
+land in master_manifest.json per sector as
+freshness: [{probe, latest, age_days, threshold, status}] with status
+CURRENT | WARN_APPROACHING | STALE | ERROR, so upstream data staleness is
+visible days before any fail-closed sector gate trips. Probes are surveillance,
+not gates: they never block publication. The single exception is a probe with
+required: true that is STALE or ERROR -- it marks the sector with a
+FRESHNESS_BLOCKING note and forces the master acceptance to FAIL (other
+sectors still run; a required probe that cannot even be evaluated must not be
+silently non-blocking). Blocking applies only to sectors in the run's
+selection, so a required-stale probe on an unselected sector cannot flip a
+partial run. A registry with no probes behaves exactly as before.
 """
 from __future__ import annotations
 
@@ -47,6 +85,7 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -79,7 +118,16 @@ MARKET_CLOSE_ET = dt_time(17, 0)
 DEFAULT_LOCK_STALE_SEC = 6 * 3600  # override a lock older than this (crash recovery)
 
 # States a required sector must be in for the gate / overall acceptance to pass.
-HEALTHY_STATES = frozenset({"PASS", "DRY_RUN", "SKIPPED_RESUME", "UP_TO_DATE"})
+# PASS_WITH_BACKFILL_GAPS: the CURRENT target date published and verified but one
+# or more best-effort historical backfill dates failed -- healthy by policy (an
+# unavailable historical date must never prevent the current portfolio).
+HEALTHY_STATES = frozenset(
+    {"PASS", "DRY_RUN", "SKIPPED_RESUME", "UP_TO_DATE", "PASS_WITH_BACKFILL_GAPS"}
+)
+
+# Persistent permanent-gap marker store (catch-up backfill tombstones).
+GAP_MARKER_PATH = ORCH_DIR / "backfill_gap_markers.json"
+_GAP_MARKER_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------- #
@@ -106,6 +154,36 @@ class BackfillSpec:
 class HealthSpec:
     manifest: str | None
     status_keys: list[str]
+    # Manifest values (case-insensitive) that count as healthy. Default is the
+    # strict {"PASS"}; portfolio_layer also accepts PASS_WITH_ADVISORY_WARNINGS
+    # (18's whole-run verdict for advisory-only soft failures).
+    healthy_values: list[str] = field(default_factory=lambda: ["PASS"])
+
+
+@dataclass(frozen=True)
+class FreshnessProbe:
+    """One upstream data-freshness sentinel (surveillance-only unless required).
+
+    kind:
+      * sqlite_max_date  -- target {db, sql}: read-only (mode=ro URI) SQL returning
+                            one date; age vs tolerance_days.
+      * manifest_date    -- target {path, key}: JSON file + (dot-separated) key
+                            holding a date; age vs tolerance_days.
+      * deadline_schedule-- target {db, sql, cadence, deadline_days?, publication_lag_days?}:
+                            for quarterly / bi-monthly datasets. Computes the newest
+                            schedule period whose data must already be available at the
+                            source (period_end + deadline_days + publication_lag_days
+                            + tolerance_days grace <= target date) and compares it with
+                            the sqlite max-date value, so it never demands data before
+                            the source can publish it.
+    """
+    name: str
+    kind: str
+    target: dict[str, Any]
+    tolerance_days: int
+    warn_lead_days: int
+    required: bool
+    notes: str
 
 
 @dataclass(frozen=True)
@@ -125,6 +203,15 @@ class Sector:
     gate_column: str | None
     require_oos_valid: bool
     staleness_tolerance_days: int
+    # Catch-up policy knobs (2026-08-07 redesign):
+    #   backfill_window_days: calendar-day window catch-up may AUTO-RUN missing
+    #     historical dates in (None -> staleness_tolerance_days). Older in-window
+    #     gaps are reported, never auto-run.
+    #   publish_epoch: earliest ISO date the publish_glob convention is valid for;
+    #     dates before it are exempt from missing-detection (a repointed glob must
+    #     not retroactively manufacture missing history).
+    backfill_window_days: int | None
+    publish_epoch: str | None
     health: HealthSpec
     backfill: BackfillSpec | None
     repair: RepairSpec | None
@@ -132,6 +219,7 @@ class Sector:
     daily_post_steps: list[dict[str, Any]]
     timeout_sec: int
     retries: int
+    freshness_probes: list[FreshnessProbe] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -143,6 +231,12 @@ class Registry:
     catch_up_window_days: int
     repair_days: int
     calendar_reference_sectors: list[str]
+    # Consecutive nightly failures after which a backfill date is auto-marked a
+    # permanent gap (tombstoned) so it is not retried every night.
+    permanent_gap_after_failures: int = 3
+    # Ad-hoc full-day market closures (mourning/disaster days) the rule-based
+    # NYSE calendar cannot derive. ISO dates.
+    market_closures: list[str] = field(default_factory=list)
 
     def by_name(self, name: str) -> Sector:
         for sector in self.sectors:
@@ -163,6 +257,63 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+_PROBE_KINDS = frozenset({"sqlite_max_date", "manifest_date", "deadline_schedule"})
+_PROBE_CADENCES = frozenset({"quarterly", "semi_monthly"})
+
+
+def _parse_freshness_probes(sector_name: str, raw_probes: Any) -> list[FreshnessProbe]:
+    probes: list[FreshnessProbe] = []
+    for raw in _as_list(raw_probes):
+        if not isinstance(raw, dict):
+            raise ValueError(f"sector {sector_name}: freshness_probes entries must be mappings")
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"sector {sector_name}: freshness probe missing name")
+        kind = str(raw.get("kind") or "").strip()
+        if kind not in _PROBE_KINDS:
+            raise ValueError(
+                f"sector {sector_name}: probe {name}: unknown kind {kind!r}; valid={sorted(_PROBE_KINDS)}"
+            )
+        target = raw.get("target")
+        if not isinstance(target, dict):
+            raise ValueError(f"sector {sector_name}: probe {name}: target must be a mapping")
+        required_keys = ("db", "sql") if kind in {"sqlite_max_date", "deadline_schedule"} else ("path", "key")
+        for key in required_keys:
+            if not str(target.get(key) or "").strip():
+                raise ValueError(f"sector {sector_name}: probe {name}: target.{key} is required for kind {kind}")
+        if kind == "deadline_schedule":
+            cadence = str(target.get("cadence") or "").strip()
+            if cadence not in _PROBE_CADENCES:
+                raise ValueError(
+                    f"sector {sector_name}: probe {name}: target.cadence must be one of {sorted(_PROBE_CADENCES)}"
+                )
+            for lag_key in ("deadline_days", "publication_lag_days"):
+                if int(target.get(lag_key, 0)) < 0:
+                    raise ValueError(f"sector {sector_name}: probe {name}: target.{lag_key} must be >= 0")
+        tolerance_days = int(raw.get("tolerance_days", 0))
+        warn_lead_days = int(raw.get("warn_lead_days", 0))
+        if tolerance_days < 0 or warn_lead_days < 0:
+            raise ValueError(
+                f"sector {sector_name}: probe {name}: tolerance_days and warn_lead_days must be >= 0"
+            )
+        probes.append(
+            FreshnessProbe(
+                name=name,
+                kind=kind,
+                target=dict(target),
+                tolerance_days=tolerance_days,
+                warn_lead_days=warn_lead_days,
+                required=bool(raw.get("required", False)),
+                notes=str(raw.get("notes") or ""),
+            )
+        )
+    probe_names = [p.name for p in probes]
+    duplicates = sorted({n for n in probe_names if probe_names.count(n) > 1})
+    if duplicates:
+        raise ValueError(f"sector {sector_name}: duplicate freshness probe names: {duplicates}")
+    return probes
+
+
 def load_registry(path: Path) -> Registry:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or "sectors" not in raw:
@@ -174,6 +325,7 @@ def load_registry(path: Path) -> Registry:
         health = HealthSpec(
             manifest=health_raw.get("manifest"),
             status_keys=list(health_raw.get("status_keys") or []),
+            healthy_values=[str(v) for v in (health_raw.get("healthy_values") or ["PASS"])],
         )
         backfill_raw = entry.get("backfill")
         backfill = None
@@ -213,6 +365,16 @@ def load_registry(path: Path) -> Registry:
                 gate_column=entry.get("gate_column"),
                 require_oos_valid=bool(entry.get("require_oos_valid", False)),
                 staleness_tolerance_days=int(entry.get("staleness_tolerance_days", 3)),
+                backfill_window_days=(
+                    int(entry["backfill_window_days"])
+                    if entry.get("backfill_window_days") is not None
+                    else None
+                ),
+                publish_epoch=(
+                    parse_iso(str(entry["publish_epoch"]))
+                    if entry.get("publish_epoch")
+                    else None
+                ),
                 health=health,
                 backfill=backfill,
                 repair=repair,
@@ -220,6 +382,7 @@ def load_registry(path: Path) -> Registry:
                 daily_post_steps=list(entry.get("daily_post_steps") or []),
                 timeout_sec=int(entry.get("timeout_sec", defaults.get("timeout_sec", 21600))),
                 retries=int(entry.get("retries", defaults.get("retries", 1))),
+                freshness_probes=_parse_freshness_probes(str(entry["name"]), entry.get("freshness_probes")),
             )
         )
     names = [sector.name for sector in sectors]
@@ -235,6 +398,8 @@ def load_registry(path: Path) -> Registry:
             raise ValueError(f"sector {sector.name}: retries must be >= 0")
         if sector.staleness_tolerance_days < 0:
             raise ValueError(f"sector {sector.name}: staleness_tolerance_days must be >= 0")
+        if sector.backfill_window_days is not None and sector.backfill_window_days < 0:
+            raise ValueError(f"sector {sector.name}: backfill_window_days must be >= 0")
         if sector.publish_glob.count("{date}") != 1:
             raise ValueError(f"sector {sector.name}: publish_glob must contain exactly one {{date}}")
     group_order = {str(k): list(v) for k, v in (raw.get("group_order") or {}).items()}
@@ -262,6 +427,14 @@ def load_registry(path: Path) -> Registry:
         raise ValueError(
             "catch_up_gap_backfill_threshold and catch_up_window_days must both be >= 1"
         )
+    permanent_after = int(defaults.get("permanent_gap_after_failures", 3))
+    if permanent_after < 1:
+        raise ValueError(f"permanent_gap_after_failures must be >= 1, got {permanent_after}")
+    closures = [parse_iso(str(raw_closure)) for raw_closure in _as_list(defaults.get("market_closures"))]
+    # Ad-hoc closures must be visible to the module-level trading calendar
+    # (is_trading_day has no registry context at its many call sites).
+    global _AD_HOC_CLOSURES
+    _AD_HOC_CLOSURES = frozenset(_to_date(c) for c in closures)
     return Registry(
         sectors=sectors,
         group_order=group_order,
@@ -270,6 +443,8 @@ def load_registry(path: Path) -> Registry:
         catch_up_window_days=catch_up_window,
         repair_days=repair_days,
         calendar_reference_sectors=calendar_refs,
+        permanent_gap_after_failures=permanent_after,
+        market_closures=closures,
     )
 
 
@@ -288,6 +463,54 @@ def validate_registry_paths(reg: Registry) -> None:
                 missing.append(f"{sector.name}:{relative}")
     if missing:
         raise ValueError(f"registry references missing scripts: {missing}")
+
+
+# Documented per-step subprocess ceilings: sector runner configs that declare an
+# explicit per-step timeout their own step launcher enforces. The registry sector
+# timeout_sec must dominate the largest such ceiling, otherwise the master kills
+# a sector while one of its steps is still legitimately inside its own budget
+# (2026-08-05 biotech post-mortem: registry 21600s default vs biotech's
+# biotech_refresh.step_timeout_sec = 28800s). Sectors absent from this map do not
+# document a per-step ceiling in config (their runners hard-code or omit one), so
+# no relation is asserted for them. Extend this map when a runner gains one.
+STEP_CEILING_SOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "biotech": ("biotech_index/config.yaml", ("biotech_refresh.step_timeout_sec",)),
+    "portfolio_layer": (
+        "portfolio_layer/config.yaml",
+        (
+            "orchestration.step_timeout_sec",
+            "orchestration.macro_step_timeout_sec",
+            "orchestration.monitor_step_timeout_sec",
+        ),
+    ),
+}
+
+
+def documented_step_ceiling_sec(sector_name: str) -> float | None:
+    """Largest per-step timeout the sector's own config documents, else None."""
+    source = STEP_CEILING_SOURCES.get(sector_name)
+    if source is None:
+        return None
+    rel_path, dotted_keys = source
+    config_path = PROJECT_ROOT / rel_path
+    if not config_path.is_file():
+        return None
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    values: list[float] = []
+    for dotted in dotted_keys:
+        node: Any = raw
+        for part in dotted.split("."):
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if node is None:
+            continue
+        try:
+            values.append(float(node))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None
 
 
 # --------------------------------------------------------------------------- #
@@ -372,8 +595,14 @@ def us_market_holidays(year: int) -> set[date]:
     return holidays
 
 
+# Ad-hoc full-day closures (mourning/disaster days, e.g. the 2025-01-09 Carter
+# closure pattern) that no fixed rule can derive. Populated from the registry's
+# defaults.market_closures by load_registry.
+_AD_HOC_CLOSURES: frozenset[date] = frozenset()
+
+
 def is_trading_day(d: date) -> bool:
-    return d.weekday() < 5 and d not in us_market_holidays(d.year)
+    return d.weekday() < 5 and d not in us_market_holidays(d.year) and d not in _AD_HOC_CLOSURES
 
 
 def latest_completed_trading_session(*, now_utc: datetime | None = None) -> str:
@@ -480,30 +709,126 @@ def _missing_from_expected(published: set[str], expected: list[str]) -> list[str
     return sorted(d for d in expected if d not in published)
 
 
-def missing_trading_dates(reg: Registry, sector: Sector, target: str) -> list[str]:
-    """Trading dates this sector has not published within the catch-up window, up to
-    `target` -- including internal gaps, not just dates after the last published one.
+def sector_backfill_window_days(sector: Sector) -> int:
+    """Calendar-day window catch-up may auto-run missing historical dates in."""
+    if sector.backfill_window_days is not None:
+        return sector.backfill_window_days
+    return sector.staleness_tolerance_days
 
-    The window is [max(first_published<=target, target - catch_up_window_days),
-    target] so a hole a few sessions back is surfaced while ancient sparse
-    calibration history is not dragged into a routine catch-up.
+
+# --------------------------------------------------------------------------- #
+# Permanent-gap markers (catch-up backfill tombstones)
+# --------------------------------------------------------------------------- #
+def load_gap_markers(path: Path = GAP_MARKER_PATH) -> dict[str, Any]:
+    """{"sectors": {sector: {date: {failures, permanent, reason, ...}}}}."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"sectors": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("sectors"), dict):
+        return {"sectors": {}}
+    return data
+
+
+def save_gap_markers(markers: dict[str, Any], path: Path = GAP_MARKER_PATH) -> None:
+    write_atomic(Path(path), json.dumps(markers, indent=2, sort_keys=True) + "\n")
+
+
+def permanent_gap_dates(markers: dict[str, Any], sector_name: str) -> set[str]:
+    out: set[str] = set()
+    for iso_date, rec in (markers.get("sectors", {}).get(sector_name) or {}).items():
+        if isinstance(rec, dict) and rec.get("permanent"):
+            out.add(str(iso_date))
+    return out
+
+
+def record_gap_failure(
+    markers: dict[str, Any], sector_name: str, iso_date: str, reason: str, *, auto_permanent_after: int
+) -> None:
+    """Record one backfill-date failure; auto-tombstone after N consecutive failures.
+
+    A date whose inputs can never exist (e.g. sector scores predating that sector's
+    OOS promotion) fails deterministically forever; without a tombstone it would be
+    retried every night. Transient failures self-heal: a later success clears the
+    record (clear_gap_record) before the threshold is reached.
+    """
+    sectors = markers.setdefault("sectors", {})
+    per_sector = sectors.setdefault(sector_name, {})
+    rec = per_sector.get(iso_date)
+    if not isinstance(rec, dict):
+        rec = {"failures": 0, "permanent": False, "source": "auto"}
+    rec["failures"] = int(rec.get("failures", 0)) + 1
+    rec["reason"] = reason
+    rec["last_failure_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if rec["failures"] >= auto_permanent_after and not rec.get("permanent"):
+        rec["permanent"] = True
+        rec["source"] = rec.get("source") or "auto"
+    per_sector[iso_date] = rec
+
+
+def clear_gap_record(markers: dict[str, Any], sector_name: str, iso_date: str) -> None:
+    per_sector = markers.get("sectors", {}).get(sector_name)
+    if isinstance(per_sector, dict):
+        per_sector.pop(iso_date, None)
+
+
+@dataclass(frozen=True)
+class GapReport:
+    """Per-sector missing-date classification for one catch-up target."""
+    target_missing: bool
+    backfill_missing: list[str]   # auto-run candidates, NEWEST-first
+    historical_gaps: list[str]    # inside the outer window but older than the backfill window
+    permanent_gaps: list[str]     # tombstoned by marker; skipped but surfaced
+
+
+def sector_gap_report(
+    reg: Registry, sector: Sector, target: str, *, markers: dict[str, Any] | None = None
+) -> GapReport:
+    """Classify this sector's unpublished trading dates up to `target`.
+
+    The CURRENT target date is classified separately (target_missing) and is never
+    window-bounded or tombstoned: current production is always attempted. Historical
+    dates are auto-run candidates only within [target - backfill_window_days, target);
+    older in-(outer-)window gaps are surfaced as historical_gaps for reporting. Dates
+    before the sector's publish_epoch (or before its first publish, or beyond
+    catch_up_window_days) are exempt entirely -- a repointed publish_glob must not
+    retroactively manufacture missing history.
     """
     published = set(sector_published_dates(sector))
+    target_missing = target not in published
     published_on_or_before = sorted(d for d in published if d <= target)
-    window_start_lookback = (_to_date(target) - timedelta(days=reg.catch_up_window_days)).isoformat()
     if not published_on_or_before:
-        window_start = target
-    else:
-        window_start = max(published_on_or_before[0], window_start_lookback)
-    if window_start > target:
-        return []
-    expected = trading_dates_in_range(reg, window_start, target)
-    return _missing_from_expected(published, expected)
+        # Never published at/before target: only the current target is actionable.
+        return GapReport(target_missing, [], [], [])
+    outer_start = (_to_date(target) - timedelta(days=reg.catch_up_window_days)).isoformat()
+    floor = max(published_on_or_before[0], outer_start)
+    if sector.publish_epoch:
+        floor = max(floor, sector.publish_epoch)
+    if floor > target:
+        return GapReport(target_missing, [], [], [])
+    expected = trading_dates_in_range(reg, floor, target)
+    missing_all = [d for d in expected if d not in published and d != target]
+    window_start = max(
+        floor, (_to_date(target) - timedelta(days=sector_backfill_window_days(sector))).isoformat()
+    )
+    tombstoned = permanent_gap_dates(markers if markers is not None else load_gap_markers(), sector.name)
+    backfill = sorted((d for d in missing_all if d >= window_start and d not in tombstoned), reverse=True)
+    historical = sorted(d for d in missing_all if d < window_start and d not in tombstoned)
+    permanent = sorted(d for d in missing_all if d in tombstoned)
+    return GapReport(target_missing, backfill, historical, permanent)
 
 
 def resolve_target_date(requested: str | None, *, now_utc: datetime | None = None) -> str:
     if requested:
-        return parse_iso(requested)
+        iso = parse_iso(requested)
+        # An explicitly requested target must be a real session: running every
+        # sector for a weekend/holiday/closure manufactures phantom dated
+        # artifacts that can 'PASS' for a session that never existed.
+        if not is_trading_day(_to_date(iso)):
+            raise SystemExit(
+                f"--as-of {iso} is not a trading session (weekend/holiday/ad-hoc closure)"
+            )
+        return iso
     return latest_completed_trading_session(now_utc=now_utc)
 
 
@@ -612,35 +937,104 @@ def _catch_up_daily_command(
     return command
 
 
-def catch_up_commands(
+@dataclass(frozen=True)
+class CatchUpPlan:
+    """Execution plan for one sector's catch-up: CURRENT target first, then
+    best-effort historical backfill groups, newest-first."""
+    target: str
+    target_missing: bool
+    target_commands: list[list[str]]                       # empty when target already published
+    backfill_groups: list[tuple[tuple[str, ...], list[list[str]]]]  # (dates, commands), newest-first
+    historical_gaps: list[str]
+    permanent_gaps: list[str]
+    used_native_backfill: bool
+
+    @property
+    def all_commands(self) -> list[list[str]]:
+        out = list(self.target_commands)
+        for _dates, cmds in self.backfill_groups:
+            out.extend(cmds)
+        return out
+
+    @property
+    def backfill_dates(self) -> list[str]:
+        return [d for dates, _cmds in self.backfill_groups for d in dates]
+
+
+def plan_note(plan: CatchUpPlan) -> str:
+    return (
+        f"target_missing={plan.target_missing}"
+        f" backfill={len(plan.backfill_dates)}"
+        f" historical_gaps={len(plan.historical_gaps)}"
+        f" permanent_gaps={len(plan.permanent_gaps)}"
+    )
+
+
+def build_catch_up_plan(
     reg: Registry,
     sector: Sector,
     target: str,
     *,
     force: bool,
     live_completed_session: str | None = None,
-) -> tuple[list[list[str]], list[str]]:
-    missing = missing_trading_dates(reg, sector, target)
-    if not missing:
-        return [], []
-    if len(missing) > reg.catch_up_gap_backfill_threshold and sector.backfill and sector.backfill.script:
-        cmds, _ = backfill_commands(sector, missing[0], missing[-1], reg)
-        return cmds, missing
-    commands: list[list[str]] = []
+    markers: dict[str, Any] | None = None,
+) -> CatchUpPlan:
+    """CURRENT-TARGET-FIRST catch-up plan.
+
+    The current target date always leads (an unavailable historical date must never
+    prevent producing the current book); historical backfill follows newest-first so
+    the most valuable missing dates fill first, each date/group independent
+    (best-effort). Gaps larger than catch_up_gap_backfill_threshold use the sector's
+    native backfill entry, CHUNKED to at most threshold dates per command so one
+    subprocess never has to fit N full per-date rebuilds inside the single-command
+    timeout ceiling; every chunk still runs the per-date daily_post_steps (e.g.
+    med-devices script 76 provenance) so the post-publish contract holds on the
+    backfill route too.
+    """
+    # live_completed_session is sampled ONCE at orchestrator startup (main resolves
+    # it next to the target) so a run spanning the 17:00 ET close cannot reclassify
+    # the intended current-session command as historical hours later.
     live_session = live_completed_session or latest_completed_trading_session()
-    for iso_date in missing:
-        commands.append(
-            _catch_up_daily_command(
-                sector,
-                iso_date,
-                force=force,
-                live_completed_session=live_session,
-            )
+    report = sector_gap_report(reg, sector, target, markers=markers)
+    target_cmds: list[list[str]] = []
+    if report.target_missing:
+        target_cmds.append(
+            _catch_up_daily_command(sector, target, force=force, live_completed_session=live_session)
         )
-        # Catch-up is a sequence of ordinary dated publishes. Preserve the exact daily
-        # post-publish contract (notably med-devices script 76 provenance) for every date.
-        commands.extend(daily_post_commands(sector, iso_date))
-    return commands, missing
+        target_cmds.extend(daily_post_commands(sector, target))
+    groups: list[tuple[tuple[str, ...], list[list[str]]]] = []
+    missing = report.backfill_missing  # newest-first
+    used_native = (
+        len(missing) > reg.catch_up_gap_backfill_threshold
+        and sector.backfill is not None
+        and bool(sector.backfill.script)
+    )
+    if used_native:
+        ascending = sorted(missing)
+        chunk_size = reg.catch_up_gap_backfill_threshold
+        chunks = [ascending[i : i + chunk_size] for i in range(0, len(ascending), chunk_size)]
+        for chunk in reversed(chunks):  # newest chunk first
+            cmds, _bf_note = backfill_commands(sector, chunk[0], chunk[-1], reg)
+            for iso_date in chunk:
+                cmds.extend(daily_post_commands(sector, iso_date))
+            groups.append((tuple(chunk), cmds))
+    else:
+        for iso_date in missing:
+            cmds = [
+                _catch_up_daily_command(sector, iso_date, force=force, live_completed_session=live_session)
+            ]
+            # Preserve the exact daily post-publish contract for every date.
+            cmds.extend(daily_post_commands(sector, iso_date))
+            groups.append(((iso_date,), cmds))
+    return CatchUpPlan(
+        target=target,
+        target_missing=report.target_missing,
+        target_commands=target_cmds,
+        backfill_groups=groups,
+        historical_gaps=report.historical_gaps,
+        permanent_gaps=report.permanent_gaps,
+        used_native_backfill=used_native,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -775,6 +1169,88 @@ def _pid_alive(pid: int | None) -> bool | None:
     return True
 
 
+# Slack when comparing a PID's creation time with a recorded start timestamp:
+# clock skew + the gap between process start and timestamp write.
+_PID_IDENTITY_SLACK_SEC = 120
+
+
+def _pid_creation_time_utc(pid: int | None) -> datetime | None:
+    """Process creation time (UTC), or None when unavailable.
+
+    Windows: GetProcessTimes via ctypes (FILETIME, 100ns ticks since 1601-01-01).
+    Elsewhere (not used in this deployment) returns None so callers fall back to
+    plain liveness.
+    """
+    if pid is None or pid <= 0 or os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return None
+        try:
+            class FILETIME(ctypes.Structure):
+                _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+            creation, exit_t, kernel_t, user_t = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+            ok = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_t),
+                ctypes.byref(kernel_t),
+                ctypes.byref(user_t),
+            )
+            if not ok:
+                return None
+            ticks = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+            if ticks <= 0:
+                return None
+            return datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ticks // 10)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def _parse_utc_timestamp(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _holder_alive(pid: int | None, started_utc_iso: str) -> bool | None:
+    """PID liveness WITH identity: a recycled PID must not impersonate a dead holder.
+
+    Windows PID reuse can make a crashed orchestrator look alive forever (lock never
+    overridden, RUNNING manifest never reconciled). When the recorded holder start
+    time is known and the live process at that PID was created materially AFTER it,
+    the recorded holder is provably dead regardless of raw liveness.
+    """
+    alive = _pid_alive(pid)
+    if alive is not True:
+        return alive
+    started = _parse_utc_timestamp(started_utc_iso)
+    if started is None:
+        return alive
+    created = _pid_creation_time_utc(pid)
+    if created is None:
+        return alive
+    if created > started + timedelta(seconds=_PID_IDENTITY_SLACK_SEC):
+        return False  # PID recycled by an unrelated process
+    return True
+
+
 def make_run_stamp() -> str:
     """Run-dir stamp with sub-second + PID suffix so two masters (or two runs in the same
     second) never collide on the same run directory (finding 9)."""
@@ -851,9 +1327,15 @@ class OrchestrationLock:
                 self.fd = self._try_create()
                 if self.fd is None:
                     # Only override a lock whose recorded holder is provably gone:
-                    # PID-liveness beats age, and live descendants keep ownership closed.
+                    # PID-liveness (with creation-time identity, so a recycled PID
+                    # cannot impersonate the dead holder) beats age, and live
+                    # descendants keep ownership closed.
                     recorded_pid = self._recorded_pid()
-                    alive = _pid_alive(recorded_pid) if recorded_pid is not None else None
+                    alive = (
+                        _holder_alive(recorded_pid, self._recorded_started_utc())
+                        if recorded_pid is not None
+                        else None
+                    )
                     recorded_children = self._recorded_children()
                     live_children = [pid for pid in recorded_children if _pid_alive(pid) is True]
                     age = self._age()
@@ -872,7 +1354,11 @@ class OrchestrationLock:
                         self.fd = self._try_create()
             if self.fd is None:
                 recorded_pid = self._recorded_pid()
-                alive = _pid_alive(recorded_pid) if recorded_pid is not None else None
+                alive = (
+                    _holder_alive(recorded_pid, self._recorded_started_utc())
+                    if recorded_pid is not None
+                    else None
+                )
                 age = self._age()
                 reason = "lock remained owned after serialized recovery"
                 detail = self.path.read_text(encoding="utf-8", errors="replace") if self.path.exists() else ""
@@ -936,6 +1422,14 @@ class OrchestrationLock:
         match = re.search(r"pid=(\d+)", text)
         return int(match.group(1)) if match else None
 
+    def _recorded_started_utc(self) -> str:
+        try:
+            text = self.path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        match = re.search(r"started_utc=(\S+)", text)
+        return match.group(1) if match else ""
+
     def _recorded_children(self) -> list[int]:
         try:
             text = self.path.read_text(encoding="utf-8", errors="replace")
@@ -975,10 +1469,34 @@ def _flag_true(raw: object) -> bool:
         return False
 
 
+def _is_json_artifact(path: Path) -> bool:
+    return path.suffix.lower() == ".json"
+
+
+def _load_json_artifact(path: Path) -> Any | None:
+    """Parsed JSON artifact content, or None when missing/unreadable/invalid."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _count_oos_valid(path: Path, sector: Sector) -> tuple[int, int]:
-    """(oos_valid_or_gate_rows, total_rows) for the published table."""
+    """(oos_valid_or_gate_rows, total_rows) for the published table.
+
+    JSON artifacts (the portfolio's final_manifest.json) are parsed as JSON, never
+    through CSV line-count heuristics: a dict counts as one row, a list as its
+    length, so serialization style (pretty vs compact) cannot change the verdict.
+    """
     if not path.exists():
         return 0, 0
+    if _is_json_artifact(path):
+        data = _load_json_artifact(path)
+        if data is None:
+            return 0, 0
+        if isinstance(data, list):
+            return 0, len(data)
+        return 0, 1 if data else 0
     col = sector.oos_column or sector.gate_column
     total = 0
     valid = 0
@@ -1017,13 +1535,21 @@ def read_manifest(sector: Sector, iso_date: str | None) -> tuple[str, str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return "UNREADABLE", ""
+    healthy = {str(v).upper() for v in (sector.health.healthy_values or ["PASS"])}
     verdicts = [str(data.get(key, "")).upper() for key in sector.health.status_keys]
-    status = "PASS" if verdicts and all(v == "PASS" for v in verdicts) else "FAIL" if verdicts else "UNKNOWN"
+    status = "PASS" if verdicts and all(v in healthy for v in verdicts) else "FAIL" if verdicts else "UNKNOWN"
     return status, _manifest_asof(data)
 
 
 def _oos_required(sector: Sector) -> bool:
-    return sector.require_oos_valid or bool(sector.oos_column) or bool(sector.gate_column)
+    """The registry's require_oos_valid knob is authoritative.
+
+    A configured oos_column/gate_column merely says WHICH column carries the flag,
+    never that valid rows are required: transportation's sealed zero-overlay shadow
+    model declares oos_column with require_oos_valid: false (its rank tables carry
+    oos_score_valid_flag=0 by design) and must not fail artifact verification.
+    """
+    return sector.require_oos_valid
 
 
 # Recognized "as-of" date columns in a published table, most-specific first. Every
@@ -1094,14 +1620,32 @@ def verify_published_artifact_for_date(
     artifact = parent / _publish_folder_name(sector, iso_date) / filename
     if not artifact.exists():
         return False, [f"{iso_date}: artifact missing: {artifact}"]
-    valid, total = _count_oos_valid(artifact, sector)
-    if total <= 0:
-        reasons.append(f"artifact has 0 rows: {artifact}")
-    if _oos_required(sector) and valid <= 0:
-        reasons.append("no oos/gate-valid rows where required")
-    date_checked, date_ok, date_detail = _csv_date_column_matches(artifact, iso_date)
-    if date_checked and not date_ok:
-        reasons.append(f"internal as-of column mismatch: {date_detail}")
+    if _is_json_artifact(artifact):
+        # JSON artifact (portfolio final_manifest.json): parse it -- never certify
+        # JSON through CSV heuristics. Its own run_as_of ties the content to the
+        # folder date; a compact serialization must not change the verdict.
+        data = _load_json_artifact(artifact)
+        if data is None:
+            reasons.append(f"artifact unreadable/invalid JSON: {artifact}")
+            date_checked, date_ok, date_detail = False, False, "unreadable"
+        else:
+            if not data:
+                reasons.append(f"artifact JSON is empty: {artifact}")
+            internal_asof = _manifest_asof(data) if isinstance(data, dict) else ""
+            date_checked = bool(internal_asof)
+            date_ok = internal_asof == iso_date
+            date_detail = f"json asof={internal_asof or 'absent'}"
+            if date_checked and not date_ok:
+                reasons.append(f"internal as-of mismatch: {date_detail} != folder {iso_date}")
+    else:
+        valid, total = _count_oos_valid(artifact, sector)
+        if total <= 0:
+            reasons.append(f"artifact has 0 rows: {artifact}")
+        if _oos_required(sector) and valid <= 0:
+            reasons.append("no oos/gate-valid rows where required")
+        date_checked, date_ok, date_detail = _csv_date_column_matches(artifact, iso_date)
+        if date_checked and not date_ok:
+            reasons.append(f"internal as-of column mismatch: {date_detail}")
     if verify_manifest and sector.health.manifest:
         status, asof = read_manifest(sector, iso_date)
         if status != "PASS":
@@ -1195,13 +1739,239 @@ def health_check(reg: Registry, sectors: list[Sector], target: str) -> dict[str,
 
 
 # --------------------------------------------------------------------------- #
+# Freshness sentinel (surveillance-only; see module docstring)
+# --------------------------------------------------------------------------- #
+PROBE_TIMEOUT_SEC = 10.0
+
+
+def _call_with_timeout(fn, timeout_sec: float):
+    """Run fn() on a daemon thread with a hard wall-clock timeout.
+
+    sqlite/file reads cannot be interrupted portably; a daemon thread lets the
+    orchestrator abandon a hung probe (status ERROR) without hanging the run.
+    """
+    out: list[Any] = []
+    err: list[BaseException] = []
+
+    def _worker() -> None:
+        try:
+            out.append(fn())
+        except BaseException as exc:  # re-raised on the caller thread below
+            err.append(exc)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout_sec)
+    if worker.is_alive():
+        raise TimeoutError(f"probe timed out after {timeout_sec}s")
+    if err:
+        raise err[0]
+    return out[0] if out else None
+
+
+def _sqlite_scalar_ro(db: str, sql: str) -> Any:
+    """One scalar from a sqlite DB opened STRICTLY read-only (mode=ro URI)."""
+    db_path = Path(db)
+    if not db_path.is_absolute():
+        db_path = PROJECT_ROOT / db
+    if not db_path.is_file():
+        raise FileNotFoundError(f"sqlite db not found: {db_path}")
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=5)
+    try:
+        row = conn.execute(sql).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def _manifest_date_value(path_raw: str, key: str) -> Any:
+    path = Path(path_raw)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path_raw
+    data = json.loads(path.read_text(encoding="utf-8"))
+    node: Any = data
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise KeyError(f"manifest key {key!r} missing at {part!r} in {path}")
+        node = node[part]
+    return node
+
+
+def _coerce_probe_date(value: Any, *, context: str) -> date:
+    text = str(value if value is not None else "").strip()[:10]
+    if not text:
+        raise ValueError(f"{context}: no date value returned")
+    return datetime.strptime(text, "%Y-%m-%d").date()
+
+
+def _month_end_of(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def _period_ends_desc(cadence: str, upto: date, count: int) -> list[date]:
+    """Most recent `count` schedule period ends at/before `upto`, newest first.
+
+    quarterly    -> calendar quarter ends (last day of Mar/Jun/Sep/Dec), e.g. 13F.
+    semi_monthly -> bi-monthly-per-month cycles: the 15th and the last day of each
+                    month (FINRA short-interest settlement schedule).
+    """
+    out: list[date] = []
+    year, month = upto.year, upto.month
+    while len(out) < count:
+        if cadence == "quarterly":
+            candidates = [_month_end_of(year, month)] if month in (3, 6, 9, 12) else []
+        else:
+            candidates = [_month_end_of(year, month), date(year, month, 15)]
+        for cand in sorted(candidates, reverse=True):
+            if cand <= upto and len(out) < count:
+                out.append(cand)
+        year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+    return out
+
+
+def _probe_raw_value(probe: FreshnessProbe) -> Any:
+    if probe.kind in {"sqlite_max_date", "deadline_schedule"}:
+        return _sqlite_scalar_ro(str(probe.target["db"]), str(probe.target["sql"]))
+    return _manifest_date_value(str(probe.target["path"]), str(probe.target["key"]))
+
+
+def evaluate_freshness_probe(probe: FreshnessProbe, target: str) -> dict[str, Any]:
+    """Evaluate one probe against the run's target date. Never raises: any
+    failure (missing db/manifest, bad SQL/key, NULL date, timeout) is status
+    ERROR with the exception recorded in `detail`."""
+    row: dict[str, Any] = {
+        "probe": probe.name,
+        "kind": probe.kind,
+        "required": probe.required,
+        "latest": "",
+        "age_days": None,
+        "threshold": probe.tolerance_days,
+        "status": "ERROR",
+        "detail": "",
+    }
+    target_d = _to_date(target)
+    try:
+        raw = _call_with_timeout(lambda: _probe_raw_value(probe), PROBE_TIMEOUT_SEC)
+        latest_d = _coerce_probe_date(raw, context=f"probe {probe.name}")
+    except Exception as exc:
+        row["detail"] = f"{type(exc).__name__}: {exc}"
+        return row
+    row["latest"] = latest_d.isoformat()
+    row["age_days"] = (target_d - latest_d).days
+    if probe.kind == "deadline_schedule":
+        total_lag = (
+            int(probe.target.get("deadline_days", 0))
+            + int(probe.target.get("publication_lag_days", 0))
+            + probe.tolerance_days
+        )
+        cadence = str(probe.target["cadence"])
+        # Generate slightly past the target so a period whose availability date falls
+        # inside the warn window is visible even before its period end has lag applied.
+        ends = _period_ends_desc(cadence, target_d + timedelta(days=probe.warn_lead_days), 16)
+        required = next((e for e in ends if e + timedelta(days=total_lag) <= target_d), None)
+        row["threshold"] = f"period>={required.isoformat()}" if required else "no_period_required_yet"
+        if required is not None and latest_d < required:
+            row["status"] = "STALE"
+        else:
+            upcoming = [e for e in reversed(ends) if e > latest_d]  # ascending
+            if upcoming and (upcoming[0] + timedelta(days=total_lag) - target_d).days <= probe.warn_lead_days:
+                row["status"] = "WARN_APPROACHING"
+            else:
+                row["status"] = "CURRENT"
+        return row
+    age_days = int(row["age_days"])
+    if age_days > probe.tolerance_days:
+        row["status"] = "STALE"
+    elif age_days + probe.warn_lead_days > probe.tolerance_days:
+        row["status"] = "WARN_APPROACHING"
+    else:
+        row["status"] = "CURRENT"
+    return row
+
+
+def evaluate_freshness(sectors: list[Sector], target: str, log) -> dict[str, list[dict[str, Any]]]:
+    """Evaluate every registered probe (cheap, read-only). STALE/ERROR probes are
+    logged loudly; one summary line covers the whole sweep."""
+    freshness: dict[str, list[dict[str, Any]]] = {}
+    for sector in sectors:
+        if not sector.freshness_probes:
+            continue
+        rows = [evaluate_freshness_probe(probe, target) for probe in sector.freshness_probes]
+        freshness[sector.name] = rows
+        for row in rows:
+            if row["status"] == "STALE":
+                log(
+                    f"FRESHNESS ERROR: [{sector.name}] probe={row['probe']} STALE "
+                    f"latest={row['latest'] or 'none'} age_days={row['age_days']} "
+                    f"threshold={row['threshold']}{' (required)' if row['required'] else ''}"
+                )
+            elif row["status"] == "ERROR":
+                log(f"FRESHNESS ERROR: [{sector.name}] probe={row['probe']} ERROR: {row['detail']}")
+    if freshness:
+        summary = "; ".join(
+            f"{name} " + ",".join(f"{r['probe']}={r['status']}" for r in rows)
+            for name, rows in freshness.items()
+        )
+        log(f"freshness: {summary}")
+    return freshness
+
+
+def apply_freshness_consequences(
+    freshness: dict[str, list[dict[str, Any]]],
+    results: dict[str, RunResult],
+    overall: str,
+    log,
+    *,
+    selected_names: set[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Probes are surveillance, not gates: they never block publication by default.
+    The single consequence with teeth: a probe with required:true whose status is
+    STALE **or ERROR** marks the sector with a visible FRESHNESS_BLOCKING note and
+    forces the master acceptance to FAIL (sectors have already run at this point).
+    ERROR blocks because a required probe that cannot even be evaluated (missing
+    DB, renamed table, timeout) would otherwise be silently non-blocking forever,
+    defeating the fail-closed intent. Blocking is scoped to `selected_names` so a
+    required-stale probe on a sector excluded from this run cannot flip the
+    acceptance of a run that never touched it (it is still logged loudly)."""
+    blocking_required: list[str] = []
+    for name, rows in sorted(freshness.items()):
+        blocking = [
+            (r["probe"], r.get("status"))
+            for r in rows
+            if r.get("required") and r.get("status") in {"STALE", "ERROR"}
+        ]
+        if not blocking:
+            continue
+        rendered = [f"{probe}={status}" for probe, status in blocking]
+        if selected_names is not None and name not in selected_names:
+            log(
+                f"FRESHNESS ERROR: [{name}] required probe(s) {rendered} blocking, but the "
+                f"sector is not in this run's selection -> surveillance only for this run"
+            )
+            continue
+        blocking_required.extend(f"{name}:{item}" for item in rendered)
+        res = results.get(name)
+        if res is not None:
+            res.note = (res.note + "; " if res.note else "") + f"FRESHNESS_BLOCKING: {','.join(rendered)}"
+    if blocking_required and overall == "PASS":
+        overall = "FAIL"
+        log(
+            "FRESHNESS ERROR: required freshness probe(s) STALE/ERROR -> master acceptance "
+            f"FAIL: {blocking_required}"
+        )
+    return overall, blocking_required
+
+
+# --------------------------------------------------------------------------- #
 # Execution
 # --------------------------------------------------------------------------- #
 @dataclass
 class RunResult:
     sector: str
-    # PASS | FAIL | OPTIONAL_FAIL | DRY_RUN | SKIPPED_RESUME | SKIPPED_GATE
-    #   | UP_TO_DATE | NOTE | UNKNOWN | RUNNING
+    # PASS | PASS_WITH_BACKFILL_GAPS | FAIL | OPTIONAL_FAIL | DRY_RUN
+    #   | SKIPPED_RESUME | SKIPPED_GATE | UP_TO_DATE | NOTE | UNKNOWN | RUNNING
     status: str = "PENDING"
     commands: list[list[str]] = field(default_factory=list)
     return_codes: list[int] = field(default_factory=list)
@@ -1211,6 +1981,9 @@ class RunResult:
     command_hash: str = ""
     content_hash: str = ""
     note: str = ""
+    # Catch-up per-date backfill accounting (attempted/failed/historical/permanent);
+    # None outside catch-up mode.
+    backfill: dict[str, Any] | None = None
 
 
 def run_commands(
@@ -1245,6 +2018,139 @@ def run_commands(
     result.status = "PASS" if overall_ok else "FAIL"
     log(f"  [{sector.name}] {result.status} rcs={result.return_codes} elapsed={result.elapsed_sec}s")
     return result
+
+
+def run_catch_up_sector(
+    reg: Registry,
+    sector: Sector,
+    plan: CatchUpPlan,
+    *,
+    run_dir: Path,
+    net_sem: threading.Semaphore | None,
+    log,
+    markers_path: Path = GAP_MARKER_PATH,
+    runner=None,
+) -> RunResult:
+    """Execute one sector's catch-up plan: CURRENT TARGET FIRST, then best-effort
+    historical backfill (newest-first, per-group independent).
+
+    Acceptance is the CURRENT date alone: a current-date execution/verification
+    failure fails the sector exactly like daily mode; failed backfill dates are
+    recorded per-date (status PASS_WITH_BACKFILL_GAPS) and never fail the master.
+    Verification runs IMMEDIATELY after each date's commands so a sector whose
+    health manifest is a global latest-run file is checked while that manifest
+    still describes the date just built (execution order is current-first /
+    newest-first, so end-of-run verification would compare against the OLDEST
+    date). `runner` is injectable for the no-subprocess selftest.
+    """
+    result = RunResult(sector=sector.name, commands=plan.all_commands, backfill=None)
+    started = time.perf_counter()
+    log_path = run_dir / "logs" / f"{sector.name}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    backfill_failed: dict[str, str] = {}
+    date_partitioned_manifest = bool(sector.health.manifest and "{date}" in sector.health.manifest)
+    with log_path.open("w", encoding="utf-8", newline="") as logfile:
+        def _exec(command: list[str]) -> int:
+            if runner is not None:
+                return int(runner(command))
+            return _run_one(sector, command, net_sem=net_sem, logfile=logfile)
+
+        # ---- 1) CURRENT TARGET FIRST -------------------------------------- #
+        if plan.target_missing:
+            target_ok = True
+            for command in plan.target_commands:
+                rc = _exec(command)
+                result.return_codes.append(rc)
+                if rc != 0:
+                    target_ok = False
+                    break
+            if not target_ok:
+                result.status = "FAIL"
+                result.note = f"current target {plan.target} failed; backfill not attempted"
+            else:
+                ok, reasons = verify_published_artifact_for_date(sector, plan.target)
+                if ok:
+                    result.status = "PASS"
+                else:
+                    result.status = "FAIL"
+                    result.note = "artifact_verify_failed: " + "; ".join(reasons)
+        else:
+            # Target already published (e.g. by a prior/concurrent run): verify it
+            # BEFORE any backfill can overwrite a global latest-run manifest.
+            ok, reasons = verify_published_artifact_for_date(sector, plan.target)
+            if ok:
+                result.status = "UP_TO_DATE"
+            else:
+                result.status = "FAIL"
+                result.note = (
+                    f"target {plan.target} published but unverifiable: " + "; ".join(reasons)
+                )
+        # ---- 2) historical backfill, best-effort, newest-first ------------- #
+        if result.status in {"PASS", "UP_TO_DATE"} and plan.backfill_groups:
+            for dates, cmds in plan.backfill_groups:
+                group_rc = 0
+                for command in cmds:
+                    group_rc = _exec(command)
+                    result.return_codes.append(group_rc)
+                    if group_rc != 0:
+                        break
+                if group_rc != 0:
+                    for iso_date in dates:
+                        backfill_failed[iso_date] = f"rc={group_rc}"
+                    continue
+                for iso_date in dates:
+                    # Global latest-run manifests are only trustworthy per-date on
+                    # the per-date route (verified immediately after that date's
+                    # run); a native backfill chunk writes them once, so only
+                    # {date}-partitioned manifests are checked there.
+                    ok_d, reasons_d = verify_published_artifact_for_date(
+                        sector,
+                        iso_date,
+                        verify_manifest=(not plan.used_native_backfill) or date_partitioned_manifest,
+                    )
+                    if not ok_d:
+                        backfill_failed[iso_date] = "verify: " + "; ".join(reasons_d)
+    # ---- 3) marker bookkeeping + status ---------------------------------- #
+    if plan.backfill_dates:
+        with _GAP_MARKER_LOCK:
+            markers = load_gap_markers(markers_path)
+            for iso_date, reason in backfill_failed.items():
+                record_gap_failure(
+                    markers, sector.name, iso_date, reason,
+                    auto_permanent_after=reg.permanent_gap_after_failures,
+                )
+            for iso_date in plan.backfill_dates:
+                if iso_date not in backfill_failed:
+                    clear_gap_record(markers, sector.name, iso_date)
+            save_gap_markers(markers, markers_path)
+    if result.status in {"PASS", "UP_TO_DATE"}:
+        if backfill_failed:
+            result.status = "PASS_WITH_BACKFILL_GAPS"
+            result.note = (result.note + "; " if result.note else "") + (
+                "backfill_gaps=" + ",".join(sorted(backfill_failed))
+            )
+        elif result.status == "UP_TO_DATE" and plan.backfill_groups:
+            result.status = "PASS"  # backfill work executed and verified
+    result.backfill = {
+        "attempted": list(plan.backfill_dates),
+        "failed": dict(sorted(backfill_failed.items())),
+        "historical_gaps": list(plan.historical_gaps),
+        "permanent_gaps": list(plan.permanent_gaps),
+        "native_backfill": plan.used_native_backfill,
+    }
+    result.elapsed_sec = round(time.perf_counter() - started, 2)
+    log(
+        f"  [{sector.name}] {result.status} rcs={result.return_codes} "
+        f"elapsed={result.elapsed_sec}s ({plan_note(plan)})"
+    )
+    return result
+
+
+def _should_retry_rc(rc: int) -> bool:
+    """Retry policy for one command attempt: never retry success, and never retry a
+    TIMEOUT (rc 124) -- re-running a command that just consumed its full per-attempt
+    ceiling doubles the sector's wall time for a near-certain repeat failure."""
+    return rc not in (0, 124)
 
 
 def _run_one(sector: Sector, command: list[str], *, net_sem: threading.Semaphore | None, logfile) -> int:
@@ -1293,8 +2199,8 @@ def _run_one(sector: Sector, command: list[str], *, net_sem: threading.Semaphore
                 tracker.unregister_child(proc.pid)
             if acquired and net_sem is not None:
                 net_sem.release()
-        if rc == 0:
-            return 0
+        if not _should_retry_rc(rc):
+            return rc
     return rc
 
 
@@ -1390,16 +2296,24 @@ def write_master_manifest(run_dir: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
-def _result_rows(results: dict[str, RunResult]) -> list[dict[str, Any]]:
-    return [
-        {
+def _result_rows(
+    results: dict[str, RunResult], freshness: dict[str, list[dict[str, Any]]] | None = None
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for r in results.values():
+        row: dict[str, Any] = {
             "sector": r.sector, "status": r.status, "note": r.note, "elapsed_sec": r.elapsed_sec,
             "return_codes": r.return_codes, "artifact": r.artifact, "sha256": r.sha256,
             "command_hash": r.command_hash, "content_hash": r.content_hash,
             "commands": [subprocess.list2cmdline(c) for c in r.commands],
         }
-        for r in results.values()
-    ]
+        if r.backfill is not None:
+            row["backfill"] = r.backfill
+        probes = (freshness or {}).get(r.sector)
+        if probes is not None:
+            row["freshness"] = probes
+        rows.append(row)
+    return rows
 
 
 def load_resume_records(reg: Registry) -> list[dict[str, str]]:
@@ -1453,7 +2367,20 @@ def reconcile_abandoned_runs() -> list[Path]:
         run_stamp = str(data.get("run_stamp") or manifest.parent.name)
         match = re.search(r"_p(\d+)$", run_stamp)
         pid = int(match.group(1)) if match else None
-        if _pid_alive(pid) is not False:
+        # The stamp encodes the master's UTC start time; with it, a recycled PID
+        # (created after the run started) cannot keep the manifest RUNNING forever.
+        stamp_match = re.match(r"^(\d{8}T\d{6}_\d+)Z", run_stamp)
+        started_iso = ""
+        if stamp_match:
+            try:
+                started_iso = (
+                    datetime.strptime(stamp_match.group(1), "%Y%m%dT%H%M%S_%f")
+                    .replace(tzinfo=timezone.utc)
+                    .isoformat()
+                )
+            except ValueError:
+                started_iso = ""
+        if _holder_alive(pid, started_iso) is not False:
             continue
         data["acceptance"] = "ABORTED"
         data["tier0_gate"] = "FAIL"
@@ -1516,9 +2443,11 @@ def build_sector_commands(
             sector = _with_repair_steps(sector, steps)
         return repair_commands(sector, dates), ""
     if args.mode == "catch-up":
-        cmds, missing = catch_up_commands(reg, sector, target, force=args.force)
-        note = f"missing_dates={len(missing)}" if missing else "up_to_date"
-        return cmds, note
+        plan = build_catch_up_plan(
+            reg, sector, target, force=args.force,
+            live_completed_session=getattr(args, "live_session", None),
+        )
+        return plan.all_commands, plan_note(plan)
     # daily
     daily_cmds: list[list[str]] = []
     if args.cadence == "weekly":
@@ -1542,18 +2471,24 @@ def _with_repair_steps(sector: Sector, steps: list[str]) -> Sector:
 
 
 def last_n_dates(reg: Registry, target: str, n: int) -> list[str]:
+    """The most recent `n` calendar trading sessions ending at `target`.
+
+    Pure calendar walk-back (never published-evidence dates): after a multi-day
+    publishing outage, published dirs would point --repair at stale pre-outage
+    dates instead of the sessions that actually need attention. `reg` is kept in
+    the signature for call-site symmetry; the rule-based calendar (plus the
+    registry-declared ad-hoc closures already loaded) is authoritative here.
+    """
+    del reg  # calendar-only by design (see docstring)
     if n < 1:
         raise ValueError(f"last_n_dates requires n >= 1, got {n}")
-    known = [d for d in known_trading_dates(reg) if d <= target]
-    if len(known) >= n:
-        return known[-n:]
-    out = set(known)
+    out: list[str] = []
     cur = _to_date(target)
     while len(out) < n and cur > _to_date("2000-01-01"):
         if is_trading_day(cur):
-            out.add(cur.isoformat())
+            out.append(cur.isoformat())
         cur -= timedelta(days=1)
-    return sorted(out)[-n:]
+    return sorted(out)
 
 
 def finalize_result(
@@ -1563,36 +2498,17 @@ def finalize_result(
     target: str,
     mode: str,
     dry_run: bool,
-    catch_up_dates: list[str] | None = None,
 ) -> RunResult:
-    """Apply strict artifact verification (daily/catch-up) and optional-sector downgrade.
+    """Apply strict artifact verification (daily) and optional-sector downgrade.
 
-    Daily verifies the single target date. Catch-up verifies EVERY date it attempted
-    (finding 3): each filled gap must have an artifact that exists, has rows, carries
-    oos/gate-valid rows where required, and whose internal as-of column matches that
-    folder date. A single unverified filled date fails the sector -- catch-up is not
-    'done' just because the newest date landed.
+    Daily verifies the single target date. Catch-up verification happens INLINE in
+    run_catch_up_sector (target strictly, each backfill date immediately after its
+    own run, best-effort), so only the optional-sector downgrade applies here --
+    re-verifying at the end would compare a global latest-run manifest against the
+    wrong (oldest) date under current-first/newest-first execution order.
     """
-    if not dry_run and res.status in {"PASS", "UP_TO_DATE"}:
-        reasons: list[str] = []
-        if mode == "daily":
-            _, reasons = verify_published_artifact(sector, target)
-        elif mode == "catch-up":
-            dates_to_verify = catch_up_dates if catch_up_dates else [target]
-            # Most sector health manifests are global "latest run" files rather than
-            # date-partitioned artifacts. After a multi-date catch-up they describe only
-            # the final command, so comparing that one manifest date against every earlier
-            # gap creates false failures. Verify every CSV semantically and apply the global
-            # manifest exactly once, to the final attempted date.
-            manifest_date = dates_to_verify[-1]
-            for iso_date in dates_to_verify:
-                ok_date, date_reasons = verify_published_artifact_for_date(
-                    sector,
-                    iso_date,
-                    verify_manifest=iso_date == manifest_date,
-                )
-                if not ok_date:
-                    reasons.extend(date_reasons)
+    if not dry_run and mode == "daily" and res.status in {"PASS", "UP_TO_DATE"}:
+        _, reasons = verify_published_artifact(sector, target)
         if reasons:
             res.status = "FAIL"
             res.note = (res.note + "; " if res.note else "") + "artifact_verify_failed: " + "; ".join(reasons)
@@ -1622,7 +2538,6 @@ def run_tier0(
 ) -> dict[str, RunResult]:
     results: dict[str, RunResult] = {}
     lock = threading.Lock()
-    empty_status = "UP_TO_DATE" if args.mode == "catch-up" else "NOTE"
 
     def record_progress(res: RunResult) -> None:
         """Persist each completed sector while the master is still RUNNING.
@@ -1650,10 +2565,17 @@ def run_tier0(
 
     def run_lane(members: list[Sector]) -> None:
         for sector in members:
-            # Capture the missing dates BEFORE running so catch-up can verify every date it
-            # attempts (finding 3); recomputing post-run would show them as no-longer-missing.
-            catch_up_dates = missing_trading_dates(reg, sector, target) if args.mode == "catch-up" else None
-            commands, note = build_sector_commands(reg, sector, args, target, repair_map)
+            plan: CatchUpPlan | None = None
+            if args.mode == "catch-up":
+                # CURRENT-TARGET-FIRST plan; verification happens inline in
+                # run_catch_up_sector (per date, immediately after each run).
+                plan = build_catch_up_plan(
+                    reg, sector, target, force=args.force,
+                    live_completed_session=getattr(args, "live_session", None),
+                )
+                commands, note = plan.all_commands, plan_note(plan)
+            else:
+                commands, note = build_sector_commands(reg, sector, args, target, repair_map)
             cmd_hash = _command_hash(commands)
             content_hash = _content_hash(sector, args.registry)
             if (
@@ -1668,14 +2590,16 @@ def run_tier0(
                 record_progress(res)
                 log(f"  [{sector.name}] SKIPPED_RESUME (prior PASS matched)")
                 continue
-            res = run_commands(sector, commands, run_dir=run_dir, net_sem=net_sem,
-                               dry_run=args.dry_run, empty_status=empty_status, log=log)
-            res.note = note
+            if plan is not None and not args.dry_run:
+                res = run_catch_up_sector(reg, sector, plan, run_dir=run_dir, net_sem=net_sem, log=log)
+            else:
+                res = run_commands(sector, commands, run_dir=run_dir, net_sem=net_sem,
+                                   dry_run=args.dry_run, empty_status="NOTE", log=log)
+            res.note = "; ".join(part for part in (note, res.note) if part)
             res.command_hash = cmd_hash
             res.content_hash = content_hash
             _set_artifact(sector, res, target, dry_run=args.dry_run)
-            finalize_result(sector, res, target=target, mode=args.mode, dry_run=args.dry_run,
-                            catch_up_dates=catch_up_dates)
+            finalize_result(sector, res, target=target, mode=args.mode, dry_run=args.dry_run)
             record_progress(res)
 
     workers = max(1, len(lanes))
@@ -1714,6 +2638,19 @@ def tier0_gate(
         if state is None or state.status not in HEALTHY_STATES:
             failing.append(sector.name)
     return (not failing), failing
+
+
+def _gate_manifest_value(gate_ok: bool, ignore_gate: bool) -> str:
+    """Sealed-manifest tier0_gate value: PASS | BYPASSED | FAIL.
+
+    BYPASSED (gate failed but --ignore-gate deliberately ran the portfolio anyway)
+    must survive into the FINAL manifest -- rewriting it to FAIL made 'gate failed,
+    portfolio skipped' indistinguishable from 'gate failed, run anyway' for any
+    consumer not also joining on the ignore_gate flag.
+    """
+    if gate_ok:
+        return "PASS"
+    return "BYPASSED" if ignore_gate else "FAIL"
 
 
 def compute_overall(
@@ -1774,22 +2711,77 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="Print the command matrix; execute nothing (manifest isolated under runs_dryrun/).")
     p.add_argument("--ignore-gate", action="store_true", help="Run portfolio even if the Tier-0 gate fails (required for partial runs that exclude required sectors).")
     p.add_argument("--lock-stale-sec", type=int, default=DEFAULT_LOCK_STALE_SEC, help="Override a global orchestration lock older than this many seconds.")
+    p.add_argument("--mark-gap", default="", metavar="SECTOR:DATE[:REASON]",
+                   help="Mark one backfill date as a permanent gap (tombstone) and exit; catch-up will stop retrying it.")
+    p.add_argument("--clear-gap", default="", metavar="SECTOR:DATE",
+                   help="Clear a permanent-gap marker / failure record and exit.")
     p.add_argument("--selftest", action="store_true", help="In-process validation of registry/date-math/scheduling/repair; no subprocess.")
     return p.parse_args(argv)
 
 
 def resolve_mode(args: argparse.Namespace) -> None:
-    """Resolve the effective mode and reject conflicting mode flags (finding 14)."""
+    """Resolve the effective mode and reject conflicting mode flags (finding 14).
+
+    --mode health-check participates in the conflict check: silently rewriting
+    'health-check --catch-up' into an EXECUTING catch-up run would launch real
+    sector subprocesses under a read-only intent.
+    """
     explicit_backfill = args.mode == "backfill"
-    conflicts = [name for name, on in (("--repair", bool(args.repair)), ("--catch-up", args.catch_up), ("--mode backfill", explicit_backfill)) if on]
+    explicit_health = args.mode == "health-check"
+    conflicts = [
+        name
+        for name, on in (
+            ("--repair", bool(args.repair)),
+            ("--catch-up", args.catch_up),
+            ("--mode backfill", explicit_backfill),
+            ("--mode health-check", explicit_health),
+        )
+        if on
+    ]
     if len(conflicts) > 1:
-        raise SystemExit(f"conflicting mode flags: {conflicts}; choose exactly one of --repair / --catch-up / --mode backfill")
-    if args.cadence == "weekly" and (args.repair or args.catch_up or explicit_backfill):
+        raise SystemExit(
+            f"conflicting mode flags: {conflicts}; choose exactly one of "
+            f"--repair / --catch-up / --mode backfill / --mode health-check"
+        )
+    if args.cadence == "weekly" and (args.repair or args.catch_up or explicit_backfill or explicit_health):
         raise SystemExit("--cadence weekly only applies to daily mode")
     if args.repair:
         args.mode = "repair"
     elif args.catch_up:
         args.mode = "catch-up"
+
+
+def handle_gap_marker_cli(reg: Registry, args: argparse.Namespace) -> int:
+    """--mark-gap / --clear-gap: operator tombstone management; no run happens."""
+    if args.mark_gap and args.clear_gap:
+        raise SystemExit("--mark-gap and --clear-gap are mutually exclusive")
+    spec = args.mark_gap or args.clear_gap
+    parts = [p.strip() for p in spec.split(":")]
+    if len(parts) < 2 or (args.clear_gap and len(parts) != 2):
+        raise SystemExit(f"invalid gap spec {spec!r}; expected SECTOR:DATE[:REASON]")
+    sector_name, iso_date = parts[0], parse_iso(parts[1])
+    if sector_name not in reg.names:
+        raise SystemExit(f"unknown sector {sector_name!r}; valid={reg.names}")
+    with _GAP_MARKER_LOCK:
+        markers = load_gap_markers()
+        if args.mark_gap:
+            reason = ":".join(parts[2:]).strip() or "operator-marked permanent gap"
+            sectors = markers.setdefault("sectors", {})
+            sectors.setdefault(sector_name, {})[iso_date] = {
+                "failures": int(
+                    (sectors.get(sector_name, {}).get(iso_date) or {}).get("failures", 0)
+                ),
+                "permanent": True,
+                "reason": reason,
+                "source": "operator",
+                "marked_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            print(f"marked permanent gap: {sector_name} {iso_date} ({reason})")
+        else:
+            clear_gap_record(markers, sector_name, iso_date)
+            print(f"cleared gap record: {sector_name} {iso_date}")
+        save_gap_markers(markers)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1798,6 +2790,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_selftest()
     reg = load_registry(args.registry)
     validate_registry_paths(reg)
+    if args.mark_gap or args.clear_gap:
+        return handle_gap_marker_cli(reg, args)
     if args.repair_days is None:
         args.repair_days = reg.repair_days
     if args.repair_days < 1:
@@ -1810,6 +2804,10 @@ def main(argv: list[str] | None = None) -> int:
     skip = [s.strip() for s in args.skip_sectors.split(",") if s.strip()]
     selected = select_sectors(reg, only, skip)
     target = resolve_target_date(args.as_of)
+    # Sample the live completed session ONCE, next to target resolution, so a run
+    # spanning the 17:00 ET close cannot reclassify the intended current-session
+    # command as historical at command-build time hours later.
+    args.live_session = latest_completed_trading_session()
 
     def log(msg: str) -> None:
         print(msg, flush=True)
@@ -1878,6 +2876,8 @@ def main(argv: list[str] | None = None) -> int:
         overall = "FAIL"
         gate_ok = False
         failing: list[str] = []
+        freshness: dict[str, list[dict[str, Any]]] = {}
+        freshness_blocking_required: list[str] = []
         try:
             lanes = plan_lanes(reg, tier0_selected)
             results = run_tier0(reg, lanes, args, target, repair_map, run_dir, resume_records, net_sem, log)
@@ -1901,22 +2901,33 @@ def main(argv: list[str] | None = None) -> int:
             if tier1_selected and args.mode in {"daily", "catch-up"}:
                 if gate_ok or args.ignore_gate:
                     for sector in tier1_selected:
-                        catch_up_dates = missing_trading_dates(reg, sector, target) if args.mode == "catch-up" else None
-                        commands, note = build_sector_commands(reg, sector, args, target, repair_map)
-                        res = run_commands(sector, commands, run_dir=run_dir, net_sem=net_sem,
-                                           dry_run=False, empty_status="NOTE", log=log)
-                        res.note = note
+                        if args.mode == "catch-up":
+                            # CURRENT-TARGET-FIRST: the current book is attempted
+                            # before (and independently of) any historical backfill.
+                            plan = build_catch_up_plan(
+                                reg, sector, target, force=args.force,
+                                live_completed_session=getattr(args, "live_session", None),
+                            )
+                            commands, note = plan.all_commands, plan_note(plan)
+                            res = run_catch_up_sector(
+                                reg, sector, plan, run_dir=run_dir, net_sem=net_sem, log=log
+                            )
+                        else:
+                            commands, note = build_sector_commands(reg, sector, args, target, repair_map)
+                            res = run_commands(sector, commands, run_dir=run_dir, net_sem=net_sem,
+                                               dry_run=False, empty_status="NOTE", log=log)
+                        res.note = "; ".join(part for part in (note, res.note) if part)
                         res.command_hash = _command_hash(commands)
                         res.content_hash = _content_hash(sector, args.registry)
                         _set_artifact(sector, res, target, dry_run=False)
-                        finalize_result(sector, res, target=target, mode=args.mode, dry_run=False,
-                                        catch_up_dates=catch_up_dates)
+                        finalize_result(sector, res, target=target, mode=args.mode, dry_run=False)
                         results[sector.name] = res
                         write_master_manifest(
                             run_dir,
                             {"run_stamp": run_stamp, "mode": args.mode, "cadence": args.cadence,
                              "target": target, "master_pid": os.getpid(), "dry_run": False,
-                             "acceptance": "RUNNING", "tier0_gate": "PASS" if gate_ok else "BYPASSED",
+                             "acceptance": "RUNNING",
+                             "tier0_gate": _gate_manifest_value(gate_ok, args.ignore_gate),
                              "tier0_failing_required": failing, "sectors": _result_rows(results)},
                         )
                 else:
@@ -1931,15 +2942,27 @@ def main(argv: list[str] | None = None) -> int:
                     log(f"  [{sector.name}] NOTE: {note}")
 
             overall = compute_overall(selected, results, mode=args.mode, gate_ok=gate_ok, ignore_gate=args.ignore_gate)
-        finally:
-            manifest_path = write_master_manifest(
-                run_dir,
-                {"run_stamp": run_stamp, "mode": args.mode, "cadence": args.cadence, "target": target,
-                 "master_pid": os.getpid(), "dry_run": False, "acceptance": overall,
-                 "tier0_gate": "PASS" if gate_ok else "FAIL",
-                 "tier0_failing_required": failing, "ignore_gate": bool(args.ignore_gate),
-                 "sectors": _result_rows(results)},
+            # Data-freshness sentinel: read-only surveillance of upstream feeds, run
+            # after the sectors so it reports the post-run state. Probes never block
+            # publication; only a required probe that is STALE flips the acceptance.
+            freshness = evaluate_freshness(reg.sectors, target, log)
+            overall, freshness_blocking_required = apply_freshness_consequences(
+                freshness, results, overall, log,
+                selected_names={s.name for s in selected},
             )
+        finally:
+            payload: dict[str, Any] = {
+                "run_stamp": run_stamp, "mode": args.mode, "cadence": args.cadence, "target": target,
+                "master_pid": os.getpid(), "dry_run": False, "acceptance": overall,
+                "tier0_gate": _gate_manifest_value(gate_ok, bool(args.ignore_gate)),
+                "tier0_failing_required": failing, "ignore_gate": bool(args.ignore_gate),
+                "sectors": _result_rows(results, freshness=freshness),
+            }
+            if freshness:
+                payload["freshness"] = freshness
+            if freshness_blocking_required:
+                payload["freshness_blocking_required"] = freshness_blocking_required
+            manifest_path = write_master_manifest(run_dir, payload)
     log(f"master_manifest: {manifest_path}")
     log(f"OVERALL: {overall}")
     return 0 if overall == "PASS" else 1
@@ -1952,6 +2975,7 @@ FAKE_REGISTRY = {
     "defaults": {
         "timeout_sec": 60, "retries": 0, "max_concurrent_network_lanes": 2,
         "catch_up_gap_backfill_threshold": 3, "catch_up_window_days": 45, "repair_days": 5,
+        "permanent_gap_after_failures": 2, "market_closures": [],
         "calendar_reference_sectors": ["alpha", "defense_x"],
     },
     "group_order": {"grp_tech": ["alpha", "beta"], "grp_ind": ["defense_x", "mach_x"]},
@@ -1960,6 +2984,7 @@ FAKE_REGISTRY = {
          "entry_script": "a/run.py", "date_flag": "--asof", "args_template": ["--asof", "{date}"],
          "force_args": ["--force-refresh"], "publish_glob": "output/a/{date}/a.csv", "publish_date_format": "%Y-%m-%d",
          "oos_column": "oos_score_valid_flag", "require_oos_valid": True, "staleness_tolerance_days": 3,
+         "backfill_window_days": 5,
          "health": {"manifest": "output/a/m.json", "status_keys": ["status"]},
          "daily_post_steps": [{"script": "a/promote.py", "args_template": ["--asof", "{date}"]}],
          "backfill": {"script": "a/bf.py", "args_template": ["--start", "{from}", "--end", "{to}"], "per_date": False},
@@ -1980,7 +3005,16 @@ FAKE_REGISTRY = {
          "weekly_pre_steps": [{"script": "d/snap.py", "args_template": ["--end-date", "{date}"]}],
          "backfill": {"script": "d/19.py", "args_template": ["--start-date", "{from}", "--end-date", "{to}", "--membership-mode", "pit"], "per_date": False},
          "repair": {"date_flag": "--asof", "selection_flag": "", "steps": ["13", "17"], "rebuild_steps": [],
-                    "extra_args": ["--positioning-through-publish-only"]}},
+                    "extra_args": ["--positioning-through-publish-only"]},
+         "freshness_probes": [
+             {"name": "borrow_age", "kind": "sqlite_max_date",
+              "target": {"db": "fixture/f.sqlite", "sql": "SELECT MAX(asof_date) FROM t"},
+              "tolerance_days": 10, "warn_lead_days": 3},
+             {"name": "13f_period", "kind": "deadline_schedule",
+              "target": {"db": "fixture/f.sqlite", "sql": "SELECT MAX(period_of_report) FROM t",
+                         "cadence": "quarterly", "deadline_days": 45, "publication_lag_days": 35},
+              "tolerance_days": 0, "warn_lead_days": 7, "required": True},
+         ]},
         {"name": "mach_x", "db_group": "grp_ind", "dependency_tier": 0, "required": False, "network": True,
          "entry_script": "m/run.py", "date_flag": "--asof", "args_template": ["--asof", "{date}"],
          "force_args": ["--force"], "publish_glob": "output/m/{date}/m.csv", "publish_date_format": "%Y-%m-%d",
@@ -1990,9 +3024,11 @@ FAKE_REGISTRY = {
          "repair": {"date_flag": "--asof", "selection_flag": "--only", "steps": ["12", "13"], "rebuild_steps": ["06a", "10b"], "extra_args": []}},
         {"name": "port_x", "db_group": "portfolio", "dependency_tier": 1, "required": True, "network": True,
          "entry_script": "p/18.py", "date_flag": "--as-of", "args_template": ["--as-of", "{date}"],
-         "force_args": ["--force"], "publish_glob": "p/output/runs/{date}/stocks_scores.csv", "publish_date_format": "%Y-%m-%d",
+         "force_args": ["--force"], "publish_glob": "p/output/runs/{date}/final/final_manifest.json", "publish_date_format": "%Y-%m-%d",
          "oos_column": None, "require_oos_valid": False, "staleness_tolerance_days": 10,
-         "health": {"manifest": "p/output/runs/{date}/manifest.json", "status_keys": ["hard_gate_acceptance"]},
+         "publish_epoch": "2026-07-02",
+         "health": {"manifest": "p/output/runs/{date}/orchestration_meta.json", "status_keys": ["acceptance"],
+                    "healthy_values": ["PASS", "PASS_WITH_ADVISORY_WARNINGS"]},
          "backfill": {"script": "", "args_template": [], "per_date": False, "note": "stage11 not auto-run"},
          "repair": None},
     ],
@@ -2013,6 +3049,13 @@ def run_selftest() -> int:
     ok("registry_parse_sector_count", len(reg.sectors) == 5)
     ok("registry_defaults", reg.max_concurrent_network_lanes == 2 and reg.catch_up_gap_backfill_threshold == 3)
     ok("registry_catch_up_window", reg.catch_up_window_days == 45)
+    ok("registry_permanent_gap_threshold", reg.permanent_gap_after_failures == 2)
+    ok("registry_publish_epoch_parsed", reg.by_name("port_x").publish_epoch == "2026-07-02")
+    ok("registry_backfill_window_parsed",
+       reg.by_name("alpha").backfill_window_days == 5 and reg.by_name("beta").backfill_window_days is None)
+    ok("registry_backfill_window_default_tolerance",
+       sector_backfill_window_days(reg.by_name("beta")) == 3
+       and sector_backfill_window_days(reg.by_name("alpha")) == 5)
     ok("registry_group_order", reg.group_order["grp_ind"] == ["defense_x", "mach_x"])
     port = reg.by_name("port_x")
     ok("registry_tier1", port.dependency_tier == 1 and port.date_flag == "--as-of")
@@ -2227,8 +3270,11 @@ def run_selftest() -> int:
     except ValueError:
         ok("select_reject_empty", True)
 
-    # --- conflicting mode flags / cadence ---
-    for flags in (["--repair", "alpha", "--catch-up"], ["--mode", "backfill", "--catch-up"], ["--cadence", "weekly", "--catch-up"]):
+    # --- conflicting mode flags / cadence (health-check participates: it must never
+    # silently become an executing catch-up run) ---
+    for flags in (["--repair", "alpha", "--catch-up"], ["--mode", "backfill", "--catch-up"],
+                  ["--cadence", "weekly", "--catch-up"], ["--mode", "health-check", "--catch-up"],
+                  ["--mode", "health-check", "--repair", "alpha"]):
         a = parse_args(flags)
         try:
             resolve_mode(a)
@@ -2280,7 +3326,8 @@ def run_selftest() -> int:
             entry_script="x/run.py", date_flag="--asof", args_template=["--asof", "{date}"],
             force_args=[], publish_glob="pub/{date}/t.csv", publish_date_format="%Y-%m-%d",
             oos_column="oos_score_valid_flag", gate_column=None, require_oos_valid=True,
-            staleness_tolerance_days=3, health=HealthSpec(manifest=None, status_keys=[]),
+            staleness_tolerance_days=3, backfill_window_days=None, publish_epoch=None,
+            health=HealthSpec(manifest=None, status_keys=[]),
             backfill=None, repair=None, weekly_pre_steps=[], daily_post_steps=[], timeout_sec=60, retries=0,
         )
         base.update(over)
@@ -2301,34 +3348,16 @@ def run_selftest() -> int:
         blank_path.write_text("asof_date,oos_score_valid_flag,ticker\n,1,T0\n", encoding="utf-8")
         vblank = verify_published_artifact_for_date(fsec, "2026-07-12")
         ok("finding4_blank_row_date_fails", not vblank[0] and any("blank" in r for r in vblank[1]))
-        # catch-up verifies EVERY attempted date: a single bad date fails the whole sector
-        res_cu = RunResult("fsec", "PASS")
-        finalize_result(fsec, res_cu, target="2026-07-17", mode="catch-up", dry_run=False,
-                        catch_up_dates=["2026-07-15", "2026-07-16", "2026-07-14"])
-        ok("finding3_catchup_all_dates_checked", res_cu.status == "FAIL" and "2026-07-14" in res_cu.note)
-        res_ok = RunResult("fsec", "PASS")
-        finalize_result(fsec, res_ok, target="2026-07-17", mode="catch-up", dry_run=False,
-                        catch_up_dates=["2026-07-15", "2026-07-16", "2026-07-17"])
-        ok("finding3_catchup_all_present_pass", res_ok.status == "PASS")
-
-        # One global latest-run manifest must be checked against the final catch-up date,
-        # not falsely compared with every earlier artifact.
+        # finalize_result (daily) verifies the single target; catch-up verification is
+        # inline in run_catch_up_sector (covered by the catch-up policy block below).
+        res_daily_bad = RunResult("fsec", "PASS")
+        finalize_result(fsec, res_daily_bad, target="2026-07-14", mode="daily", dry_run=False)
+        ok("daily_finalize_unverified_target_fails", res_daily_bad.status == "FAIL")
+        res_daily_ok = RunResult("fsec", "PASS")
+        finalize_result(fsec, res_daily_ok, target="2026-07-16", mode="daily", dry_run=False)
+        ok("daily_finalize_verified_target_pass", res_daily_ok.status == "PASS")
         man_dir = tmp_root / "mani"
         man_dir.mkdir(parents=True, exist_ok=True)
-        (man_dir / "global.json").write_text(
-            json.dumps({"status": "PASS", "asof": "2026-07-17"}), encoding="utf-8"
-        )
-        fsec_global = _sector(health=HealthSpec(manifest="mani/global.json", status_keys=["status"]))
-        res_global = RunResult("fsec", "PASS")
-        finalize_result(
-            fsec_global,
-            res_global,
-            target="2026-07-17",
-            mode="catch-up",
-            dry_run=False,
-            catch_up_dates=["2026-07-15", "2026-07-16", "2026-07-17"],
-        )
-        ok("finding3_global_manifest_checked_once", res_global.status == "PASS")
 
         # finding 4: empty-asof manifest is NOT date-verifying -> artifact date column must verify
         (man_dir / "empty_2026-07-16.json").write_text(json.dumps({"status": "PASS", "asof": ""}), encoding="utf-8")
@@ -2350,10 +3379,296 @@ def run_selftest() -> int:
         fsec_wrong = _sector(health=HealthSpec(manifest="mani/wrong_{date}.json", status_keys=["status"]))
         vwrong = verify_published_artifact_for_date(fsec_wrong, "2026-07-16")
         ok("finding4_manifest_asof_mismatch_fails", not vwrong[0] and any("manifest asof=2026-07-10" in r for r in vwrong[1]))
+        # M10: healthy_values set -- PASS_WITH_ADVISORY_WARNINGS healthy only when declared
+        (man_dir / "advisory_2026-07-16.json").write_text(
+            json.dumps({"acceptance": "PASS_WITH_ADVISORY_WARNINGS", "run_as_of": "2026-07-16"}),
+            encoding="utf-8",
+        )
+        fsec_adv = _sector(health=HealthSpec(
+            manifest="mani/advisory_{date}.json", status_keys=["acceptance"],
+            healthy_values=["PASS", "PASS_WITH_ADVISORY_WARNINGS"]))
+        st_adv, asof_adv = read_manifest(fsec_adv, "2026-07-16")
+        ok("m10_advisory_value_set_healthy", st_adv == "PASS" and asof_adv == "2026-07-16")
+        fsec_strict = _sector(health=HealthSpec(manifest="mani/advisory_{date}.json", status_keys=["acceptance"]))
+        ok("m10_default_value_set_strict", read_manifest(fsec_strict, "2026-07-16")[0] == "FAIL")
     finally:
         _globals["PROJECT_ROOT"] = _saved_root
         import shutil
         shutil.rmtree(tmp_root, ignore_errors=True)
+
+    # --- catch-up policy (2026-08-07 redesign): current-first, bounded window,
+    # --- epoch exemption, permanent-gap markers, newest-first, best-effort backfill ---
+    cu_root = Path(tempfile.mkdtemp())
+    _saved_cu_root = _globals["PROJECT_ROOT"]
+    try:
+        _globals["PROJECT_ROOT"] = cu_root
+        markers_path = cu_root / "markers.json"
+        run_dir_cu = cu_root / "rundir"
+        target_cu = "2026-07-17"
+
+        def _publish(sec: Sector, iso: str, rows: int = 2) -> None:
+            parent, filename = publish_dir_root(sec)
+            d = parent / iso
+            d.mkdir(parents=True, exist_ok=True)
+            with (d / filename).open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["asof_date", "oos_score_valid_flag", "ticker"])
+                for i in range(rows):
+                    writer.writerow([iso, "1", f"T{i}"])
+
+        def _mk_runner(fail_dates: set[str], publish_sec: Sector):
+            """No-subprocess command runner: publishes the date's artifact on success."""
+            def _runner(command: list[str]) -> int:
+                date_tok = next((t for t in command if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t)), None)
+                if date_tok is None:
+                    return 0
+                if date_tok in fail_dates:
+                    return 1
+                if "post.py" not in " ".join(command):
+                    _publish(publish_sec, date_tok)
+                return 0
+            return _runner
+
+        # gap report: window bounded by tolerance; historical gaps surfaced not run
+        cusec = _sector(name="cusec", publish_glob="cu/{date}/t.csv",
+                        daily_post_steps=[{"script": "x/post.py", "args_template": ["--asof", "{date}"]}])
+        for d in ("2026-07-06", "2026-07-13"):
+            _publish(cusec, d)
+        rep = sector_gap_report(reg, cusec, target_cu, markers={"sectors": {}})
+        ok("cu_target_missing_detected", rep.target_missing)
+        ok("cu_window_bounded_by_tolerance",
+           rep.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"])
+        ok("cu_newest_first_ordering", rep.backfill_missing == sorted(rep.backfill_missing, reverse=True))
+        ok("cu_historical_gaps_surfaced_not_run",
+           rep.historical_gaps == ["2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10"])
+        cusec_w = _sector(name="cusec", publish_glob="cu/{date}/t.csv", backfill_window_days=7)
+        rep_w = sector_gap_report(reg, cusec_w, target_cu, markers={"sectors": {}})
+        ok("cu_backfill_window_days_override",
+           "2026-07-10" in rep_w.backfill_missing and "2026-07-09" not in rep_w.backfill_missing)
+
+        # publish-convention epoch: pre-epoch dates exempt from missing-detection
+        cusec_e = _sector(name="cusec", publish_glob="cu/{date}/t.csv", publish_epoch="2026-07-13")
+        rep_e = sector_gap_report(reg, cusec_e, target_cu, markers={"sectors": {}})
+        ok("cu_epoch_exempts_preepoch_dates",
+           rep_e.historical_gaps == [] and rep_e.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"])
+
+        # permanent-gap markers: auto-tombstone after N failures; respected by scans
+        mk = {"sectors": {}}
+        record_gap_failure(mk, "cusec", "2026-07-15", "rc=1", auto_permanent_after=2)
+        ok("cu_marker_first_failure_not_permanent", permanent_gap_dates(mk, "cusec") == set())
+        record_gap_failure(mk, "cusec", "2026-07-15", "rc=1", auto_permanent_after=2)
+        ok("cu_marker_auto_permanent_after_threshold", permanent_gap_dates(mk, "cusec") == {"2026-07-15"})
+        rep_m = sector_gap_report(reg, cusec, target_cu, markers=mk)
+        ok("cu_permanent_gap_not_retried",
+           "2026-07-15" not in rep_m.backfill_missing and rep_m.permanent_gaps == ["2026-07-15"])
+        clear_gap_record(mk, "cusec", "2026-07-15")
+        ok("cu_marker_cleared", permanent_gap_dates(mk, "cusec") == set())
+
+        # plan: CURRENT TARGET FIRST, then newest-first backfill, post steps per date
+        plan_cu = build_catch_up_plan(reg, cusec, target_cu, force=False,
+                                      live_completed_session=target_cu, markers={"sectors": {}})
+        ok("cu_plan_current_target_first",
+           plan_cu.target_missing and target_cu in " ".join(plan_cu.all_commands[0]))
+        ok("cu_plan_target_post_step", "post.py" in " ".join(plan_cu.all_commands[1]))
+        ok("cu_plan_backfill_newest_first",
+           plan_cu.backfill_dates == ["2026-07-16", "2026-07-15", "2026-07-14"])
+        ok("cu_plan_backfill_after_target",
+           all(target_cu in " ".join(c) for c in plan_cu.target_commands)
+           and plan_cu.all_commands[: len(plan_cu.target_commands)] == plan_cu.target_commands)
+        ok("cu_plan_historical_flag_on_backfill_only",
+           all("--historical-catchup" not in c for c in plan_cu.target_commands))
+
+        # native backfill route: chunked to <= threshold dates per command, newest chunk
+        # first, per-date post steps preserved on the backfill route too
+        cusec_bf = _sector(
+            name="cusec_bf", publish_glob="cubf/{date}/t.csv", backfill_window_days=10,
+            backfill=BackfillSpec(script="a/bf.py", args_template=["--start", "{from}", "--end", "{to}"], per_date=False),
+            daily_post_steps=[{"script": "x/post.py", "args_template": ["--asof", "{date}"]}],
+        )
+        _publish(cusec_bf, "2026-07-06")
+        plan_bf = build_catch_up_plan(reg, cusec_bf, target_cu, force=False,
+                                      live_completed_session=target_cu, markers={"sectors": {}})
+        ok("cu_native_backfill_chunked",
+           plan_bf.used_native_backfill and len(plan_bf.backfill_groups) == 3
+           and all(len(dates) <= reg.catch_up_gap_backfill_threshold for dates, _c in plan_bf.backfill_groups))
+        ok("cu_native_chunks_newest_first",
+           plan_bf.backfill_groups[0][0] == ("2026-07-15", "2026-07-16")
+           and plan_bf.backfill_groups[-1][0][0] == "2026-07-07")
+        ok("cu_native_chunk_post_steps",
+           sum("post.py" in " ".join(c) for c in plan_bf.backfill_groups[0][1]) == 2)
+
+        # execution: a failed backfill date NEVER fails the sector/master; the failed
+        # date is recorded per-date and its marker failure count persisted
+        cus_a = _sector(name="cus_a", publish_glob="cua/{date}/t.csv")
+        for d in ("2026-07-06", "2026-07-13"):
+            _publish(cus_a, d)
+        plan_a = build_catch_up_plan(reg, cus_a, target_cu, force=False,
+                                     live_completed_session=target_cu, markers={"sectors": {}})
+        res_a = run_catch_up_sector(reg, cus_a, plan_a, run_dir=run_dir_cu, net_sem=None,
+                                    log=lambda _m: None, markers_path=markers_path,
+                                    runner=_mk_runner({"2026-07-15"}, cus_a))
+        ok("cu_exec_backfill_failure_not_fatal", res_a.status == "PASS_WITH_BACKFILL_GAPS")
+        ok("cu_exec_current_book_published", (cu_root / "cua" / target_cu / "t.csv").exists())
+        ok("cu_exec_failed_date_recorded",
+           res_a.backfill is not None and set(res_a.backfill["failed"]) == {"2026-07-15"})
+        ok("cu_exec_backfill_gap_master_pass",
+           compute_overall([cus_a], {"cus_a": res_a}, mode="catch-up", gate_ok=True, ignore_gate=False) == "PASS")
+        ok("cu_exec_backfill_gap_gate_healthy", "PASS_WITH_BACKFILL_GAPS" in HEALTHY_STATES)
+        ok("cu_exec_marker_failure_persisted",
+           load_gap_markers(markers_path)["sectors"]["cus_a"]["2026-07-15"]["failures"] == 1)
+
+        # second failing night: up-to-date target + same gap -> auto-tombstone at the
+        # fake registry threshold (2), and the next scan skips the tombstoned date
+        plan_a2 = build_catch_up_plan(reg, cus_a, target_cu, force=False,
+                                      live_completed_session=target_cu,
+                                      markers=load_gap_markers(markers_path))
+        ok("cu_second_night_only_gap_remains",
+           not plan_a2.target_missing and plan_a2.backfill_dates == ["2026-07-15"])
+        res_a2 = run_catch_up_sector(reg, cus_a, plan_a2, run_dir=run_dir_cu, net_sem=None,
+                                     log=lambda _m: None, markers_path=markers_path,
+                                     runner=_mk_runner({"2026-07-15"}, cus_a))
+        ok("cu_exec_up_to_date_target_with_gap", res_a2.status == "PASS_WITH_BACKFILL_GAPS")
+        ok("cu_exec_marker_auto_permanent",
+           load_gap_markers(markers_path)["sectors"]["cus_a"]["2026-07-15"]["permanent"] is True)
+        plan_a3 = build_catch_up_plan(reg, cus_a, target_cu, force=False,
+                                      live_completed_session=target_cu,
+                                      markers=load_gap_markers(markers_path))
+        ok("cu_exec_tombstone_respected_next_scan",
+           plan_a3.backfill_dates == [] and plan_a3.permanent_gaps == ["2026-07-15"])
+
+        # execution: CURRENT-date failure fails the sector exactly like daily and
+        # skips backfill (no historical mutation on a failed night)
+        cus_b = _sector(name="cus_b", publish_glob="cub/{date}/t.csv")
+        for d in ("2026-07-06", "2026-07-13"):
+            _publish(cus_b, d)
+        plan_b = build_catch_up_plan(reg, cus_b, target_cu, force=False,
+                                     live_completed_session=target_cu, markers={"sectors": {}})
+        res_b = run_catch_up_sector(reg, cus_b, plan_b, run_dir=run_dir_cu, net_sem=None,
+                                    log=lambda _m: None, markers_path=markers_path,
+                                    runner=_mk_runner({target_cu}, cus_b))
+        ok("cu_exec_current_failure_fails_sector", res_b.status == "FAIL")
+        ok("cu_exec_current_failure_skips_backfill", res_b.return_codes == [1])
+
+        # fully current catch-up -> UP_TO_DATE (healthy), never NOTE/FAIL
+        cus_c = _sector(name="cus_c", publish_glob="cuc/{date}/t.csv")
+        _publish(cus_c, target_cu)
+        plan_c = build_catch_up_plan(reg, cus_c, target_cu, force=False,
+                                     live_completed_session=target_cu, markers={"sectors": {}})
+        ok("cu_plan_empty_when_current", plan_c.all_commands == [] and not plan_c.target_missing)
+        res_c = run_catch_up_sector(reg, cus_c, plan_c, run_dir=run_dir_cu, net_sem=None,
+                                    log=lambda _m: None, markers_path=markers_path,
+                                    runner=lambda _c: 1)  # must never be invoked
+        ok("cu_exec_up_to_date_healthy", res_c.status == "UP_TO_DATE" and res_c.return_codes == [])
+        ok("cu_up_to_date_master_pass",
+           compute_overall([cus_c], {"cus_c": res_c}, mode="catch-up", gate_ok=True, ignore_gate=False) == "PASS")
+
+        # published-but-unverifiable target fails closed
+        bad_dir = cu_root / "cud" / target_cu
+        bad_dir.mkdir(parents=True, exist_ok=True)
+        (bad_dir / "t.csv").write_text(
+            "asof_date,oos_score_valid_flag,ticker\n2026-07-10,1,T0\n", encoding="utf-8"
+        )
+        cus_d = _sector(name="cus_d", publish_glob="cud/{date}/t.csv")
+        plan_d = build_catch_up_plan(reg, cus_d, target_cu, force=False,
+                                     live_completed_session=target_cu, markers={"sectors": {}})
+        res_d = run_catch_up_sector(reg, cus_d, plan_d, run_dir=run_dir_cu, net_sem=None,
+                                    log=lambda _m: None, markers_path=markers_path,
+                                    runner=lambda _c: 0)
+        ok("cu_exec_unverifiable_target_fails", res_d.status == "FAIL")
+
+        # {date}-partitioned health manifests are verified PER backfill date (a FAIL
+        # per-date manifest turns that date into a recorded gap, not a sector FAIL)
+        cus_e = _sector(name="cus_e", publish_glob="cue/{date}/t.csv",
+                        health=HealthSpec(manifest="cuman/{date}/m.json", status_keys=["acceptance"]))
+        _publish(cus_e, "2026-07-13")
+        for iso, acc in (("2026-07-17", "PASS"), ("2026-07-16", "PASS"),
+                         ("2026-07-15", "PASS"), ("2026-07-14", "FAIL")):
+            meta_dir = cu_root / "cuman" / iso
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            (meta_dir / "m.json").write_text(
+                json.dumps({"acceptance": acc, "run_as_of": iso}), encoding="utf-8"
+            )
+        plan_e = build_catch_up_plan(reg, cus_e, target_cu, force=False,
+                                     live_completed_session=target_cu, markers={"sectors": {}})
+        res_e = run_catch_up_sector(reg, cus_e, plan_e, run_dir=run_dir_cu, net_sem=None,
+                                    log=lambda _m: None, markers_path=markers_path,
+                                    runner=_mk_runner(set(), cus_e))
+        ok("cu_perdate_manifest_checked",
+           res_e.status == "PASS_WITH_BACKFILL_GAPS"
+           and res_e.backfill is not None
+           and set(res_e.backfill["failed"]) == {"2026-07-14"}
+           and "manifest" in res_e.backfill["failed"]["2026-07-14"])
+
+        # JSON publish artifacts (portfolio final_manifest.json) are verified as JSON:
+        # compact serialization passes, internal run_as_of mismatch / invalid JSON fail
+        jsec = _sector(name="jsec", publish_glob="jout/{date}/final_manifest.json",
+                       oos_column=None, require_oos_valid=False,
+                       health=HealthSpec(manifest=None, status_keys=[]))
+        for iso, payload in (
+            ("2026-07-16", json.dumps({"acceptance": "PASS", "run_as_of": "2026-07-16"}, separators=(",", ":"))),
+            ("2026-07-15", json.dumps({"acceptance": "PASS", "run_as_of": "2026-07-10"})),
+            ("2026-07-14", "not-json{"),
+        ):
+            jdir = cu_root / "jout" / iso
+            jdir.mkdir(parents=True, exist_ok=True)
+            (jdir / "final_manifest.json").write_text(payload, encoding="utf-8")
+        ok("json_artifact_compact_verifies", verify_published_artifact_for_date(jsec, "2026-07-16")[0])
+        ok("json_artifact_internal_date_mismatch_fails",
+           not verify_published_artifact_for_date(jsec, "2026-07-15")[0])
+        ok("json_artifact_invalid_fails", not verify_published_artifact_for_date(jsec, "2026-07-14")[0])
+
+        # require_oos_valid is authoritative: a declared oos_column with the knob
+        # false (transportation's sealed zero-overlay shadow) must verify with flag=0
+        shadow = _sector(name="shadow", publish_glob="sh/{date}/t.csv", require_oos_valid=False)
+        sh_dir = cu_root / "sh" / "2026-07-16"
+        sh_dir.mkdir(parents=True, exist_ok=True)
+        (sh_dir / "t.csv").write_text(
+            "asof_date,oos_score_valid_flag,ticker\n2026-07-16,0,T0\n", encoding="utf-8"
+        )
+        ok("require_oos_valid_knob_authoritative", not _oos_required(shadow))
+        ok("shadow_zero_flag_artifact_verifies", verify_published_artifact_for_date(shadow, "2026-07-16")[0])
+    finally:
+        _globals["PROJECT_ROOT"] = _saved_cu_root
+        import shutil
+        shutil.rmtree(cu_root, ignore_errors=True)
+
+    # --- ad-hoc market closures: registry-declared, excluded from the calendar ---
+    closure_raw = {**FAKE_REGISTRY, "defaults": {**FAKE_REGISTRY["defaults"], "market_closures": ["2026-07-15"]}}
+    ctmp = Path(tempfile.mkdtemp()) / "closure.yaml"
+    ctmp.write_text(yaml.safe_dump(closure_raw), encoding="utf-8")
+    try:
+        creg = load_registry(ctmp)
+        ok("closure_parsed", creg.market_closures == ["2026-07-15"])
+        ok("closure_not_trading_day", not is_trading_day(date(2026, 7, 15)))
+        ok("closure_excluded_from_expected_sessions",
+           "2026-07-15" not in trading_dates_in_range(creg, "2026-07-13", "2026-07-17"))
+    finally:
+        load_registry(tmp)  # restore the plain fake registry's (empty) closure set
+    ok("closure_restored_after_reload", is_trading_day(date(2026, 7, 15)))
+
+    # --- explicit --as-of must be a real session ---
+    try:
+        resolve_target_date("2026-08-08")  # Saturday
+        ok("asof_reject_non_trading_day", False)
+    except SystemExit:
+        ok("asof_reject_non_trading_day", True)
+
+    # --- retry policy: success and TIMEOUT are terminal, other failures retry ---
+    ok("timeout_not_retried", not _should_retry_rc(124) and not _should_retry_rc(0) and _should_retry_rc(1))
+
+    # --- sealed-manifest gate value preserves the BYPASSED distinction ---
+    ok("gate_value_bypassed_preserved",
+       _gate_manifest_value(True, False) == "PASS"
+       and _gate_manifest_value(False, True) == "BYPASSED"
+       and _gate_manifest_value(False, False) == "FAIL")
+
+    # --- PID identity: a recycled PID cannot impersonate a dead holder ---
+    ok("holder_identity_no_timestamp_falls_back", _holder_alive(os.getpid(), "") is True)
+    if _pid_creation_time_utc(os.getpid()) is not None:
+        ok("holder_identity_recycled_pid_dead",
+           _holder_alive(os.getpid(), "2000-01-01T00:00:00+00:00") is False)
+        ok("holder_identity_current_pid_alive",
+           _holder_alive(os.getpid(), datetime.now(timezone.utc).isoformat(timespec="seconds")) is True)
 
     # --- finding 8: health-check subset semantics ---
     all_t0 = [s for s in reg.sectors if s.dependency_tier == 0]
@@ -2376,12 +3691,23 @@ def run_selftest() -> int:
     with OrchestrationLock(dead_lock, stale_after_sec=10 ** 9):  # dead PID -> override even though fresh
         ok("finding9_dead_pid_override", dead_lock.exists())
     live_lock = _lockdir / "live.lock"
-    live_lock.write_text(f"pid={os.getpid()} started_utc=2000-01-01T00:00:00+00:00\n", encoding="utf-8")
+    # A genuinely-live holder (matching start time) must NOT be overridden even when old.
+    live_started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    live_lock.write_text(f"pid={os.getpid()} started_utc={live_started}\n", encoding="utf-8")
     try:
-        with OrchestrationLock(live_lock, stale_after_sec=1):  # alive PID + old -> must NOT override
+        with OrchestrationLock(live_lock, stale_after_sec=1):  # alive PID -> must NOT override
             ok("finding9_live_pid_not_overridden", False)
     except RuntimeError:
         ok("finding9_live_pid_not_overridden", True)
+    # A RECYCLED pid (live process created long after the recorded holder started)
+    # is provably not the holder -> override even with a huge stale threshold.
+    if _pid_creation_time_utc(os.getpid()) is not None:
+        recycled_lock = _lockdir / "recycled.lock"
+        recycled_lock.write_text(
+            f"pid={os.getpid()} started_utc=2000-01-01T00:00:00+00:00\n", encoding="utf-8"
+        )
+        with OrchestrationLock(recycled_lock, stale_after_sec=10 ** 9):
+            ok("finding9_recycled_pid_overridden", True)
     orphan_lock = _lockdir / "orphan.lock"
     orphan_lock.write_text(
         f"pid=2000000000 started_utc=2000-01-01T00:00:00+00:00\nchildren={os.getpid()}\n",
@@ -2392,6 +3718,190 @@ def run_selftest() -> int:
             ok("finding9_live_orphan_child_blocks_override", False)
     except RuntimeError:
         ok("finding9_live_orphan_child_blocks_override", True)
+
+    # --- freshness sentinel: parse + validation ---
+    fr_def = reg.by_name("defense_x")
+    ok("freshness_parse_count", len(fr_def.freshness_probes) == 2)
+    fp_borrow = fr_def.freshness_probes[0]
+    ok("freshness_parse_fields",
+       fp_borrow.name == "borrow_age" and fp_borrow.kind == "sqlite_max_date"
+       and fp_borrow.tolerance_days == 10 and fp_borrow.warn_lead_days == 3 and not fp_borrow.required)
+    ok("freshness_parse_required_flag", fr_def.freshness_probes[1].required
+       and fr_def.freshness_probes[1].kind == "deadline_schedule")
+    ok("freshness_no_probes_default", reg.by_name("alpha").freshness_probes == [])
+    for bad_probe, label in (
+        ({"name": "x", "kind": "bogus", "target": {"db": "d", "sql": "s"}}, "bad_kind"),
+        ({"name": "x", "kind": "sqlite_max_date", "target": {"db": "d"}}, "missing_sql"),
+        ({"name": "x", "kind": "manifest_date", "target": {"path": "p"}}, "missing_key"),
+        ({"name": "x", "kind": "deadline_schedule", "target": {"db": "d", "sql": "s", "cadence": "weekly"}}, "bad_cadence"),
+        ({"name": "x", "kind": "sqlite_max_date", "target": {"db": "d", "sql": "s"}, "tolerance_days": -1}, "neg_tolerance"),
+        ({"name": "", "kind": "sqlite_max_date", "target": {"db": "d", "sql": "s"}}, "empty_name"),
+    ):
+        try:
+            _parse_freshness_probes("t", [bad_probe])
+            ok(f"freshness_reject_{label}", False)
+        except ValueError:
+            ok(f"freshness_reject_{label}", True)
+    try:
+        _parse_freshness_probes("t", [
+            {"name": "dup", "kind": "manifest_date", "target": {"path": "p", "key": "k"}},
+            {"name": "dup", "kind": "manifest_date", "target": {"path": "p", "key": "k"}},
+        ])
+        ok("freshness_reject_duplicate_names", False)
+    except ValueError:
+        ok("freshness_reject_duplicate_names", True)
+
+    # --- freshness sentinel: every kind + WARN/STALE/ERROR paths on real fixtures ---
+    fr_tmp = Path(tempfile.mkdtemp())
+    fdb = fr_tmp / "f.sqlite"
+    fcon = sqlite3.connect(fdb)
+    fcon.execute("CREATE TABLE obs (d TEXT)")
+    fcon.executemany("INSERT INTO obs VALUES (?)", [("2026-08-01",), ("2026-07-20",)])
+    fcon.execute("CREATE TABLE empty_obs (d TEXT)")
+    fcon.execute("CREATE TABLE q (p TEXT)")
+    fcon.execute("INSERT INTO q VALUES ('2026-03-31')")
+    fcon.execute("CREATE TABLE sm (s TEXT)")
+    fcon.execute("INSERT INTO sm VALUES ('2026-06-15')")
+    fcon.execute("CREATE TABLE sm2 (s TEXT)")
+    fcon.execute("INSERT INTO sm2 VALUES ('2026-07-15')")
+    fcon.commit()
+    fcon.close()
+
+    def _mk_probe(**over: Any) -> FreshnessProbe:
+        base: dict[str, Any] = dict(
+            name="p", kind="sqlite_max_date",
+            target={"db": str(fdb), "sql": "SELECT MAX(d) FROM obs"},
+            tolerance_days=10, warn_lead_days=3, required=False, notes="")
+        base.update(over)
+        return FreshnessProbe(**base)
+
+    try:
+        r_cur = evaluate_freshness_probe(_mk_probe(), "2026-08-05")
+        ok("freshness_sqlite_current",
+           r_cur["status"] == "CURRENT" and r_cur["latest"] == "2026-08-01" and r_cur["age_days"] == 4
+           and r_cur["threshold"] == 10)
+        ok("freshness_sqlite_warn_approaching",
+           evaluate_freshness_probe(_mk_probe(), "2026-08-09")["status"] == "WARN_APPROACHING")  # age 8, breach at 11
+        ok("freshness_sqlite_stale",
+           evaluate_freshness_probe(_mk_probe(), "2026-08-17")["status"] == "STALE")  # age 16 > 10
+        r_badsql = evaluate_freshness_probe(
+            _mk_probe(target={"db": str(fdb), "sql": "SELECT MAX(d) FROM missing_table"}), "2026-08-05")
+        ok("freshness_sqlite_error_bad_sql", r_badsql["status"] == "ERROR" and bool(r_badsql["detail"]))
+        ok("freshness_sqlite_error_missing_db",
+           evaluate_freshness_probe(
+               _mk_probe(target={"db": str(fr_tmp / "nope.sqlite"), "sql": "SELECT 1"}), "2026-08-05",
+           )["status"] == "ERROR")
+        ok("freshness_sqlite_error_null_date",
+           evaluate_freshness_probe(
+               _mk_probe(target={"db": str(fdb), "sql": "SELECT MAX(d) FROM empty_obs"}), "2026-08-05",
+           )["status"] == "ERROR")
+
+        fman = fr_tmp / "m.json"
+        fman.write_text(json.dumps({"meta": {"asof_date": "2026-08-01T00:00:00"}}), encoding="utf-8")
+        r_man = evaluate_freshness_probe(
+            _mk_probe(kind="manifest_date", target={"path": str(fman), "key": "meta.asof_date"}), "2026-08-05")
+        ok("freshness_manifest_current_dotted_key",
+           r_man["status"] == "CURRENT" and r_man["latest"] == "2026-08-01")
+        ok("freshness_manifest_error_missing_key",
+           evaluate_freshness_probe(
+               _mk_probe(kind="manifest_date", target={"path": str(fman), "key": "meta.nope"}), "2026-08-05",
+           )["status"] == "ERROR")
+        ok("freshness_manifest_error_missing_file",
+           evaluate_freshness_probe(
+               _mk_probe(kind="manifest_date", target={"path": str(fr_tmp / "no.json"), "key": "k"}), "2026-08-05",
+           )["status"] == "ERROR")
+
+        # deadline_schedule quarterly (13F shape): Q1 data satisfies until Q2's
+        # availability date quarter_end+45+35 = 2026-09-18; warn from 7 days before.
+        q_target = {"db": str(fdb), "sql": "SELECT MAX(p) FROM q",
+                    "cadence": "quarterly", "deadline_days": 45, "publication_lag_days": 35}
+
+        def _q_eval(t: str) -> dict[str, Any]:
+            return evaluate_freshness_probe(
+                _mk_probe(kind="deadline_schedule", target=q_target, tolerance_days=0, warn_lead_days=7), t)
+
+        r_q_cur = _q_eval("2026-08-05")
+        ok("freshness_deadline_quarterly_current",
+           r_q_cur["status"] == "CURRENT" and r_q_cur["threshold"] == "period>=2026-03-31")
+        ok("freshness_deadline_quarterly_warn", _q_eval("2026-09-12")["status"] == "WARN_APPROACHING")
+        r_q_stale = _q_eval("2026-09-20")
+        ok("freshness_deadline_quarterly_stale",
+           r_q_stale["status"] == "STALE" and r_q_stale["threshold"] == "period>=2026-06-30")
+
+        # deadline_schedule semi_monthly (FINRA shape): cycle 15th/EOM, pub lag 12
+        # + 7d grace -> the 07-15 cycle is required from 08-03.
+        def _sm_eval(table: str, t: str) -> dict[str, Any]:
+            return evaluate_freshness_probe(
+                _mk_probe(kind="deadline_schedule",
+                          target={"db": str(fdb), "sql": f"SELECT MAX(s) FROM {table}",
+                                  "cadence": "semi_monthly", "publication_lag_days": 12},
+                          tolerance_days=7, warn_lead_days=3), t)
+
+        r_sm_stale = _sm_eval("sm", "2026-08-05")   # latest 06-15 < required 07-15
+        ok("freshness_deadline_semimonthly_stale",
+           r_sm_stale["status"] == "STALE" and r_sm_stale["threshold"] == "period>=2026-07-15")
+        ok("freshness_deadline_semimonthly_current", _sm_eval("sm2", "2026-08-05")["status"] == "CURRENT")
+        ok("freshness_deadline_semimonthly_warn",    # 07-31 cycle due 08-19; 2 days out
+           _sm_eval("sm2", "2026-08-17")["status"] == "WARN_APPROACHING")
+
+        # hard probe timeout -> TimeoutError -> ERROR (exercised with a tiny budget)
+        try:
+            _call_with_timeout(lambda: time.sleep(0.5), 0.05)
+            ok("freshness_timeout_raises", False)
+        except TimeoutError:
+            ok("freshness_timeout_raises", True)
+
+        # sweep + summary line + per-sector scoping
+        fr_logs: list[str] = []
+        fsen = _sector(name="fsen", freshness_probes=[_mk_probe()])
+        fmap = evaluate_freshness([fsen, _sector(name="noprobe")], "2026-08-05", fr_logs.append)
+        ok("freshness_eval_map_scoped", list(fmap) == ["fsen"] and fmap["fsen"][0]["status"] == "CURRENT")
+        ok("freshness_summary_line_logged", any(msg.startswith("freshness: ") for msg in fr_logs))
+        no_probe_logs: list[str] = []
+        ok("freshness_eval_empty_without_probes",
+           evaluate_freshness([_sector(name="noprobe")], "2026-08-05", no_probe_logs.append) == {}
+           and no_probe_logs == [])
+
+        # consequences: a required probe that is STALE **or ERROR** forces FAIL with a
+        # FRESHNESS_BLOCKING note; everything else (non-required STALE/ERROR, WARN) is
+        # surveillance-only, and blocking is scoped to the run's selected sectors.
+        fr_state = {
+            "defense_x": [{"probe": "13f_period", "required": True, "status": "STALE"}],
+            "mach_x": [{"probe": "finra_cycle", "required": False, "status": "STALE"},
+                       {"probe": "borrow_age", "required": False, "status": "ERROR"}],
+        }
+        fr_results = {"defense_x": RunResult("defense_x", "PASS")}
+        cons_logs: list[str] = []
+        overall_fr, blocking_req = apply_freshness_consequences(fr_state, fr_results, "PASS", cons_logs.append)
+        ok("freshness_required_stale_forces_fail",
+           overall_fr == "FAIL" and blocking_req == ["defense_x:13f_period=STALE"])
+        ok("freshness_required_stale_note_marked",
+           "FRESHNESS_BLOCKING: 13f_period=STALE" in fr_results["defense_x"].note)
+        ok("freshness_required_stale_logged_loudly", any("FRESHNESS ERROR" in m for m in cons_logs))
+        overall_err, err_req = apply_freshness_consequences(
+            {"defense_x": [{"probe": "13f_period", "required": True, "status": "ERROR"}]},
+            {}, "PASS", cons_logs.append)
+        ok("freshness_required_error_blocks",
+           overall_err == "FAIL" and err_req == ["defense_x:13f_period=ERROR"])
+        overall_nr, blocking_nr = apply_freshness_consequences(
+            {"mach_x": fr_state["mach_x"]}, {}, "PASS", cons_logs.append)
+        ok("freshness_nonrequired_stale_never_blocks", overall_nr == "PASS" and blocking_nr == [])
+        overall_scoped, scoped_req = apply_freshness_consequences(
+            fr_state, {}, "PASS", cons_logs.append, selected_names={"mach_x"})
+        ok("freshness_unselected_sector_never_blocks",
+           overall_scoped == "PASS" and scoped_req == [])
+        overall_keep, _ = apply_freshness_consequences(fr_state, {}, "FAIL", cons_logs.append)
+        ok("freshness_existing_fail_kept", overall_keep == "FAIL")
+
+        # no-probes backward compatibility: manifest rows are byte-identical
+        rows_plain = _result_rows({"a": RunResult("a", "PASS")})
+        ok("freshness_rows_no_key_without_probes", "freshness" not in rows_plain[0])
+        rows_fr = _result_rows({"a": RunResult("a", "PASS")},
+                               freshness={"a": [{"probe": "p", "status": "CURRENT"}]})
+        ok("freshness_rows_attached_when_present", rows_fr[0]["freshness"][0]["probe"] == "p")
+    finally:
+        import shutil
+        shutil.rmtree(fr_tmp, ignore_errors=True)
 
     # --- real registry loads and every entry_script exists ---
     real = load_registry(DEFAULT_REGISTRY)
@@ -2407,6 +3917,15 @@ def run_selftest() -> int:
         == ["defense", "machinery", "transportation"],
     )
     ok("real_portfolio_tier1", real.by_name("portfolio_layer").dependency_tier == 1)
+    # M10: publish/health gate on end-of-run artifacts, with the advisory verdict healthy.
+    rport = real.by_name("portfolio_layer")
+    ok("m10_real_portfolio_publish_final_manifest",
+       rport.publish_glob.endswith("/final/final_manifest.json"))
+    ok("m10_real_portfolio_health_orchestration_meta",
+       rport.health.manifest is not None
+       and rport.health.manifest.endswith("orchestration_meta.json")
+       and rport.health.status_keys == ["acceptance"]
+       and "PASS_WITH_ADVISORY_WARNINGS" in rport.health.healthy_values)
     rdef = real.by_name("defense")
     ok("real_defense_weekly_no_promotion", not rdef.weekly_pre_steps)
     rbio = real.by_name("biotech")
@@ -2430,6 +3949,66 @@ def run_selftest() -> int:
        and "daily" in rsemi.backfill.args_template
        and "--include-stage11-survivorship-panel" in rsemi.backfill.args_template)
     ok("real_semi_repair_rebuild", rsemi.repair is not None and bool(rsemi.repair.rebuild_steps))
+    # freshness sentinel seeds: probes parse and carry the intended shape.
+    ok("real_defense_freshness_probe_names",
+       {p.name for p in rdef.freshness_probes}
+       == {"ibkr_borrow_age", "finra_short_interest_cycle", "institutional_13f_period"})
+    p13f = next(p for p in rdef.freshness_probes if p.name == "institutional_13f_period")
+    ok("real_defense_13f_probe_required_deadline_aware",
+       p13f.required and p13f.kind == "deadline_schedule"
+       and p13f.target.get("cadence") == "quarterly"
+       and int(p13f.target.get("deadline_days", 0)) == 45
+       and int(p13f.target.get("publication_lag_days", 0)) >= 30
+       and p13f.warn_lead_days == 7)
+    rborrow = next(p for p in rdef.freshness_probes if p.name == "ibkr_borrow_age")
+    ok("real_defense_borrow_probe_tolerance", rborrow.tolerance_days == 10 and rborrow.warn_lead_days == 3
+       and not rborrow.required)
+    rmach = real.by_name("machinery")
+    ok("real_machinery_freshness_probes_not_required",
+       len(rmach.freshness_probes) == 3 and not any(p.required for p in rmach.freshness_probes))
+    rtrans = real.by_name("transportation")
+    # require_oos_valid: false is authoritative for the sealed zero-overlay shadow
+    # lane -- transportation must never be marked OPTIONAL_FAIL for flag=0 tables.
+    ok("real_transportation_oos_not_required",
+       rtrans.oos_column == "oos_score_valid_flag" and not rtrans.require_oos_valid
+       and not _oos_required(rtrans))
+    # Publish-convention epoch: the portfolio's final-manifest convention starts at the
+    # first date a final_manifest.json exists on disk (2026-07-02); the repointed glob
+    # must not manufacture missing history before it.
+    ok("real_portfolio_publish_epoch", rport.publish_epoch == "2026-07-02")
+    ok("real_permanent_gap_threshold", real.permanent_gap_after_failures == 3)
+    ok("real_no_adhoc_closures_declared", real.market_closures == [])
+    ok("real_transportation_borrow_probe",
+       any(p.name == "ibkr_borrow_age" and p.tolerance_days == 10 for p in rtrans.freshness_probes))
+    rfinra = next(p for p in rtrans.freshness_probes if p.name == "finra_short_interest_cycle")
+    ok("real_transportation_finra_bimonthly",
+       rfinra.kind == "deadline_schedule" and rfinra.target.get("cadence") == "semi_monthly"
+       and rfinra.warn_lead_days == 3)
+    ok("real_portfolio_freshness_probes",
+       {(p.name, p.kind, p.tolerance_days, p.warn_lead_days) for p in rport.freshness_probes}
+       == {("macro_serving_age", "sqlite_max_date", 5, 2), ("holdings_ledger_age", "sqlite_max_date", 7, 2)})
+    ok("real_freshness_probes_never_required_except_defense_13f",
+       all(not p.required for s in real.sectors for p in s.freshness_probes
+           if not (s.name == "defense" and p.name == "institutional_13f_period")))
+
+    # --- timeout consistency: every sector ceiling must dominate its documented
+    # per-step ceiling (2026-08-05 biotech post-mortem: the 21600s default killed
+    # an attempt whose single-step budget was 28800s). Sectors without a
+    # documented per-step ceiling (not in STEP_CEILING_SOURCES) assert nothing.
+    for rsec in real.sectors:
+        ceiling = documented_step_ceiling_sec(rsec.name)
+        if ceiling is not None:
+            ok(
+                f"timeout_covers_documented_step_ceiling_{rsec.name}",
+                rsec.timeout_sec >= ceiling,
+            )
+    # The two known declarers must stay resolvable so the assertion above cannot
+    # silently degrade into a no-op if a config key is renamed/moved.
+    ok("timeout_ceiling_resolvable_biotech",
+       (documented_step_ceiling_sec("biotech") or 0) >= 28800)
+    ok("timeout_ceiling_resolvable_portfolio",
+       (documented_step_ceiling_sec("portfolio_layer") or 0) >= 7200)
+    ok("timeout_ceiling_unknown_sector_none", documented_step_ceiling_sec("nope") is None)
 
     print(f"SELFTEST PASS: {len(checks)} checks")
     return 0

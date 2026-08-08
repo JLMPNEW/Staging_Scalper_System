@@ -1,0 +1,5 @@
+machinery_stage12:
+  model_version: model-v1
+  portfolio_config_path: C:\Users\josel\OneDrive\Desktop\Investment Files\Staging_Scalper_System\tmppytest-industrials-portfolio-20260803-final\test_daily_scoring_requires_un0\portfolio.yaml
+  score_model_version: score-v1
+  scoring_contract_version: contract-v1

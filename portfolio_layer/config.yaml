@@ -35,7 +35,9 @@ provider_ingestion:
     portfolio_catchup_lookback_sessions: 10
     continuity_lookback_calendar_days: 8
     missed_capture_action: flag_no_backfill
-    universe_staleness_action: capture_existing_names_with_warning
+    universe_registry_policy: provider_owned_append_only
+    universe_source_refresh: opportunistic_sealed_handoff
+    universe_source_age_is_capture_warning: false
   schedules:
     sunday_baseline: "18:00"
     premarket: "07:30"
@@ -958,6 +960,7 @@ holdings_ledger:
   enabled_in_production: false
   source_reports_dir: "../IB_reports"
   statement_glob: "U*.csv"
+  max_staleness_days: 7                    # broker-ledger staleness bound: newest sealed IB statement must be within this many calendar days of the run as-of
   broker: "IBKR"
   manual_lot_overrides:
     FISV:
@@ -1156,6 +1159,7 @@ risk_governor:
   apply_directive: false                   # false = directive recorded as shadow in the final book;
                                            # flipping to true requires Stage 11 promotion evidence
   drawdown_window_trading_days: 63
+  drawdown_min_complete_fraction: 0.80      # fail closed when fewer complete held-name return rows cover the window
   dd_limit: 0.15                            # trailing book drawdown that trips the circuit breaker
   dd_cut_multiplier: 0.5                    # gross multiplier while the breaker is tripped
   recovery_fraction: 0.5                    # re-risk only when dd <= dd_limit * this (hysteresis)

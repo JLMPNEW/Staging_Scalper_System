@@ -12,7 +12,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, time as wall_time, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence, cast
 from zoneinfo import ZoneInfo
 
 
@@ -76,6 +76,29 @@ CREATE TABLE IF NOT EXISTS capture_universe_members (
     FOREIGN KEY(universe_id) REFERENCES capture_universes(universe_id),
     FOREIGN KEY(instrument_id) REFERENCES instruments(instrument_id)
 );
+CREATE TABLE IF NOT EXISTS provider_universe_registry (
+    registry_id TEXT PRIMARY KEY,
+    source_run_as_of TEXT NOT NULL,
+    activated_at_utc TEXT NOT NULL,
+    source_artifact_path TEXT NOT NULL,
+    source_artifact_sha256 TEXT NOT NULL,
+    member_count INTEGER NOT NULL,
+    universe_digest TEXT NOT NULL,
+    UNIQUE(source_run_as_of, universe_digest)
+);
+CREATE TABLE IF NOT EXISTS provider_universe_registry_members (
+    registry_id TEXT NOT NULL,
+    instrument_id TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    tier TEXT NOT NULL CHECK(tier IN ('tier0','tier1','tier2')),
+    sector TEXT NOT NULL DEFAULT '',
+    source_pipeline TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(registry_id, instrument_id),
+    FOREIGN KEY(registry_id) REFERENCES provider_universe_registry(registry_id),
+    FOREIGN KEY(instrument_id) REFERENCES instruments(instrument_id)
+);
+CREATE INDEX IF NOT EXISTS ix_provider_universe_registry_asof
+ON provider_universe_registry(source_run_as_of, activated_at_utc);
 CREATE TABLE IF NOT EXISTS capture_runs (
     run_id TEXT PRIMARY KEY,
     cycle_id TEXT NOT NULL UNIQUE,
@@ -382,6 +405,100 @@ def freeze_universe(
     return universe_id
 
 
+def register_provider_universe(
+    conn: sqlite3.Connection,
+    *,
+    source_run_as_of: str,
+    members: Sequence[Mapping[str, Any]],
+    providers: Sequence[str],
+    source_artifact_path: str,
+    source_artifact_sha256: str,
+    activated_at_utc: str,
+) -> str:
+    """Append one sealed provider-owned universe version without replacing history."""
+    date.fromisoformat(source_run_as_of)
+    normalized = [
+        {
+            "ticker": str(row["ticker"]).strip().upper(),
+            "tier": str(row.get("tier", "")).strip().casefold(),
+            "sector": str(row.get("sector", "")),
+            "source_pipeline": str(row.get("source_pipeline", "")),
+        }
+        for row in members
+        if str(row.get("ticker", "")).strip().upper() != "CASH"
+    ]
+    normalized.sort(key=lambda row: row["ticker"])
+    tickers = [row["ticker"] for row in normalized]
+    if not normalized or len(tickers) != len(set(tickers)):
+        raise ValueError("Provider universe registry must be non-empty and ticker-unique")
+    invalid_tiers = sorted(
+        {row["tier"] for row in normalized} - {"tier0", "tier1", "tier2"}
+    )
+    if invalid_tiers:
+        raise ValueError(f"Invalid provider universe tiers: {invalid_tiers}")
+    universe_digest = digest(normalized)
+    registry_id = digest(
+        {
+            "source_run_as_of": source_run_as_of,
+            "universe_digest": universe_digest,
+        }
+    )
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO provider_universe_registry VALUES(?,?,?,?,?,?,?)",
+            (
+                registry_id,
+                source_run_as_of,
+                activated_at_utc,
+                source_artifact_path,
+                source_artifact_sha256,
+                len(normalized),
+                universe_digest,
+            ),
+        )
+        for row in normalized:
+            ident = ensure_instrument(conn, ticker=row["ticker"], providers=providers)
+            conn.execute(
+                "INSERT OR IGNORE INTO provider_universe_registry_members VALUES(?,?,?,?,?,?)",
+                (
+                    registry_id,
+                    ident,
+                    row["ticker"],
+                    row["tier"],
+                    row["sector"],
+                    row["source_pipeline"],
+                ),
+            )
+    return registry_id
+
+
+def load_provider_universe(
+    conn: sqlite3.Connection,
+    *,
+    tiers: set[str],
+    actual_date: date,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load the latest provider-owned registry that existed by the capture date."""
+    registry = conn.execute(
+        "SELECT * FROM provider_universe_registry WHERE source_run_as_of<=? "
+        "ORDER BY source_run_as_of DESC, rowid DESC LIMIT 1",
+        (actual_date.isoformat(),),
+    ).fetchone()
+    if registry is None:
+        raise ValueError("Provider universe registry is empty; sync a sealed universe first")
+    invalid_tiers = tiers - {"tier0", "tier1", "tier2"}
+    if not tiers or invalid_tiers:
+        raise ValueError(f"Invalid requested provider universe tiers: {sorted(tiers)}")
+    placeholders = ",".join("?" for _ in tiers)
+    rows = conn.execute(
+        "SELECT ticker,tier,sector,source_pipeline "
+        "FROM provider_universe_registry_members "
+        f"WHERE registry_id=? AND tier IN ({placeholders}) ORDER BY ticker",
+        (str(registry["registry_id"]), *sorted(tiers)),
+    ).fetchall()
+    return dict(registry), [dict(row) for row in rows]
+
+
 def _parse_utc(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -389,12 +506,17 @@ def _parse_utc(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _calendar_session(calendar_name: str, value: date, *, direction: str) -> tuple[Any, Any]:
+def _calendar_session(
+    calendar_name: str,
+    value: date,
+    *,
+    direction: Literal["next", "previous", "none"],
+) -> tuple[Any, Any]:
     import exchange_calendars as xcals  # type: ignore[import-untyped]
     import pandas as pd  # type: ignore[import-untyped]
 
     calendar = xcals.get_calendar(calendar_name)
-    return calendar, calendar.date_to_session(pd.Timestamp(value), direction=direction)
+    return calendar, calendar.date_to_session(cast(Any, pd.Timestamp(value)), direction=direction)
 
 
 def actionability(
@@ -1078,6 +1200,22 @@ def verify_store(conn: sqlite3.Connection) -> list[str]:
         if str(row["previous_pass_digest"]) != previous:
             errors.append(f"run_chain_break:{row['run_id']}")
         previous = str(row["run_digest"])
+    registries = conn.execute(
+        "SELECT registry_id,member_count,universe_digest "
+        "FROM provider_universe_registry ORDER BY rowid"
+    ).fetchall()
+    for registry in registries:
+        members = conn.execute(
+            "SELECT ticker,tier,sector,source_pipeline "
+            "FROM provider_universe_registry_members "
+            "WHERE registry_id=? ORDER BY ticker",
+            (str(registry["registry_id"]),),
+        ).fetchall()
+        normalized = [dict(row) for row in members]
+        if len(normalized) != int(registry["member_count"]):
+            errors.append(f"registry_member_count_mismatch:{registry['registry_id']}")
+        if digest(normalized) != str(registry["universe_digest"]):
+            errors.append(f"registry_digest_mismatch:{registry['registry_id']}")
     missing = conn.execute(
         "SELECT COUNT(*) FROM estimate_observations o "
         "LEFT JOIN estimate_versions v ON v.version_id=o.version_id WHERE v.version_id IS NULL"

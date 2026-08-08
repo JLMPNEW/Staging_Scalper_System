@@ -11,6 +11,9 @@ from industrials.transportation.disclosure_candidates import (
     EXTRACTION_METHOD,
     extract_transportation_disclosure_candidates,
 )
+from industrials.transportation.xbrl_backfill import (
+    repair_transportation_mapped_xbrl_facts,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +72,21 @@ def test_daily_score_history_uses_family_pinned_positioning_wrapper(
     )
     assert "--model-family" not in positioning
     assert "--config" not in positioning
+
+
+def test_pit_history_uses_transportation_financial_wrapper(tmp_path: Path) -> None:
+    history = load_script("19_build_transportation_pit_feature_history.py")
+    commands = dict(
+        history.stage_commands(
+            asof="2026-07-30",
+            config_path=tmp_path / "config.yaml",
+            db_path=tmp_path / "industrials.sqlite",
+            output_dir=tmp_path / "features",
+        )
+    )
+    financial = commands["financial_features"]
+    assert financial[1].endswith("08_build_transportation_financial_features.py")
+    assert not financial[1].endswith("08_build_industrials_financial_features.py")
 
 
 def seed_source_registry(conn) -> None:
@@ -396,6 +414,15 @@ def test_transportation_financial_builder_uses_dated_reporting_profile(
             """,
             (now, now),
         )
+        conn.execute(
+            """
+            UPDATE dim_xbrl_concept_map
+            SET priority = 10
+            WHERE taxonomy = 'us-gaap'
+              AND concept_name = 'Assets'
+              AND canonical_metric = 'assets'
+            """
+        )
         profile = builder.load_profile(
             conn,
             ticker="TEST",
@@ -410,6 +437,129 @@ def test_transportation_financial_builder_uses_dated_reporting_profile(
         )
     assert profile["profile_asof_date"] == "2019-03-31"
     assert profile["reporting_profile"] == "SEC_XBRL_US_GAAP"
+
+
+def test_xbrl_alias_backfill_deduplicates_destination_keys(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "xbrl_backfill.sqlite"
+    now = utc_now()
+    with connect(db_path) as conn:
+        seed_source_registry(conn)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dim_xbrl_concept_map(
+                taxonomy, concept_name, canonical_metric,
+                financial_statement, period_type, sign_policy,
+                priority, active_flag, notes, created_at, updated_at
+            )
+            VALUES (
+                'us-gaap', 'Assets', 'assets',
+                'balance_sheet', 'instant', 'as_reported',
+                10, 1, 'duplicate backfill regression', ?, ?
+            )
+            """,
+            (now, now),
+        )
+        raw_rows = [
+            (
+                "raw-earlier",
+                100.0,
+                "sec_archive_xbrl",
+                now,
+                now,
+            ),
+            (
+                "raw-later",
+                200.0,
+                "sec_archive_xbrl",
+                now,
+                now,
+            ),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO fact_sec_xbrl_fact_raw(
+                fact_key, ticker, cik, source_id, accession_number,
+                form_type, filing_date, accepted_at, fiscal_year,
+                fiscal_period, period_start, period_end, frame,
+                taxonomy, concept_name, unit, raw_value, decimals,
+                source_detail, payload_json, created_at, updated_at
+            )
+            VALUES (
+                ?, 'TEST', '0000000001', 'sec_companyfacts',
+                '0000000001-24-000001', '10-K', '2024-02-15',
+                '2024-02-15T16:00:00Z', 2023, 'FY', '',
+                '2023-12-31', 'CY2023I', 'us-gaap', 'Assets',
+                'USD', ?, '0', ?, '{}', ?, ?
+            )
+            """,
+            raw_rows,
+        )
+
+        inserted = repair_transportation_mapped_xbrl_facts(
+            conn,
+            source_ids=("sec_companyfacts",),
+            tickers=["TEST"],
+            asof=date(2024, 3, 1),
+        )
+        facts = conn.execute(
+            """
+            SELECT raw_fact_id, value
+            FROM fact_sec_xbrl_fact
+            WHERE ticker = 'TEST'
+              AND canonical_metric = 'assets'
+            """
+        ).fetchall()
+        latest_raw_id = conn.execute(
+            """
+            SELECT MAX(raw_fact_id)
+            FROM fact_sec_xbrl_fact_raw
+            WHERE ticker = 'TEST'
+            """
+        ).fetchone()[0]
+
+        assert inserted == 1
+        assert len(facts) == 1
+        assert facts[0]["raw_fact_id"] == latest_raw_id
+        assert facts[0]["value"] == 200.0
+        conn.execute(
+            """
+            UPDATE dim_xbrl_concept_map
+            SET priority = 25
+            WHERE taxonomy = 'us-gaap'
+              AND concept_name = 'Assets'
+              AND canonical_metric = 'assets'
+            """
+        )
+        assert (
+            repair_transportation_mapped_xbrl_facts(
+                conn,
+                source_ids=("sec_companyfacts",),
+                tickers=["TEST"],
+                asof=date(2024, 3, 1),
+            )
+            == 1
+        )
+        refreshed = conn.execute(
+            """
+            SELECT source_priority
+            FROM fact_sec_xbrl_fact
+            WHERE ticker = 'TEST'
+              AND canonical_metric = 'assets'
+            """
+        ).fetchone()
+        assert refreshed["source_priority"] == 25
+        assert (
+            repair_transportation_mapped_xbrl_facts(
+                conn,
+                source_ids=("sec_companyfacts",),
+                tickers=["TEST"],
+                asof=date(2024, 3, 1),
+            )
+            == 0
+        )
+
 
 def test_financial_builder_combines_pit_shares_with_unadjusted_close(
     tmp_path: Path,

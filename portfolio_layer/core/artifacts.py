@@ -58,6 +58,11 @@ CONSUMER_FILES: dict[str, tuple[str, ...]] = {
         "final/final_target_weights.csv",
         "final/final_manifest.json",
         "final/final_target_book.csv",
+        # The monitor bootstrap book (39_sync_monitor_universe prefers it when
+        # present) must be invalidated with the deployable book: a forced
+        # upstream rerun would otherwise leave a stale sealed bootstrap book.
+        "final/bootstrap_target_weights.csv",
+        "final/bootstrap_final_weights_manifest.json",
     ),
     "final_report": ("final/final_manifest.json", "final/final_target_book.csv"),
 }
@@ -74,10 +79,10 @@ def invalidate_dependents(run_dir: Path, producer: str) -> list[Path]:
             if path.is_file():
                 path.unlink()
                 removed.append(path)
-    orchestration_meta = run_dir / "orchestration_meta.json"
-    if orchestration_meta.is_file():
-        orchestration_meta.unlink()
-        removed.append(orchestration_meta)
+    # orchestration_meta.json is deliberately NOT touched here: the meta is owned
+    # exclusively by 18_run_portfolio_pipeline (persisted RUNNING before each step
+    # and re-persisted after), and deleting it from artifact invalidation destroyed
+    # the original full-run provenance during recovery runs.
     return removed
 
 

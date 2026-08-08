@@ -15,6 +15,8 @@ from industrials.machinery.stage12_activation import (
     ACTIVATION_STATUS_FULLY_VALIDATED,
     ActivationPaths,
     _activation_date_checks,
+    _capture_dashboard_state,
+    _restore_dashboard_state,
     apply_active_production_policy,
     production_policy_source_hashes,
     rollback_published_candidate,
@@ -23,11 +25,14 @@ from industrials.machinery.stage12_contract_upgrade import (
     validate_active_portfolio_contract,
 )
 from industrials.machinery.stage12_activation_transaction import (
+    PORTFOLIO_COMPLETION_ALIASES,
     ActivationOrchestrationLock,
     CommandResult,
+    PORTFOLIO_RESUME_GROUPS,
     REQUIRED_PORTFOLIO_GROUPS,
     REUSABLE_PORTFOLIO_PREFIX_GROUPS,
     render_portfolio_activation_config,
+    resolve_stage12_python,
     run_activation_transaction,
     validate_completed_session,
     validate_portfolio_smoke,
@@ -93,9 +98,7 @@ def test_contract_upgrade_rejects_machinery_policy_drift() -> None:
     config["optimizer"]["sector_weight_caps"]["machinery"] = 0.05
     expected_policy = machinery_portfolio_policy_fingerprint(config)
 
-    config.setdefault("black_litterman_fusion", {}).setdefault(
-        "strategic_sector_weights", {}
-    )["machinery"] = 0.05
+    config.setdefault("black_litterman_fusion", {}).setdefault("strategic_sector_weights", {})["machinery"] = 0.05
 
     with pytest.raises(ValueError, match="activation contract"):
         validate_active_portfolio_contract(
@@ -460,7 +463,7 @@ def test_portfolio_smoke_requires_exact_membership_and_equal_weights(
         json.dumps(
             {
                 "acceptance": "PASS",
-                "groups_completed": ["payout", "governor", "final"],
+                "groups_completed": sorted(PORTFOLIO_RESUME_GROUPS),
             }
         ),
         encoding="utf-8",
@@ -475,6 +478,53 @@ def test_portfolio_smoke_requires_exact_membership_and_equal_weights(
     assert resumed["acceptance"] == "PASS"
     assert resumed["reused_groups"] == sorted(REUSABLE_PORTFOLIO_PREFIX_GROUPS)
 
+    _write_csv(
+        run_dir / "optimizer" / "target_weights.csv",
+        [
+            {
+                "ticker": "AAA",
+                "source_pipeline": "machinery",
+                "weight": 0.05,
+            }
+        ],
+    )
+    _write_csv(
+        run_dir / "optimizer" / "monitor_eligibility_overlay.csv",
+        [
+            {
+                "ticker": "BBB",
+                "source_pipeline": "machinery",
+                "optimizer_entry_eligible": 0,
+            }
+        ],
+    )
+    filtered = validate_portfolio_smoke(
+        portfolio_config_path=config_path,
+        asof=asof,
+        activation_paths=activation,
+        reused_groups=REUSABLE_PORTFOLIO_PREFIX_GROUPS,
+        resume_evidence_path=resume_evidence,
+    )
+    assert filtered["optimizer_machinery_monitor_excluded_count"] == 1
+
+    _write_csv(
+        run_dir / "optimizer" / "monitor_eligibility_overlay.csv",
+        [
+            {
+                "ticker": "BBB",
+                "source_pipeline": "machinery",
+                "optimizer_entry_eligible": 1,
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="without a monitor entry exclusion"):
+        validate_portfolio_smoke(
+            portfolio_config_path=config_path,
+            asof=asof,
+            activation_paths=activation,
+            reused_groups=REUSABLE_PORTFOLIO_PREFIX_GROUPS,
+            resume_evidence_path=resume_evidence,
+        )
     weight_path = run_dir / "optimizer" / "target_weights.csv"
     _write_csv(
         weight_path,
@@ -501,6 +551,41 @@ def test_portfolio_smoke_requires_exact_membership_and_equal_weights(
         )
 
 
+def test_resume_contract_reruns_monitor_and_downstream_groups() -> None:
+    reusable = {
+        "scores",
+        "risk",
+    }
+    assert REUSABLE_PORTFOLIO_PREFIX_GROUPS == reusable
+    assert {
+        "ledger",
+        "monitor",
+        "monitor_filter",
+        "macro_contract",
+        "bl",
+        "sleeves",
+        "exits",
+        "payout",
+        "governor",
+        "final",
+        "final_report",
+    } <= REQUIRED_PORTFOLIO_GROUPS
+
+    resume = list(PORTFOLIO_RESUME_GROUPS)
+    assert reusable.isdisjoint(resume)
+    assert resume.index("ledger") < resume.index("monitor")
+    assert resume.index("monitor") < resume.index("monitor_filter")
+    assert resume.index("monitor_filter") < resume.index("bl")
+    assert resume.index("bl") < resume.index("sleeves")
+    assert resume.index("sleeves") < resume.index("exits")
+    assert resume.index("final") < resume.index("final_report")
+    satisfied = set(resume)
+    for group, aliases in PORTFOLIO_COMPLETION_ALIASES.items():
+        if group in satisfied:
+            satisfied.update(aliases)
+    assert REQUIRED_PORTFOLIO_GROUPS - reusable <= satisfied
+
+
 def test_published_candidate_rollback_restores_exact_shadow(
     tmp_path: Path,
 ) -> None:
@@ -510,9 +595,7 @@ def test_published_candidate_rollback_restores_exact_shadow(
     paths.root.mkdir(parents=True)
     live_rank = tmp_path / "dashboard" / asof / "machinery_final_rank_table.csv"
     live_manifest = tmp_path / "dashboard" / asof / "machinery_final_rank_table_manifest.json"
-    live_sidecar = live_rank.with_name(
-        "machinery_stage11_survivorship_calibration_panel.csv"
-    )
+    live_sidecar = live_rank.with_name("machinery_stage11_survivorship_calibration_panel.csv")
     _write_csv(
         live_rank,
         [
@@ -567,6 +650,44 @@ def test_published_candidate_rollback_restores_exact_shadow(
     assert result["sidecar_sha256"] == file_sha256(live_sidecar)
 
 
+def test_dashboard_snapshot_restores_missing_and_partial_targets(
+    tmp_path: Path,
+) -> None:
+    paths = ActivationPaths(tmp_path / "stage12", "2026-08-03")
+    live_root = tmp_path / "dashboard" / "2026-08-03"
+    rank = live_root / "machinery_final_rank_table.csv"
+    sidecar = live_root / "machinery_stage11_survivorship_calibration_panel.csv"
+    manifest = live_root / "machinery_final_rank_table_manifest.json"
+    rank.parent.mkdir(parents=True)
+    rank.write_bytes(b"partial-rank\n")
+    original_rank = rank.read_bytes()
+
+    snapshot = _capture_dashboard_state(
+        paths,
+        live_rank=rank,
+        live_sidecar=sidecar,
+        live_manifest=manifest,
+    )
+    assert snapshot["complete_dashboard"] is False
+    assert snapshot["files"]["rank"]["existed"] is True
+    assert snapshot["files"]["sidecar"]["existed"] is False
+
+    rank.write_bytes(b"published-rank\n")
+    sidecar.write_bytes(b"published-sidecar\n")
+    manifest.write_text("{}", encoding="utf-8")
+    restored = _restore_dashboard_state(
+        paths,
+        live_rank=rank,
+        live_sidecar=sidecar,
+        live_manifest=manifest,
+    )
+
+    assert restored == snapshot
+    assert rank.read_bytes() == original_rank
+    assert not sidecar.exists()
+    assert not manifest.exists()
+
+
 def test_activation_transaction_rolls_back_config_and_dashboard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -611,10 +732,9 @@ def test_activation_transaction_rolls_back_config_and_dashboard(
         "production_start_date": asof,
         "proposed_portfolio_cap": 0.05,
         "portfolio_non_activation_config_sha256": (portfolio_activation_fingerprint(portfolio_payload)),
-        "machinery_portfolio_policy_sha256": (
-            machinery_portfolio_policy_fingerprint(portfolio_payload)
-        ),
+        "machinery_portfolio_policy_sha256": (machinery_portfolio_policy_fingerprint(portfolio_payload)),
     }
+
     stage12_paths.lock_json.write_text(
         json.dumps(lock_payload),
         encoding="utf-8",
@@ -739,6 +859,60 @@ def test_activation_transaction_rolls_back_config_and_dashboard(
     assert not (tmp_path / "orchestrator.lock").exists()
 
 
+def test_stage12_runtime_uses_configured_python_and_probes_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import industrials.machinery.stage12_activation_transaction as transaction
+
+    configured_python = tmp_path / "portfolio-python.exe"
+    configured_python.write_bytes(b"test")
+    probes: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> object:
+        probes.append(command)
+        return type("Probe", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+
+    monkeypatch.setattr(transaction.subprocess, "run", fake_run)
+    resolved = resolve_stage12_python(
+        {"machinery_stage12": {"python_executable": str(configured_python)}},
+        config_path=tmp_path / "config.yaml",
+    )
+
+    assert resolved == configured_python
+    assert probes == [
+        [
+            str(configured_python),
+            "-c",
+            "import exchange_calendars, numpy, pandas, sklearn, yaml",
+        ]
+    ]
+
+
+def test_stage12_runtime_fails_before_activation_when_dependencies_are_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import industrials.machinery.stage12_activation_transaction as transaction
+
+    configured_python = tmp_path / "portfolio-python.exe"
+    configured_python.write_bytes(b"test")
+
+    def fake_run(_command: list[str], **_kwargs: object) -> object:
+        return type(
+            "Probe",
+            (),
+            {"returncode": 1, "stderr": "No module named sklearn", "stdout": ""},
+        )()
+
+    monkeypatch.setattr(transaction.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="missing portfolio dependencies"):
+        resolve_stage12_python(
+            {"machinery_stage12": {"python_executable": str(configured_python)}},
+            config_path=tmp_path / "config.yaml",
+        )
+
+
 def test_active_model_replacement_failure_preserves_prior_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -770,10 +944,7 @@ def test_active_model_replacement_failure_preserves_prior_state(
                     "model_family": "machinery",
                     "required": True,
                     "file_mode": "dated",
-                    "file_path": (
-                        "industrials/machinery/dashboard/{yyyy-mm-dd}/"
-                        "machinery_final_rank_table.csv"
-                    ),
+                    "file_path": ("industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv"),
                 }
             ],
         },
@@ -793,15 +964,9 @@ def test_active_model_replacement_failure_preserves_prior_state(
         "production_start_date": "2026-07-24",
         "proposed_portfolio_cap": 0.05,
         "active_activation_state": str(active_paths.activation_state_json),
-        "previous_activation_state_sha256": file_sha256(
-            active_paths.activation_state_json
-        ),
-        "portfolio_non_activation_config_sha256": (
-            portfolio_activation_fingerprint(portfolio_payload)
-        ),
-        "machinery_portfolio_policy_sha256": (
-            machinery_portfolio_policy_fingerprint(portfolio_payload)
-        ),
+        "previous_activation_state_sha256": file_sha256(active_paths.activation_state_json),
+        "portfolio_non_activation_config_sha256": (portfolio_activation_fingerprint(portfolio_payload)),
+        "machinery_portfolio_policy_sha256": (machinery_portfolio_policy_fingerprint(portfolio_payload)),
     }
     cycle_paths.lock_json.write_text(
         json.dumps(lock_payload),
@@ -821,17 +986,9 @@ def test_active_model_replacement_failure_preserves_prior_state(
     )
     activation_paths = ActivationPaths(cycle_root, asof)
     live_rank = (
-        tmp_path
-        / "sector_output"
-        / "industrials"
-        / "machinery"
-        / "dashboard"
-        / asof
-        / "machinery_final_rank_table.csv"
+        tmp_path / "sector_output" / "industrials" / "machinery" / "dashboard" / asof / "machinery_final_rank_table.csv"
     )
-    live_manifest = live_rank.with_name(
-        "machinery_final_rank_table_manifest.json"
-    )
+    live_manifest = live_rank.with_name("machinery_final_rank_table_manifest.json")
     _write_csv(live_rank, [{"ticker": "OLD", "asof_date": asof}])
     original_rank = live_rank.read_bytes()
     live_manifest.write_text(
@@ -866,9 +1023,7 @@ def test_active_model_replacement_failure_preserves_prior_state(
     def fake_activate(*_args: object, **_kwargs: object) -> dict[str, object]:
         assert portfolio_config_path.read_bytes() == original_config
         activation_paths.shadow_backup_csv.write_bytes(original_rank)
-        activation_paths.shadow_manifest_backup_json.write_bytes(
-            original_manifest
-        )
+        activation_paths.shadow_manifest_backup_json.write_bytes(original_manifest)
         live_rank.write_text("promoted\n", encoding="utf-8")
         live_manifest.write_text("{}", encoding="utf-8")
         return {"acceptance": "PASS"}
@@ -976,10 +1131,8 @@ def test_daily_scoring_requires_untampered_active_state(
         ),
         encoding="utf-8",
     )
-    lock_payload["machinery_portfolio_policy_sha256"] = (
-        machinery_portfolio_policy_fingerprint(
-            yaml.safe_load(portfolio_config_path.read_text(encoding="utf-8"))
-        )
+    lock_payload["machinery_portfolio_policy_sha256"] = machinery_portfolio_policy_fingerprint(
+        yaml.safe_load(portfolio_config_path.read_text(encoding="utf-8"))
     )
     stage12_paths.lock_json.write_text(
         json.dumps(lock_payload),

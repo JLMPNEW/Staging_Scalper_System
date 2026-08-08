@@ -14,6 +14,7 @@ Run:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sqlite3
@@ -29,6 +30,8 @@ import streamlit as st
 APP_DIR = Path(__file__).resolve().parent
 RUNS_ROOT = APP_DIR.parent / "portfolio_layer" / "output" / "runs"
 DB_PATH = APP_DIR.parent / "portfolio_layer" / "db" / "portfolio_layer.sqlite"
+H1_ROOT = APP_DIR.parent / "portfolio_layer" / "MacroLayer" / "out" / "regime_h1"
+SERVING_DB_PATH = APP_DIR.parent / "portfolio_layer" / "MacroLayer" / "macro_serving.sqlite"
 
 # ---------------------------------------------------------------------------
 # Palette (validated reference palette, light mode — see dataviz skill)
@@ -119,12 +122,64 @@ def load_book(run_date: str, mtime: float) -> tuple[dict, pd.DataFrame]:
 
 
 @st.cache_data(show_spinner=False)
+def file_sha256(path_str: str, mtime: float) -> str:
+    _ = mtime  # cache key only: re-hash when the file changes
+    digest = hashlib.sha256()
+    with open(path_str, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@st.cache_data(show_spinner=False)
 def load_manifest(run_date: str, mtime: float) -> dict:
     _ = mtime
     path = RUNS_ROOT / run_date / "final" / "final_manifest.json"
     if not path.is_file():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def find_h1_decision(run_date: str) -> Path | None:
+    """Latest H1 candidate decision file with as-of date <= the run date (PIT)."""
+    if not H1_ROOT.is_dir():
+        return None
+    dated = sorted(
+        (d.name for d in H1_ROOT.iterdir()
+         if d.is_dir() and len(d.name) == 10 and d.name[:4].isdigit() and d.name <= run_date),
+        reverse=True,
+    )
+    for name in dated:
+        path = H1_ROOT / name / "macro_regime_v2_decision_latest.csv"
+        if path.is_file():
+            return path
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def load_h1_decision(path_str: str, mtime: float) -> dict:
+    _ = mtime
+    df = pd.read_csv(path_str)
+    return df.iloc[0].to_dict()
+
+
+@st.cache_data(show_spinner=False)
+def load_v1_decision(run_date: str, mtime: float) -> dict:
+    """Latest V1 decision row (as-of <= run date) from the macro serving DB."""
+    _ = mtime
+    con = sqlite3.connect(str(SERVING_DB_PATH))
+    try:
+        df = pd.read_sql_query(
+            "SELECT as_of_date, active_current_regime, active_next_regime, "
+            "current_top_probability, next_top_probability, "
+            "current_confidence, next_confidence "
+            "FROM macro_regime_decision_daily WHERE as_of_date <= ? "
+            "ORDER BY as_of_date DESC LIMIT 1",
+            con, params=[run_date],
+        )
+    finally:
+        con.close()
+    return df.iloc[0].to_dict() if len(df) else {}
 
 
 @st.cache_data(show_spinner=False)
@@ -221,23 +276,83 @@ else:
 st.title(f"Final Target Book — {run_date}")
 
 acceptance = manifest.get("acceptance", "UNKNOWN")
-failed_checks = [c["check"] for c in manifest.get("checks", []) if c.get("status") != "PASS"]
-if acceptance == "PASS" and not failed_checks:
+# WARN checks are advisory diagnostics (they never gate acceptance) and must not
+# render as failures; anything else non-PASS is a real failing check.
+failed_checks = [
+    c["check"]
+    for c in manifest.get("checks", [])
+    if c.get("status") not in ("PASS", "WARN")
+]
+warn_checks = [c["check"] for c in manifest.get("checks", []) if c.get("status") == "WARN"]
+
+# Never display acceptance without verifying the manifest-recorded sha against the CSV
+# actually being rendered (a stale PASS manifest must not front a different book).
+_files_section = manifest.get("files", {})
+_book_entry = _files_section.get("final_target_book.csv", {}) if isinstance(_files_section, dict) else {}
+recorded_sha = str(_book_entry.get("sha256", "")) if isinstance(_book_entry, dict) else ""
+actual_sha = file_sha256(str(book_path), book_path.stat().st_mtime)
+sha_verified = bool(recorded_sha) and recorded_sha == actual_sha
+
+if not manifest:
+    st.error("Manifest missing: final_manifest.json not found for this run — "
+             "the book cannot be verified and must be treated as unsealed.", icon="⚠️")
+elif not sha_verified:
+    st.error(f"Integrity error: final_target_book.csv sha256 {actual_sha[:16]}… does not "
+             f"match the manifest-recorded {(recorded_sha[:16] + '…') if recorded_sha else 'MISSING'} — "
+             "the displayed book is not the sealed book.", icon="⚠️")
+elif acceptance == "PASS" and not failed_checks:
     st.success(f"Manifest acceptance: PASS — {len(manifest.get('checks', []))} checks, "
-               f"generated {manifest.get('generated_at', 'n/a')}", icon="✅")
+               f"sha256 verified, generated {manifest.get('generated_at', 'n/a')}", icon="✅")
+    if warn_checks:
+        st.warning(f"Advisory diagnostics (non-gating): {warn_checks}", icon="ℹ️")
 else:
-    st.error(f"Manifest acceptance: {acceptance} — failing checks: {failed_checks or 'manifest missing'}", icon="⚠️")
+    st.error(f"Manifest acceptance: {acceptance} — failing checks: {failed_checks}", icon="⚠️")
 
 # --- Regime strip -----------------------------------------------------------
 def fmt_regime(label: str) -> str:
     return label.replace("_", " ").title() if label else "n/a"
 
-rc1, rc2, rc3 = st.columns(3)
-rc1.metric("Macro regime (current)", fmt_regime(preamble.get("active_current_regime", "")),
-           f"confidence {float(preamble.get('current_confidence', 0)):.1%}", delta_color="off")
-rc2.metric("Macro regime (next)", fmt_regime(preamble.get("active_next_regime", "")),
-           f"confidence {float(preamble.get('next_confidence', 0)):.1%}", delta_color="off")
-rc3.metric("Macro as-of", preamble.get("macro_as_of_date", "n/a"))
+h1_path = find_h1_decision(run_date)
+h1 = load_h1_decision(str(h1_path), h1_path.stat().st_mtime) if h1_path else {}
+v1 = load_v1_decision(run_date, SERVING_DB_PATH.stat().st_mtime) if SERVING_DB_PATH.is_file() else {}
+
+
+def regime_delta(top_prob: object, confidence: object) -> str:
+    parts = []
+    if top_prob is not None and bool(pd.notna(top_prob)):
+        parts.append(f"top prob {float(top_prob):.1%}")  # type: ignore[arg-type]
+    if confidence is not None and bool(pd.notna(confidence)):
+        parts.append(f"conf {float(confidence):.1%}")  # type: ignore[arg-type]
+    return " · ".join(parts)
+
+
+# V1 top probabilities come from the serving DB decision row; only trust them when
+# that row agrees with the sealed preamble regimes the book was actually sized with.
+v1_cur_tp = v1.get("current_top_probability") if str(v1.get("active_current_regime", "")) == preamble.get("active_current_regime", "") else None
+v1_nxt_tp = v1.get("next_top_probability") if str(v1.get("active_next_regime", "")) == preamble.get("active_next_regime", "") else None
+
+r1c1, r1c2, r1c3 = st.columns(3)
+r1c1.metric("Macro regime (current)", fmt_regime(preamble.get("active_current_regime", "")),
+            regime_delta(v1_cur_tp, preamble.get("current_confidence")) or None, delta_color="off")
+r1c2.metric("Macro regime (next)", fmt_regime(preamble.get("active_next_regime", "")),
+            regime_delta(v1_nxt_tp, preamble.get("next_confidence")) or None, delta_color="off")
+r1c3.metric("Macro as-of", preamble.get("macro_as_of_date", "n/a"))
+
+r2c1, r2c2, r2c3 = st.columns(3)
+if h1:
+    r2c1.metric("H1 estimate (current)", fmt_regime(str(h1.get("active_current_regime", ""))),
+                regime_delta(h1.get("current_top_probability"), h1.get("current_confidence")) or None,
+                delta_color="off")
+    r2c2.metric("H1 estimate (next)", fmt_regime(str(h1.get("active_next_regime", ""))),
+                regime_delta(h1.get("next_top_probability"), h1.get("next_confidence")) or None,
+                delta_color="off")
+    r2c3.metric("H1 as-of", str(h1.get("as_of_date", "n/a")))
+    st.caption("H1 is the shadow candidate regime model (not promoted); "
+               "the book is sized by the active source in the first row.")
+else:
+    r2c1.metric("H1 estimate (current)", "n/a")
+    r2c2.metric("H1 estimate (next)", "n/a")
+    r2c3.metric("H1 as-of", "n/a")
 
 st.divider()
 
@@ -476,6 +591,6 @@ styler = styler.apply(lambda col: avg_cost_styles, subset=["avg_cost_price"])
 st.dataframe(styler, width="stretch", height=min(46 + 35 * len(table), 900))
 
 st.caption(
-    f"Source: `{book_path}` · rows {len(book)} · sha256 "
-    f"{manifest.get('files', {}).get('final_target_book.csv', {}).get('sha256', 'n/a')[:16]}…"
+    f"Source: `{book_path}` · rows {len(book)} · sha256 {actual_sha[:16]}… "
+    f"({'verified against manifest' if sha_verified else 'NOT VERIFIED'})"
 )
