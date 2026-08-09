@@ -102,6 +102,9 @@ portfolio_layer/MacroLayer/cache/
 portfolio_layer/MacroLayer/logs/
 portfolio_layer/MacroLayer/out/
 
+# --- Runtime coordination ---
+orchestration/.orchestrator.lock
+
 # --- OS / IDE ---
 .DS_Store
 Thumbs.db

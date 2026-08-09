@@ -9,6 +9,7 @@ promotion decision.
 from __future__ import annotations
 
 import math
+from numbers import Real
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -141,6 +142,7 @@ class FactorValidationConfig:
     primary_inference: Literal["independent_window"] = "independent_window"
     target_name: str = "excess_or_residual_forward_return"
     holiday_dates: tuple[date, ...] = ()
+    transition_cadence_trading_days: int | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -166,11 +168,22 @@ class FactorValidationConfig:
         )
         object.__setattr__(
             self,
+            "transition_cadence_trading_days",
+            _strict_optional_int(
+                self.transition_cadence_trading_days,
+                field_name="transition_cadence_trading_days",
+                minimum=1,
+            ),
+        )
+        object.__setattr__(
+            self,
             "holiday_dates",
             tuple(sorted({_as_date(value, field_name="holiday_dates") for value in self.holiday_dates})),
         )
-        if isinstance(self.round_trip_cost, bool):
-            raise TypeError("round_trip_cost must be numeric, not boolean")
+        if isinstance(self.round_trip_cost, (bool, np.bool_)) or not isinstance(
+            self.round_trip_cost, Real
+        ):
+            raise TypeError("round_trip_cost must be a real number, not a boolean or string")
         round_trip_cost = float(self.round_trip_cost)
         if not math.isfinite(round_trip_cost) or round_trip_cost < 0.0:
             raise ValueError("round_trip_cost must be finite and non-negative")
@@ -181,6 +194,60 @@ class FactorValidationConfig:
         if not target_name:
             raise ValueError("target_name must not be blank")
         object.__setattr__(self, "target_name", target_name)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the complete, canonical, JSON-safe validation policy."""
+
+        value = _json_safe(asdict(self))
+        if not isinstance(value, dict):  # pragma: no cover - dataclass invariant
+            raise TypeError("FactorValidationConfig serialization did not produce a mapping")
+        return value
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> FactorValidationConfig:
+        """Reconstruct a config while rejecting missing or injected policy knobs."""
+
+        expected = {
+            "entry_lag_trading_days",
+            "hac_max_lag",
+            "holiday_dates",
+            "horizon_trading_days",
+            "min_cross_section",
+            "min_dates",
+            "min_extreme_bucket_size",
+            "min_independent_windows",
+            "min_regime_dates",
+            "primary_inference",
+            "quantile_count",
+            "round_trip_cost",
+            "target_name",
+            "transition_cadence_trading_days",
+        }
+        supplied = set(value)
+        if supplied != expected:
+            raise ValueError(
+                "FactorValidationConfig schema mismatch: "
+                f"missing={sorted(expected - supplied)}; extra={sorted(supplied - expected)}"
+            )
+        holidays = value["holiday_dates"]
+        if not isinstance(holidays, list):
+            raise TypeError("holiday_dates must be a list in serialized configuration")
+        return cls(
+            horizon_trading_days=value["horizon_trading_days"],
+            entry_lag_trading_days=value["entry_lag_trading_days"],
+            min_cross_section=value["min_cross_section"],
+            min_dates=value["min_dates"],
+            min_independent_windows=value["min_independent_windows"],
+            min_regime_dates=value["min_regime_dates"],
+            quantile_count=value["quantile_count"],
+            min_extreme_bucket_size=value["min_extreme_bucket_size"],
+            round_trip_cost=value["round_trip_cost"],
+            hac_max_lag=value["hac_max_lag"],
+            primary_inference=value["primary_inference"],
+            target_name=value["target_name"],
+            holiday_dates=tuple(holidays),
+            transition_cadence_trading_days=value["transition_cadence_trading_days"],
+        )
 
 
 @dataclass(frozen=True)
@@ -279,6 +346,8 @@ class FactorValidationResult:
     mean_rank_persistence: float | None
     mean_top_bucket_turnover: float | None
     mean_two_leg_turnover: float | None
+    transition_evidence_eligible: bool
+    transition_insufficiency_reason: str | None
     evaluation_cadence: EvaluationCadence
     hac: HACInference
     independent_window: IndependentWindowInference
@@ -415,15 +484,19 @@ def quantile_diagnostics(
         field_name="min_extreme_bucket_size",
         minimum=1,
     )
-    if isinstance(round_trip_cost, bool):
-        raise TypeError("round_trip_cost must be numeric, not boolean")
+    if isinstance(round_trip_cost, (bool, np.bool_)) or not isinstance(round_trip_cost, Real):
+        raise TypeError("round_trip_cost must be a real number, not a boolean or string")
     round_trip_cost = float(round_trip_cost)
     if not math.isfinite(round_trip_cost) or round_trip_cost < 0.0:
         raise ValueError("round_trip_cost must be finite and non-negative")
-    if two_leg_turnover is not None and (
-        not math.isfinite(two_leg_turnover) or not 0.0 <= two_leg_turnover <= 2.0
-    ):
-        raise ValueError("two_leg_turnover must be finite and in [0, 2]")
+    if two_leg_turnover is not None:
+        if isinstance(two_leg_turnover, (bool, np.bool_)) or not isinstance(
+            two_leg_turnover, Real
+        ):
+            raise TypeError("two_leg_turnover must be a real number, not a boolean or string")
+        two_leg_turnover = float(two_leg_turnover)
+        if not math.isfinite(two_leg_turnover) or not 0.0 <= two_leg_turnover <= 2.0:
+            raise ValueError("two_leg_turnover must be finite and in [0, 2]")
     factor, returns = _clean_finite_pairs(factor_values, forward_returns)
     insufficient = QuantileDiagnostics(
         eligible=False,
@@ -799,14 +872,23 @@ def _transition_diagnostics(
     states: Sequence[_CrossSectionState],
     *,
     typical_step_trading_days: int,
+    declared_step_trading_days: int | None,
     round_trip_cost: float,
     holidays: tuple[date, ...] = (),
-) -> tuple[tuple[_CrossSectionState, ...], float | None, float | None, float | None]:
+) -> tuple[
+    tuple[_CrossSectionState, ...],
+    float | None,
+    float | None,
+    float | None,
+    bool,
+    str | None,
+]:
     persistence: list[float] = []
     top_turnovers: list[float] = []
     two_leg_turnovers: list[float] = []
+    measured_transition_count = 0
     if not states:
-        return (), None, None, None
+        return (), None, None, None, False, "no_transition_dates"
     updated = [states[0]]
     gaps = [
         _business_day_gap(
@@ -816,6 +898,28 @@ def _transition_diagnostics(
         )
         for previous, current in zip(states, states[1:], strict=False)
     ]
+    if not gaps:
+        return tuple(states), None, None, None, False, "fewer_than_two_transition_dates"
+    minimum_gap = min(gaps)
+    maximum_gap = max(gaps)
+    baseline_gap_count = sum(gap * 2 <= 3 * minimum_gap for gap in gaps)
+    inflated_gap_count = sum(gap >= 2 * minimum_gap for gap in gaps)
+    # Require repeated evidence of both regimes. A lone large gap is a dropped
+    # observation, not proof that the panel intentionally mixes cadences.
+    mixed_cadence = (
+        maximum_gap >= 2 * minimum_gap
+        and baseline_gap_count >= 2
+        and inflated_gap_count >= 2
+    )
+    if mixed_cadence and declared_step_trading_days is None:
+        return (
+            tuple(states),
+            None,
+            None,
+            None,
+            False,
+            "ambiguous_mixed_cadence_requires_declared_transition_cadence",
+        )
     # A global median cannot distinguish a dropped daily date embedded inside
     # an otherwise monthly panel. Use neighboring gaps as the local cadence;
     # the smaller neighbor deliberately breaks a transition at cadence-regime
@@ -823,21 +927,25 @@ def _transition_diagnostics(
     for transition_index, (previous, current) in enumerate(
         zip(states, states[1:], strict=False)
     ):
-        neighboring_gaps = []
-        if transition_index > 0:
-            neighboring_gaps.append(gaps[transition_index - 1])
-        if transition_index + 1 < len(gaps):
-            neighboring_gaps.append(gaps[transition_index + 1])
-        local_step = min(neighboring_gaps) if neighboring_gaps else typical_step_trading_days
-        maximum_consecutive_gap = max(1, (local_step * 3) // 2)
         gap = gaps[transition_index]
-        if gap > maximum_consecutive_gap:
+        if declared_step_trading_days is not None:
+            minimum_consecutive_gap = max(1, declared_step_trading_days // 2)
+            maximum_consecutive_gap = max(1, (declared_step_trading_days * 3) // 2)
+        else:
+            # The minimum observed cadence is the only safe undeclared
+            # baseline. A run of repeated inflated gaps must not redefine its
+            # own local cadence and span dropped observations.
+            local_step = min(minimum_gap, typical_step_trading_days)
+            minimum_consecutive_gap = 1
+            maximum_consecutive_gap = max(1, (local_step * 3) // 2)
+        if not minimum_consecutive_gap <= gap <= maximum_consecutive_gap:
             updated.append(current)
             continue
         previous_values = dict(previous.factor_by_entity)
         current_values = dict(current.factor_by_entity)
         common = sorted(set(previous_values) & set(current_values))
         if len(common) >= 3:
+            measured_transition_count += 1
             value = spearman_rank_correlation(
                 [previous_values[entity] for entity in common],
                 [current_values[entity] for entity in common],
@@ -866,11 +974,22 @@ def _transition_diagnostics(
             top_turnovers.append(top_turnover)
             two_leg_turnovers.append(two_leg_turnover)
         updated.append(current)
+    if measured_transition_count == 0:
+        return (
+            tuple(updated),
+            None,
+            None,
+            None,
+            False,
+            "no_measurable_transitions_at_required_cadence",
+        )
     return (
         tuple(updated),
         _mean_or_none(persistence),
         _mean_or_none(top_turnovers),
         _mean_or_none(two_leg_turnovers),
+        True,
+        None,
     )
 
 
@@ -980,9 +1099,17 @@ def validate_factor(
         [item.mean_ic for item in regime_diagnostics],
         minimum_values=2,
     )
-    states_tuple, persistence, turnover, two_leg_turnover = _transition_diagnostics(
+    (
+        states_tuple,
+        persistence,
+        turnover,
+        two_leg_turnover,
+        transition_eligible,
+        transition_reason,
+    ) = _transition_diagnostics(
         states,
         typical_step_trading_days=max(1, int(cadence.median_step_trading_days)),
+        declared_step_trading_days=config.transition_cadence_trading_days,
         round_trip_cost=config.round_trip_cost,
         holidays=config.holiday_dates,
     )
@@ -1030,6 +1157,8 @@ def validate_factor(
         mean_rank_persistence=persistence,
         mean_top_bucket_turnover=turnover,
         mean_two_leg_turnover=two_leg_turnover,
+        transition_evidence_eligible=transition_eligible,
+        transition_insufficiency_reason=transition_reason,
         evaluation_cadence=cadence,
         hac=hac,
         independent_window=independent,

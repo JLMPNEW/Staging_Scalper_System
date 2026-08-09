@@ -119,6 +119,24 @@ def spearman(xs: list[float], ys: list[float]) -> float | None:
     return cov / (vx * vy)
 
 
+def forward_return_observation_is_usable(
+    forward_return: float | None,
+    benchmark_return: float | None,
+    beta: float | None,
+) -> bool:
+    """Return whether an outcome is numerically usable without magnitude selection.
+
+    Eligibility deliberately depends only on presence and finiteness.  Extreme
+    future returns may be flagged for review, but excluding them here would
+    condition the validation sample on information unavailable at formation.
+    """
+
+    return all(
+        value is not None and math.isfinite(value)
+        for value in (forward_return, benchmark_return, beta)
+    )
+
+
 def quintile_spread(values: list[float], returns: list[float]) -> float | None:
     n = len(values)
     if n < 10:
@@ -162,6 +180,32 @@ def newey_west_lags_for_horizon(horizon_days: int, step_days: int) -> int:
     if step_days <= 0 or horizon_days <= step_days:
         return 0
     return max(0, math.ceil(horizon_days / step_days) - 1)
+
+
+def maximum_forward_label_staleness_days(
+    horizons_trading_days: list[int] | tuple[int, ...],
+    evaluation_step_trading_days: int,
+) -> int:
+    """Conservative calendar allowance derived from horizon and panel cadence."""
+
+    if not horizons_trading_days or any(value <= 0 for value in horizons_trading_days):
+        raise ValueError("horizons_trading_days must contain positive integers")
+    if evaluation_step_trading_days <= 0:
+        raise ValueError("evaluation_step_trading_days must be positive")
+    trading_days = max(horizons_trading_days) + evaluation_step_trading_days
+    return math.ceil(trading_days * 7 / 5) + 14
+
+
+def missing_required_historical_membership(
+    *,
+    include_inactive: bool,
+    membership_ticker_count: int,
+) -> bool:
+    """Return whether historical diagnostics must refuse a survivorship fallback."""
+
+    if membership_ticker_count < 0:
+        raise ValueError("membership_ticker_count must be nonnegative")
+    return include_inactive and membership_ticker_count == 0
 
 
 def is_member_on_date(intervals: list[tuple[date, date | None]] | None, asof: date) -> bool:
@@ -961,6 +1005,17 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
                 membership_by_ticker.setdefault(ticker, []).append((start_date, parse_date(row["end_date"])))
                 cohort_by_ticker[ticker] = str(row["cohort"] or "")
 
+        if missing_required_historical_membership(
+            include_inactive=include_inactive,
+            membership_ticker_count=len(membership_by_ticker),
+        ):
+            LOGGER.error(
+                "Point-in-time membership is required when include_inactive_tickers=true; "
+                "refusing a current-universe survivorship fallback for %s",
+                model_family,
+            )
+            return 1
+
         if not membership_by_ticker:
             universe_rows = conn.execute(
                 """
@@ -1034,6 +1089,7 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
     comp_cov: dict[tuple[str, int], list[int]] = {}
     panel_rows: list[dict[str, Any]] = []
     coverage_rows: list[dict[str, Any]] = []
+    forward_return_outlier_counts = {horizon: 0 for horizon in horizons}
 
     for panel_idx in panel_indices:
         asof = bench.dates[panel_idx]
@@ -1042,6 +1098,7 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
         fwd_raw: dict[int, dict[str, float]] = {horizon: {} for horizon in horizons}
         fwd_bench: dict[int, dict[str, float]] = {horizon: {} for horizon in horizons}
         fwd_resid: dict[int, dict[str, float]] = {horizon: {} for horizon in horizons}
+        date_outlier_counts = {horizon: 0 for horizon in horizons}
         active_members = [ticker for ticker in universe if is_member_on_date(membership_by_ticker.get(ticker), asof)]
         for ticker in active_members:
             series = prices.get(ticker)
@@ -1078,10 +1135,16 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
                         continue
                 fwd = series.ret_between(idx, target_idx)
                 bench_fwd = bench.ret_between(panel_idx, panel_idx + horizon)
-                if fwd is None or bench_fwd is None:
+                if not forward_return_observation_is_usable(fwd, bench_fwd, beta):
                     continue
+                # Keep the predicate contract visible to static type checkers.
+                assert fwd is not None and bench_fwd is not None and beta is not None
                 if fwd < min_forward_return or fwd > max_forward_return:
-                    continue
+                    # Outcome magnitude is never an eligibility filter: doing
+                    # so selects the factor sample with future information.
+                    # Retain the observation and record it for data review.
+                    date_outlier_counts[horizon] += 1
+                    forward_return_outlier_counts[horizon] += 1
                 fwd_raw[horizon][ticker] = fwd
                 fwd_bench[horizon][ticker] = bench_fwd
                 fwd_resid[horizon][ticker] = fwd - beta * bench_fwd
@@ -1095,6 +1158,10 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
                 "active_members": len(active_members),
                 "scored_rows": len(rows),
                 **{f"fwd_usable_{horizon}d": len(fwd_resid[horizon]) for horizon in horizons},
+                **{
+                    f"fwd_outlier_{horizon}d": date_outlier_counts[horizon]
+                    for horizon in horizons
+                },
                 "min_cross_section_pass": int(len(rows) >= min_cross_section),
             }
         )
@@ -1102,12 +1169,20 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
             continue
 
         for row in rows:
+            benchmark_trailing_126d = bench.ret(panel_idx, 126)
             panel_row = {
                 "asof_date": asof_iso,
                 "ticker": row["ticker"],
                 "calibration_cohort_id": row.get("calibration_cohort_id", ""),
                 "beta_to_benchmark": row.get("beta_to_benchmark"),
                 "benchmark_trailing_252d": bench.ret(panel_idx, 252),
+                "market_regime": (
+                    "risk_on"
+                    if benchmark_trailing_126d is not None and benchmark_trailing_126d >= 0.0
+                    else "risk_off"
+                    if benchmark_trailing_126d is not None
+                    else ""
+                ),
             }
             for raw_key, _score_key, _higher_is_better, _valid in subfeature_specs:
                 panel_row[raw_key] = row.get(raw_key)
@@ -1236,6 +1311,16 @@ def run_signal_diagnostics(settings: SignalDiagnosticsSettings) -> int:
         "newey_west_lags_by_horizon": newey_west_lags_by_horizon,
         "excluded_subfeatures": sorted(excluded_raw),
         "include_inactive_tickers": include_inactive,
+        "regime_method": "trailing_126d_benchmark_return_sign",
+        "forward_return_filter_mode": "nonfinite_only",
+        "forward_return_outlier_review_bounds": {
+            "minimum": min_forward_return,
+            "maximum": max_forward_return,
+        },
+        "forward_return_outlier_observation_counts": {
+            str(horizon): count
+            for horizon, count in sorted(forward_return_outlier_counts.items())
+        },
         "selected_price_source_ticker_counts": {
             source_id: sum(1 for series in prices.values() if series.source_id == source_id)
             for source_id in price_sources
@@ -1316,6 +1401,8 @@ def validate_signal_diagnostics_outputs(settings: SignalDiagnosticsSettings) -> 
     end = parse_date(args.end) or date.today()
     min_cross_section = int(cfg_get(config, f"{settings.config_key}.min_cross_section", 30))
     horizons = [int(value) for value in cfg_get(config, f"{settings.config_key}.horizons_trading_days", [21, 63])]
+    step = int(cfg_get(config, f"{settings.config_key}.step_trading_days", 21))
+    maximum_staleness_days = maximum_forward_label_staleness_days(horizons, step)
 
     errors: list[str] = []
     required_files = [
@@ -1354,7 +1441,7 @@ def validate_signal_diagnostics_outputs(settings: SignalDiagnosticsSettings) -> 
         if clean_dates:
             if min(clean_dates) > start + timedelta(days=370):
                 errors.append(f"Stage 8A panel starts too late: {min(clean_dates)} versus requested {start}")
-            if max(clean_dates) < end - timedelta(days=140):
+            if max(clean_dates) < end - timedelta(days=maximum_staleness_days):
                 errors.append(f"Stage 8A panel ends too early: {max(clean_dates)} versus requested {end}")
         pass_rows = [row for row in coverage_rows if int(row.get("min_cross_section_pass") or 0) == 1]
         if len(pass_rows) < 36:
@@ -1379,6 +1466,8 @@ def validate_signal_diagnostics_outputs(settings: SignalDiagnosticsSettings) -> 
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             if int(summary.get("usable_panel_rows") or 0) < min_cross_section * 36:
                 errors.append(f"Usable panel rows too low: {summary.get('usable_panel_rows')}")
+            if summary.get("regime_method") != "trailing_126d_benchmark_return_sign":
+                errors.append("Stage 8A summary has missing or unknown regime_method")
         except json.JSONDecodeError as exc:
             errors.append(f"Invalid stage8a_summary.json: {exc}")
     if settings.measurement_subfeatures:

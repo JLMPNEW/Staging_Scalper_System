@@ -280,7 +280,10 @@ CREATE TABLE IF NOT EXISTS provider_actual_outcomes_v2 (
     ),
     evaluation_eligible INTEGER NOT NULL CHECK (evaluation_eligible IN (0, 1)),
     ineligibility_reasons TEXT NOT NULL DEFAULT '',
-    UNIQUE (provider, endpoint_id, ticker, report_date, metric, retrieval_cycle)
+    UNIQUE (
+        provider, endpoint_id, ticker, report_date, fiscal_period_end,
+        metric, retrieval_cycle
+    )
 );
 
 CREATE INDEX IF NOT EXISTS ix_provider_actual_outcome_v2_lookup
@@ -626,6 +629,144 @@ def _quarantine_legacy_actual_outcome_tables(conn: sqlite3.Connection) -> None:
         )
 
 
+_LEGACY_ACTUAL_OUTCOME_KEY = (
+    'provider',
+    'endpoint_id',
+    'ticker',
+    'report_date',
+    'metric',
+    'retrieval_cycle',
+)
+_CURRENT_ACTUAL_OUTCOME_KEY = (
+    'provider',
+    'endpoint_id',
+    'ticker',
+    'report_date',
+    'fiscal_period_end',
+    'metric',
+    'retrieval_cycle',
+)
+
+
+def _unique_index_columns(
+    conn: sqlite3.Connection, table: str
+) -> set[tuple[str, ...]]:
+    indexes: set[tuple[str, ...]] = set()
+    for index in conn.execute(f'PRAGMA index_list({table})').fetchall():
+        if not int(index['unique']):
+            continue
+        name = str(index['name']).replace("'", "''")
+        columns = tuple(
+            str(row['name'])
+            for row in conn.execute(f"PRAGMA index_info('{name}')").fetchall()
+        )
+        indexes.add(columns)
+    return indexes
+
+
+def _migrate_actual_outcome_key(conn: sqlite3.Connection) -> None:
+    """Add fiscal period to the immutable provider-outcome observation key."""
+    unique_indexes = _unique_index_columns(conn, 'provider_actual_outcomes_v2')
+    if _CURRENT_ACTUAL_OUTCOME_KEY in unique_indexes:
+        return
+    if _LEGACY_ACTUAL_OUTCOME_KEY not in unique_indexes:
+        raise RuntimeError('Unrecognized provider_actual_outcomes_v2 uniqueness contract')
+
+    chain_errors = verify_actual_outcome_chain(conn)
+    if chain_errors:
+        raise RuntimeError(
+            f'Cannot migrate corrupt actual-outcome ledger: {chain_errors}'
+        )
+    schema_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='provider_actual_outcomes_v2'"
+    ).fetchone()
+    if schema_row is None or not schema_row['sql']:
+        raise RuntimeError('Actual-outcome table schema is missing')
+    legacy_clause = (
+        'UNIQUE (provider, endpoint_id, ticker, report_date, metric, retrieval_cycle)'
+    )
+    current_clause = (
+        'UNIQUE (provider, endpoint_id, ticker, report_date, fiscal_period_end, '
+        'metric, retrieval_cycle)'
+    )
+    table_sql = str(schema_row['sql'])
+    if table_sql.count(legacy_clause) != 1:
+        raise RuntimeError('Legacy actual-outcome key clause is ambiguous')
+    rekey_sql = table_sql.replace(
+        'CREATE TABLE provider_actual_outcomes_v2',
+        'CREATE TABLE provider_actual_outcomes_v2_rekey',
+        1,
+    ).replace(legacy_clause, current_clause, 1)
+    columns = [
+        str(row['name'])
+        for row in conn.execute(
+            'PRAGMA table_info(provider_actual_outcomes_v2)'
+        ).fetchall()
+    ]
+    column_sql = ','.join(columns)
+    source_count = int(
+        conn.execute('SELECT COUNT(*) FROM provider_actual_outcomes_v2').fetchone()[0]
+    )
+
+    conn.commit()
+    conn.execute('PRAGMA foreign_keys = OFF')
+    if int(conn.execute('PRAGMA foreign_keys').fetchone()[0]):
+        raise RuntimeError('Could not disable foreign keys for outcome-key migration')
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('DROP TABLE IF EXISTS provider_actual_outcomes_v2_rekey')
+        conn.execute(rekey_sql)
+        conn.execute(
+            f'INSERT INTO provider_actual_outcomes_v2_rekey({column_sql}) '
+            f'SELECT {column_sql} FROM provider_actual_outcomes_v2 '
+            'ORDER BY row_sequence'
+        )
+        migrated_count = int(
+            conn.execute(
+                'SELECT COUNT(*) FROM provider_actual_outcomes_v2_rekey'
+            ).fetchone()[0]
+        )
+        if migrated_count != source_count:
+            raise RuntimeError(
+                'Actual-outcome key migration row-count mismatch: '
+                f'{source_count} != {migrated_count}'
+            )
+        conn.execute('DROP TABLE provider_actual_outcomes_v2')
+        conn.execute(
+            'ALTER TABLE provider_actual_outcomes_v2_rekey '
+            'RENAME TO provider_actual_outcomes_v2'
+        )
+        conn.execute(
+            'CREATE INDEX ix_provider_actual_outcome_v2_lookup '
+            'ON provider_actual_outcomes_v2('
+            'ticker, metric, report_date, fiscal_period_end, fetched_at_utc)'
+        )
+        foreign_key_errors = conn.execute('PRAGMA foreign_key_check').fetchall()
+        if foreign_key_errors:
+            raise RuntimeError(
+                'Actual-outcome key migration broke foreign keys: '
+                f'{[tuple(row) for row in foreign_key_errors[:10]]}'
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute('PRAGMA foreign_keys = ON')
+
+    if _CURRENT_ACTUAL_OUTCOME_KEY not in _unique_index_columns(
+        conn, 'provider_actual_outcomes_v2'
+    ):
+        raise RuntimeError('Actual-outcome key migration did not install the new key')
+    final_chain_errors = verify_actual_outcome_chain(conn)
+    if final_chain_errors:
+        raise RuntimeError(
+            'Actual-outcome key migration changed ledger integrity: '
+            f'{final_chain_errors}'
+        )
+
+
 def connect_monitor_db(path: Path, *, timeout_sec: float) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=timeout_sec)
@@ -634,6 +775,7 @@ def connect_monitor_db(path: Path, *, timeout_sec: float) -> sqlite3.Connection:
     conn.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA_SQL)
+    _migrate_actual_outcome_key(conn)
     _quarantine_legacy_actual_outcome_tables(conn)
     return conn
 
@@ -1136,6 +1278,7 @@ def _normalized_actual_outcome(row: dict[str, Any]) -> dict[str, Any]:
             'endpoint_id',
             'ticker',
             'report_date',
+            'fiscal_period_end',
             'metric',
             'retrieval_cycle',
         )
@@ -1210,8 +1353,12 @@ def append_actual_outcomes(
     with conn:
         for row in normalized_rows:
             existing = conn.execute(
-                'SELECT normalized_sha256 FROM provider_actual_outcomes_v2 WHERE outcome_id=?',
-                (row['outcome_id'],),
+                'SELECT outcome_id,normalized_sha256 '
+                'FROM provider_actual_outcomes_v2 '
+                'WHERE provider=? AND endpoint_id=? AND ticker=? '
+                'AND report_date=? AND fiscal_period_end=? AND metric=? '
+                'AND retrieval_cycle=?',
+                tuple(row[column] for column in _CURRENT_ACTUAL_OUTCOME_KEY),
             ).fetchone()
             if existing is not None:
                 if existing['normalized_sha256'] != row['normalized_sha256']:

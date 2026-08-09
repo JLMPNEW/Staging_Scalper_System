@@ -605,6 +605,75 @@ software_infrastructure_signal_diagnostics:
     - "days_payables_outstanding_yoy_change"
     - "cash_conversion_cycle_yoy_change"
 
+# Stage 3 shared factor-validation pilot. This is intentionally manual and
+# shadow-only: its evidence cannot promote a factor or write to Portfolio Layer.
+technology_factor_validation_shadow:
+  mode: "shadow"
+  production_promotion_enabled: false
+  portfolio_write_enabled: false
+  model_family: "software_infrastructure"
+  family_id: "software_infrastructure_full_family_shadow_v2"
+  signal_panel_path: "../output/technology_reports/software_infrastructure/signal_diagnostics/signal_panel.csv"
+  legacy_ic_path: "../output/technology_reports/software_infrastructure/signal_diagnostics/subfeature_ic.csv"
+  legacy_summary_path: "../output/technology_reports/software_infrastructure/signal_diagnostics/stage8a_summary.json"
+  output_root: "../output/technology_reports/factor_validation_shadow"
+  factor_ids:
+    - "avg_dollar_volume_60d"
+    - "deferred_revenue_yoy_growth"
+    - "distance_from_52w_high"
+    - "ev_gross_profit"
+    - "ev_operating_income"
+    - "fcf_margin"
+    - "fcf_to_net_income"
+    - "fcf_yield"
+    - "free_cash_flow_yoy_growth"
+    - "gross_margin"
+    - "gross_profit_yoy_growth"
+    - "insider_cluster_buyers_90d"
+    - "insider_net_value_90d"
+    - "institutional_ownership_delta_pct"
+    - "latest_borrow_fee_rate"
+    - "latest_days_to_cover"
+    - "latest_short_interest_pct_float"
+    - "max_drawdown_12m"
+    - "net_cash_to_assets"
+    - "operating_income_yoy_growth"
+    - "operating_margin"
+    - "realized_vol_60d"
+    - "rel_strength_bench_3m"
+    - "ret_12m_ex_1m"
+    - "ret_3m"
+    - "revenue_acceleration"
+    - "revenue_yoy_growth"
+    - "rpo_to_revenue"
+    - "rpo_yoy_growth"
+    - "sbc_pct_revenue"
+    - "share_count_yoy_growth"
+    - "short_interest_change_3m"
+  horizons_trading_days:
+    - 21
+    - 63
+  evaluation_step_trading_days: 21
+  entry_lag_trading_days: 0
+  min_cross_section: 30
+  min_dates: 12
+  min_independent_windows: 3
+  min_regime_dates: 3
+  methodology_amendment_id: stage3_audit_round2_regime_and_governance_v1
+  quantile_count: 5
+  min_extreme_bucket_size: 2
+  round_trip_cost: 0.003
+  round_trip_cost_source: "conservative_shadow_stress_30bps_pending_ib_history"
+  fdr_alpha: 0.004166666666666667
+  cross_campaign_familywise_alpha: 0.05
+  cross_campaign_max_looks: 12
+  alpha_spending_method: "bonferroni_equal"
+  require_complete_legacy_family: true
+  selection_design: "retrospective_full_family"
+  prospective_claim_authorized: false
+  production_scoring_config_key: "software_infrastructure_calibrated_scoring"
+  holiday_dates: []
+
 technology_hardware_signal_diagnostics:
   source_id: "technology_hardware_stage8_signal_diagnostics"
   output_dir: "../output/technology_reports/technology_hardware/signal_diagnostics"

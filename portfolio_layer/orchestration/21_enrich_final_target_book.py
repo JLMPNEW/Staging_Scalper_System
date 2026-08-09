@@ -33,7 +33,10 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.db import utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
-from portfolio_layer.ledger.ledger_common import parse_number  # noqa: E402
+from portfolio_layer.ledger.ledger_common import (  # noqa: E402
+    latest_sealed_ledger_run,
+    parse_number,
+)
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.expectations_monitor.monitor_common import (  # noqa: E402
     monitor_output_subdir,
@@ -199,63 +202,6 @@ def _sealed_csv(
     if errors:
         raise ValueError(f"Unsealed/stale input {artifact}: {errors}")
     return read_csv(artifact), manifest
-
-
-def _latest_ledger_run(
-    runs_root: Path, run_as_of: str, *, max_staleness_days: int
-) -> tuple[Path, int, list[dict[str, str]]]:
-    """Newest PASS ledger run on or before run_as_of, bounded by max_staleness_days.
-
-    Returns (run_dir, ledger_age_days, skipped_newer) where skipped_newer records every
-    newer candidate that was passed over because its manifest is FAIL/corrupt, so the
-    consumer manifest can surface them instead of silently walking past.
-    """
-    candidates = sorted(
-        (
-            path
-            for path in runs_root.iterdir()
-            if path.is_dir()
-            and path.name <= run_as_of
-            and (path / "ledger" / "ledger_manifest.json").is_file()
-        ),
-        key=lambda path: path.name,
-        reverse=True,
-    )
-    if not candidates:
-        raise FileNotFoundError(f"No accepted broker ledger exists on or before {run_as_of}")
-    run_date = date.fromisoformat(run_as_of)
-    skipped: list[dict[str, str]] = []
-    for candidate in candidates:
-        manifest_path = candidate / "ledger" / "ledger_manifest.json"
-        try:
-            manifest = read_manifest(manifest_path)
-        except ValueError as exc:
-            skipped.append({"run": candidate.name, "reason": f"corrupt_manifest: {exc}"})
-            continue
-        acceptance = manifest_acceptance_value(manifest)
-        if acceptance != "PASS":
-            skipped.append(
-                {"run": candidate.name, "reason": f"acceptance={acceptance or 'MISSING'}"}
-            )
-            continue
-        try:
-            ledger_date = date.fromisoformat(candidate.name)
-        except ValueError as exc:
-            raise ValueError(
-                f"Ledger run directory name is not an ISO date: {candidate.name}"
-            ) from exc
-        age_days = (run_date - ledger_date).days
-        if age_days > max_staleness_days:
-            raise ValueError(
-                f"Newest PASS broker ledger {candidate.name} is {age_days} days old for run "
-                f"{run_as_of}, beyond holdings_ledger.max_staleness_days={max_staleness_days}; "
-                f"newer non-PASS ledgers skipped: {skipped or 'none'}"
-            )
-        return candidate, age_days, skipped
-    raise ValueError(
-        f"No PASS broker ledger exists on or before {run_as_of}; "
-        f"candidates skipped: {skipped}"
-    )
 
 
 def _current_price(level: dict[str, str] | None) -> float | None:
@@ -996,7 +942,7 @@ def main() -> int:  # noqa: C901
         raise ValueError(
             f"holdings_ledger.max_staleness_days must be >= 0, got {max_staleness_days}"
         )
-    ledger_run, ledger_age_days, ledger_runs_skipped = _latest_ledger_run(
+    ledger_run, ledger_age_days, ledger_runs_skipped = latest_sealed_ledger_run(
         runs_root, run_as_of, max_staleness_days=max_staleness_days
     )
     ledger_as_of = ledger_run.name

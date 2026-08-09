@@ -442,6 +442,73 @@ def append_links(conn: Any, links: Iterable[dict[str, Any]]) -> tuple[int, int]:
     return inserted, duplicates
 
 
+def evaluation_validation_errors(
+    *,
+    candidates: list[dict[str, Any]],
+    links: list[dict[str, Any]],
+    stored_links: list[dict[str, Any]],
+    evaluation_cycle: str,
+) -> list[str]:
+    candidate_keys = [
+        (
+            row['estimate_provider'],
+            row['ticker'],
+            row['metric'],
+            row['canonical_period'],
+            row['report_date'],
+            row['fiscal_period_end'],
+            row['snapshot_id'],
+            row['outcome_id'],
+            row['resolution_id'],
+        )
+        for row in candidates
+    ]
+    errors: list[str] = []
+    if len(candidate_keys) != len(set(candidate_keys)):
+        errors.append('duplicate_candidate_identity')
+    if any(
+        row['evaluation_status'] not in {'eligible', 'ineligible'}
+        for row in candidates
+    ):
+        errors.append('invalid_evaluation_status')
+
+    generated_by_id = {str(row['link_id']): row for row in links}
+    stored_by_id = {str(row['link_id']): row for row in stored_links}
+    if len(generated_by_id) != len(links):
+        errors.append('duplicate_generated_link_identity')
+    if len(stored_by_id) != len(stored_links):
+        errors.append('duplicate_stored_link_identity')
+    if generated_by_id.keys() != stored_by_id.keys():
+        errors.append(
+            f'link_identity_mismatch:{len(generated_by_id)}:{len(stored_by_id)}'
+        )
+    elif any(
+        str(generated_by_id[link_id]['normalized_sha256'])
+        != str(stored_by_id[link_id]['normalized_sha256'])
+        for link_id in generated_by_id
+    ):
+        errors.append('stored_link_payload_mismatch')
+
+    eligible_candidates = sum(
+        row['evaluation_status'] == 'eligible' for row in candidates
+    )
+    eligible_links = sum(row['evaluation_status'] == 'eligible' for row in links)
+    stored_eligible_links = sum(
+        row['evaluation_status'] == 'eligible' for row in stored_links
+    )
+    if eligible_candidates != eligible_links or eligible_links != stored_eligible_links:
+        errors.append(
+            'eligible_link_count_mismatch:'
+            f'{eligible_candidates}:{eligible_links}:{stored_eligible_links}'
+        )
+    if any(
+        str(row.get('evaluation_cycle', '')) != evaluation_cycle
+        for row in stored_links
+    ):
+        errors.append('stored_cycle_mismatch')
+    return errors
+
+
 def run_selftest() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         conn = connect_monitor_db(Path(tmp) / 'monitor.sqlite', timeout_sec=1.0)
@@ -574,6 +641,19 @@ def run_selftest() -> None:
             assert len(links) == 1
             assert append_links(conn, links) == (1, 0)
             assert append_links(conn, links) == (0, 1)
+            stored_links = [
+                dict(row)
+                for row in conn.execute(
+                    'SELECT * FROM provider_forecast_outcome_links_v3 '
+                    'WHERE evaluation_cycle=\'selftest\''
+                ).fetchall()
+            ]
+            assert evaluation_validation_errors(
+                candidates=candidates,
+                links=links,
+                stored_links=stored_links,
+                evaluation_cycle='selftest',
+            ) == []
         finally:
             conn.close()
     print('forecast/outcome linker selftest: PASS')
@@ -669,30 +749,13 @@ def main() -> int:
     write_csv(candidates_path, CANDIDATE_FIELDS, candidates)
     write_csv(links_path, LINK_FIELDS, stored_links)
     eligible = sum(row['evaluation_status'] == 'eligible' for row in candidates)
-    candidate_keys = [
-        (
-            row['estimate_provider'], row['ticker'], row['metric'],
-            row['canonical_period'], row['report_date'], row['snapshot_id'],
-        )
-        for row in candidates
-    ]
-    validation_errors: list[str] = []
-    if len(candidate_keys) != len(set(candidate_keys)):
-        validation_errors.append('duplicate_candidate_identity')
-    if any(
-        row['evaluation_status'] not in {'eligible', 'ineligible'}
-        for row in candidates
-    ):
-        validation_errors.append('invalid_evaluation_status')
-    if len(links) != eligible or len(stored_links) != eligible:
-        validation_errors.append(
-            f'eligible_link_count_mismatch:{eligible}:{len(links)}:{len(stored_links)}'
-        )
-    if any(
-        str(row.get('evaluation_cycle', '')) != evaluation_cycle
-        for row in stored_links
-    ):
-        validation_errors.append('stored_cycle_mismatch')
+    eligible_links = sum(row['evaluation_status'] == 'eligible' for row in links)
+    validation_errors = evaluation_validation_errors(
+        candidates=candidates,
+        links=links,
+        stored_links=stored_links,
+        evaluation_cycle=evaluation_cycle,
+    )
     acceptance = (
         'FAIL'
         if validation_errors
@@ -717,6 +780,8 @@ def main() -> int:
             'candidate_count': len(candidates),
             'linked_count': len(stored_links),
             'eligible_count': eligible,
+            'eligible_linked_count': eligible_links,
+            'ineligible_linked_count': len(stored_links) - eligible_links,
             'inserted_count': inserted,
             'duplicate_count': duplicates,
             'validation_errors': validation_errors,

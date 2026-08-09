@@ -308,6 +308,12 @@ def run_selftest() -> None:
                     'reportedDate': '2026-07-30',
                     'reportedEPS': '2.5',
                     'reportTime': 'post-market',
+                },
+                {
+                    'fiscalDateEnding': '2026-03-31',
+                    'reportedDate': '2026-07-30',
+                    'reportedEPS': '2.0',
+                    'reportTime': 'post-market',
                 }
             ]
         },
@@ -318,16 +324,19 @@ def run_selftest() -> None:
         retrieval_cycle='selftest',
         entitlement_version='provider_entitlements_v1:provisional_retention_v1',
     )
-    assert len(rows) == 1
-    assert rows[0]['fiscal_period_end'] == '2026-06-30'
+    assert len(rows) == 2
+    assert {row['fiscal_period_end'] for row in rows} == {
+        '2026-03-31',
+        '2026-06-30',
+    }
     actual_rows = build_alpha_actual_rows(
         result,
         as_of=date(2026, 7, 31),
         retrieval_cycle='selftest',
         entitlement_version='provider_entitlements_v1:provisional_retention_v1',
     )
-    assert len(actual_rows) == 1
-    assert actual_rows[0]['actual_value'] == 2.5
+    assert len(actual_rows) == 2
+    assert {row['actual_value'] for row in actual_rows} == {2.0, 2.5}
     with tempfile.TemporaryDirectory() as tmp:
         calendar_path = Path(tmp) / 'calendar.csv'
         write_csv(
@@ -360,10 +369,10 @@ def run_selftest() -> None:
         assert calendar_rows[0]['report_date'] == '2026-08-10'
         conn = connect_monitor_db(Path(tmp) / 'monitor.sqlite', timeout_sec=1.0)
         try:
-            assert append_fiscal_period_resolutions(conn, rows) == (1, 0)
-            assert append_fiscal_period_resolutions(conn, rows) == (0, 1)
-            assert append_actual_outcomes(conn, actual_rows) == (1, 0)
-            assert append_actual_outcomes(conn, actual_rows) == (0, 1)
+            assert append_fiscal_period_resolutions(conn, rows) == (2, 0)
+            assert append_fiscal_period_resolutions(conn, rows) == (0, 2)
+            assert append_actual_outcomes(conn, actual_rows) == (2, 0)
+            assert append_actual_outcomes(conn, actual_rows) == (0, 2)
         finally:
             conn.close()
     print('fiscal-period resolution selftest: PASS')

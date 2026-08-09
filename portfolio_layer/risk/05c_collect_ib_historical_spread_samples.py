@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Optional Stage 2.5 - collect IBKR historical BID_ASK samples for Stage 4 spread costs.
 
-This script is intentionally disabled by config by default. When enabled, it is
-expected to run in the overnight portfolio process while TWS or IB Gateway is
-available. It stores:
+This script is intentionally disabled by config by default. When enabled, it
+attempts TWS/IB Gateway first. An explicitly configured connection-failure
+policy may reuse only the newest bounded partition already stored in the
+portfolio database; the normal per-name staleness and coverage gates remain
+authoritative. It stores:
 
   runs/<as_of>/risk/ib_spread_samples.csv
   runs/<as_of>/risk/spread_snapshot.csv
@@ -63,6 +65,7 @@ from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 LOGGER = logging.getLogger("collect_ib_spread_samples")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 ET = ZoneInfo("America/New_York")
+DB_CONNECTION_FALLBACK_POLICY = "reuse_latest_db_samples_within_staleness"
 
 
 def iso_date_arg(raw: str) -> str:
@@ -376,6 +379,70 @@ def _load_db_samples(db_path: Path, *, as_of: str, tickers: Sequence[str]) -> li
     return _normalize_replay_samples(rows, as_of=as_of, tickers=tickers)
 
 
+def _load_latest_bounded_db_samples(
+    db_path: Path,
+    *,
+    as_of: str,
+    tickers: Sequence[str],
+    max_partition_age_days: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Load the newest prior sample partition without weakening row-level gates."""
+    if max_partition_age_days < 0:
+        raise ValueError(
+            f"max_partition_age_days must be >= 0, got {max_partition_age_days}"
+        )
+    requested_date = date.fromisoformat(as_of)
+    with connect(db_path) as conn:
+        init_liquidity_tables(conn)
+        latest_row = conn.execute(
+            "SELECT MAX(as_of_date) FROM ib_spread_samples WHERE as_of_date <= ?",
+            (as_of,),
+        ).fetchone()
+        source_as_of = str(latest_row[0] or "") if latest_row is not None else ""
+        if not source_as_of:
+            raise ValueError(
+                f"No portfolio SQLite liquidity samples exist on or before {as_of}"
+            )
+        try:
+            source_date = date.fromisoformat(source_as_of)
+        except ValueError as exc:
+            raise ValueError(
+                f"Latest SQLite liquidity partition is not an ISO date: {source_as_of!r}"
+            ) from exc
+        age_days = (requested_date - source_date).days
+        if age_days < 0 or age_days > max_partition_age_days:
+            raise ValueError(
+                f"Latest SQLite liquidity partition {source_as_of} is {age_days} days "
+                f"old for {as_of}, beyond max_stale_liquidity_days="
+                f"{max_partition_age_days}"
+            )
+        rows = [
+            {
+                field: "" if row[field] is None else row[field]
+                for field in IB_SPREAD_SAMPLE_FIELDS
+            }
+            for row in conn.execute(
+                f"SELECT {', '.join(IB_SPREAD_SAMPLE_FIELDS)} "
+                "FROM ib_spread_samples WHERE as_of_date = ? "
+                "ORDER BY ticker, target_time_et",
+                (source_as_of,),
+            ).fetchall()
+        ]
+    normalized = _normalize_replay_samples(
+        rows,
+        as_of=source_as_of,
+        tickers=tickers,
+    )
+    for row in normalized:
+        row["as_of_date"] = as_of
+    if not normalized:
+        raise ValueError(
+            f"SQLite liquidity partition {source_as_of} has no rows for the "
+            "current liquidity universe"
+        )
+    return normalized, source_as_of
+
+
 def _collect_from_ib(
     *,
     config: dict[str, Any],
@@ -525,6 +592,11 @@ def main() -> int:  # noqa: C901
         LOGGER.error("No tickers found for liquidity collection in %s", run_dir)
         return 1
 
+    collection_error = ""
+    reused_db_source_as_of = ""
+    connection_failure_policy = str(
+        cfg_get(config, "liquidity_panel.connection_failure_policy", "fail")
+    ).strip()
     try:
         if args.input_samples is not None:
             input_path = args.input_samples.expanduser().resolve()
@@ -534,14 +606,45 @@ def main() -> int:  # noqa: C901
             sample_rows = _load_db_samples(db_path, as_of=run_as_of, tickers=tickers)
             provider = f"portfolio_sqlite_replay:{db_path}"
         else:
-            sample_rows = _collect_from_ib(
-                config=config,
-                as_of=run_as_of,
-                tickers=tickers,
-                sample_times=sample_times,
-                ib_client_id=args.ib_client_id,
-            )
-            provider = str(cfg_get(config, "liquidity_panel.provider", "ibkr_historical_bid_ask"))
+            try:
+                sample_rows = _collect_from_ib(
+                    config=config,
+                    as_of=run_as_of,
+                    tickers=tickers,
+                    sample_times=sample_times,
+                    ib_client_id=args.ib_client_id,
+                )
+                provider = str(
+                    cfg_get(
+                        config,
+                        "liquidity_panel.provider",
+                        "ibkr_historical_bid_ask",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - IB client errors vary.
+                if connection_failure_policy != DB_CONNECTION_FALLBACK_POLICY:
+                    raise
+                sample_rows, reused_db_source_as_of = (
+                    _load_latest_bounded_db_samples(
+                        db_path,
+                        as_of=run_as_of,
+                        tickers=tickers,
+                        max_partition_age_days=max_stale_days,
+                    )
+                )
+                collection_error = f"{type(exc).__name__}:{exc}"
+                provider = (
+                    f"portfolio_sqlite_connection_fallback:{db_path};"
+                    f"source_as_of={reused_db_source_as_of}"
+                )
+                LOGGER.warning(
+                    "IB liquidity connection failed (%s); replaying bounded "
+                    "SQLite partition %s for %s. Row-level staleness and coverage "
+                    "gates remain authoritative.",
+                    collection_error,
+                    reused_db_source_as_of,
+                    run_as_of,
+                )
     except Exception as exc:  # noqa: BLE001 - collector should fail closed with a clear log line.
         LOGGER.error("Liquidity collection failed: %s", exc)
         return 1
@@ -583,6 +686,9 @@ def main() -> int:  # noqa: C901
         "run_as_of": run_as_of,
         "stage": "stage2_5_intraday_liquidity",
         "provider": provider,
+        "connection_failure_policy": connection_failure_policy,
+        "ib_collection_error": collection_error,
+        "reused_db_source_as_of": reused_db_source_as_of,
         "generated_at": _timestamp(),
         "enabled": True,
         "panel_active": True,

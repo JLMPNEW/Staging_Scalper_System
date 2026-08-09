@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from datetime import date, timedelta
 
 import numpy as np
@@ -27,6 +30,34 @@ def test_strict_dates_and_numpy_json_values_fail_closed() -> None:
     assert json.loads(json.dumps(safe, allow_nan=False)) == {"integer": 3, "floating": 0.25}
     with pytest.raises(ValueError, match="non-finite"):
         _json_safe(np.float64(np.inf))
+
+
+@pytest.mark.parametrize("bad_cost", ["0.001", True, np.bool_(True)])
+def test_cost_inputs_reject_strings_and_all_boolean_scalars(bad_cost: object) -> None:
+    with pytest.raises(TypeError, match="real number"):
+        FactorValidationConfig(
+            horizon_trading_days=21,
+            round_trip_cost=bad_cost,  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError, match="real number"):
+        quantile_diagnostics(
+            list(range(10)),
+            [float(item) for item in range(10)],
+            round_trip_cost=bad_cost,  # type: ignore[arg-type]
+        )
+
+
+def test_full_config_round_trip_is_exact_schema() -> None:
+    config = FactorValidationConfig(
+        horizon_trading_days=21,
+        round_trip_cost=0.001,
+        holiday_dates=(date(2026, 7, 3),),
+        transition_cadence_trading_days=5,
+    )
+    assert FactorValidationConfig.from_dict(config.to_dict()) == config
+    injected = {**config.to_dict(), "promotion_approved": True}
+    with pytest.raises(ValueError, match="schema mismatch"):
+        FactorValidationConfig.from_dict(injected)
 
 
 def test_tied_extremes_and_two_bucket_monotonicity_are_valid() -> None:
@@ -288,17 +319,33 @@ def test_declared_holidays_refine_business_day_gaps() -> None:
     assert with_holiday.minimum_step_trading_days == 1
 
 
-def test_mixed_cadence_keeps_sparse_transitions_and_min_lag() -> None:
+def test_mixed_cadence_fails_closed_without_declared_transition_cadence() -> None:
     result = validate_factor(
         _monthly_signal_observations(daily_cluster=5),
         factor_id="MIXED",
         config=FactorValidationConfig(horizon_trading_days=21, round_trip_cost=0.001),
     )
     assert result.evaluation_cadence.minimum_step_trading_days == 1
-    measured = [item for item in result.per_date if item.two_leg_turnover is not None]
-    # Median-based adjacency keeps the monthly transitions measurable; the old
-    # minimum-based rule collapsed this to the daily cluster only.
+    assert result.transition_evidence_eligible is False
+    assert (
+        result.transition_insufficiency_reason
+        == "ambiguous_mixed_cadence_requires_declared_transition_cadence"
+    )
+    assert all(item.two_leg_turnover is None for item in result.per_date)
+
+    declared = validate_factor(
+        _monthly_signal_observations(daily_cluster=5),
+        factor_id="MIXED",
+        config=FactorValidationConfig(
+            horizon_trading_days=21,
+            round_trip_cost=0.001,
+            transition_cadence_trading_days=21,
+        ),
+    )
+    measured = [item for item in declared.per_date if item.two_leg_turnover is not None]
+    assert declared.transition_evidence_eligible is True
     assert len(measured) > 25
+    assert all(item.as_of_date != date(2026, 3, 3) for item in measured)
 
 
 def test_single_dropped_daily_date_is_not_spanned() -> None:
@@ -325,12 +372,84 @@ def test_mixed_cadence_does_not_span_a_dropped_daily_cluster_date() -> None:
     result = validate_factor(
         _monthly_signal_observations(daily_cluster=5, drop_wednesday=True),
         factor_id="MIXED_GAP",
-        config=FactorValidationConfig(horizon_trading_days=21, round_trip_cost=0.001),
+        config=FactorValidationConfig(
+            horizon_trading_days=21,
+            round_trip_cost=0.001,
+            transition_cadence_trading_days=1,
+        ),
     )
     by_date = {item.as_of_date: item for item in result.per_date}
     assert result.evaluation_cadence.median_step_trading_days > 10
     assert by_date[date(2026, 3, 5)].two_leg_turnover is None
     assert by_date[date(2026, 3, 6)].two_leg_turnover is not None
+
+
+def test_repeated_three_day_gaps_fail_closed_as_ambiguous_cadence() -> None:
+    dates = [
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        date(2026, 1, 12),
+        date(2026, 1, 15),
+        date(2026, 1, 20),
+        date(2026, 1, 21),
+        date(2026, 1, 22),
+    ]
+    observations = [
+        FactorObservation(as_of, f"E{entity:02d}", float(entity), entity / 100.0)
+        for as_of in dates
+        for entity in range(10)
+    ]
+
+    result = validate_factor(
+        observations,
+        factor_id="REPEATED_INFLATED_GAPS",
+        config=FactorValidationConfig(horizon_trading_days=21, min_dates=3),
+    )
+
+    assert result.transition_evidence_eligible is False
+    assert (
+        result.transition_insufficiency_reason
+        == "ambiguous_mixed_cadence_requires_declared_transition_cadence"
+    )
+    assert all(item.two_leg_turnover is None for item in result.per_date)
+
+
+def test_factor_result_is_deterministic_across_process_hash_seeds() -> None:
+    script = """
+import json
+from datetime import date
+from factor_validation import FactorObservation, FactorValidationConfig, validate_factor
+rows = []
+for month in range(18):
+    as_of = date(2024 + month // 12, month % 12 + 1, 15)
+    for entity in range(12):
+        factor = float((entity * 7 + month * 3) % 12)
+        outcome = factor * 0.01 + ((entity * 11 + month) % 5 - 2) * 0.004
+        rows.append(FactorObservation(as_of, f"E{entity:02d}", factor, outcome))
+result = validate_factor(
+    rows,
+    factor_id="DETERMINISM",
+    config=FactorValidationConfig(
+        horizon_trading_days=21,
+        transition_cadence_trading_days=21,
+    ),
+)
+print(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
+"""
+    outputs = []
+    for seed in ("1", "9173"):
+        environment = dict(os.environ)
+        environment["PYTHONHASHSEED"] = seed
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        outputs.append(completed.stdout)
+    assert outputs[0] == outputs[1]
 
 
 def test_primary_p_value_fails_closed_below_configured_evidence_minimums() -> None:
@@ -357,6 +476,37 @@ def test_primary_p_value_fails_closed_below_configured_evidence_minimums() -> No
     assert result.independent_window.two_sided_p_value is not None
     assert result.evidence_eligible is False
     assert result.primary_p_value is None
+
+
+def test_declared_cadence_with_zero_measurable_transitions_fails_closed() -> None:
+    rows: list[FactorObservation] = []
+    for month in range(18):
+        as_of = date(2024 + month // 12, month % 12 + 1, 15)
+        for entity in range(12):
+            factor = float(entity)
+            rows.append(
+                FactorObservation(
+                    as_of,
+                    f"E{entity:02d}",
+                    factor,
+                    factor * 0.01 + month * 0.0001,
+                )
+            )
+    result = validate_factor(
+        rows,
+        factor_id="wrong_declared_cadence",
+        config=FactorValidationConfig(
+            horizon_trading_days=21,
+            transition_cadence_trading_days=1,
+        ),
+    )
+    assert result.transition_evidence_eligible is False
+    assert (
+        result.transition_insufficiency_reason
+        == "no_measurable_transitions_at_required_cadence"
+    )
+    assert result.mean_rank_persistence is None
+    assert result.mean_two_leg_turnover is None
 
 
 @pytest.mark.parametrize(

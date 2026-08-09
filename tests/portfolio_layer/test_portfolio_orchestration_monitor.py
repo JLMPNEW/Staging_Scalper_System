@@ -28,6 +28,49 @@ def _load_orchestrator() -> ModuleType:
     return module
 
 
+def _load_monitor_universe() -> ModuleType:
+    path = (
+        PROJECT_ROOT
+        / "portfolio_layer"
+        / "expectations_monitor"
+        / "39_sync_monitor_universe.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "monitor_universe_sync_test",
+        path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_sealed_ledger(
+    orchestrator: ModuleType,
+    run_dir: Path,
+    *,
+    ticker: str = "AAA",
+) -> Path:
+    ledger_dir = run_dir / "ledger"
+    ledger_dir.mkdir(parents=True)
+    positions = ledger_dir / "broker_net_stock_positions.csv"
+    positions.write_text(
+        "symbol,net_shares,shares_lent\n" f"{ticker},10,0\n",
+        encoding="utf-8",
+    )
+    orchestrator.write_manifest(
+        ledger_dir / "ledger_manifest.json",
+        {
+            "acceptance": "PASS",
+            "run_as_of": run_dir.name,
+            "provenance_sha256": {
+                "broker_net_stock_positions": orchestrator.sha256_file(positions)
+            },
+        },
+    )
+    return positions
+
+
 def test_monitor_stable_manifest_verifies_parent_outputs_and_children(
     tmp_path: Path,
 ) -> None:
@@ -192,6 +235,172 @@ def test_missing_ledger_fails_fast_for_holdings_required_monitor(
 
     with pytest.raises(ValueError, match="requires same-date broker holdings"):
         orchestrator.plan_groups(args, config, tmp_path / "2026-08-03")
+
+
+def test_missing_statement_uses_prior_ledger_and_defers_only_current_broker_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_broker_statement_available",
+        lambda *_args, **_kwargs: False,
+    )
+    runs_root = tmp_path / "runs"
+    _write_sealed_ledger(orchestrator, runs_root / "2026-08-02")
+    args = SimpleNamespace(
+        groups=(
+            "ledger,exits,payout,monitor,monitor_filter,final,final_report"
+        ),
+        cadence="strategic",
+        skip="",
+        config=tmp_path / "config.yaml",
+    )
+    config = {
+        "orchestration": {"cadences": {}},
+        "expectations_monitor": {
+            "universe": {"require_broker_holdings": True}
+        },
+        "holdings_ledger": {
+            "max_staleness_days": 7,
+            "missing_same_date_statement_policy": (
+                orchestrator.DEFERRED_LEDGER_POLICY
+            ),
+        },
+    }
+
+    planned, metadata = orchestrator.plan_groups_with_metadata(
+        args,
+        config,
+        runs_root / "2026-08-03",
+    )
+
+    assert planned == ["monitor", "monitor_filter", "final", "final_report"]
+    assert metadata["deferred_groups"] == ["ledger", "exits", "payout"]
+    assert metadata["broker_holdings_source_as_of"] == "2026-08-02"
+    assert metadata["broker_holdings_age_days"] == 1
+    assert not metadata["same_date_statement_available"]
+    assert not metadata["same_date_ledger_available"]
+
+
+def test_prior_ledger_fallback_rejects_hash_tampering_and_staleness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_broker_statement_available",
+        lambda *_args, **_kwargs: False,
+    )
+    runs_root = tmp_path / "runs"
+    positions = _write_sealed_ledger(
+        orchestrator,
+        runs_root / "2026-08-02",
+    )
+    args = SimpleNamespace(
+        groups="monitor,monitor_filter,final",
+        cadence="tactical",
+        skip="",
+        config=tmp_path / "config.yaml",
+    )
+    config = {
+        "orchestration": {"cadences": {}},
+        "expectations_monitor": {
+            "universe": {"require_broker_holdings": True}
+        },
+        "holdings_ledger": {
+            "max_staleness_days": 0,
+            "missing_same_date_statement_policy": (
+                orchestrator.DEFERRED_LEDGER_POLICY
+            ),
+        },
+    }
+
+    with pytest.raises(ValueError, match="no bounded hash-verified prior ledger"):
+        orchestrator.plan_groups(args, config, runs_root / "2026-08-03")
+
+    config["holdings_ledger"]["max_staleness_days"] = 7
+    positions.write_text(
+        "symbol,net_shares,shares_lent\nAAA,999,0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no bounded hash-verified prior ledger"):
+        orchestrator.plan_groups(args, config, runs_root / "2026-08-03")
+
+
+def test_monitor_universe_consumes_bounded_prior_ledger(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monitor = _load_monitor_universe()
+    runs_root = tmp_path / "runs"
+    _write_sealed_ledger(
+        orchestrator,
+        runs_root / "2026-08-02",
+        ticker="HELD",
+    )
+    config = {
+        "holdings_ledger": {
+            "max_staleness_days": 7,
+            "missing_same_date_statement_policy": (
+                monitor.DEFERRED_LEDGER_POLICY
+            ),
+        }
+    }
+
+    rows, sources, dependency = monitor._broker_holdings_source(
+        config=config,
+        run_dir=runs_root / "2026-08-03",
+        run_as_of="2026-08-03",
+        required=True,
+    )
+
+    assert [row["symbol"] for row in rows] == ["HELD"]
+    assert sources[0]["source_run_as_of"] == "2026-08-02"
+    assert sources[0]["consumer_run_as_of"] == "2026-08-03"
+    assert dependency["status"] == "DEFERRED_SAME_DATE"
+    assert dependency["source_as_of"] == "2026-08-02"
+    assert dependency["age_days"] == 1
+
+
+def test_portfolio_runtime_handoff_is_explicit_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    configured = tmp_path / "configured-python.exe"
+    configured.write_bytes(b"runtime")
+    current = tmp_path / "current-python.exe"
+    current.write_bytes(b"runtime")
+    config = {
+        "orchestration": {"python_executable": str(configured)}
+    }
+
+    command = orchestrator.configured_runtime_command(
+        config,
+        argv=["--as-of", "2026-08-07"],
+        current_executable=current,
+    )
+
+    assert command is not None
+    assert Path(command[0]).resolve() == configured.resolve()
+    assert command[2:] == ["--as-of", "2026-08-07"]
+    assert (
+        orchestrator.configured_runtime_command(
+            config,
+            argv=[],
+            current_executable=configured,
+        )
+        is None
+    )
+    config["orchestration"]["python_executable"] = str(tmp_path / "missing.exe")
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        orchestrator.configured_runtime_command(
+            config,
+            argv=[],
+            current_executable=current,
+        )
 
 
 def test_holdings_required_monitor_normalizes_ledger_before_consumer(

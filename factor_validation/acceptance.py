@@ -80,7 +80,7 @@ class AcceptanceRecord:
 def _same_optional_float(left: float | None, right: float | None) -> bool:
     if left is None or right is None:
         return left is right
-    return math.isclose(left, right, rel_tol=1e-15, abs_tol=0.0)
+    return left == right
 
 
 def _validate_structural_contract(
@@ -133,7 +133,7 @@ def build_acceptance_record(
     *,
     cell_id: str,
     result: FactorValidationResult,
-    family_p_values: Mapping[str, float | None],
+    family_results: Mapping[str, FactorValidationResult],
     supersedes_manifest_sha256: str | None = None,
 ) -> AcceptanceRecord:
     """Create a deterministic terminal acceptance record for one registered cell.
@@ -147,7 +147,7 @@ def build_acceptance_record(
         registry,
         cell_id=cell_id,
         result=result,
-        family_p_values=family_p_values,
+        family_results=family_results,
     )
     if supersedes_manifest_sha256 is not None:
         normalized_supersedes = str(supersedes_manifest_sha256).strip().lower()
@@ -216,13 +216,57 @@ def registered_fdr_decision(
     *,
     cell_id: str,
     result: FactorValidationResult,
-    family_p_values: Mapping[str, float | None],
+    family_results: Mapping[str, FactorValidationResult],
 ) -> FDRDecision:
-    """Recompute BH over the complete registered family and select one cell."""
+    """Derive every sibling p-value from registered result objects and select one."""
+
+    cell = registry.cell(cell_id)
+    decisions = registered_fdr_decisions(
+        registry,
+        cell_id=cell_id,
+        family_results=family_results,
+    )
+    if family_results[cell.cell_id] is not result:
+        raise ValueError("result must be the exact registered family_results object for cell_id")
+    return next(item for item in decisions if item.member_id == cell.fdr_member_id)
+
+
+def registered_fdr_decisions(
+    registry: CampaignRegistry,
+    *,
+    cell_id: str,
+    family_results: Mapping[str, FactorValidationResult],
+) -> tuple[FDRDecision, ...]:
+    """Validate a complete registered family and derive its BH decisions."""
 
     cell = registry.cell(cell_id)
     family = registry.family(cell.fdr_family_id)
-    decisions = apply_benjamini_hochberg(family, family_p_values)
-    decision = next(item for item in decisions if item.member_id == cell.fdr_member_id)
-    _validate_structural_contract(registry, cell, result, decision)
-    return decision
+    cells = tuple(
+        item for item in registry.cells if item.fdr_family_id == family.family_id
+    )
+    expected = {item.cell_id for item in cells}
+    supplied = set(family_results)
+    if supplied != expected:
+        raise ValueError(
+            "registered family result membership mismatch: "
+            f"missing={sorted(expected - supplied)}; extra={sorted(supplied - expected)}"
+        )
+    if any(
+        not isinstance(family_results[item.cell_id], FactorValidationResult)
+        for item in cells
+    ):
+        raise TypeError("family_results must contain FactorValidationResult instances")
+    p_values = {
+        item.fdr_member_id: family_results[item.cell_id].primary_p_value
+        for item in cells
+    }
+    decisions = apply_benjamini_hochberg(family, p_values)
+    by_member = {decision.member_id: decision for decision in decisions}
+    for item in cells:
+        _validate_structural_contract(
+            registry,
+            item,
+            family_results[item.cell_id],
+            by_member[item.fdr_member_id],
+        )
+    return decisions

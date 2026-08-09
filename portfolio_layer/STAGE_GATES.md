@@ -774,6 +774,16 @@ reduce exposure; lending is stored separately (e.g. BDX uses shares-at-IB for ex
 - Instruments and cash/NAV data are present; securities lending is separated from portfolio exposure.
 - `enabled_in_production:false`; no live IB/TWS connection in the core stage.
 
+**Overnight statement-lag policy:** the market-date portfolio run does not pretend that a next-day IB
+statement already exists. When the same-date statement and ledger are absent, Stage 12 may consume only
+the newest `PASS`, hash-verified ledger on or before the run date and only within
+`holdings_ledger.max_staleness_days`. The selected ledger date and age are sealed in every consuming
+monitor/report manifest. `ledger`, `exits`, and `payout` are deferred because they require same-date broker
+facts; scores, risk, monitoring, optimizer, final weights, and the enriched report continue and the run is
+classified `PASS_WITH_DEFERRED`. A missing, over-age, corrupt, non-PASS, or hash-mismatched fallback is a
+hard failure. When the statement arrives, the late-statement reconciler reruns only the broker-dependent
+groups and final enrichment; it does not rerun unchanged sector or score pipelines.
+
 **Known ledger limits before Stage 9:**
 - Overlapping date-range statements may repeat the same trade under different raw-source hashes unless a
   future IB report includes a stable execution ID; Stage 9 should consume one sealed ledger run, not merge
@@ -1094,6 +1104,14 @@ Stage 12 has two deliberately separate final artifacts:
 - The enriched report preserves the deployable second-pass 12a weights exactly, contains every sealed IB
   stock holding, and carries same-date macro/monitor/levels lineage. The frozen entry overlay is the only
   monitor-to-optimizer edge; level and action recommendations remain advisory.
+- A missing overnight same-date IB statement invokes the Stage 8.5 bounded-ledger policy: only
+  `ledger`/`exits`/`payout` are deferred, the monitor and final report stamp the prior ledger's source date
+  and age, and orchestration seals `PASS_WITH_DEFERRED`. Late reconciliation must replace the deferred
+  broker-dependent outputs without rerunning already accepted upstream groups.
+- Overnight IB liquidity collection is attempted first. A TWS connection failure may use only the newest
+  stored liquidity partition within `max_stale_liquidity_days`; the source date and error are sealed, and
+  the existing per-name age, quote-integrity, universe, and fallback-fraction gates remain hard. This is
+  bounded observation carry-forward, not permission to substitute an unmeasured default panel.
 
 ---
 

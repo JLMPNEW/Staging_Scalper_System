@@ -37,10 +37,16 @@ from portfolio_layer.expectations_monitor.monitor_common import (  # noqa: E402
     utc_now,
     writer_lock,
 )
+from portfolio_layer.ledger.ledger_common import (  # noqa: E402
+    latest_sealed_ledger_run,
+)
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 VALIDATION_FIELDS = ["check", "status", "detail"]
+DEFERRED_LEDGER_POLICY = (
+    "use_latest_sealed_ledger_and_defer_current_broker_groups"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,6 +95,93 @@ def _sealed_source(
         "acceptance": manifest_acceptance_value(manifest),
     }
     return read_csv(artifact), [source]
+
+
+def _broker_holdings_source(
+    *,
+    config: dict[str, Any],
+    run_dir: Path,
+    run_as_of: str,
+    required: bool,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, Any]]:
+    artifact = run_dir / "ledger" / "broker_net_stock_positions.csv"
+    manifest_path = run_dir / "ledger" / "ledger_manifest.json"
+    if artifact.exists() or manifest_path.exists():
+        rows, sources = _sealed_source(
+            role="broker_holdings",
+            artifact=artifact,
+            manifest_path=manifest_path,
+            artifact_keys=(
+                "broker_net_stock_positions",
+                "broker_net_stock_positions.csv",
+            ),
+            run_as_of=run_as_of,
+            required=required,
+        )
+        return rows, sources, {
+            "status": "CURRENT" if sources else "NOT_REQUIRED",
+            "source_as_of": run_as_of if sources else "",
+            "age_days": 0 if sources else None,
+            "policy": "same_date",
+            "skipped_newer": [],
+        }
+    if not required:
+        return [], [], {
+            "status": "NOT_REQUIRED",
+            "source_as_of": "",
+            "age_days": None,
+            "policy": "not_required",
+            "skipped_newer": [],
+        }
+
+    policy = str(
+        cfg_get(
+            config,
+            "holdings_ledger.missing_same_date_statement_policy",
+            "fail",
+        )
+    ).strip()
+    if policy != DEFERRED_LEDGER_POLICY:
+        raise FileNotFoundError(
+            f"Required same-date broker holdings are missing for {run_as_of}; "
+            f"missing_same_date_statement_policy={policy or 'MISSING'}"
+        )
+    raw_staleness = cfg_get(config, "holdings_ledger.max_staleness_days", 7)
+    try:
+        max_staleness_days = int(str(raw_staleness))
+    except ValueError as exc:
+        raise ValueError(
+            "holdings_ledger.max_staleness_days must be an integer, "
+            f"got {raw_staleness!r}"
+        ) from exc
+    ledger_run, age_days, skipped = latest_sealed_ledger_run(
+        run_dir.parent,
+        run_as_of,
+        max_staleness_days=max_staleness_days,
+    )
+    ledger_as_of = ledger_run.name
+    rows, sources = _sealed_source(
+        role="broker_holdings",
+        artifact=ledger_run / "ledger" / "broker_net_stock_positions.csv",
+        manifest_path=ledger_run / "ledger" / "ledger_manifest.json",
+        artifact_keys=(
+            "broker_net_stock_positions",
+            "broker_net_stock_positions.csv",
+        ),
+        run_as_of=ledger_as_of,
+        required=True,
+    )
+    for source in sources:
+        source["consumer_run_as_of"] = run_as_of
+        source["source_run_as_of"] = ledger_as_of
+        source["source_age_days"] = str(age_days)
+    return rows, sources, {
+        "status": "DEFERRED_SAME_DATE",
+        "source_as_of": ledger_as_of,
+        "age_days": age_days,
+        "policy": policy,
+        "skipped_newer": skipped,
+    }
 
 
 def _row_digest(rows: list[dict[str, Any]]) -> str:
@@ -318,11 +411,9 @@ def main() -> int:
         run_as_of=run_as_of,
         required=bool(universe_cfg.get("require_final_target", True)),
     )
-    holding_rows, holding_sources = _sealed_source(
-        role="broker_holdings",
-        artifact=run_dir / "ledger" / "broker_net_stock_positions.csv",
-        manifest_path=run_dir / "ledger" / "ledger_manifest.json",
-        artifact_keys=("broker_net_stock_positions", "broker_net_stock_positions.csv"),
+    holding_rows, holding_sources, holdings_dependency = _broker_holdings_source(
+        config=config,
+        run_dir=run_dir,
         run_as_of=run_as_of,
         required=bool(universe_cfg.get("require_broker_holdings", True)),
     )
@@ -391,6 +482,18 @@ def main() -> int:
         pending_orders_required=pending_orders_required,
         pending_orders_integrated=pending_orders_integrated,
     )
+    checks.append(
+        {
+            "check": "broker_holdings_current_or_bounded_fallback",
+            "status": "PASS",
+            "detail": (
+                f"status={holdings_dependency['status']}; "
+                f"source_as_of={holdings_dependency['source_as_of'] or 'none'}; "
+                f"age_days={holdings_dependency['age_days']}; "
+                f"policy={holdings_dependency['policy']}"
+            ),
+        }
+    )
     failures = [row for row in checks if row["status"] == "FAIL"]
     if failures:
         raise RuntimeError(f"Monitor universe validation failed: {failures}")
@@ -418,6 +521,7 @@ def main() -> int:
         "tier_counts": counts,
         "row_digest": _row_digest(rows),
         "source_artifacts": sources,
+        "broker_holdings_dependency": holdings_dependency,
         "shadow_only": True,
         "pending_orders_integrated": pending_orders_integrated,
     }
@@ -484,6 +588,7 @@ def main() -> int:
             "generated_at_utc": generated_at,
             "shadow_only": True,
             "database_path": str(db_path),
+            "broker_holdings_dependency": holdings_dependency,
             "inputs_sha256": {str(path): sha256_file(path) for path in input_paths},
             "outputs_sha256": {
                 universe_path.name: sha256_file(universe_path),

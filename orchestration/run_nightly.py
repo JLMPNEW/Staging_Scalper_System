@@ -33,6 +33,12 @@ PROVIDER_VALIDATOR = (
 DEFAULT_CONFIG = PROJECT_ROOT / "portfolio_layer" / "config.yaml"
 RUNS_ROOT = ORCH_DIR / "runs"
 NIGHTLY_ROOT = ORCH_DIR / "nightly_runs"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from portfolio_layer.core.runtime_env import (  # noqa: E402
+    hydrate_missing_user_environment,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -240,6 +246,14 @@ def main() -> int:
     args = parse_args()
     if args.selftest:
         return _selftest()
+
+    hydrated = hydrate_missing_user_environment()
+    if hydrated:
+        print(
+            "Hydrated missing local user environment variables by name: "
+            + ", ".join(hydrated),
+            flush=True,
+        )
 
     config = args.config.expanduser().resolve()
     if not config.is_file():

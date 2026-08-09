@@ -11,13 +11,23 @@ from pathlib import Path, PurePosixPath
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from factor_validation.core import CONTRACT_VERSION
+from factor_validation.core import CONTRACT_VERSION, FactorValidationConfig
 from factor_validation.fdr import FDRFamily
 
 
 REGISTRY_SCHEMA_VERSION = "factor_validation_campaign_registry_v1"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
+)
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -54,6 +64,13 @@ def _safe_id(value: str, *, field_name: str) -> str:
             f"{field_name} must start with an alphanumeric character and contain only "
             "letters, numbers, '.', '_', or '-'"
         )
+    if len(normalized) > 64:
+        raise ValueError(f"{field_name} must be at most 64 characters")
+    if normalized.endswith("."):
+        raise ValueError(f"{field_name} must not end with a dot")
+    windows_basename = normalized.split(".", 1)[0].upper()
+    if windows_basename in _WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"{field_name} is a reserved Windows device name")
     return normalized
 
 
@@ -129,6 +146,13 @@ class FileSeal:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> FileSeal:
+        expected = {"logical_path", "sha256", "size_bytes"}
+        if set(value) != expected:
+            raise ValueError(
+                "file seal schema mismatch: "
+                f"missing={sorted(expected - set(value))}; "
+                f"extra={sorted(set(value) - expected)}"
+            )
         return cls(
             logical_path=value.get("logical_path", ""),
             sha256=value.get("sha256", ""),
@@ -157,6 +181,8 @@ class ObservedProvenance:
             paths = [item.logical_path for item in seals]
             if len(set(paths)) != len(paths):
                 raise ValueError(f"{field_name} logical paths must be unique")
+            if len({path.casefold() for path in paths}) != len(paths):
+                raise ValueError(f"{field_name} logical paths must be unique case-insensitively")
             object.__setattr__(self, field_name, seals)
 
     @classmethod
@@ -194,6 +220,52 @@ class ObservedProvenance:
         return sha256_bytes(canonical_json_bytes(self.to_dict()))
 
 
+@dataclass(frozen=True, init=False)
+class ProvenanceFileSet:
+    """Concrete files that must be hashed by the registration/publication APIs."""
+
+    config_path: Path
+    source_paths: tuple[tuple[str, Path], ...]
+    code_paths: tuple[tuple[str, Path], ...]
+
+    def __init__(
+        self,
+        *,
+        config_path: str | Path,
+        source_paths: Mapping[str, str | Path],
+        code_paths: Mapping[str, str | Path],
+    ) -> None:
+        object.__setattr__(self, "config_path", Path(config_path))
+        for field_name, supplied in (
+            ("source_paths", source_paths),
+            ("code_paths", code_paths),
+        ):
+            normalized = tuple(
+                sorted(
+                    (
+                        (_logical_path(logical_path), Path(path))
+                        for logical_path, path in supplied.items()
+                    ),
+                    key=lambda item: item[0],
+                )
+            )
+            if not normalized:
+                raise ValueError(f"{field_name} must contain at least one concrete file")
+            logical = [item[0] for item in normalized]
+            if len({item.casefold() for item in logical}) != len(logical):
+                raise ValueError(f"{field_name} logical paths collide case-insensitively")
+            object.__setattr__(self, field_name, normalized)
+
+    def observe(self) -> ObservedProvenance:
+        """Hash the concrete bytes now; callers cannot supply claimed digests."""
+
+        return ObservedProvenance.from_paths(
+            config_path=self.config_path,
+            source_paths=dict(self.source_paths),
+            code_paths=dict(self.code_paths),
+        )
+
+
 @dataclass(frozen=True)
 class ValidationCellRegistration:
     """Pre-registered identity and provenance for one factor/target/horizon cell."""
@@ -211,6 +283,7 @@ class ValidationCellRegistration:
     config_sha256: str
     source_files: tuple[FileSeal, ...]
     code_files: tuple[FileSeal, ...]
+    validation_config: FactorValidationConfig
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cell_id", _safe_id(self.cell_id, field_name="cell_id"))
@@ -264,6 +337,16 @@ class ValidationCellRegistration:
             paths = [item.logical_path for item in seals]
             if len(set(paths)) != len(paths):
                 raise ValueError(f"{field_name} logical paths must be unique")
+            if len({path.casefold() for path in paths}) != len(paths):
+                raise ValueError(f"{field_name} logical paths must be unique case-insensitively")
+        if not isinstance(self.validation_config, FactorValidationConfig):
+            raise TypeError("validation_config must be a FactorValidationConfig")
+        if self.validation_config.horizon_trading_days != self.horizon_trading_days:
+            raise ValueError("validation_config horizon does not match registered horizon")
+        if self.validation_config.entry_lag_trading_days != self.entry_lag_trading_days:
+            raise ValueError("validation_config entry lag does not match registered entry lag")
+        if self.validation_config.target_name != self.target_name:
+            raise ValueError("validation_config target does not match registered target")
         object.__setattr__(self, "source_files", source_files)
         object.__setattr__(self, "code_files", code_files)
 
@@ -282,6 +365,8 @@ class ValidationCellRegistration:
             "sector_id": self.sector_id,
             "source_files": [item.to_dict() for item in self.source_files],
             "target_name": self.target_name,
+            "validation_config": self.validation_config.to_dict(),
+            "validation_config_sha256": self.validation_config_sha256,
         }
 
     @property
@@ -296,13 +381,44 @@ class ValidationCellRegistration:
             code_files=self.code_files,
         )
 
+    @property
+    def validation_config_sha256(self) -> str:
+        return sha256_bytes(canonical_json_bytes(self.validation_config.to_dict()))
+
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ValidationCellRegistration:
+        expected = {
+            "cell_id",
+            "code_files",
+            "config_sha256",
+            "entry_lag_trading_days",
+            "evaluation_step_trading_days",
+            "factor_direction",
+            "factor_id",
+            "fdr_family_id",
+            "fdr_member_id",
+            "horizon_trading_days",
+            "sector_id",
+            "source_files",
+            "target_name",
+            "validation_config",
+            "validation_config_sha256",
+        }
+        supplied = set(value)
+        if supplied != expected:
+            raise ValueError(
+                "validation cell schema mismatch: "
+                f"missing={sorted(expected - supplied)}; extra={sorted(supplied - expected)}"
+            )
         source_values = value.get("source_files", [])
         code_values = value.get("code_files", [])
         if not isinstance(source_values, list) or not isinstance(code_values, list):
             raise TypeError("source_files and code_files must be lists")
-        return cls(
+        config_value = value.get("validation_config")
+        if not isinstance(config_value, dict):
+            raise TypeError("validation_config must be an object")
+        validation_config = FactorValidationConfig.from_dict(config_value)
+        cell = cls(
             cell_id=value.get("cell_id", ""),
             sector_id=value.get("sector_id", ""),
             factor_id=value.get("factor_id", ""),
@@ -316,7 +432,11 @@ class ValidationCellRegistration:
             config_sha256=value.get("config_sha256", ""),
             source_files=tuple(FileSeal.from_dict(item) for item in source_values),
             code_files=tuple(FileSeal.from_dict(item) for item in code_values),
+            validation_config=validation_config,
         )
+        if value.get("validation_config_sha256") != cell.validation_config_sha256:
+            raise ValueError("validation_config_sha256 mismatch")
+        return cell
 
 
 @dataclass(frozen=True)
@@ -357,14 +477,35 @@ class CampaignRegistry:
             raise ValueError("a campaign must register at least one cell and one FDR family")
         if len({item.cell_id for item in cells}) != len(cells):
             raise ValueError("campaign cell_id values must be unique")
+        if len({item.cell_id.casefold() for item in cells}) != len(cells):
+            raise ValueError("campaign cell_id values collide case-insensitively")
         if len({item.family_id for item in families}) != len(families):
             raise ValueError("campaign FDR family_id values must be unique")
+        if len({item.family_id.casefold() for item in families}) != len(families):
+            raise ValueError("campaign FDR family_id values collide case-insensitively")
+        for family in families:
+            _safe_id(family.family_id, field_name="FDR family_id")
+            for member_id in family.member_ids:
+                _safe_id(member_id, field_name="FDR member_id")
         cell_keys = [
             (item.sector_id, item.factor_id, item.target_name, item.horizon_trading_days)
             for item in cells
         ]
         if len(set(cell_keys)) != len(cell_keys):
             raise ValueError("campaign factor/target/horizon cell identities must be unique")
+        casefold_cell_keys = [
+            (
+                item.sector_id.casefold(),
+                item.factor_id.casefold(),
+                item.target_name.casefold(),
+                item.horizon_trading_days,
+            )
+            for item in cells
+        ]
+        if len(set(casefold_cell_keys)) != len(casefold_cell_keys):
+            raise ValueError(
+                "campaign factor/target/horizon identities collide case-insensitively"
+            )
         families_by_id = {item.family_id: item for item in families}
         assignments: dict[str, list[str]] = {item.family_id: [] for item in families}
         for cell in cells:
@@ -377,6 +518,12 @@ class CampaignRegistry:
                 )
             assignments[family.family_id].append(cell.fdr_member_id)
         for family in families:
+            if len({member.casefold() for member in family.member_ids}) != len(
+                family.member_ids
+            ):
+                raise ValueError(
+                    f"FDR family {family.family_id!r} member IDs collide case-insensitively"
+                )
             assigned = assignments[family.family_id]
             if len(set(assigned)) != len(assigned):
                 raise ValueError(f"FDR family {family.family_id!r} has duplicate cell assignments")
@@ -427,6 +574,19 @@ class CampaignRegistry:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> CampaignRegistry:
+        expected = {
+            "campaign_id",
+            "cells",
+            "contract_version",
+            "fdr_families",
+            "schema_version",
+        }
+        supplied = set(value)
+        if supplied != expected:
+            raise ValueError(
+                "campaign registry schema mismatch: "
+                f"missing={sorted(expected - supplied)}; extra={sorted(supplied - expected)}"
+            )
         cells_value = value.get("cells", [])
         families_value = value.get("fdr_families", [])
         if not isinstance(cells_value, list) or not isinstance(families_value, list):

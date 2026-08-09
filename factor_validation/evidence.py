@@ -10,9 +10,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from factor_validation.acceptance import AcceptanceRecord, build_acceptance_record
+from factor_validation.acceptance import (
+    AcceptanceRecord,
+    build_acceptance_record,
+    registered_fdr_decisions,
+)
 from factor_validation.core import FactorValidationResult, PerDateDiagnostic
-from factor_validation.fdr import FDRDecision, apply_benjamini_hochberg
+from factor_validation.fdr import FDRDecision
 from factor_validation.registry import CampaignRegistry, canonical_json_bytes
 
 
@@ -150,19 +154,22 @@ def build_evidence_files(
     *,
     cell_id: str,
     result: FactorValidationResult,
-    family_p_values: Mapping[str, float | None],
+    family_results: Mapping[str, FactorValidationResult],
     supersedes_manifest_sha256: str | None = None,
 ) -> EvidenceFiles:
     """Build deterministic content files without performing filesystem I/O."""
 
     cell = registry.cell(cell_id)
-    family = registry.family(cell.fdr_family_id)
-    decisions = apply_benjamini_hochberg(family, family_p_values)
+    decisions = registered_fdr_decisions(
+        registry,
+        cell_id=cell_id,
+        family_results=family_results,
+    )
     acceptance = build_acceptance_record(
         registry,
         cell_id=cell_id,
         result=result,
-        family_p_values=family_p_values,
+        family_results=family_results,
         supersedes_manifest_sha256=supersedes_manifest_sha256,
     )
     summary = result.to_dict()

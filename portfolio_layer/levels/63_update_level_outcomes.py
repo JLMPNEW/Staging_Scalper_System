@@ -186,9 +186,13 @@ def _outcome_acceptance(
     retirement_errors: list[str],
     first_write_drifts: int,
     deferred: bool,
+    preserve_drifts_as_deferred: bool = False,
 ) -> str:
-    if chain_errors or resolution_errors or retirement_errors or first_write_drifts:
+    if chain_errors or resolution_errors or retirement_errors:
         return "FAIL"
+    if first_write_drifts and not preserve_drifts_as_deferred:
+        return "FAIL"
+    deferred = deferred or bool(first_write_drifts)
     return "PASS_WITH_DEFERRED" if deferred else "PASS"
 
 
@@ -237,6 +241,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--as-of", type=date.fromisoformat)
     parser.add_argument("--input-dir", type=Path)
     parser.add_argument("--market-data-dir", type=Path)
+    parser.add_argument(
+        "--preserve-first-write-drifts-as-deferred",
+        action="store_true",
+        help=(
+            "Late-broker supplement only: preserve immutable prior publications and "
+            "report same-model recomputation differences as deferred, never as replacements."
+        ),
+    )
     parser.add_argument("--selftest", action="store_true")
     return parser.parse_args()
 
@@ -768,6 +780,7 @@ def main() -> int:
         retirement_errors=retirement_errors,
         first_write_drifts=first_write_drifts_preserved,
         deferred=deferred,
+        preserve_drifts_as_deferred=args.preserve_first_write_drifts_as_deferred,
     )
     write_manifest(
         ledger_manifest_path,
@@ -778,6 +791,9 @@ def main() -> int:
             "inserted": inserted,
             "idempotent_duplicates": duplicates,
             "first_write_level_drifts_preserved": first_write_drifts_preserved,
+            "preserve_first_write_drifts_as_deferred": bool(
+                args.preserve_first_write_drifts_as_deferred
+            ),
             "cross_model_restatements_skipped": cross_model_restatements_skipped,
             "cross_model_restatement_policy": (
                 "preserve_first_write_and_defer_new_model_until_next_unpublished_as_of"

@@ -46,12 +46,13 @@ Immutability contract:
     an explicit ``--as-of``.
 
 Each producer invalidates dependent seals first. IB liquidity collection (05c) is attempted by
-this overnight process when enabled; a 05c connection failure is itself WARN-only, but with
-`liquidity_panel.enhanced_intraday_enabled: true` (the production setting) 05d ALWAYS runs and
-fails closed on a missing or partial spread_snapshot.csv, so an overnight IB outage hard-stops
-the risk group rather than silently falling through. 05d is skipped only when the panel is
-wholly absent AND enhanced intraday collection is disabled; only in that configuration does
-Stage 4's explicit spread fallback cover the absent panel.
+this overnight process when enabled. Under the explicit connection-failure policy it may rebuild
+the current snapshot from the newest stored sample partition inside the configured staleness
+bound; 05d/08 still hard-fail stale rows, quote defects, incomplete universes, or excess fallback.
+Without that policy (or without a usable stored partition), an overnight IB outage hard-stops the
+risk group. 05d is skipped only when the panel is wholly absent AND enhanced intraday collection
+is disabled; only in that configuration does Stage 4's explicit spread fallback cover the absent
+panel.
 
 Every run writes runs/<as_of>/orchestration_meta.json with per-step durations, exit codes, and the
 acceptance read from each stage manifest. A narrowly scoped recovery run may select a different
@@ -86,7 +87,13 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
+from portfolio_layer.core.runtime_env import (  # noqa: E402
+    hydrate_missing_user_environment,
+)
 from portfolio_layer.expectations_monitor.monitor_common import monitor_output_subdir  # noqa: E402
+from portfolio_layer.ledger.ledger_common import (  # noqa: E402
+    latest_sealed_ledger_run,
+)
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
 
@@ -347,6 +354,10 @@ DEFAULT_CADENCES = {
     ],
 }
 MACRO_REFRESH_SCRIPTS = {"20a_run_macro_raw.py", "20_run_macro_serving.py"}
+DEFERRED_LEDGER_POLICY = (
+    "use_latest_sealed_ledger_and_defer_current_broker_groups"
+)
+CURRENT_BROKER_GROUPS = {"ledger", "exits", "payout"}
 # The exact refusal raised by portfolio_layer.core.contracts.fail_if_exists when a
 # producer meets its own prior partial outputs. Used by the partial-step recovery
 # path (never for sealed steps).
@@ -696,6 +707,14 @@ def parse_args() -> argparse.Namespace:
             "Point-in-time observations already in the independent store remain consumable."
         ),
     )
+    p.add_argument(
+        "--late-holding-supplement",
+        action="store_true",
+        help=(
+            "Late IB statement only: supplement newly held names while preserving "
+            "first-write monitor/levels evidence for previously published names."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="Print the plan without executing.")
     p.add_argument("--continue-on-fail", action="store_true",
                    help="Keep running later groups after a failure (default: stop).")
@@ -735,6 +754,11 @@ def script_args(
         and getattr(args, "historical_catchup", False)
     ):
         flags.append("--skip-event-cycle")
+    if (
+        script == "50_run_expectations_monitor_daily.py"
+        and getattr(args, "late_holding_supplement", False)
+    ):
+        flags.append("--late-holding-supplement")
     if script == "09_run_portfolio_optimizer.py":
         flags.extend(
             (
@@ -833,13 +857,37 @@ def _broker_statement_available(config: dict[str, Any], config_path: Path, as_of
 
 
 def _sealed_ledger_available(run_dir: Path) -> bool:
-    return (
-        (run_dir / "ledger" / "broker_net_stock_positions.csv").is_file()
-        and manifest_acceptance(run_dir, "ledger/ledger_manifest.json") == "PASS"
-    )
+    try:
+        selected, age_days, _skipped = latest_sealed_ledger_run(
+            run_dir.parent,
+            run_dir.name,
+            max_staleness_days=0,
+        )
+    except (FileNotFoundError, ValueError, OSError):
+        return False
+    return selected.resolve() == run_dir.resolve() and age_days == 0
 
 
-def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path) -> list[str]:
+def _configured_max_ledger_staleness(config: dict[str, Any]) -> int:
+    raw = cfg_get(config, "holdings_ledger.max_staleness_days", 7)
+    try:
+        value = int(str(raw))
+    except ValueError as exc:
+        raise ValueError(
+            f"holdings_ledger.max_staleness_days must be an integer, got {raw!r}"
+        ) from exc
+    if value < 0:
+        raise ValueError(
+            f"holdings_ledger.max_staleness_days must be >= 0, got {value}"
+        )
+    return value
+
+
+def plan_groups_with_metadata(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    run_dir: Path,
+) -> tuple[list[str], dict[str, Any]]:
     orch = cfg_get(config, "orchestration", {}) or {}
     overrides = orch.get("cadences") or {}
     for name, override in overrides.items():
@@ -866,6 +914,7 @@ def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path)
     if unknown:
         raise ValueError(f"unknown orchestration groups: {unknown}; valid={sorted(GROUPS)}")
     planned = [g for g in groups if g not in skip]
+    requested_after_skip = list(planned)
     monitor_planned = bool({"monitor", "monitor_filter"} & set(planned))
     require_holdings = bool(
         cfg_get(
@@ -876,46 +925,139 @@ def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path)
     )
     ledger_required = monitor_planned and require_holdings
     ledger_ready = _sealed_ledger_available(run_dir)
-    ledger_sources = run_dir / "ledger" / "broker_statement_sources.csv"
-    config_path = args.config.expanduser().resolve()
-    statement_available = ledger_sources.is_file() or _broker_statement_available(
+    config_path = Path(args.config).expanduser().resolve()
+    statement_available = _broker_statement_available(
         config,
         config_path,
         run_dir.name,
     )
+    policy = str(
+        cfg_get(
+            config,
+            "holdings_ledger.missing_same_date_statement_policy",
+            "fail",
+        )
+    ).strip()
+    selected_ledger_as_of = run_dir.name if ledger_ready else ""
+    selected_ledger_age_days: int | None = 0 if ledger_ready else None
+    skipped_ledger_candidates: list[dict[str, str]] = []
+    fallback_error = ""
 
     if ledger_required and not ledger_ready:
-        if "ledger" in skip:
+        if statement_available and "ledger" in skip:
             raise ValueError(
                 "expectations monitor requires same-date broker holdings, "
                 "but group ledger was explicitly skipped"
             )
-        if not statement_available:
-            raise ValueError(
-                "expectations monitor requires same-date broker holdings, "
-                f"but no sealed ledger or IB statement exists for {run_dir.name}"
+        if statement_available:
+            # Custom group lists and configured cadences cannot place a required
+            # source after its consumer. Normalize one ledger pass immediately
+            # before the first monitor group.
+            planned = [group for group in planned if group != "ledger"]
+            monitor_index = min(
+                index
+                for index, group in enumerate(planned)
+                if group in {"monitor", "monitor_filter"}
             )
-        # Custom group lists and configured cadences cannot place a required
-        # source after its consumer. Normalize one ledger pass immediately
-        # before the first monitor group.
-        planned = [group for group in planned if group != "ledger"]
-        monitor_index = min(
-            index
-            for index, group in enumerate(planned)
-            if group in {"monitor", "monitor_filter"}
+            planned.insert(monitor_index, "ledger")
+
+    needs_prior_ledger = (
+        not ledger_ready
+        and not statement_available
+        and (
+            ledger_required
+            or "final_report" in planned
+            or bool(CURRENT_BROKER_GROUPS & set(planned))
         )
-        planned.insert(monitor_index, "ledger")
-    elif "ledger" in planned and not statement_available:
-        if not ledger_ready:
-            LOGGER.info(
-                "group ledger skipped: no sealed import and no IB statement ending %s "
-                "in the configured report dir",
-                run_dir.name,
+    )
+    if needs_prior_ledger:
+        if policy != DEFERRED_LEDGER_POLICY:
+            raise ValueError(
+                "expectations monitor requires same-date broker holdings, but no "
+                f"sealed ledger or IB statement exists for {run_dir.name}; "
+                f"missing_same_date_statement_policy={policy or 'MISSING'}"
             )
-            planned = [
-                group for group in planned if group not in {"ledger", "exits"}
-            ]
+        try:
+            selected, selected_ledger_age_days, skipped_ledger_candidates = (
+                latest_sealed_ledger_run(
+                    run_dir.parent,
+                    run_dir.name,
+                    max_staleness_days=_configured_max_ledger_staleness(config),
+                )
+            )
+            selected_ledger_as_of = selected.name
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            fallback_error = f"{type(exc).__name__}: {exc}"
+            raise ValueError(
+                f"Same-date broker data is unavailable for {run_dir.name}, and "
+                f"no bounded hash-verified prior ledger can support the monitor: {exc}"
+            ) from exc
+        planned = [
+            group for group in planned if group not in CURRENT_BROKER_GROUPS
+        ]
+        LOGGER.warning(
+            "No same-date IB statement for %s: monitor/final report will use "
+            "sealed ledger %s (age=%s days); deferred groups=%s",
+            run_dir.name,
+            selected_ledger_as_of,
+            selected_ledger_age_days,
+            sorted(CURRENT_BROKER_GROUPS & set(requested_after_skip)),
+        )
+
+    deferred_groups = [
+        group
+        for group in requested_after_skip
+        if group in CURRENT_BROKER_GROUPS and group not in planned
+    ]
+    metadata: dict[str, Any] = {
+        "missing_same_date_statement_policy": policy,
+        "same_date_statement_available": statement_available,
+        "same_date_ledger_available": ledger_ready,
+        "broker_holdings_source_as_of": selected_ledger_as_of,
+        "broker_holdings_age_days": selected_ledger_age_days,
+        "deferred_groups": deferred_groups,
+        "skipped_ledger_candidates": skipped_ledger_candidates,
+        "fallback_error": fallback_error,
+        "requested_groups_after_skip": requested_after_skip,
+    }
+    return planned, metadata
+
+
+def plan_groups(args: argparse.Namespace, config: dict[str, Any], run_dir: Path) -> list[str]:
+    planned, _metadata = plan_groups_with_metadata(args, config, run_dir)
     return planned
+
+
+def configured_runtime_command(
+    config: dict[str, Any],
+    *,
+    argv: list[str] | None = None,
+    current_executable: str | Path | None = None,
+) -> list[str] | None:
+    """Return a deterministic self-relaunch command when the runtime is wrong."""
+    raw = str(cfg_get(config, "orchestration.python_executable", "")).strip()
+    if not raw:
+        return None
+    configured = Path(os.path.expandvars(raw)).expanduser()
+    if not configured.is_absolute():
+        configured = PROJECT_ROOT / configured
+    configured = configured.resolve()
+    if not configured.is_file():
+        raise FileNotFoundError(
+            f"Configured orchestration.python_executable does not exist: {configured}"
+        )
+    current = Path(current_executable or sys.executable).expanduser().resolve()
+    try:
+        same_runtime = os.path.samefile(configured, current)
+    except OSError:
+        same_runtime = os.path.normcase(str(configured)) == os.path.normcase(str(current))
+    if same_runtime:
+        return None
+    return [
+        str(configured),
+        str(Path(__file__).resolve()),
+        *(list(sys.argv[1:]) if argv is None else argv),
+    ]
 
 
 def run_pipeline() -> int:  # noqa: C901
@@ -967,6 +1109,16 @@ def run_pipeline() -> int:  # noqa: C901
         )
         return 1
     orchestration_meta_path = run_dir / orchestration_meta_name
+    if args.late_holding_supplement and (
+        not args.force
+        or not args.groups
+        or not orchestration_meta_name.startswith("late_statement_")
+    ):
+        LOGGER.error(
+            "--late-holding-supplement requires --force, explicit --groups, and a "
+            "late_statement_*.json recovery manifest"
+        )
+        return 1
     orch = cfg_get(config, "orchestration", {}) or {}
     step_timeout = float(orch.get("step_timeout_sec", 1800))
     macro_step_timeout = float(orch.get("macro_step_timeout_sec", 7200))
@@ -980,7 +1132,9 @@ def run_pipeline() -> int:  # noqa: C901
         )
         return 1
     try:
-        planned = plan_groups(args, config, run_dir)
+        planned, broker_dependency = plan_groups_with_metadata(
+            args, config, run_dir
+        )
         groups_map = resolved_groups(config)
     except ValueError as exc:
         LOGGER.error("Invalid orchestration plan: %s", exc)
@@ -1034,13 +1188,17 @@ def run_pipeline() -> int:  # noqa: C901
             "run_as_of": run_as_of,
             "cadence": args.cadence,
             "groups_planned": planned,
+            "groups_requested": broker_dependency["requested_groups_after_skip"],
             "groups_completed": completed_groups,
             "groups_failed": failed_groups,
             "groups_soft_failed": soft_failed_groups,
+            "groups_deferred": broker_dependency["deferred_groups"],
+            "broker_dependency": broker_dependency,
             "active_group": active_group,
             "force": bool(args.force),
             "reuse_risk_price_data": bool(args.reuse_risk_price_data),
             "historical_catchup": bool(args.historical_catchup),
+            "late_holding_supplement": bool(args.late_holding_supplement),
             "steps": steps,
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             # Freeze provenance at process start. Re-reading these files for every
@@ -1235,6 +1393,8 @@ def run_pipeline() -> int:  # noqa: C901
         overall = "FAIL"
     elif soft_failed_groups:
         overall = "PASS_WITH_ADVISORY_WARNINGS"
+    elif broker_dependency["deferred_groups"]:
+        overall = "PASS_WITH_DEFERRED"
     else:
         overall = "PASS"
     persist(overall)
@@ -1247,6 +1407,33 @@ def run_pipeline() -> int:  # noqa: C901
 
 def main() -> int:
     configure_utc_logging()
+    hydrated = hydrate_missing_user_environment()
+    if hydrated:
+        LOGGER.info(
+            "Hydrated %d missing variable(s) from local Windows user scope: %s",
+            len(hydrated),
+            ", ".join(hydrated),
+        )
+    startup_args = parse_args()
+    startup_config_path = startup_args.config.expanduser().resolve()
+    try:
+        startup_config = load_yaml(startup_config_path)
+        runtime_command = configured_runtime_command(startup_config)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        LOGGER.error("Portfolio orchestration runtime configuration failure: %s", exc)
+        return 1
+    if runtime_command is not None:
+        LOGGER.info(
+            "Re-launching portfolio pipeline with configured runtime: %s",
+            runtime_command[0],
+        )
+        completed = subprocess.run(
+            runtime_command,
+            cwd=str(PROJECT_ROOT),
+            check=False,
+        )
+        return int(completed.returncode)
+
     coordination = GlobalOrchestrationCoordination()
     # Narrow lock-failure handling to lock ACQUISITION only: any failure inside
     # run_pipeline() must not be mislabeled as a lock failure.

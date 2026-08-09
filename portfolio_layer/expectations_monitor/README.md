@@ -214,7 +214,10 @@ retained for legacy reproducibility but is no longer the configured estimate net
   hash-chained v2 ledger. FMP earnings `date` is correctly treated as `report_date`, never silently
   as a fiscal-period end. Exact fiscal-period matches may come only from the local PIT earnings
   calendar; unresolved rows remain ineligible. Release timestamps that lack a timezone are also
-  untrusted.
+  untrusted. The immutable observation key includes `fiscal_period_end`: providers may legitimately
+  publish two fiscal periods on one `report_date`, and both must remain independently addressable.
+  Existing ledgers are transactionally re-keyed without changing row sequence, row hash, or outcome
+  ID; row-count, hash-chain, uniqueness, and foreign-key checks all fail closed during migration.
 - `46_sync_fiscal_period_resolutions.py` captures exact Alpha `reportedDate` to
   `fiscalDateEnding` mappings and provider-matched reported EPS. The sealed Alpha bulk earnings
   calendar is an authoritative prospective fallback when the per-symbol history endpoint is
@@ -222,6 +225,9 @@ retained for legacy reproducibility but is no longer the configured estimate net
 - `47_link_provider_forecasts_to_outcomes.py` scores only provider-matched quarterly forecasts and
   outcomes. A forecast must have been available on a U.S.-Eastern date strictly before the report
   date. Same-day forecasts are excluded regardless of the reported before/after-market label.
+  Linkable but ineligible rows are retained as diagnostic links with explicit reasons; acceptance
+  validates total-link conservation separately from evaluation-eligible-link conservation, so
+  fail-closed evidence rows cannot be mistaken for eligible calibration observations.
 - `48_run_provider_earnings_event_cycle.py` selects only sealed Tier 0/1 names whose exact Alpha
   calendar event is within the configured two-day lookback/lookahead window. It batches exact-period
   and provider-matched actual capture, resumes hash-valid children after a failed parent, retries

@@ -550,7 +550,8 @@ sectors:
     health:
       manifest: "portfolio_layer/output/runs/{date}/orchestration_meta.json"
       status_keys: ["acceptance"]
-      healthy_values: ["PASS", "PASS_WITH_ADVISORY_WARNINGS"]
+      healthy_values:
+        ["PASS", "PASS_WITH_ADVISORY_WARNINGS", "PASS_WITH_DEFERRED"]
     # Portfolio has no native per-date backfill entry. In --mode backfill the
     # orchestrator records a NOTE that research/65 snapshot capture is the
     # intended path and does NOT auto-run the stage11 chain.

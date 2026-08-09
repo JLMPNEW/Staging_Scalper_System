@@ -14,6 +14,7 @@ Run:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 import json
@@ -76,10 +77,15 @@ ACTION_STATE_BG = {
 }
 
 NUMERIC_COLS = [
-    "weight", "IB_quantity", "final_score", "score_confidence", "current_price",
+    "weight", "IB_Holding", "IB_quantity", "final_score", "score_confidence", "current_price",
     "rel_ret_5d", "rel_ret_20d", "ma50", "ma200",
     "starter_band_low", "starter_band_high", "add_band_low", "add_band_high",
     "trim_band_low", "trim_band_high",
+]
+# Text columns the page renders; older run schemas predate several of them.
+TEXT_COLS = [
+    "sector", "rating", "internal_state", "action_state", "benchmark_ticker",
+    "price_band_status", "price_band_basis",
 ]
 
 
@@ -97,28 +103,70 @@ def list_run_dates() -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def load_book(run_date: str, mtime: float) -> tuple[dict, pd.DataFrame]:
-    """Parse the preamble key/value block and the book table."""
+def load_book(run_date: str, mtime: float) -> tuple[dict, pd.DataFrame, list[str]]:
+    """Parse the preamble key/value block and the book table.
+
+    Preamble rows carry one or more ``key,value`` PAIRS per line (the IB P&L rows
+    pack a headline figure plus its components), so parse pairwise rather than
+    splitting once. Returns (preamble, book, missing_columns) — older run schemas
+    predate several columns and must degrade to blanks instead of raising.
+    """
     _ = mtime  # cache key only: reload when the sealed file changes
     text = (RUNS_ROOT / run_date / "final" / "final_target_book.csv").read_text(encoding="utf-8-sig")
     lines = text.splitlines()
-    header_idx = next(i for i, ln in enumerate(lines) if ln.startswith("ticker,"))
+    header_idx = next((i for i, ln in enumerate(lines) if ln.startswith("ticker,")), None)
+    if header_idx is None:
+        raise ValueError(f"{run_date}: final_target_book.csv has no 'ticker,' header row")
+
     preamble: dict[str, str] = {}
-    for ln in lines[:header_idx]:
-        if "," in ln:
-            key, _, value = ln.partition(",")
-            if key.strip():
-                preamble[key.strip()] = value.strip()
+    for row in csv.reader(lines[:header_idx]):
+        cells = [c.strip() for c in row]
+        for i in range(0, len(cells) - 1, 2):
+            key, value = cells[i], cells[i + 1]
+            if key:
+                preamble[key] = value
+
     df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])))
+    missing = [c for c in (*NUMERIC_COLS, *TEXT_COLS, "next_earnings_date") if c not in df.columns]
     for col in NUMERIC_COLS:
-        if col not in df.columns:  # older runs predate the market-signal columns
+        if col not in df.columns:
             df[col] = pd.NA
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "benchmark_ticker" not in df.columns:
-        df["benchmark_ticker"] = pd.NA
+    for col in TEXT_COLS:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("")
+    if "next_earnings_date" not in df.columns:
+        df["next_earnings_date"] = pd.NaT
     df["next_earnings_date"] = pd.to_datetime(df["next_earnings_date"], format="%m/%d/%Y", errors="coerce")
-    df["sector"] = df["sector"].fillna("")
-    return preamble, df
+    return preamble, df, missing
+
+
+def preamble_float(preamble: dict, key: str) -> float | None:
+    """Parse a preamble numeric value; None when absent or unparseable."""
+    raw = preamble.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        return float(str(raw).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def db_signature(path: Path) -> tuple:
+    """Cache key covering the DB and its WAL sidecar.
+
+    SQLite in WAL mode commits into ``<db>-wal`` without necessarily touching the
+    main file's mtime, so keying a cache on the main file alone serves stale rows.
+    """
+    parts = []
+    for candidate in (path, path.with_name(path.name + "-wal")):
+        try:
+            stat = candidate.stat()
+            parts.append((stat.st_mtime, stat.st_size))
+        except OSError:
+            parts.append((0.0, 0))
+    return tuple(parts)
 
 
 @st.cache_data(show_spinner=False)
@@ -164,9 +212,9 @@ def load_h1_decision(path_str: str, mtime: float) -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def load_v1_decision(run_date: str, mtime: float) -> dict:
+def load_v1_decision(run_date: str, signature: tuple) -> dict:
     """Latest V1 decision row (as-of <= run date) from the macro serving DB."""
-    _ = mtime
+    _ = signature
     con = sqlite3.connect(str(SERVING_DB_PATH))
     try:
         df = pd.read_sql_query(
@@ -198,22 +246,26 @@ def load_ending_cash(run_date: str, mtime: float) -> float:
     """Ending Cash total from the run's IB cash report."""
     _ = mtime
     df = pd.read_csv(RUNS_ROOT / run_date / "ledger" / "broker_cash_report.csv")
-    rows = df.loc[df["line_item"].eq("Ending Cash"), "total"].astype(float).fillna(0.0)
-    return float(rows.iloc[0]) if len(rows) else 0.0
+    rows = df.loc[df["line_item"].eq("Ending Cash")]
+    # A base-currency summary already totals every currency; summing it alongside
+    # per-currency rows would double count, so prefer it when present.
+    base = rows.loc[rows["currency"].astype(str).str.contains("Base Currency", case=False, na=False)]
+    chosen = base if len(base) else rows
+    return float(sum(float(v) for v in chosen["total"] if pd.notna(v)))
 
 
 @st.cache_data(show_spinner=False)
-def load_trades(mtime: float) -> pd.DataFrame:
+def load_trades(signature: tuple) -> pd.DataFrame:
     """Load cumulative normalized IB trades from the portfolio-layer SQLite.
 
     The per-run ledger/broker_trades.csv holds only that statement's trades;
     the DB table is the deduplicated (by trade_key) full history.
     """
-    _ = mtime
+    _ = signature
     con = sqlite3.connect(str(DB_PATH))
     try:
         df = pd.read_sql_query(
-            "SELECT trade_date, symbol, asset_category, realized_pl FROM broker_trades", con
+            "SELECT trade_date, symbol, account, asset_category, realized_pl FROM broker_trades", con
         )
     finally:
         con.close()
@@ -254,7 +306,7 @@ with st.sidebar:
 
 book_path = RUNS_ROOT / run_date / "final" / "final_target_book.csv"
 manifest_path = RUNS_ROOT / run_date / "final" / "final_manifest.json"
-preamble, book = load_book(run_date, book_path.stat().st_mtime)
+preamble, book, missing_cols = load_book(run_date, book_path.stat().st_mtime)
 manifest = load_manifest(run_date, manifest_path.stat().st_mtime if manifest_path.is_file() else 0.0)
 
 run_ts = pd.Timestamp(run_date)
@@ -294,19 +346,27 @@ actual_sha = file_sha256(str(book_path), book_path.stat().st_mtime)
 sha_verified = bool(recorded_sha) and recorded_sha == actual_sha
 
 if not manifest:
-    st.error("Manifest missing: final_manifest.json not found for this run — "
+    st.error("Manifest missing or empty: final_manifest.json not found for this run — "
              "the book cannot be verified and must be treated as unsealed.", icon="⚠️")
-elif not sha_verified:
+elif recorded_sha and not sha_verified:
     st.error(f"Integrity error: final_target_book.csv sha256 {actual_sha[:16]}… does not "
-             f"match the manifest-recorded {(recorded_sha[:16] + '…') if recorded_sha else 'MISSING'} — "
+             f"match the manifest-recorded {recorded_sha[:16]}… — "
              "the displayed book is not the sealed book.", icon="⚠️")
 elif acceptance == "PASS" and not failed_checks:
-    st.success(f"Manifest acceptance: PASS — {len(manifest.get('checks', []))} checks, "
-               f"sha256 verified, generated {manifest.get('generated_at', 'n/a')}", icon="✅")
+    seal = "sha256 verified" if sha_verified else "NO sha recorded in manifest (unverifiable)"
+    body = (f"Manifest acceptance: PASS — {len(manifest.get('checks', []))} checks, {seal}, "
+            f"generated {manifest.get('generated_at', 'n/a')}")
+    (st.success if sha_verified else st.warning)(body, icon="✅" if sha_verified else "⚠️")
     if warn_checks:
         st.warning(f"Advisory diagnostics (non-gating): {warn_checks}", icon="ℹ️")
 else:
     st.error(f"Manifest acceptance: {acceptance} — failing checks: {failed_checks}", icon="⚠️")
+
+# The manifest hashes only the book; ledger/DB-sourced panels are not covered by it.
+if missing_cols:
+    st.warning(
+        f"This run predates the current book schema — {len(missing_cols)} column(s) are absent "
+        f"and render blank: {', '.join(missing_cols)}.", icon="ℹ️")
 
 # --- Regime strip -----------------------------------------------------------
 def fmt_regime(label: str) -> str:
@@ -314,7 +374,7 @@ def fmt_regime(label: str) -> str:
 
 h1_path = find_h1_decision(run_date)
 h1 = load_h1_decision(str(h1_path), h1_path.stat().st_mtime) if h1_path else {}
-v1 = load_v1_decision(run_date, SERVING_DB_PATH.stat().st_mtime) if SERVING_DB_PATH.is_file() else {}
+v1 = load_v1_decision(run_date, db_signature(SERVING_DB_PATH)) if SERVING_DB_PATH.is_file() else {}
 
 
 def regime_delta(top_prob: object, confidence: object) -> str:
@@ -364,10 +424,12 @@ monitored_only = is_ib & book["weight"].eq(0)
 overlap = in_target & is_ib
 earnings_soon = book.loc[in_target | is_ib, "earnings_in_days"].between(0, 7).sum()
 
+cash_weight = book.loc[is_cash, "weight"].sum()
 k = st.columns(6)
 k[0].metric("Target positions", int(in_target.sum()))
-k[1].metric("Gross weight", f"{book['weight'].sum():.2%}")
-k[2].metric("CASH weight", f"{book.loc[is_cash, 'weight'].sum():.2%}")
+k[1].metric("Equity gross", f"{book['weight'].sum() - cash_weight:.2%}",
+            f"{book['weight'].sum():.2%} incl. CASH", delta_color="off")
+k[2].metric("CASH weight", f"{cash_weight:.2%}")
 k[3].metric("IB holdings", int(is_ib.sum()))
 k[4].metric("IB ∩ target", int(overlap.sum()))
 k[5].metric("Earnings ≤ 7d", int(earnings_soon))
@@ -376,17 +438,57 @@ st.divider()
 
 # --- IB realized P&L (account-level, from the run's normalized IB trades) -----
 st.subheader("IB realized P&L")
+
+# The sealed preamble carries IB's own statement figures — those are authoritative.
+# Summing broker_trades.realized_pl reproduces only the trade-level short-term
+# component (it excludes dividends and broker interest), so it must not headline.
+sealed_realized_mtd = preamble_float(preamble, "ib_realized_profit_loss_mtd")
+sealed_realized_ytd = preamble_float(preamble, "ib_realized_profit_loss_ytd")
+sealed_mtm_mtd = preamble_float(preamble, "ib_mark_to_market_mtd_profit")
+sealed_mtm_ytd = preamble_float(preamble, "ib_mark_to_market_ytd_profit")
+
+if sealed_realized_mtd is not None or sealed_realized_ytd is not None:
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Realized P&L — MTD",
+              f"${sealed_realized_mtd:,.2f}" if sealed_realized_mtd is not None else "n/a")
+    s2.metric("Realized P&L — YTD",
+              f"${sealed_realized_ytd:,.2f}" if sealed_realized_ytd is not None else "n/a")
+    s3.metric("Mark-to-market — MTD",
+              f"${sealed_mtm_mtd:,.2f}" if sealed_mtm_mtd is not None else "n/a")
+    s4.metric("Mark-to-market — YTD",
+              f"${sealed_mtm_ytd:,.2f}" if sealed_mtm_ytd is not None else "n/a")
+
+    def component_line(period: str) -> str:
+        labels = [("ib_realized_short_term", "short-term"), ("ib_realized_long_term", "long-term"),
+                  ("ib_dividends", "dividends"), ("ib_net_broker_interest", "net interest")]
+        parts = []
+        for key, label in labels:
+            value = preamble_float(preamble, f"{key}_{period}")
+            if value is not None:
+                parts.append(f"{label} ${value:,.2f}")
+        return " · ".join(parts)
+
+    st.caption(
+        f"IB statement figures sealed in the book preamble (as of "
+        f"{preamble.get('ib_profit_as_of_date', 'n/a')}) — the authoritative account numbers.  \n"
+        f"MTD components: {component_line('mtd') or 'n/a'}  \n"
+        f"YTD components: {component_line('ytd') or 'n/a'}"
+    )
+else:
+    st.info("This run's book carries no sealed IB P&L preamble; falling back to trade-derived sums.")
+
+st.markdown("**Trade-level attribution** (from the `broker_trades` history)")
 if not DB_PATH.is_file():
     st.info(f"Portfolio-layer DB not found at {DB_PATH}.")
 else:
-    trades = load_trades(DB_PATH.stat().st_mtime)
+    trades = load_trades(db_signature(DB_PATH))
     ytd_trades = trades.loc[
         trades["trade_date"].dt.year.eq(run_ts.year) & trades["trade_date"].le(run_ts)
     ]
     mtd_trades = ytd_trades.loc[ytd_trades["trade_date"].dt.month.eq(run_ts.month)]
     pl1, pl2 = st.columns(2)
-    pl1.metric("Realized P&L — MTD", f"${mtd_trades['realized_pl'].sum():,.2f}")
-    pl2.metric("Realized P&L — YTD", f"${ytd_trades['realized_pl'].sum():,.2f}")
+    pl1.metric("Trade realized — MTD", f"${mtd_trades['realized_pl'].sum():,.2f}")
+    pl2.metric("Trade realized — YTD", f"${ytd_trades['realized_pl'].sum():,.2f}")
     with st.expander("Per-symbol breakdown"):
         per_symbol = (
             ytd_trades.groupby("symbol")
@@ -399,7 +501,7 @@ else:
         per_symbol["realized_pl_mtd"] = per_symbol["realized_pl_mtd"].fillna(0.0)
         per_symbol = (
             per_symbol.loc[per_symbol["realized_pl_ytd"].ne(0) | per_symbol["realized_pl_mtd"].ne(0)]
-            .sort_values("realized_pl_ytd", ascending=False)
+            .sort_index()
             .reset_index()
             .loc[:, ["symbol", "realized_pl_mtd", "realized_pl_ytd", "trades_ytd"]]
         )
@@ -407,10 +509,12 @@ else:
             per_symbol.style.format({"realized_pl_mtd": "${:,.2f}", "realized_pl_ytd": "${:,.2f}"}),
             width="stretch",
         )
+    accounts = sorted(str(a) for a in ytd_trades["account"].dropna().unique())
     st.caption(
-        f"Computed from the portfolio-layer DB `broker_trades` table (deduplicated IB "
-        f"statement history), summing `realized_pl` by trade date ≤ {run_date}; "
-        f"includes all asset categories (stocks and options)."
+        f"Per-trade `realized_pl` by trade date ≤ {run_date}, all asset categories "
+        f"(stocks, options, crypto) across account(s) {', '.join(accounts) or 'n/a'}. "
+        f"This is trade-level attribution only — it excludes dividends and broker interest, "
+        f"so it will NOT tie to the sealed IB realized total above."
     )
 
 st.divider()
@@ -422,12 +526,17 @@ if not holdings_path.is_file():
 else:
     holdings = load_holdings(run_date, holdings_path.stat().st_mtime)
     cash = load_ending_cash(run_date, cash_path.stat().st_mtime) if cash_path.is_file() else 0.0
-    account_value = holdings["market_value"].sum() + cash
+    account_value = float(holdings["market_value"].sum()) + cash
+    if account_value <= 0:  # never divide by a zero/absent account value
+        st.warning("Account value is zero or unavailable; percentage-of-account figures are hidden.",
+                   icon="⚠️")
 
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("Account value", f"${account_value:,.0f}")
     a2.metric("Positions market value", f"${holdings['market_value'].sum():,.0f}")
-    a3.metric("Cash", f"${cash:,.0f}", f"{cash / account_value:.1%} of account", delta_color="off")
+    a3.metric("Cash", f"${cash:,.0f}",
+              f"{cash / account_value:.1%} of account" if account_value > 0 else None,
+              delta_color="off")
     a4.metric("Unrealized P&L", f"${holdings['unrealized_pl'].sum():,.0f}")
 
     pos = holdings.loc[:, ["symbol", "cost_basis", "market_value", "unrealized_pl"]].copy()
@@ -437,7 +546,7 @@ else:
     pos["base"] = pos[["cost_basis", "market_value"]].min(axis=1)
     pos["gain"] = (pos["market_value"] - pos["cost_basis"]).clip(lower=0.0)
     pos["loss"] = (pos["cost_basis"] - pos["market_value"]).clip(lower=0.0)
-    pos["pct_of_account"] = pos["market_value"] / account_value
+    pos["pct_of_account"] = pos["market_value"] / account_value if account_value > 0 else 0.0
     pos = pos.sort_values("market_value")  # smallest at bottom; largest on top
 
     hover = ("<b>%{y}</b><br>cost basis $%{customdata[0]:,.0f}"
@@ -515,8 +624,8 @@ TABLE_COLUMNS = [
     "ticker", "weight", "IB_quantity", "earnings_in_days", "next_earnings_date",
     "sector", "rating", "internal_state", "action_state",
     "benchmark_ticker", "rel_ret_5d", "rel_ret_20d", "avg_cost_price", "current_price",
-    "ma50", "ma200",
-    "starter_band_high", "starter_band_low", "add_band_high", "add_band_low",
+    "ma50", "ma200", "price_band_status",
+    "starter_band_low", "starter_band_high", "add_band_low", "add_band_high",
     "trim_band_low", "trim_band_high",
 ]
 table = (
@@ -590,7 +699,14 @@ styler = styler.apply(lambda col: avg_cost_styles, subset=["avg_cost_price"])
 
 st.dataframe(styler, width="stretch", height=min(46 + 35 * len(table), 900))
 
+_diag = table["price_band_status"].eq("diagnostic_only_missing_intrinsic").sum()
 st.caption(
+    f"`current_price` is green-bold when ≤ `starter_band_high` and filled green when ≤ "
+    f"`add_band_high` — the test is the band's UPPER edge only, so a price that has fallen "
+    f"*below* the band also colors. Check `price_band_status`: "
+    f"{_diag} of {len(table)} shown rows are `diagnostic_only_missing_intrinsic` "
+    f"(band derived from market reference, no intrinsic valuation — not an actionable level).  \n"
     f"Source: `{book_path}` · rows {len(book)} · sha256 {actual_sha[:16]}… "
-    f"({'verified against manifest' if sha_verified else 'NOT VERIFIED'})"
+    f"({'verified against manifest' if sha_verified else 'NOT VERIFIED'}). "
+    f"The manifest hashes the book only — ledger, cash and DB panels above are not covered by it."
 )

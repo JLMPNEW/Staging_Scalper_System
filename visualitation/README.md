@@ -19,17 +19,31 @@ Then open http://localhost:8501 (or the port Streamlit prints).
   cumulative `broker_trades` table in `portfolio_layer/db/portfolio_layer.sqlite`.
   Shows manifest acceptance, regime context (active V1 source plus the H1
   shadow-candidate estimate from MacroLayer/out/regime_h1, latest as-of ≤ run
-  date), KPI tiles, IB realized P&L
-  (MTD/YTD tiles + per-symbol breakdown; computed from deduplicated IB
-  statement trades by trade date ≤ run date), an IB positions chart
+  date), KPI tiles, IB P&L (realized + mark-to-market MTD/YTD read from the
+  book preamble's SEALED IB statement figures — the authoritative numbers —
+  with a separate trade-level attribution block and per-symbol breakdown
+  derived from broker_trades, which excludes dividends/interest and therefore
+  does not tie to the sealed total), an IB positions chart
   (stacked cost-vs-market bars incl. cash, green/red tips = unrealized
   gain/loss, labels = % of account; from ledger/holding_state.csv +
   broker_cash_report.csv), and the styled book table (ticker, weight,
   IB_quantity, earnings, sector, rating, states, benchmark/relative
   returns/MAs, current price, starter/add/trim bands with high-before-low
   for starter and add). current_price renders green-bold when ≤
-  starter_band_high and gets a light-green fill when ≤ add_band_high.
+  starter_band_high and gets a light-green fill when ≤ add_band_high;
+  avg_cost_price fills green/red vs current price. price_band_status is shown
+  because most bands are `diagnostic_only_missing_intrinsic` (not actionable).
   Run date selectable in the sidebar (defaults to latest run).
+
+## Schema notes
+
+- The book preamble packs MULTIPLE `key,value` pairs per line (the IB P&L rows),
+  so it is parsed pairwise via `csv.reader` — never `partition(",")`.
+- Run dirs before 2026-07-31 use an older book schema with no preamble and no
+  sector/rating/state/price columns. The app degrades to blanks and shows a
+  schema-warning banner rather than raising.
+- Both SQLite DBs run in WAL mode, so cache keys use `db_signature()`
+  (main file + `-wal` sidecar mtime/size), not the main file's mtime alone.
 
 ## Planned pages (from the visualization design discussion, 2026-08-01)
 

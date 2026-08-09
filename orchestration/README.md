@@ -36,8 +36,10 @@ user's environment; they are never placed in task arguments or manifests.
 - Master catch-up marks older portfolio dates `--historical-catchup`, preventing
   current-only event endpoints from being assigned to historical runs.
 - IB statements remain date-specific. If no statement ends on the run date, the
-  portfolio runner skips ledger/exits and labels any carried ledger date in the
-  final report. On a later night,
+  portfolio runner uses only a bounded, hash-verified prior ledger, defers
+  ledger/exits/payout, and seals the portfolio run as `PASS_WITH_DEFERRED`.
+  Monitoring, optimization, final weights, and final reporting continue and
+  label the carried ledger date and age. On a later night,
   `reconcile_late_ib_statements.py` detects the newly downloaded statement and
   reruns only `ledger -> exits -> payout -> final -> final_report` for that
   existing date. It never rebuilds scores, prices, risk, optimization, macro, or
@@ -50,9 +52,23 @@ user's environment; they are never placed in task arguments or manifests.
   downstream rebuild stops the nightly run before the current-date master.
 - The portfolio risk group attempts IB historical liquidity after building the
   exact-date risk universe. Requests are sequential (never a simultaneous
-  100-line market-data batch). A connection failure is recorded as an advisory
-  warning and the explicit spread fallback remains available; any partial panel
-  must still pass the hard 05d/08 completeness and fallback-fraction gates.
+  100-line market-data batch). On a connection failure, the configured policy
+  may replay only the newest portfolio-database sample partition within the
+  liquidity staleness bound. The source partition and connection error are
+  sealed; any stale row, quote defect, incomplete universe, or excess fallback
+  still fails the hard 05d/08 gates.
 
 Weekend or holiday publisher folders are retained for audit but are excluded
 from the catch-up market calendar.
+
+The Windows task may run the heterogeneous sector master with the base Conda
+interpreter. The portfolio runner independently normalizes itself, before lock
+acquisition or artifact writes, to `orchestration.python_executable` from
+`portfolio_layer/config.yaml`. A missing configured interpreter fails before
+the run starts.
+
+At startup, the nightly entry and Stage 12 runner fill only a fixed allowlist of
+missing process variables from the local Windows user environment. Existing
+process values always win; values are never printed or written to manifests.
+This prevents a long-lived Task Scheduler/IDE parent from missing newly added
+API-key or database-path variables.

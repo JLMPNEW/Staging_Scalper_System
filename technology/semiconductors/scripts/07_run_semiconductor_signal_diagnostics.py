@@ -34,6 +34,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.signal_diagnostics import (  # noqa: E402
+    forward_return_observation_is_usable,
+)
 from technology.core.scoring_features import (  # noqa: E402
     COMPONENT_SPECS,
     SUBFEATURE_SPECS,
@@ -1128,10 +1131,19 @@ def main() -> int:
                         continue
                 fwd = series.ret_between(idx, target_idx)
                 bench_fwd = bench.ret_between(panel_idx, panel_idx + h)
-                if fwd is None or bench_fwd is None:
+                if not forward_return_observation_is_usable(fwd, bench_fwd, beta):
                     continue
+                # Keep the shared predicate contract visible to static checkers.
+                assert fwd is not None and bench_fwd is not None and beta is not None
                 if fwd < min_forward_return or fwd > max_forward_return:
-                    continue
+                    LOGGER.debug(
+                        "Retaining outcome outlier for unbiased IC sample: "
+                        "ticker=%s asof=%s horizon=%s return=%s",
+                        ticker,
+                        asof,
+                        h,
+                        fwd,
+                    )
                 fwd_resid[h][ticker] = fwd - beta * bench_fwd
                 usable = True
             if usable:

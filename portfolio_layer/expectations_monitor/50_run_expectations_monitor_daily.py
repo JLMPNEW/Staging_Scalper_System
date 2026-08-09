@@ -90,6 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--force', action='store_true')
+    parser.add_argument('--late-holding-supplement', action='store_true')
     parser.add_argument('--selftest', action='store_true')
     return parser.parse_args()
 
@@ -717,6 +718,7 @@ def main() -> int:
         'skip_pending_orders': bool(args.skip_pending_orders),
         'skip_event_cycle': bool(args.skip_event_cycle),
         'skip_market_data': bool(args.skip_market_data),
+        'late_holding_supplement': bool(args.late_holding_supplement),
         'universe_sources': universe_sources,
         'inputs_sha256': {str(path): sha256_file(path) for path in input_paths},
     }
@@ -1241,6 +1243,8 @@ def main() -> int:
         ]
         if args.force:
             state_command.append('--force')
+        if args.late_holding_supplement:
+            state_command.append('--late-holding-supplement')
         if args.dry_run:
             state_command.append('--dry-run')
         state_rc, state_detail = _run(state_command, dry_run=False)
@@ -1359,6 +1363,7 @@ def main() -> int:
             'shadow_only': True,
             'state_publication_authorized': state_publication_authorized,
             'broker_execution_prohibited': True,
+            'late_holding_supplement': bool(args.late_holding_supplement),
             'provider_request_fields': ['endpoint', 'ticker', 'authentication'],
             'implementation_or_policy_data_sent': False,
             'capture_cycle_count': len(cycles),

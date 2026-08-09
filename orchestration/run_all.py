@@ -3925,7 +3925,8 @@ def run_selftest() -> int:
        rport.health.manifest is not None
        and rport.health.manifest.endswith("orchestration_meta.json")
        and rport.health.status_keys == ["acceptance"]
-       and "PASS_WITH_ADVISORY_WARNINGS" in rport.health.healthy_values)
+       and "PASS_WITH_ADVISORY_WARNINGS" in rport.health.healthy_values
+       and "PASS_WITH_DEFERRED" in rport.health.healthy_values)
     rdef = real.by_name("defense")
     ok("real_defense_weekly_no_promotion", not rdef.weekly_pre_steps)
     rbio = real.by_name("biotech")

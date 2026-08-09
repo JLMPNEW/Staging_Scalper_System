@@ -334,6 +334,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def order_universe_entries(
+    universe: dict[str, dict[str, str]],
+) -> list[dict[str, str]]:
+    """Prioritize held names, then investable candidates, deterministically."""
+    return sorted(
+        universe.values(),
+        key=lambda row: (
+            row.get("is_holding", "0") != "1",
+            row.get("investable_eligible", "0") != "1",
+            row["ticker"],
+        ),
+    )
+
+
 def main() -> int:
     args = parse_args()
     configure_utc_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
@@ -374,6 +388,7 @@ def main() -> int:
         universe[ticker] = {
             "ticker": ticker,
             "investable_eligible": "1" if investable == "1" else "0",
+            "is_holding": "0",
             "source_pipeline": str(row.get("source_pipeline", "")),
             "sector": str(row.get("sector", "")),
         }
@@ -389,15 +404,17 @@ def main() -> int:
             if not ticker:
                 continue
             holding_count += 1
-            universe.setdefault(
-                ticker,
-                {
+            existing = universe.get(ticker)
+            if existing is not None:
+                existing["is_holding"] = "1"
+            else:
+                universe[ticker] = {
                     "ticker": ticker,
                     "investable_eligible": "0",
+                    "is_holding": "1",
                     "source_pipeline": "broker_holding_only",
                     "sector": "",
-                },
-            )
+                }
     if not universe:
         LOGGER.error("Universe is empty after filtering %s", scores_path)
         return 1
@@ -455,8 +472,9 @@ def main() -> int:
     history_rows = load_history(history_path)
     prior_dates = latest_prior_dates(history_rows)
 
-    # Investable names first so fallback budgets are spent where it matters.
-    ordered = sorted(universe.values(), key=lambda r: (r["investable_eligible"] != "1", r["ticker"]))
+    # Existing holdings carry immediate portfolio risk. Spend bounded fallback
+    # calls on them before investable candidates, then on the remaining universe.
+    ordered = order_universe_entries(universe)
     rows: list[dict[str, Any]] = []
     yahoo_calls = gemini_calls = 0
 

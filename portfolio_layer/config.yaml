@@ -626,6 +626,10 @@ risk_panel:
 liquidity_panel:
   enhanced_intraday_enabled: true
   provider: "ibkr_historical_bid_ask"
+  # TWS may be offline during the scheduled overnight run. Reuse is limited to
+  # the newest stored partition inside max_stale_liquidity_days; 05d/08 still
+  # hard-fail stale names, bad quotes, incomplete universes, or excess fallback.
+  connection_failure_policy: "reuse_latest_db_samples_within_staleness"
   universe_source: "risk_eligible_scores"   # risk_eligible_scores | investable_scores | target_weights | trade_list | auto
   bar_size: "5 mins"
   duration_days: 5                         # permits backfill if one overnight run is missed
@@ -961,6 +965,11 @@ holdings_ledger:
   source_reports_dir: "../IB_reports"
   statement_glob: "U*.csv"
   max_staleness_days: 7                    # broker-ledger staleness bound: newest sealed IB statement must be within this many calendar days of the run as-of
+  # Overnight statements normally arrive the following day. Keep the production
+  # score/monitor/optimizer/final chain running with the newest hash-verified
+  # prior ledger inside max_staleness_days; defer same-date ledger/exits/payout.
+  # The late-statement reconciler replaces those outputs after the CSV arrives.
+  missing_same_date_statement_policy: "use_latest_sealed_ledger_and_defer_current_broker_groups"
   broker: "IBKR"
   manual_lot_overrides:
     FISV:
@@ -1124,6 +1133,10 @@ calibration_feedback:
 # Stage 12 - orchestration (orchestration/18) + rule-based risk governor (orchestration/19).
 # The governor emits a SHADOW directive only; nothing applies it until Stage 11 promotes it.
 orchestration:
+  # The master scheduler may use the base interpreter for heterogeneous sector
+  # repos. Stage 12 re-launches itself in this environment before taking locks
+  # or writing artifacts, so covariance/optimizer dependencies are deterministic.
+  python_executable: "C:/Users/josel/miniconda3/envs/scalper-staging/python.exe"
   step_timeout_sec: 1800
   macro_step_timeout_sec: 7200             # raw + full serving fits can legitimately exceed 30 minutes
   monitor_step_timeout_sec: 7200           # provider + OHLCV + state + levels fan-out

@@ -4,9 +4,14 @@ import csv
 import hashlib
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
+
+from portfolio_layer.core.contracts import (
+    read_manifest,
+    sealed_artifact_errors,
+)
 
 
 STATEMENT_META_FIELDS = [
@@ -53,6 +58,90 @@ NET_STOCK_POSITION_FIELDS = [
     "shares_lent",
     "net_shares",
 ]
+
+
+def latest_sealed_ledger_run(
+    runs_root: Path,
+    run_as_of: str,
+    *,
+    max_staleness_days: int,
+) -> tuple[Path, int, list[dict[str, str]]]:
+    """Return the newest hash-verified broker ledger on or before run_as_of.
+
+    A missing same-date statement is operationally normal for the overnight
+    pipeline. Consumers may use a prior sealed ledger only inside the explicit
+    staleness bound; corrupt/newer candidates are surfaced in the skipped list.
+    """
+    if max_staleness_days < 0:
+        raise ValueError(
+            f"max_staleness_days must be >= 0, got {max_staleness_days}"
+        )
+    try:
+        run_date = date.fromisoformat(run_as_of)
+    except ValueError as exc:
+        raise ValueError(f"run_as_of must use YYYY-MM-DD, got {run_as_of!r}") from exc
+    if run_date.isoformat() != run_as_of:
+        raise ValueError(f"run_as_of must use canonical YYYY-MM-DD, got {run_as_of!r}")
+    if not runs_root.is_dir():
+        raise FileNotFoundError(f"Portfolio runs root does not exist: {runs_root}")
+
+    candidates: list[tuple[date, Path]] = []
+    for path in runs_root.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            candidate_date = date.fromisoformat(path.name)
+        except ValueError:
+            continue
+        if (
+            candidate_date <= run_date
+            and (path / "ledger" / "ledger_manifest.json").is_file()
+        ):
+            candidates.append((candidate_date, path))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if not candidates:
+        raise FileNotFoundError(
+            f"No sealed broker-ledger candidate exists on or before {run_as_of}"
+        )
+
+    skipped: list[dict[str, str]] = []
+    for candidate_date, candidate in candidates:
+        manifest_path = candidate / "ledger" / "ledger_manifest.json"
+        artifact = candidate / "ledger" / "broker_net_stock_positions.csv"
+        try:
+            manifest = read_manifest(manifest_path)
+        except (OSError, ValueError) as exc:
+            skipped.append(
+                {
+                    "run": candidate.name,
+                    "reason": f"unreadable_manifest:{type(exc).__name__}:{exc}",
+                }
+            )
+            continue
+        errors = sealed_artifact_errors(
+            manifest,
+            artifact,
+            "broker_net_stock_positions",
+            "broker_net_stock_positions.csv",
+            run_as_of=candidate.name,
+            allow_deferred=False,
+        )
+        if errors:
+            skipped.append({"run": candidate.name, "reason": ";".join(errors)})
+            continue
+        age_days = (run_date - candidate_date).days
+        if age_days > max_staleness_days:
+            raise ValueError(
+                f"Newest usable broker ledger {candidate.name} is {age_days} days old "
+                f"for run {run_as_of}, beyond max_staleness_days={max_staleness_days}; "
+                f"newer candidates skipped={skipped or 'none'}"
+            )
+        return candidate, age_days, skipped
+
+    raise ValueError(
+        f"No usable sealed broker ledger exists on or before {run_as_of}; "
+        f"candidates skipped={skipped}"
+    )
 
 TRADE_FIELDS = [
     "trade_key",
