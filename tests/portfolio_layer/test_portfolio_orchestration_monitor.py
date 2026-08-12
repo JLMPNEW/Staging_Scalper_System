@@ -45,6 +45,44 @@ def _load_monitor_universe() -> ModuleType:
     return module
 
 
+def _load_expectations_state() -> ModuleType:
+    path = (
+        PROJECT_ROOT
+        / "portfolio_layer"
+        / "expectations_monitor"
+        / "56_build_expectations_state.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "expectations_state_blank_market_test",
+        path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_expectations_escalations_accept_blank_optional_market_evidence() -> None:
+    module = _load_expectations_state()
+    event = {
+        "event_type": "guidance_cut",
+        "severity": 4.5,
+        "event_id": "event-1",
+        "direction": -1,
+        "material_flag": 1,
+    }
+
+    flags, floor, evidence = module._escalations(
+        [event],
+        {"abnormal_ret_1d_z": "", "rel_ret_5d": "", "rel_ret_20d": ""},
+    )
+
+    assert "R1" in flags
+    assert "R4" not in flags
+    assert floor == "watch"
+    assert evidence == ["event-1"]
+
+
 def _write_sealed_ledger(
     orchestrator: ModuleType,
     run_dir: Path,

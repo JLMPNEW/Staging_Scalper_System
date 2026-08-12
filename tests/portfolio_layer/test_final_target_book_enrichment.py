@@ -103,6 +103,34 @@ def test_enriched_book_includes_broker_only_stock_and_requested_context() -> Non
     assert by_ticker["BBB"]["next_earnings_date"] == "8/12/2026"
 
 
+def test_final_price_validation_is_basis_and_date_aware() -> None:
+    enricher = _load_enricher()
+    base = {
+        "ticker": "AAA",
+        "price_source": "levels_market_structure",
+        "current_price": 100.25,
+        "_market_latest_price": 100.0,
+        "_market_latest_date": "2026-08-10",
+        "_level_latest_date": "2026-08-10",
+        "_market_price_basis": "adjusted_close",
+        "_level_price_basis": "raw_unadjusted_nominal",
+    }
+
+    assert enricher._market_level_price_errors([base]) == ([], 0, 1)
+    same_basis_bad = {**base, "_level_price_basis": "adjusted_close"}
+    assert enricher._market_level_price_errors([same_basis_bad])[0] == [
+        "AAA:same_basis_price:100.0!=100.25"
+    ]
+    stale_level = {**base, "_level_latest_date": "2026-08-07"}
+    assert enricher._market_level_price_errors([stale_level])[0] == [
+        "AAA:date:2026-08-10!=2026-08-07"
+    ]
+    unknown_basis = {**base, "_level_price_basis": ""}
+    assert enricher._market_level_price_errors([unknown_basis])[0] == [
+        "AAA:unsupported_basis:adjusted_close->missing"
+    ]
+
+
 def test_final_report_uses_macro_preamble_not_repeated_columns(tmp_path: Path) -> None:
     enricher = _load_enricher()
     report = tmp_path / "final_target_book.csv"

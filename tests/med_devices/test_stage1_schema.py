@@ -8,16 +8,21 @@ import sys
 from datetime import date
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
 from med_devices.core.analyst_review import (
+    AnalystReviewDecision,
+    decision_lifecycle_rows,
     decision_expiration_status,
     decision_review_cadence_status,
     effective_decision,
     load_analyst_review_decisions,
+    queue_decision_state_matches,
 )
 from med_devices.core.db import connect, init_db
+from med_devices.core.fda_mapping_governance import _audit_mapping_rows
 from med_devices.core.fda_product_family_review import (
     build_product_family_shadow_score,
     load_product_family_exposures,
@@ -36,11 +41,84 @@ SOURCE_REGISTRY = REPO_ROOT / "med_devices" / "data" / "free_source_registry.yam
 SCRIPT_DIR = REPO_ROOT / "med_devices" / "scripts"
 FDA_PRODUCT_FAMILY_MAPPING = REPO_ROOT / "med_devices" / "data" / "fda_product_family_mapping.csv"
 FDA_PRODUCT_FAMILY_EXPOSURE = REPO_ROOT / "med_devices" / "data" / "fda_product_family_exposure.csv"
+FDA_MANUFACTURER_OVERRIDES = REPO_ROOT / "med_devices" / "data" / "fda_manufacturer_overrides.csv"
 
 
 def table_names(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     return {str(row["name"]) for row in rows}
+
+
+def test_fda_mapping_governance_ignores_zero_reference_ambiguous_dimensions() -> None:
+    orphan = {
+        "fda_manufacturer_id": "11270",
+        "manufacturer_name": "NOVA BIOMEDICAL CORPORATION DIABETES PRODUCTS",
+        "mapping_method": "ambiguous",
+        "mapping_confidence": "75",
+        "total_fda_rows": "0",
+    }
+    active = {**orphan, "fda_manufacturer_id": "11271", "total_fda_rows": "1"}
+
+    issues, ambiguous_count, high_volume_count, low_confidence_count = _audit_mapping_rows(
+        [orphan, active],
+        active_companies={},
+        min_mapped_confidence=75.0,
+        low_confidence_review_threshold=90.0,
+    )
+
+    assert ambiguous_count == 1
+    assert high_volume_count == 0
+    assert low_confidence_count == 0
+    assert [issue["fda_manufacturer_id"] for issue in issues] == ["11271"]
+    assert issues[0]["issue_type"] == "ambiguous_mapping"
+
+
+def test_xray_reviewed_manufacturer_overrides_cover_verified_dentsply_entities() -> None:
+    with FDA_MANUFACTURER_OVERRIDES.open(newline="", encoding="utf-8-sig") as handle:
+        rows = {row["fda_manufacturer_id"]: row for row in csv.DictReader(handle)}
+
+    for manufacturer_id, expected_name in {
+        "9252": "DENTSPLY IH INC.",
+        "10700": "DENTSPLY SIRONA ORTHODONTICS INC.",
+    }.items():
+        row = rows[manufacturer_id]
+        assert row["manufacturer_name"] == expected_name
+        assert row["ticker"] == "XRAY"
+        assert row["company_id"] == "64"
+        assert row["confidence"] == "99"
+        assert row["mapping_method"] == "manual_override"
+        assert row["valid_from"] == "2026-08-10"
+        assert row["reviewed_at"] == "2026-08-10"
+        assert "owner/operator 2511302" in row["note"]
+
+
+def test_confirmed_fda_manufacturer_closure_overrides_are_governed() -> None:
+    with FDA_MANUFACTURER_OVERRIDES.open(newline="", encoding="utf-8-sig") as handle:
+        rows = {row["fda_manufacturer_id"]: row for row in csv.DictReader(handle)}
+
+    expected = {
+        "10799": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "10589": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "10590": ("manual_override", "MDT", "6", "95", "2019-01-04"),
+        "1145": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "1148": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "1124": ("manual_override", "MDT", "6", "95", "2020-10-01"),
+        "1135": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "1139": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "10644": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "987": ("out_of_universe", "", "", "0", "2019-01-04"),
+        "60": ("out_of_universe", "", "", "0", "2019-01-04"),
+    }
+    for manufacturer_id, values in expected.items():
+        row = rows[manufacturer_id]
+        assert (
+            row["mapping_method"],
+            row["ticker"],
+            row["company_id"],
+            row["confidence"],
+            row["valid_from"],
+        ) == values
+        assert row["reviewed_at"] == "2026-08-11"
 
 
 def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -63,6 +141,19 @@ FDA_PRODUCT_FAMILY_SHADOW_COLUMNS = (
     "fda_product_family_exposure_missing_count",
     "fda_product_family_shadow_status",
     "fda_product_family_shadow_reason",
+)
+FDA_ADJUDICATION_COLUMNS = (
+    "fda_adjudication_applied_flag",
+    "fda_adjudicated_event_count_24m",
+    "fda_raw_death_count_24m",
+    "fda_adjudicated_device_death_count_24m",
+    "fda_adjudicated_serious_product_event_count_24m",
+    "fda_adjudicated_non_device_death_count_24m",
+    "fda_scoring_death_count_24m",
+    "fda_scoring_injury_count_24m",
+    "fda_scoring_malfunction_count_24m",
+    "fda_adjudication_status",
+    "fda_adjudication_reviewed_at",
 )
 
 
@@ -91,12 +182,28 @@ def test_reviewed_ldt_clia_footprints_are_effective_dated() -> None:
     assert effective["ADPT"]["product_codes"] == "QDC"
     assert effective["MDAI"]["premarket_numbers"] == "DEN250028"
     assert effective["MDAI"]["product_codes"] == "SHY"
-    assert effective["VCYT"]["footprint_category"] == (
-        "centralized_ldt_clia_with_dormant_legacy_clearance"
-    )
+    assert effective["VCYT"]["footprint_category"] == ("centralized_ldt_clia_with_dormant_legacy_clearance")
     assert effective["VCYT"]["premarket_numbers"] == "K130010"
     assert effective["VCYT"]["product_codes"] == "NYI;NSU"
     assert effective["VCYT"]["expected_cdrh_records"] == "legacy_only"
+
+
+def test_osur_fda_footprint_correction_is_effective_dated() -> None:
+    module = load_script_module(
+        "10_build_med_device_fda_features.py",
+        "med_device_osur_footprint_test",
+    )
+    path = REPO_ROOT / "med_devices" / "data" / "fda_company_footprints.csv"
+
+    before = module.load_footprint_overrides(path, asof=date(2026, 8, 9))
+    effective = module.load_footprint_overrides(path, asof=date(2026, 8, 10))
+
+    assert before["OSUR"]["product_codes"] == "MIB;MZF"
+    assert before["OSUR"]["review_adjusted_fda_state"] == "mapping_review_required"
+    assert effective["OSUR"]["product_codes"] == "MZO;QID;MZF"
+    assert effective["OSUR"]["premarket_numbers"] == "P080027;DEN190025"
+    assert effective["OSUR"]["review_adjusted_fda_state"] == "manual_fda_footprint_device"
+    assert "MIB" not in effective["OSUR"]["product_codes"].split(";")
 
 
 def test_vnrx_incorrect_cpt_expires_before_structural_lab_routing() -> None:
@@ -104,12 +211,8 @@ def test_vnrx_incorrect_cpt_expires_before_structural_lab_routing() -> None:
         "11_build_med_device_reimbursement_features.py",
         "med_device_vnrx_reimbursement_classification_test",
     )
-    classification_path = (
-        REPO_ROOT / "med_devices" / "data" / "reimbursement_company_classifications.csv"
-    )
-    override_path = (
-        REPO_ROOT / "med_devices" / "data" / "reimbursement_mapping_overrides.csv"
-    )
+    classification_path = REPO_ROOT / "med_devices" / "data" / "reimbursement_company_classifications.csv"
+    override_path = REPO_ROOT / "med_devices" / "data" / "reimbursement_mapping_overrides.csv"
 
     before = reimbursement_module.load_company_classifications(
         classification_path,
@@ -124,9 +227,7 @@ def test_vnrx_incorrect_cpt_expires_before_structural_lab_routing() -> None:
     vnrx_code = next(row for row in rows if row["ticker"] == "VNRX")
 
     assert "VNRX" not in before
-    assert effective["VNRX"].billing_category == (
-        "veterinary_commercial_and_precommercial_human"
-    )
+    assert effective["VNRX"].billing_category == ("veterinary_commercial_and_precommercial_human")
     assert effective["VNRX"].payment_rate_status == "veterinary_no_cms"
     assert effective["VNRX"].primary_payment_file == "none"
     assert row_is_effective_asof(vnrx_code, date(2026, 7, 23))
@@ -138,16 +239,8 @@ def test_wgs_reimbursement_anchor_transitions_to_exome_genome_code_set() -> None
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = [row for row in csv.DictReader(handle) if row["ticker"] == "WGS"]
 
-    before = {
-        row["reimbursement_code"]
-        for row in rows
-        if row_is_effective_asof(row, date(2026, 7, 23))
-    }
-    effective = {
-        row["reimbursement_code"]
-        for row in rows
-        if row_is_effective_asof(row, date(2026, 7, 24))
-    }
+    before = {row["reimbursement_code"] for row in rows if row_is_effective_asof(row, date(2026, 7, 23))}
+    effective = {row["reimbursement_code"] for row in rows if row_is_effective_asof(row, date(2026, 7, 24))}
 
     assert before == {"81425"}
     assert effective == {"81415", "81416", "81425", "81426"}
@@ -168,16 +261,14 @@ def test_assay_specific_reimbursement_codes_replace_generic_81479_proxies() -> N
         current_codes = {
             row["reimbursement_code"]
             for row in rows
-            if row["ticker"] == ticker
-            and row_is_effective_asof(row, date(2026, 7, 24))
+            if row["ticker"] == ticker and row_is_effective_asof(row, date(2026, 7, 24))
         }
         assert current_codes == {code}
 
     gral_codes = {
         row["reimbursement_code"]
         for row in rows
-        if row["ticker"] == "GRAL"
-        and row_is_effective_asof(row, date(2026, 7, 24))
+        if row["ticker"] == "GRAL" and row_is_effective_asof(row, date(2026, 7, 24))
     }
     assert not gral_codes
 
@@ -187,11 +278,7 @@ def test_generic_81479_has_no_ticker_agnostic_manual_flat_rate() -> None:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
 
-    assert not [
-        row
-        for row in rows
-        if row["code"] == "81479" and str(row["payment_rate"] or "").strip()
-    ]
+    assert not [row for row in rows if row["code"] == "81479" and str(row["payment_rate"] or "").strip()]
 
 
 def test_updated_lab_reimbursement_classifications_are_effective() -> None:
@@ -199,9 +286,7 @@ def test_updated_lab_reimbursement_classifications_are_effective() -> None:
         "11_build_med_device_reimbursement_features.py",
         "med_device_updated_lab_reimbursement_classification_test",
     )
-    path = (
-        REPO_ROOT / "med_devices" / "data" / "reimbursement_company_classifications.csv"
-    )
+    path = REPO_ROOT / "med_devices" / "data" / "reimbursement_company_classifications.csv"
     classifications = module.load_company_classifications(
         path,
         asof=date(2026, 7, 24),
@@ -234,16 +319,8 @@ def test_company_risk_event_sync_is_pit_filtered_and_idempotent(tmp_path: Path) 
     )
     path = REPO_ROOT / "med_devices" / "data" / "company_risk_events.csv"
 
-    assert not [
-        row
-        for row in module.load_rows(path, asof="2026-07-13")
-        if row["ticker"] == "TCMD"
-    ]
-    rows = [
-        row
-        for row in module.load_rows(path, asof="2026-07-14")
-        if row["ticker"] == "TCMD"
-    ]
+    assert not [row for row in module.load_rows(path, asof="2026-07-13") if row["ticker"] == "TCMD"]
+    rows = [row for row in module.load_rows(path, asof="2026-07-14") if row["ticker"] == "TCMD"]
     assert len(rows) == 1
 
     db_path = tmp_path / "med_devices.sqlite"
@@ -469,6 +546,130 @@ def test_diagnostics_research_review_decisions_are_same_day_exclusive() -> None:
         assert effective.allow_portfolio_candidate_override is False
 
 
+def test_august_data_fix_closures_preserve_pit_history_and_re_gate_as_watchlist() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    decisions, issues = load_analyst_review_decisions(path)
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+
+    cohorts = {
+        "ADPT": "diagnostics_clinical_tests",
+        "MDAI": "capital_equipment_procedure_platforms",
+        "BDSX": "diagnostics_clinical_tests",
+        "CSTL": "diagnostics_clinical_tests",
+        "NEO": "diagnostics_clinical_tests",
+        "PSNL": "diagnostics_clinical_tests",
+        "XGN": "diagnostics_clinical_tests",
+        "WGS": "diagnostics_clinical_tests",
+        "ENOV": "orthopedics_spine_sports_implants",
+        "ITGR": "hospital_supplies_surgical_consumables_oem",
+        "QDEL": "diagnostics_clinical_tests",
+    }
+    for ticker, cohort in cohorts.items():
+        prior = effective_decision(decisions, ticker=ticker, cohort=cohort, asof=date(2026, 8, 10))
+        effective = effective_decision(decisions, ticker=ticker, cohort=cohort, asof=date(2026, 8, 11))
+
+        assert prior is not None and prior.decision == "data_fix_needed"
+        assert effective is not None and effective.decision == "watchlist"
+        assert effective.review_category == "all"
+        assert effective.allow_portfolio_candidate_override is False
+
+
+def test_decision_lifecycle_rows_exclude_future_and_same_day_reviews() -> None:
+    path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    decisions, issues = load_analyst_review_decisions(path)
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+
+    historical_rows = decision_lifecycle_rows(
+        decisions,
+        asof=date(2026, 8, 7),
+        warning_days=14,
+    )
+    effective_rows = decision_lifecycle_rows(
+        decisions,
+        asof=date(2026, 8, 11),
+        warning_days=14,
+    )
+
+    assert historical_rows
+    assert all(str(row["reviewed_at"]) < "2026-08-07" for row in historical_rows)
+    closure_tickers = {
+        str(row["ticker"])
+        for row in effective_rows
+        if row["reviewed_at"] == "2026-08-10" and row["decision"] == "watchlist"
+    }
+    assert closure_tickers == {
+        "ADPT",
+        "BDSX",
+        "CSTL",
+        "ENOV",
+        "ITGR",
+        "MDAI",
+        "NEO",
+        "OSUR",
+        "PSNL",
+        "QDEL",
+        "WGS",
+        "XGN",
+    }
+
+
+def test_queue_decision_state_matcher_covers_every_governed_lifecycle_state() -> None:
+    active = AnalystReviewDecision(
+        ticker="RMD",
+        calibration_cohort="home_chronic_care_devices_dme_drug_delivery",
+        review_category="all",
+        decision="watchlist",
+        decision_reason="governed review",
+        review_owner="portfolio_research",
+        reviewed_at="2026-07-24",
+        expires_at="",
+        next_review_at="2026-08-24",
+        active=True,
+        allow_portfolio_candidate_override=False,
+        max_position_weight_override=None,
+        source_reference="test",
+        row_number=1,
+    )
+    expired = AnalystReviewDecision(**{**active.__dict__, "active": False, "expires_at": "2026-08-01"})
+
+    for status in (
+        "decided",
+        "decision_expires_soon",
+        "decision_review_due_soon",
+        "decision_review_overdue",
+    ):
+        assert queue_decision_state_matches(
+            status=status,
+            recorded_decision="watchlist",
+            active_decision=active,
+            expired_decision=None,
+        )
+    assert queue_decision_state_matches(
+        status="expired_decision_needs_review",
+        recorded_decision="watchlist",
+        active_decision=None,
+        expired_decision=expired,
+    )
+    assert queue_decision_state_matches(
+        status="open",
+        recorded_decision="",
+        active_decision=None,
+        expired_decision=None,
+    )
+    assert not queue_decision_state_matches(
+        status="open",
+        recorded_decision="watchlist",
+        active_decision=None,
+        expired_decision=None,
+    )
+    assert not queue_decision_state_matches(
+        status="unknown_future_state",
+        recorded_decision="",
+        active_decision=None,
+        expired_decision=None,
+    )
+
+
 def test_dxcm_and_rmd_postmarket_decisions_are_same_day_exclusive_and_scheduled() -> None:
     path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
     decisions, issues = load_analyst_review_decisions(path)
@@ -532,16 +733,10 @@ def test_abt_product_family_governance_is_effective_dated_and_complete() -> None
     assert not [issue for issue in before_issues if issue.severity == "CRITICAL"]
     assert not [issue for issue in effective_issues if issue.severity == "CRITICAL"]
     assert not [issue for issue in exposure_issues if issue.severity == "CRITICAL"]
-    assert {
-        mapping.product_code
-        for mapping in effective
-        if mapping.ticker == "ABT"
-    }.issuperset({"DSQ", "QBJ", "QLG", "NGV", "NKM", "OAE", "DQK"})
-    governed_families = {
-        exposure.product_family
-        for exposure in exposures
-        if exposure.ticker == "ABT"
-    }
+    assert {mapping.product_code for mapping in effective if mapping.ticker == "ABT"}.issuperset(
+        {"DSQ", "QBJ", "QLG", "NGV", "NKM", "OAE", "DQK"}
+    )
+    governed_families = {exposure.product_family for exposure in exposures if exposure.ticker == "ABT"}
     assert governed_families.issuperset(
         {
             "diabetes_cgm",
@@ -555,24 +750,31 @@ def test_abt_product_family_governance_is_effective_dated_and_complete() -> None
             "cardiopulmonary_surgical_support",
         }
     )
-    available = {
-        exposure.product_family: exposure
-        for exposure in exposures
-        if exposure.exposure_status == "available"
-    }
+    available = {exposure.product_family: exposure for exposure in exposures if exposure.exposure_status == "available"}
     assert len(available) == 8
     assert available["diabetes_cgm"].exposure_value == 7600.0
     assert available["diabetes_cgm"].exposure_scope == "product_family"
-    assert available["lvad_circulatory_support"].exposure_scope == (
-        "business_subsegment_fallback"
-    )
+    assert available["lvad_circulatory_support"].exposure_scope == ("business_subsegment_fallback")
     assert available["lvad_circulatory_support"].exposure_confidence == 75.0
     waived = {
-        exposure.product_family
-        for exposure in exposures
-        if exposure.exposure_status == "waived_no_specific_exposure"
+        exposure.product_family for exposure in exposures if exposure.exposure_status == "waived_no_specific_exposure"
     }
     assert waived == {"cardiopulmonary_surgical_support"}
+
+    closure_mappings, closure_issues = load_product_family_mappings(
+        FDA_PRODUCT_FAMILY_MAPPING,
+        asof=date(2026, 8, 10),
+    )
+    assert not [issue for issue in closure_issues if issue.severity == "CRITICAL"]
+    mtd = mapping_for(
+        closure_mappings,
+        ticker="ABT",
+        product_code="MTD",
+        manufacturer_id=183,
+    )
+    assert mtd is not None
+    assert mtd.product_family == "electrophysiology_ablation"
+    assert mtd.mapping_confidence == 99.0
 
 
 def test_product_family_shadow_uses_governed_waiver_floor() -> None:
@@ -620,15 +822,10 @@ def test_product_family_shadow_uses_governed_waiver_floor() -> None:
     assert shadow.status == "ready_with_waiver"
     assert shadow.event_risk_score is not None
     waived_detail = next(
-        item
-        for item in shadow.family_details
-        if item["product_family"] == "cardiopulmonary_surgical_support"
+        item for item in shadow.family_details if item["product_family"] == "cardiopulmonary_surgical_support"
     )
     assert waived_detail["denominator_usd_millions"] == 500.0
-    assert (
-        waived_detail["denominator_source"]
-        == "governed_waiver_conservative_floor"
-    )
+    assert waived_detail["denominator_source"] == "governed_waiver_conservative_floor"
 
 
 def test_product_family_mapping_prefers_manufacturer_specific_row(tmp_path: Path) -> None:
@@ -717,21 +914,12 @@ def test_stage1_schema_creates_independent_med_device_tables(tmp_path: Path) -> 
     with connect(db_path) as conn:
         init_db(conn)
         names = table_names(conn)
-        price_columns = {
-            str(row["name"])
-            for row in conn.execute("PRAGMA table_info(fact_price_ohlcv)").fetchall()
-        }
+        price_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(fact_price_ohlcv)").fetchall()}
         fda_columns = {
-            str(row["name"])
-            for row in conn.execute(
-                "PRAGMA table_info(feature_fda_product_risk)"
-            ).fetchall()
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(feature_fda_product_risk)").fetchall()
         }
         score_columns = {
-            str(row["name"])
-            for row in conn.execute(
-                "PRAGMA table_info(med_device_daily_scores)"
-            ).fetchall()
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(med_device_daily_scores)").fetchall()
         }
 
     assert "source_registry" in names
@@ -747,9 +935,11 @@ def test_stage1_schema_creates_independent_med_device_tables(tmp_path: Path) -> 
     assert "fda_safety_product_family_adjusted_score" in fda_columns
     assert "fda_product_family_shadow_status" in fda_columns
     assert "fda_product_family_shadow_oos_valid_flag" in fda_columns
+    assert set(FDA_ADJUDICATION_COLUMNS).issubset(fda_columns)
     assert "fda_event_risk_product_family_adjusted_score" in score_columns
     assert "fda_safety_product_family_adjusted_score" in score_columns
     assert "fda_product_family_shadow_oos_valid_flag" in score_columns
+    assert set(FDA_ADJUDICATION_COLUMNS).issubset(score_columns)
 
 
 def test_stage1_schema_migrates_shadow_columns_onto_pre_migration_tables(tmp_path: Path) -> None:
@@ -772,13 +962,9 @@ def test_stage1_schema_migrates_shadow_columns_onto_pre_migration_tables(tmp_pat
         fresh_columns = {table: table_columns(conn, table) for table in tables}
         for table in tables:
             missing_from_create = [
-                column
-                for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS
-                if column not in fresh_columns[table]
+                column for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS if column not in fresh_columns[table]
             ]
-            assert not missing_from_create, (
-                f"{table} CREATE TABLE is missing shadow columns: {missing_from_create}"
-            )
+            assert not missing_from_create, f"{table} CREATE TABLE is missing shadow columns: {missing_from_create}"
             for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS:
                 conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
             pre_migration = table_columns(conn, table)
@@ -788,11 +974,7 @@ def test_stage1_schema_migrates_shadow_columns_onto_pre_migration_tables(tmp_pat
 
         for table in tables:
             migrated = table_columns(conn, table)
-            not_migrated = [
-                column
-                for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS
-                if column not in migrated
-            ]
+            not_migrated = [column for column in FDA_PRODUCT_FAMILY_SHADOW_COLUMNS if column not in migrated]
             assert not not_migrated, (
                 f"init_db did not migrate shadow columns onto pre-migration {table} "
                 f"(missing from _ensure_table_optional_columns dict?): {not_migrated}"
@@ -878,7 +1060,7 @@ def test_med_device_universe_loader_accepts_clean_keep_shape(tmp_path: Path) -> 
         "\n".join(
             [
                 "Name,Company_Name,Industry,Index,CIK,Exchange,SecurityType,ListingStatus,IsPrimaryListing,Country,Currency,CompanyName,MatchedTicker,MatchType,Source,IdentityDataSources,MissingIdentityFields,ManualInclude,ManualExclude,ManualReview,Notes",
-                "ISRG,\"Intuitive Surgical, Inc.\",Healthcare,Medical Instruments & Supplies,0001035267,Nasdaq,Common Stock,active,TRUE,United States,USD,INTUITIVE SURGICAL INC,ISRG,exact,sec,nasdaqtrader,,false,false,false,",
+                'ISRG,"Intuitive Surgical, Inc.",Healthcare,Medical Instruments & Supplies,0001035267,Nasdaq,Common Stock,active,TRUE,United States,USD,INTUITIVE SURGICAL INC,ISRG,exact,sec,nasdaqtrader,,false,false,false,',
                 "MDT,Medtronic plc,Healthcare,Medical Devices,0001613103,NYSE,Ordinary Shares,active,TRUE,United States,USD,Medtronic plc,MDT,exact,sec,nasdaqtrader,,,,,",
             ]
         ),
@@ -1045,6 +1227,258 @@ def test_sec_ingestion_parses_filings_and_companyfacts() -> None:
     assert rows[0]["cash_and_investments"] == 300
 
 
+def test_sec_ingestion_derives_reviewed_gross_profit_with_provenance() -> None:
+    module = load_script_module("05_sync_med_device_sec_fundamentals.py", "med_device_sec_gross_profit_test")
+    company = module.Company(company_id=95, ticker="CERS", cik="0001020214", company_name="Cerus Corporation")
+
+    def duration_fact(value: float) -> dict[str, object]:
+        return {
+            "units": {
+                "USD": [
+                    {
+                        "start": "2025-01-01",
+                        "end": "2025-12-31",
+                        "fy": 2025,
+                        "fp": "FY",
+                        "form": "10-K",
+                        "filed": "2026-03-02",
+                        "accn": "0001193125-26-085678",
+                        "val": value,
+                    }
+                ]
+            }
+        }
+
+    companyfacts = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": duration_fact(1_000.0),
+                "OperatingIncomeLoss": duration_fact(-50.0),
+                "SellingGeneralAndAdministrativeExpense": duration_fact(350.0),
+                "ResearchAndDevelopmentExpense": duration_fact(200.0),
+            }
+        }
+    }
+    default_rows = module.build_financial_statement_rows(company, companyfacts)
+    assert default_rows[0]["gross_profit"] is None
+
+    policy = module.sec_ingestion_policy(
+        {"sec_ingestion": {"annual_gross_profit_from_operating_expenses_tickers": ["cers"]}}
+    )
+    rows = module.build_financial_statement_rows(company, companyfacts, policy)
+    assert rows[0]["gross_profit"] == pytest.approx(500.0)
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["gross_profit"]["derived"] is True
+    assert payload["gross_profit"]["concept"] == "derived_operating_income_plus_sga_and_rd"
+    assert payload["gross_profit"]["inputs"]["revenue"] == 1_000.0
+
+    companyfacts["facts"]["us-gaap"]["OperatingIncomeLoss"] = duration_fact(600.0)
+    invalid_rows = module.build_financial_statement_rows(company, companyfacts, policy)
+    assert invalid_rows[0]["gross_profit"] is None
+
+
+def test_cers_regulatory_and_reimbursement_source_contract() -> None:
+    fda_path = REPO_ROOT / "med_devices" / "data" / "fda_company_footprints.csv"
+    with fda_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        fda_rows = {row["ticker"]: row for row in csv.DictReader(handle)}
+    assert fda_rows["CERS"]["product_codes"] == "PJF"
+    assert fda_rows["CERS"]["premarket_numbers"] == "BP140143"
+    assert fda_rows["CERS"]["fei_numbers"] == "3003948751"
+    assert fda_rows["CERS"]["review_adjusted_fda_state"] == "regulatory_review_required"
+    assert fda_rows["CERS"]["review_reason"] == "structured_postmarket_event_attribution_required"
+
+    evidence_path = REPO_ROOT / "med_devices" / "data" / "fda_manual_footprint_evidence.csv"
+    with evidence_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        evidence_rows = {row["ticker"]: row for row in csv.DictReader(handle)}
+    assert evidence_rows["CERS"]["fda_evidence_type"] == "cber_pma_and_postmarket_mapped"
+    assert evidence_rows["CERS"]["regulatory_stage"] == "commercial_pma_postmarket_active"
+    assert evidence_rows["CERS"]["source"] == "fda_accessdata_cber_and_openfda_device"
+
+    classification_path = REPO_ROOT / "med_devices" / "data" / "reimbursement_company_classifications.csv"
+    with classification_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        classifications = {row["ticker"]: row for row in csv.DictReader(handle)}
+    cers_classification = classifications["CERS"]
+    assert cers_classification["billing_category"] == "blood_processing_products"
+    assert cers_classification["payment_rate_status"] == "direct_hcpcs_and_bundled_hospital"
+
+    mapping_path = REPO_ROOT / "med_devices" / "data" / "reimbursement_mapping_overrides.csv"
+    with mapping_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        cers_codes = {
+            row["reimbursement_code"]
+            for row in csv.DictReader(handle)
+            if row["ticker"] == "CERS" and row["active"] == "1"
+        }
+    assert cers_codes == {"P9026", "P9070", "P9071", "P9073"}
+
+    reimbursement_module = load_script_module(
+        "11_build_med_device_reimbursement_features.py",
+        "med_device_cers_reimbursement_status_test",
+    )
+    assert "direct_hcpcs_and_bundled_hospital" in reimbursement_module.RECOGNIZED_BUNDLED_PAYMENT_STATUSES
+    assert "direct_hcpcs_and_bundled_hospital" in reimbursement_module.PROCEDURE_INDIRECT_PAYMENT_STATUSES
+
+    decision_path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    decisions, issues = load_analyst_review_decisions(decision_path)
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+    prior = effective_decision(
+        decisions,
+        ticker="CERS",
+        cohort="hospital_supplies_surgical_consumables_oem",
+        asof=date(2026, 8, 10),
+    )
+    effective = effective_decision(
+        decisions,
+        ticker="CERS",
+        cohort="hospital_supplies_surgical_consumables_oem",
+        asof=date(2026, 8, 11),
+    )
+    assert prior is not None and prior.decision == "data_fix_needed"
+    assert effective is not None and effective.decision == "defer"
+    assert effective.review_category == "all"
+    assert effective.allow_portfolio_candidate_override is False
+
+
+def test_cers_adverse_event_adjudication_is_effective_dated_and_preserves_raw_counts(
+    tmp_path: Path,
+) -> None:
+    module = load_script_module(
+        "10_build_med_device_fda_features.py",
+        "med_device_cers_event_adjudication_test",
+    )
+    publishing_module = load_script_module(
+        "16_publish_med_device_score_review_pack.py",
+        "med_device_cers_event_adjudication_publish_test",
+    )
+    assert set(FDA_ADJUDICATION_COLUMNS).issubset(publishing_module.SCORE_FIELDS)
+    path = REPO_ROOT / "med_devices" / "data" / "fda_adverse_event_adjudications.csv"
+    before = module.load_adverse_event_adjudications(
+        path,
+        asof=date(2026, 8, 9),
+    )
+    effective = module.load_adverse_event_adjudications(
+        path,
+        asof=date(2026, 8, 10),
+    )
+    assert before == {}
+    assert len(effective) == 4
+
+    raw_events = [
+        ("20993629", "3003925919-2024-00001", "2024-12-20", 0, 1, 0),
+        ("21121055", "3003925919-2024-00002", "2025-01-09", 1, 0, 0),
+        ("22028783", "3003925919-2025-00001", "2025-05-15", 1, 0, 0),
+        ("22038210", "3003925919-2025-00002", "2025-05-16", 1, 0, 0),
+    ]
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO dim_company(
+                company_id, ticker, cik, company_name, exchange, subsector,
+                country, currency, universe_status, is_active, first_seen_at,
+                updated_at
+            )
+            VALUES (
+                1, 'CERS', '0001020214', 'Cerus Corporation', 'NASDAQ',
+                'blood_processing', 'United States', 'USD', 'active', 1,
+                '2024-01-01', '2026-08-10'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_fda_product_code(
+                product_code, device_name, medical_specialty, device_class,
+                created_at, updated_at
+            )
+            VALUES (
+                'PJF', 'Illuminator System For Blood Products',
+                'Hematology', '3', '2026-08-10', '2026-08-10'
+            )
+            """
+        )
+        for (
+            event_id,
+            report_number,
+            report_date,
+            death_count,
+            injury_count,
+            malfunction_count,
+        ) in raw_events:
+            conn.execute(
+                """
+                INSERT INTO fact_fda_adverse_event(
+                    adverse_event_id, company_id, product_code, report_date,
+                    death_count, injury_count, malfunction_count, event_type,
+                    payload_json, created_at, updated_at
+                )
+                VALUES (?, 1, 'PJF', ?, ?, ?, ?, ?, ?, '2026-08-10', '2026-08-10')
+                """,
+                (
+                    event_id,
+                    report_date,
+                    death_count,
+                    injury_count,
+                    malfunction_count,
+                    "Death" if death_count else "Injury",
+                    json.dumps(
+                        {
+                            "mdr_report_key": event_id,
+                            "report_number": report_number,
+                        }
+                    ),
+                ),
+            )
+
+        policy = module.fda_feature_policy(module.load_yaml(REPO_ROOT / "med_devices" / "config.yaml"))
+        raw_row = module.FdaFeatureRow(
+            asof_date="2026-08-10",
+            company_id=1,
+            ticker="CERS",
+            company_name="Cerus Corporation",
+            revenue_ttm=473_580_000.0,
+        )
+        module.count_adverse_events(
+            conn,
+            raw_row,
+            asof=date(2026, 8, 10),
+            policy=policy,
+        )
+        module.score_row(raw_row, policy=policy)
+
+        adjudicated_row = module.FdaFeatureRow(
+            asof_date="2026-08-10",
+            company_id=1,
+            ticker="CERS",
+            company_name="Cerus Corporation",
+            revenue_ttm=473_580_000.0,
+        )
+        module.count_adverse_events(
+            conn,
+            adjudicated_row,
+            asof=date(2026, 8, 10),
+            policy=policy,
+            adjudications=effective,
+        )
+        module.score_row(adjudicated_row, policy=policy)
+
+    assert raw_row.death_count_24m == 3
+    assert raw_row.hard_red_flag == 1
+    assert adjudicated_row.death_count_24m == 3
+    assert adjudicated_row.fda_raw_death_count_24m == 3
+    assert adjudicated_row.fda_adjudicated_event_count_24m == 4
+    assert adjudicated_row.fda_adjudicated_device_death_count_24m == 0
+    assert adjudicated_row.fda_adjudicated_serious_product_event_count_24m == 2
+    assert adjudicated_row.fda_adjudicated_non_device_death_count_24m == 2
+    assert adjudicated_row.fda_scoring_death_count_24m == 0
+    assert adjudicated_row.fda_scoring_injury_count_24m == 2
+    assert adjudicated_row.hard_red_flag == 0
+    assert adjudicated_row.fda_adjudication_applied_flag == 1
+    assert adjudicated_row.fda_adjudication_status == ("effective_event_level_adjudication")
+    payload = adjudicated_row.payload or {}
+    assert len(payload["adverse_event_adjudication"]["events"]) == 4
+
+
 def test_sec_metric_sort_ignores_malformed_filed_dates() -> None:
     module = load_script_module("05_sync_med_device_sec_fundamentals.py", "med_device_sec_sort_test")
     valid = module.FactObservation(
@@ -1135,7 +1569,9 @@ def test_financial_feature_builder_computes_ttm_and_valuation(tmp_path: Path) ->
             """,
             rows,
         )
-        companies = [module.Company(company_id=1, ticker="AAA", company_name="AAA Medical", subsector="medical_devices")]
+        companies = [
+            module.Company(company_id=1, ticker="AAA", company_name="AAA Medical", subsector="medical_devices")
+        ]
         policy = module.FinancialFeaturePolicy(
             market_sources=["yahoo_finance_backup"],
             share_count_sources=["yahoo_finance_backup", "sec_companyfacts"],
@@ -1193,6 +1629,213 @@ def test_financial_read_csv_flexible_reports_decode_failure(tmp_path: Path) -> N
         assert "Could not decode CSV" in str(exc)
     else:
         raise AssertionError("Expected read_csv_flexible to raise ValueError for undecodable CSV")
+
+
+def test_fda_targeted_footprints_cover_cber_and_postmarket_channels(tmp_path: Path) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_targeted_cber_test")
+    link_module = load_script_module("09_link_med_device_fda_to_companies.py", "med_device_fda_cber_link_test")
+    footprint_csv = tmp_path / "footprints.csv"
+    with footprint_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "ticker",
+                "footprint_category",
+                "primary_fda_entity",
+                "product_codes",
+                "premarket_numbers",
+                "expected_cdrh_records",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "ticker": "CERS",
+                "footprint_category": "direct_regulated_device",
+                "primary_fda_entity": "Cerus Corporation",
+                "product_codes": "PJF",
+                "premarket_numbers": "BP140143",
+                "expected_cdrh_records": "yes",
+            }
+        )
+
+    endpoints = module.build_targeted_footprint_endpoints(
+        footprint_csv,
+        target_limit=1000,
+        include_entity_names=True,
+        include_postmarket=True,
+        tickers={"CERS"},
+    )
+    by_name = {endpoint.name: endpoint for endpoint in endpoints}
+
+    assert module.is_pma_identifier("BP140143")
+    assert module.is_pma_identifier("P160055")
+    assert not module.is_pma_identifier("K260001")
+    assert by_name["target_pma_BP140143"].search == 'pma_number:"BP140143"'
+    assert by_name["target_recall_code_CERS_PJF"].search == (
+        'product_code:"PJF" AND recalling_firm:"Cerus Corporation"'
+    )
+    assert by_name["target_enforcement_code_CERS_PJF"].path == "enforcement.json"
+    assert by_name["target_event_code_CERS_PJF"].search == (
+        'device.device_report_product_code:"PJF" AND device.manufacturer_d_name:"Cerus Corporation"'
+    )
+    assert "target_entity_pma_CERS_CERUS_CORPORATION" in by_name
+    assert "target_event_entity_CERS_CERUS_CORPORATION" in by_name
+    assert len(endpoints) == 9
+    assert (
+        module.build_targeted_footprint_endpoints(
+            footprint_csv,
+            target_limit=1000,
+            include_postmarket=True,
+            tickers={"OTHER"},
+        )
+        == []
+    )
+    assert link_module.approval_submission_clause("BP140143") == (
+        "(submission_number = ? OR submission_number LIKE ?)",
+        ["BP140143", "BP140143-%"],
+    )
+
+
+def test_fda_targeted_footprints_support_denovo_and_supersede_old_product_codes(
+    tmp_path: Path,
+) -> None:
+    module = load_script_module(
+        "08_sync_med_device_fda_core.py",
+        "med_device_fda_targeted_osur_test",
+    )
+    footprint_csv = tmp_path / "footprints.csv"
+    fieldnames = [
+        "ticker",
+        "primary_fda_entity",
+        "product_codes",
+        "premarket_numbers",
+        "expected_cdrh_records",
+        "valid_from",
+        "reviewed_at",
+    ]
+    with footprint_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "ticker": "OSUR",
+                "primary_fda_entity": "OraSure Technologies",
+                "product_codes": "MIB;MZF",
+                "premarket_numbers": "",
+                "expected_cdrh_records": "yes",
+                "valid_from": "2026-07-24",
+                "reviewed_at": "2026-07-23",
+            }
+        )
+        writer.writerow(
+            {
+                "ticker": "OSUR",
+                "primary_fda_entity": "OraSure Technologies, Inc.",
+                "product_codes": "MZO;QID;MZF",
+                "premarket_numbers": "P080027;DEN190025",
+                "expected_cdrh_records": "yes",
+                "valid_from": "2026-08-10",
+                "reviewed_at": "2026-08-10",
+            }
+        )
+
+    prior = module.build_targeted_footprint_endpoints(
+        footprint_csv,
+        target_limit=1000,
+        include_postmarket=True,
+        tickers={"OSUR"},
+        asof=date(2026, 8, 9),
+    )
+    effective = module.build_targeted_footprint_endpoints(
+        footprint_csv,
+        target_limit=1000,
+        include_postmarket=True,
+        tickers={"OSUR"},
+        asof=date(2026, 8, 10),
+    )
+    prior_names = {endpoint.name for endpoint in prior}
+    by_name = {endpoint.name: endpoint for endpoint in effective}
+
+    assert "target_recall_code_OSUR_MIB" in prior_names
+    assert "target_recall_code_OSUR_MIB" not in by_name
+    assert by_name["target_510k_DEN190025"].search == 'k_number:"DEN190025"'
+    assert by_name["target_pma_P080027"].search == 'pma_number:"P080027"'
+    assert "target_event_code_OSUR_MZO" in by_name
+    assert "target_event_code_OSUR_QID" in by_name
+    assert "target_event_code_OSUR_MZF" in by_name
+    assert by_name["target_event_code_OSUR_MZO"].search == (
+        'device.device_report_product_code:"MZO" AND device.manufacturer_d_name:"OraSure Technologies, Inc."'
+    )
+    assert module.is_510k_or_denovo_identifier("DEN190025")
+
+
+def test_osur_regulatory_evidence_closes_data_fix_without_override() -> None:
+    evidence_path = REPO_ROOT / "med_devices" / "data" / "fda_manual_footprint_evidence.csv"
+    with evidence_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        evidence = {row["ticker"]: row for row in csv.DictReader(handle)}["OSUR"]
+    assert evidence["fda_evidence_type"] == "pma_denovo_and_postmarket_mapped"
+    assert evidence["evidence_confidence"] == "100"
+
+    decision_path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    decisions, issues = load_analyst_review_decisions(decision_path)
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+    prior = effective_decision(
+        decisions,
+        ticker="OSUR",
+        cohort="diagnostics_clinical_tests",
+        asof=date(2026, 8, 10),
+    )
+    effective = effective_decision(
+        decisions,
+        ticker="OSUR",
+        cohort="diagnostics_clinical_tests",
+        asof=date(2026, 8, 11),
+    )
+    assert prior is not None and prior.decision == "data_fix_needed"
+    assert effective is not None and effective.decision == "watchlist"
+    assert effective.review_category == "all"
+    assert effective.allow_portfolio_candidate_override is False
+
+
+def test_fda_manual_cber_approval_evidence_is_canonical_and_provenanced(
+    tmp_path: Path,
+) -> None:
+    module = load_script_module(
+        "08_sync_med_device_fda_core.py",
+        "med_device_fda_manual_cber_test",
+    )
+    evidence_path = REPO_ROOT / "med_devices" / "data" / "fda_manual_approval_evidence.csv"
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
+        count = module.upsert_manual_approval_evidence(
+            conn,
+            evidence_path,
+            source_id="fda_accessdata_cber",
+        )
+        rows = conn.execute(
+            """
+            SELECT submission_number, submission_type, product_code, decision_date,
+                   source_id, payload_json
+            FROM fact_fda_approval
+            WHERE submission_number LIKE 'BP140143%'
+            ORDER BY submission_number
+            """
+        ).fetchall()
+
+    assert count == 2
+    assert [row["submission_number"] for row in rows] == [
+        "BP140143",
+        "BP140143-S717",
+    ]
+    assert [row["submission_type"] for row in rows] == ["PMA", "PMA_SUPPLEMENT"]
+    assert all(row["product_code"] == "PJF" for row in rows)
+    assert all(row["source_id"] == "fda_accessdata_cber" for row in rows)
+    assert all(
+        json.loads(row["payload_json"])["evidence_method"] == "authoritative_manual_fda_accessdata" for row in rows
+    )
 
 
 def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
@@ -1259,6 +1902,56 @@ def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
             endpoint_name="approvals_510k",
             source_id="openfda_device",
         )
+        module.upsert_endpoint_records(
+            conn,
+            "target_pma_BP140143",
+            [
+                {
+                    "pma_number": "BP140143",
+                    "supplement_number": "S717",
+                    "applicant": "Cerus Corporation",
+                    "decision_date": "20221102",
+                    "date_received": "20210930",
+                    "decision": "Approved",
+                    "trade_name": "INTERCEPT Blood System for Platelets",
+                    "product_code": "PJF",
+                }
+            ],
+            source_id="openfda_device",
+        )
+        module.upsert_endpoint_records(
+            conn,
+            "target_recall_code_CERS_PJF",
+            [
+                {
+                    "recall_number": "Z-CERS-2026",
+                    "recalling_firm": "Cerus Corporation",
+                    "classification": "Class II",
+                    "event_date_initiated": "20260601",
+                    "product_code": "PJF",
+                }
+            ],
+            source_id="openfda_device",
+        )
+        module.upsert_endpoint_records(
+            conn,
+            "target_event_code_CERS_PJF",
+            [
+                {
+                    "mdr_report_key": "CERS-1",
+                    "date_received": "20260620",
+                    "event_type": "Injury",
+                    "device": [
+                        {
+                            "manufacturer_d_name": "Cerus Corporation",
+                            "device_report_product_code": "PJF",
+                            "brand_name": "INTERCEPT Blood System for Platelets",
+                        }
+                    ],
+                }
+            ],
+            source_id="openfda_device",
+        )
         module.upsert_recall(
             conn,
             {
@@ -1289,13 +1982,30 @@ def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
             },
             source_id="openfda_device",
         )
-        product_row = conn.execute("SELECT product_code FROM dim_fda_product_code WHERE product_code = 'ABC'").fetchone()
-        approval_row = conn.execute("SELECT decision_date FROM fact_fda_approval WHERE submission_number = 'K260001'").fetchone()
+        product_row = conn.execute(
+            "SELECT product_code FROM dim_fda_product_code WHERE product_code = 'ABC'"
+        ).fetchone()
+        approval_row = conn.execute(
+            "SELECT decision_date FROM fact_fda_approval WHERE submission_number = 'K260001'"
+        ).fetchone()
         denovo_row = conn.execute(
             "SELECT submission_type, product_code FROM fact_fda_approval WHERE submission_number = 'DEN250028'"
         ).fetchone()
-        recall_row = conn.execute("SELECT severity_weight FROM fact_fda_recall WHERE recall_number = 'Z-0001-2026'").fetchone()
-        event_row = conn.execute("SELECT injury_count FROM fact_fda_adverse_event WHERE adverse_event_id = '123'").fetchone()
+        cber_row = conn.execute(
+            "SELECT submission_type, product_code FROM fact_fda_approval WHERE submission_number = 'BP140143-S717'"
+        ).fetchone()
+        recall_row = conn.execute(
+            "SELECT severity_weight FROM fact_fda_recall WHERE recall_number = 'Z-0001-2026'"
+        ).fetchone()
+        cber_recall_row = conn.execute(
+            "SELECT endpoint_name FROM fact_fda_recall WHERE recall_number = 'Z-CERS-2026'"
+        ).fetchone()
+        event_row = conn.execute(
+            "SELECT injury_count FROM fact_fda_adverse_event WHERE adverse_event_id = '123'"
+        ).fetchone()
+        cber_event_row = conn.execute(
+            "SELECT injury_count FROM fact_fda_adverse_event WHERE adverse_event_id = 'CERS-1'"
+        ).fetchone()
 
     assert product_row is not None
     assert approval_row is not None
@@ -1303,10 +2013,17 @@ def test_fda_core_parser_populates_canonical_tables(tmp_path: Path) -> None:
     assert denovo_row is not None
     assert denovo_row["submission_type"] == "DENOVO"
     assert denovo_row["product_code"] == "SHY"
+    assert cber_row is not None
+    assert cber_row["submission_type"] == "PMA_SUPPLEMENT"
+    assert cber_row["product_code"] == "PJF"
     assert recall_row is not None
     assert recall_row["severity_weight"] == 5.0
+    assert cber_recall_row is not None
+    assert cber_recall_row["endpoint_name"] == "target_recall_code_CERS_PJF"
     assert event_row is not None
     assert event_row["injury_count"] == 1
+    assert cber_event_row is not None
+    assert cber_event_row["injury_count"] == 1
 
 
 def test_fda_adverse_event_counts_use_structured_fields_not_narrative_substrings() -> None:
@@ -1425,12 +2142,19 @@ def test_raw_api_responses_are_run_scoped_after_legacy_migration(tmp_path: Path)
         table_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'raw_api_responses'"
         ).fetchone()
-        index_names = {
-            str(row["name"])
-            for row in conn.execute("PRAGMA index_list(raw_api_responses)").fetchall()
-        }
+        index_names = {str(row["name"]) for row in conn.execute("PRAGMA index_list(raw_api_responses)").fetchall()}
         upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
         run_1 = module.start_ingestion_run(conn, "openfda_device")
+        with pytest.raises(RuntimeError, match="already running"):
+            module.start_ingestion_run(conn, "openfda_device")
+        module.finish_ingestion_run(
+            conn,
+            ingestion_run_id=run_1,
+            status="success",
+            request_count=0,
+            row_count=0,
+            message="test",
+        )
         run_2 = module.start_ingestion_run(conn, "openfda_device")
         for run_id in (run_1, run_2):
             module.store_raw_response(
@@ -1441,6 +2165,7 @@ def test_raw_api_responses_are_run_scoped_after_legacy_migration(tmp_path: Path)
                 response_status=200,
                 payload_text='{"results":[{"recall_number":"Z-0001-2026"}]}',
                 ingestion_run_id=run_id,
+                asof_date="2026-08-10",
             )
         rows = conn.execute(
             """
@@ -1456,6 +2181,325 @@ def test_raw_api_responses_are_run_scoped_after_legacy_migration(tmp_path: Path)
     assert "idx_raw_api_responses_run_query" in index_names
     assert [int(row["ingestion_run_id"]) for row in rows] == [run_1, run_2]
     assert len({str(row["response_hash"]) for row in rows}) == 1
+
+
+def test_fda_raw_response_replay_requires_complete_set_seal_and_valid_hash(tmp_path: Path) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_replay_test")
+    db_path = tmp_path / "med_devices.sqlite"
+    payload_text = '{"meta":{"results":{"total":1}},"results":[{"recall_number":"Z-0001-2026"}]}'
+    endpoint = module.EndpointConfig(
+        name="recall",
+        path="recall.json",
+        enabled=True,
+        search="",
+        sort="",
+        max_records=100,
+    )
+    policy = module.fda_policy(module.load_yaml(module.DEFAULT_CONFIG))
+    public_params = {"limit": 100, "skip": 0}
+
+    with connect(db_path) as conn:
+        init_db(conn)
+        upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
+        run_id = module.start_ingestion_run(conn, "openfda_device")
+        module.store_raw_response(
+            conn,
+            source_id="openfda_device",
+            endpoint=module.endpoint_url(policy, endpoint),
+            query_params=public_params,
+            response_status=200,
+            payload_text=payload_text,
+            ingestion_run_id=run_id,
+            asof_date="2026-08-10",
+        )
+        unsealed = module.load_raw_response_replay_cache(
+            conn,
+            source_id="openfda_device",
+            asof_date="2026-08-10",
+        )
+        module.finish_ingestion_run(
+            conn,
+            ingestion_run_id=run_id,
+            status="success",
+            request_count=1,
+            row_count=1,
+            message="test",
+        )
+        module.seal_ingestion_run(
+            conn,
+            ingestion_run_id=run_id,
+            source_id="openfda_device",
+            asof_date="2026-08-10",
+        )
+        same_day = module.load_raw_response_replay_cache(
+            conn,
+            source_id="openfda_device",
+            asof_date="2026-08-10",
+        )
+        next_day = module.load_raw_response_replay_cache(
+            conn,
+            source_id="openfda_device",
+            asof_date="2026-08-11",
+        )
+
+        page = module.fetch_fda_page_job(
+            endpoint,
+            policy=policy,
+            api_key="not-used-for-replay",
+            skip=0,
+            limit=100,
+            page_number_hint=1,
+            replay_cache=same_day,
+        )
+        conn.execute("UPDATE raw_api_responses SET response_hash = 'tampered'")
+        tampered = module.load_raw_response_replay_cache(
+            conn,
+            source_id="openfda_device",
+            asof_date="2026-08-10",
+        )
+
+    assert unsealed == {}
+    assert page.replayed is True
+    assert page.payload["results"][0]["recall_number"] == "Z-0001-2026"
+    assert next_day == {}
+    assert tampered == {}
+
+
+def test_fda_incremental_windows_are_anchored_scoped_and_watermarked(tmp_path: Path) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_incremental_test")
+    db_path = tmp_path / "med_devices.sqlite"
+    endpoint = module.EndpointConfig(
+        name="adverse_event",
+        path="event.json",
+        enabled=True,
+        search="",
+        sort="date_received:desc",
+        max_records=25_000,
+        date_field="date_received",
+        window_days=7,
+        overlap_days=5,
+        initial_lookback_days=14,
+    )
+
+    with connect(db_path) as conn:
+        init_db(conn)
+        upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
+        first = module.plan_incremental_endpoints(
+            conn,
+            [endpoint],
+            source_id="openfda_device",
+            run_asof=date(2026, 8, 10),
+        )
+        repeated = module.plan_incremental_endpoints(
+            conn,
+            [endpoint],
+            source_id="openfda_device",
+            run_asof=date(2026, 8, 10),
+        )
+        run_id = module.start_ingestion_run(conn, "openfda_device")
+        module.finish_ingestion_run(
+            conn,
+            ingestion_run_id=run_id,
+            status="success",
+            request_count=0,
+            row_count=0,
+            message="test",
+        )
+        module.seal_ingestion_run(
+            conn,
+            ingestion_run_id=run_id,
+            source_id="openfda_device",
+            asof_date="2026-08-10",
+        )
+        scope_hash = module.endpoint_scope_hash(endpoint)
+        module.upsert_ingestion_watermark(
+            conn,
+            source_id="openfda_device",
+            stream_name="adverse_event",
+            scope_hash=scope_hash,
+            date_field="date_received",
+            watermark_date="2026-08-10",
+            ingestion_run_id=run_id,
+        )
+        after_watermark = module.plan_incremental_endpoints(
+            conn,
+            [endpoint],
+            source_id="openfda_device",
+            run_asof=date(2026, 8, 11),
+        )
+        module.upsert_ingestion_watermark(
+            conn,
+            source_id="openfda_device",
+            stream_name="adverse_event",
+            scope_hash=scope_hash,
+            date_field="date_received",
+            watermark_date="2026-08-01",
+            ingestion_run_id=run_id,
+        )
+        watermark = module.get_ingestion_watermark(
+            conn,
+            source_id="openfda_device",
+            stream_name="adverse_event",
+            scope_hash=scope_hash,
+        )
+        changed_scope = module.endpoint_scope_hash(module.replace(endpoint, search="event_type:Death"))
+        missing_changed_scope = module.get_ingestion_watermark(
+            conn,
+            source_id="openfda_device",
+            stream_name="adverse_event",
+            scope_hash=changed_scope,
+        )
+
+    assert [(row.window_start, row.window_end, row.search) for row in first] == [
+        (row.window_start, row.window_end, row.search) for row in repeated
+    ]
+    assert first[-1].window_end == "2026-08-10"
+    assert all("date_received:[" in row.search for row in first)
+    assert after_watermark[-1].window_end == "2026-08-11"
+    assert watermark == date(2026, 8, 10)
+    assert missing_changed_scope is None
+
+
+def test_fda_global_adverse_template_is_replaced_by_governed_code_groups(tmp_path: Path) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_scope_test")
+    footprint = tmp_path / "footprint.csv"
+    footprint.write_text(
+        "ticker,product_codes,primary_fda_entity,valid_from,valid_to\n"
+        "AAA,ZZZ;AAA,AAA,2020-01-01,\n"
+        "BBB,BBB,BBB,2020-01-01,\n"
+        "OLD,OLD,OLD,2020-01-01,2025-12-31\n",
+        encoding="utf-8",
+    )
+    template = module.EndpointConfig(
+        name="adverse_event",
+        path="event.json",
+        enabled=True,
+        search="",
+        sort="date_received:desc",
+        max_records=25_000,
+        date_field="date_received",
+        window_days=1,
+        overlap_days=14,
+        initial_lookback_days=30,
+        partition_field="mdr_report_key",
+        partition_width=10_000,
+        scope_product_code_field="device.device_report_product_code",
+        scope_manufacturer_field="device.manufacturer_d_name",
+        scope_group_size=2,
+    )
+
+    aliases = tmp_path / "aliases.csv"
+    aliases.write_text(
+        "ticker,alias_raw,valid_from,valid_to\nAAA,AAA Legacy,2020-01-01,\n",
+        encoding="utf-8",
+    )
+    scoped = module.scope_endpoints_to_footprint_product_codes(
+        [template], footprint, asof=date(2026, 8, 10), alias_path=aliases
+    )
+
+    assert [row.name for row in scoped] == [
+        "target_event_group_001",
+        "target_event_group_002",
+        "target_event_group_003",
+    ]
+    assert "adverse_event" not in {row.name for row in scoped}
+    combined_search = " ".join(row.search for row in scoped)
+    assert all(f'device.device_report_product_code:"{code}"' in combined_search for code in ("AAA", "BBB", "ZZZ"))
+    assert 'device.manufacturer_d_name:"AAA"' in combined_search
+    assert 'device.manufacturer_d_name:"BBB"' in combined_search
+    assert 'device.manufacturer_d_name:"AAA Legacy"' in combined_search
+    assert "OLD" not in combined_search
+
+
+def test_fda_overflow_is_partitioned_and_total_reconciled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_script_module("08_sync_med_device_fda_core.py", "med_device_fda_partition_test")
+    db_path = tmp_path / "med_devices.sqlite"
+    endpoint = module.EndpointConfig(
+        name="adverse_event",
+        path="event.json",
+        enabled=True,
+        search="date_received:[20260810 TO 20260810]",
+        sort="date_received:desc",
+        max_records=2,
+        date_field="date_received",
+        window_days=1,
+        overlap_days=1,
+        initial_lookback_days=1,
+        stream_name="adverse_event",
+        scope_hash="scope",
+        window_start="2026-08-10",
+        window_end="2026-08-10",
+        partition_field="mdr_report_key",
+        partition_width=2,
+    )
+    policy = module.fda_policy(module.load_yaml(module.DEFAULT_CONFIG))
+
+    def fake_fetch(current: Any, **kwargs: Any) -> Any:
+        current_endpoint = current
+        sort = str(current_endpoint.sort)
+        search = str(current_endpoint.search)
+        if sort == "mdr_report_key:asc":
+            keys = [1]
+            total = 5
+        elif sort == "mdr_report_key:desc":
+            keys = [5]
+            total = 5
+        elif "mdr_report_key:[0 TO 1]" in search:
+            keys = [1]
+            total = 1
+        elif "mdr_report_key:[2 TO 3]" in search:
+            keys = [2, 3]
+            total = 2
+        elif "mdr_report_key:[4 TO 5]" in search:
+            keys = [4, 5]
+            total = 2
+        else:
+            keys = [1, 2]
+            total = 5
+        payload = {
+            "meta": {"results": {"total": total}},
+            "results": [{"mdr_report_key": str(key), "date_received": "20260810"} for key in keys],
+        }
+        skip = int(kwargs["skip"])
+        limit = int(kwargs["limit"])
+        public_params, _private = module.page_params(current_endpoint, skip=skip, limit=limit, api_key="")
+        return module.FetchedFdaPage(
+            endpoint_name=current_endpoint.name,
+            url=module.endpoint_url(policy, current_endpoint),
+            public_params=public_params,
+            skip=skip,
+            page_number_hint=int(kwargs["page_number_hint"]),
+            response_status=200,
+            payload_text=module.compact_json(payload),
+            payload=payload,
+        )
+
+    monkeypatch.setattr(module, "fetch_fda_page_job", fake_fetch)
+    with connect(db_path) as conn:
+        init_db(conn)
+        upsert_source_registry(conn, load_source_registry(SOURCE_REGISTRY))
+        run_id = module.start_ingestion_run(conn, "openfda_device")
+        result = module.sync_endpoint_with_partitions(
+            conn,
+            endpoint,
+            policy=policy,
+            api_key="",
+            max_records=2,
+            source_id="openfda_device",
+            ingestion_run_id=run_id,
+            asof_date="2026-08-10",
+            replay_cache={},
+            refresh_network=False,
+        )
+        raw_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM raw_api_responses WHERE ingestion_run_id = ?", (run_id,)
+        ).fetchone()["n"]
+
+    assert result.status == "success"
+    assert result.reason == "deterministic_numeric_partition"
+    assert result.total == 5
+    assert result.seen == 5
+    assert raw_count == 6
 
 
 def test_fda_recall_lookup_uses_partial_index(tmp_path: Path) -> None:
@@ -1520,7 +2564,9 @@ def test_fda_linker_and_feature_builder_scores_mapped_records(tmp_path: Path) ->
             source_id="openfda_device",
         )
         aliases = link_module.build_aliases(conn)
-        manufacturers = conn.execute("SELECT fda_manufacturer_id, manufacturer_name FROM dim_fda_manufacturer").fetchall()
+        manufacturers = conn.execute(
+            "SELECT fda_manufacturer_id, manufacturer_name FROM dim_fda_manufacturer"
+        ).fetchall()
         for manufacturer in manufacturers:
             match = link_module.best_match(
                 str(manufacturer["manufacturer_name"]),
@@ -1668,7 +2714,9 @@ def test_fda_canonical_recalls_collapse_product_rows_by_event_family(tmp_path: P
 
 
 def test_reimbursement_feature_builder_is_conservative_without_cms_data(tmp_path: Path) -> None:
-    module = load_script_module("11_build_med_device_reimbursement_features.py", "med_device_reimbursement_features_test")
+    module = load_script_module(
+        "11_build_med_device_reimbursement_features.py", "med_device_reimbursement_features_test"
+    )
     db_path = tmp_path / "med_devices.sqlite"
     with connect(db_path) as conn:
         init_db(conn)

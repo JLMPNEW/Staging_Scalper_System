@@ -100,6 +100,42 @@ def test_source_manifest_rejects_changed_direct_document(tmp_path: Path) -> None
         load_source_manifest(manifest_path)
 
 
+def test_source_manifest_accepts_safe_nested_sec_document_and_rejects_traversal(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / 'copied.xml'
+    document.write_text('<xbrl/>', encoding='utf-8')
+    digest = file_sha256(document)
+    header = (
+        'ticker,accession_number,document_name,primary_document,'
+        'content_sha256,cache_status,local_path,cik,form_type,filing_date\n'
+    )
+    valid = tmp_path / 'nested.csv'
+    valid.write_text(
+        header + (
+            'TEST,0000000001-26-000001,xslF345X06/doc4.xml,'
+            f'xslF345X06/doc4.xml,{digest},CACHED_HASHED,{document},'
+            '0000000001,10-K,2026-02-15\n'
+        ), encoding='utf-8',
+    )
+    loaded = load_source_manifest(valid)
+    key = ('TEST', '0000000001-26-000001')
+    assert loaded.direct_filings[key].primary_document == 'xslF345X06/doc4.xml'
+    assert loaded.direct_documents[key][0].name == 'xslF345X06/doc4.xml'
+
+    for index, unsafe in enumerate(('../doc4.xml', r'xslF345X06\doc4.xml')):
+        rejected = tmp_path / f'unsafe-{index}.csv'
+        rejected.write_text(
+            header + (
+                f'TEST,0000000001-26-000001,{unsafe},{unsafe},'
+                f'{digest},CACHED_HASHED,{document},0000000001,10-K,'
+                '2026-02-15\n'
+            ), encoding='utf-8',
+        )
+        with pytest.raises(ValueError):
+            load_source_manifest(rejected)
+
+
 @pytest.mark.parametrize(
     ("scope", "expected_reason"),
     [

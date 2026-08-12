@@ -729,6 +729,39 @@ def test_complete_cache_gate_stops_before_run_allocation(
     assert json.loads(dedicated_gate_path.read_text(encoding="utf-8"))["mode"] == "cache_gate_failed"
 
 
+def test_policy_corpus_is_not_exported_before_sector_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dedicated_parser.cli as cli
+
+    registry = AdapterRegistry(
+        model_family='consumer_defensive', adapter_version='test',
+        supported_forms=('10-K',), source_metrics=(MetricRequest('metric'),),
+        metric_dependencies={}, document_keywords=(),
+        review_policy_path=str(tmp_path / 'policy.yaml'),
+        review_policy_golden_path=str(tmp_path / 'golden.json'),
+    )
+    exported: list[bool] = []
+    monkeypatch.setattr(cli, 'load_registry', lambda _path: registry)
+    monkeypatch.setattr(
+        cli, '_export_policy_corpus', lambda _registry: exported.append(True)
+    )
+
+    def fail_preflight(*_args: object, **_kwargs: object):
+        raise RuntimeError('simulated invalid sector seal')
+
+    monkeypatch.setattr(cli, 'build_plan', fail_preflight)
+    with pytest.raises(RuntimeError, match='invalid sector seal'):
+        cli.main([
+            '--db', str(tmp_path / 'empty.sqlite'),
+            '--cache-dir', str(tmp_path / 'cache'),
+            '--adapter', 'test.adapter:extract',
+            '--asof', '2026-08-12', '--plan-only',
+        ])
+    assert exported == []
+    assert not (tmp_path / 'golden.json').exists()
+
+
 def test_defense_hydration_scope_preserves_missing_reason() -> None:
     namespace = runpy.run_path(
         str(
