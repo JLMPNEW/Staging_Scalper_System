@@ -84,6 +84,35 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
     FOREIGN KEY (ingestion_run_id) REFERENCES ingestion_runs(ingestion_run_id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS ingestion_run_seals (
+    ingestion_run_id INTEGER PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    response_count INTEGER NOT NULL,
+    response_set_hash TEXT NOT NULL,
+    sealed_at TEXT NOT NULL,
+    FOREIGN KEY (ingestion_run_id) REFERENCES ingestion_runs(ingestion_run_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS ingestion_watermarks (
+    source_id TEXT NOT NULL,
+    stream_name TEXT NOT NULL,
+    scope_hash TEXT NOT NULL,
+    date_field TEXT NOT NULL,
+    watermark_date TEXT NOT NULL,
+    last_ingestion_run_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (source_id, stream_name, scope_hash),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT,
+    FOREIGN KEY (last_ingestion_run_id) REFERENCES ingestion_runs(ingestion_run_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingestion_run_seals_source_asof
+ON ingestion_run_seals(source_id, asof_date, ingestion_run_id);
+CREATE INDEX IF NOT EXISTS idx_ingestion_watermarks_source_stream
+ON ingestion_watermarks(source_id, stream_name, watermark_date);
+
 CREATE TABLE IF NOT EXISTS dim_company (
     company_id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker TEXT NOT NULL UNIQUE,
@@ -804,6 +833,17 @@ CREATE TABLE IF NOT EXISTS feature_fda_product_risk (
     fda_mdr_malfunction_count_24m INTEGER DEFAULT 0,
     fda_mdr_malfunction_count_per_category REAL DEFAULT 0.0,
     fda_breadth_adjustment_applied INTEGER DEFAULT 0,
+    fda_adjudication_applied_flag INTEGER DEFAULT 0,
+    fda_adjudicated_event_count_24m INTEGER DEFAULT 0,
+    fda_raw_death_count_24m INTEGER DEFAULT 0,
+    fda_adjudicated_device_death_count_24m INTEGER DEFAULT 0,
+    fda_adjudicated_serious_product_event_count_24m INTEGER DEFAULT 0,
+    fda_adjudicated_non_device_death_count_24m INTEGER DEFAULT 0,
+    fda_scoring_death_count_24m INTEGER DEFAULT 0,
+    fda_scoring_injury_count_24m INTEGER DEFAULT 0,
+    fda_scoring_malfunction_count_24m INTEGER DEFAULT 0,
+    fda_adjudication_status TEXT DEFAULT '',
+    fda_adjudication_reviewed_at TEXT DEFAULT '',
     fda_signal_mode TEXT,
     fda_signal_direction TEXT,
     fda_signal_reliability REAL,
@@ -1097,6 +1137,9 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     oos_score_valid_flag INTEGER DEFAULT 0,
     native_score_field TEXT DEFAULT 'composite_score',
     native_score_value REAL DEFAULT 0.0,
+    production_score_source TEXT DEFAULT '',
+    ic_tilt_applied_to_production_flag INTEGER DEFAULT 0,
+    production_score_regime_version TEXT DEFAULT '',
     score_zero_is_missing_flag INTEGER DEFAULT 0,
     score_scale_min REAL DEFAULT 0.0,
     score_scale_max REAL DEFAULT 100.0,
@@ -1231,6 +1274,17 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     fda_mdr_malfunction_count_24m INTEGER DEFAULT 0,
     fda_mdr_malfunction_count_per_category REAL DEFAULT 0.0,
     fda_breadth_adjustment_applied INTEGER DEFAULT 0,
+    fda_adjudication_applied_flag INTEGER DEFAULT 0,
+    fda_adjudicated_event_count_24m INTEGER DEFAULT 0,
+    fda_raw_death_count_24m INTEGER DEFAULT 0,
+    fda_adjudicated_device_death_count_24m INTEGER DEFAULT 0,
+    fda_adjudicated_serious_product_event_count_24m INTEGER DEFAULT 0,
+    fda_adjudicated_non_device_death_count_24m INTEGER DEFAULT 0,
+    fda_scoring_death_count_24m INTEGER DEFAULT 0,
+    fda_scoring_injury_count_24m INTEGER DEFAULT 0,
+    fda_scoring_malfunction_count_24m INTEGER DEFAULT 0,
+    fda_adjudication_status TEXT DEFAULT '',
+    fda_adjudication_reviewed_at TEXT DEFAULT '',
     fda_signal_mode TEXT DEFAULT '',
     fda_signal_direction TEXT DEFAULT '',
     fda_signal_reliability REAL DEFAULT 0.0,
@@ -1373,6 +1427,7 @@ CREATE TABLE IF NOT EXISTS data_quality_issues (
 
 CREATE INDEX IF NOT EXISTS idx_source_registry_stage ON source_registry(stage, priority);
 CREATE INDEX IF NOT EXISTS idx_raw_api_responses_source ON raw_api_responses(source_id, request_time_utc);
+CREATE INDEX IF NOT EXISTS idx_raw_api_responses_ingestion_run ON raw_api_responses(ingestion_run_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_api_responses_run_query
 ON raw_api_responses(source_id, endpoint, COALESCE(query_params_json, ''), COALESCE(ingestion_run_id, -1));
 CREATE INDEX IF NOT EXISTS idx_dim_company_cik ON dim_company(cik);
@@ -1486,7 +1541,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     _migrate_raw_api_responses_unique(conn)
     _normalize_denovo_approval_types(conn)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_api_responses_source ON raw_api_responses(source_id, request_time_utc)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_raw_api_responses_source ON raw_api_responses(source_id, request_time_utc)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_raw_api_responses_ingestion_run ON raw_api_responses(ingestion_run_id)"
+    )
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_api_responses_run_query
@@ -1676,6 +1736,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             "fda_mdr_malfunction_count_24m": "INTEGER DEFAULT 0",
             "fda_mdr_malfunction_count_per_category": "REAL DEFAULT 0.0",
             "fda_breadth_adjustment_applied": "INTEGER DEFAULT 0",
+            "fda_adjudication_applied_flag": "INTEGER DEFAULT 0",
+            "fda_adjudicated_event_count_24m": "INTEGER DEFAULT 0",
+            "fda_raw_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudicated_device_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudicated_serious_product_event_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudicated_non_device_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_scoring_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_scoring_injury_count_24m": "INTEGER DEFAULT 0",
+            "fda_scoring_malfunction_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudication_status": "TEXT DEFAULT ''",
+            "fda_adjudication_reviewed_at": "TEXT DEFAULT ''",
             "fda_signal_mode": "TEXT",
             "fda_signal_direction": "TEXT",
             "fda_signal_reliability": "REAL",
@@ -1776,6 +1847,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             "oos_score_valid_flag": "INTEGER DEFAULT 0",
             "native_score_field": "TEXT DEFAULT 'composite_score'",
             "native_score_value": "REAL DEFAULT 0.0",
+            "production_score_source": "TEXT DEFAULT ''",
+            "ic_tilt_applied_to_production_flag": "INTEGER DEFAULT 0",
+            "production_score_regime_version": "TEXT DEFAULT ''",
             "score_zero_is_missing_flag": "INTEGER DEFAULT 0",
             "score_scale_min": "REAL DEFAULT 0.0",
             "score_scale_max": "REAL DEFAULT 100.0",
@@ -1923,6 +1997,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             "fda_mdr_malfunction_count_24m": "INTEGER DEFAULT 0",
             "fda_mdr_malfunction_count_per_category": "REAL DEFAULT 0.0",
             "fda_breadth_adjustment_applied": "INTEGER DEFAULT 0",
+            "fda_adjudication_applied_flag": "INTEGER DEFAULT 0",
+            "fda_adjudicated_event_count_24m": "INTEGER DEFAULT 0",
+            "fda_raw_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudicated_device_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudicated_serious_product_event_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudicated_non_device_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_scoring_death_count_24m": "INTEGER DEFAULT 0",
+            "fda_scoring_injury_count_24m": "INTEGER DEFAULT 0",
+            "fda_scoring_malfunction_count_24m": "INTEGER DEFAULT 0",
+            "fda_adjudication_status": "TEXT DEFAULT ''",
+            "fda_adjudication_reviewed_at": "TEXT DEFAULT ''",
             "fda_signal_mode": "TEXT DEFAULT ''",
             "fda_signal_direction": "TEXT DEFAULT ''",
             "fda_signal_reliability": "REAL DEFAULT 0.0",
@@ -2091,7 +2176,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fact_ibkr_borrow_company_date ON fact_ibkr_borrow_snapshot(company_id, asof_date)"
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_13f_holding_company_date ON fact_sec_13f_holding(company_id, report_date)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fact_13f_holding_company_date ON fact_sec_13f_holding(company_id, report_date)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fact_form4_transaction_company_date ON fact_sec_form4_transaction(company_id, transaction_date)"
     )
@@ -2226,7 +2313,9 @@ def _ensure_table_optional_columns(conn: sqlite3.Connection, table_name: str, co
                 f"Non-standard SQLite column type for {table_name}.{column}: {column_type!r}. "
                 "Use TEXT, INTEGER, REAL, BLOB, NUMERIC, optionally with a literal DEFAULT."
             )
-        conn.execute(f"ALTER TABLE {quote_identifier(table_name)} ADD COLUMN {quote_identifier(column)} {normalized_type}")
+        conn.execute(
+            f"ALTER TABLE {quote_identifier(table_name)} ADD COLUMN {quote_identifier(column)} {normalized_type}"
+        )
 
 
 def start_run(conn: sqlite3.Connection, *, run_type: str, input_path: Optional[Path]) -> int:

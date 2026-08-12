@@ -346,6 +346,14 @@ sec_ingestion:
       - EUR
     shares_outstanding:
       - shares
+  # Companyfacts omits CERS's issuer-extension gross-profit line. Its reviewed
+  # annual statement layout supports gross contribution = operating income +
+  # SG&A + R&D. Interim revenue can exclude government-contract revenue, so the
+  # parser deliberately limits this fallback to annual filings with direct SEC
+  # inputs and a result between zero and reported annual revenue.
+  annual_gross_profit_from_operating_expenses_tickers:
+    - CERS
+
   metric_concepts:
     revenue:
       - RevenueFromContractWithCustomerExcludingAssessedTax
@@ -552,12 +560,23 @@ fda_core_ingestion:
   request_sleep_sec: 0.15
   page_limit: 1000
   commit_every_pages: 10
+  # Targeted queries close coverage gaps that rolling broad endpoints can miss.
+  # Zero-result searches remain auditable and never become synthetic events.
+  targeted_tickers:
+    - CERS
+    - OSUR
+  targeted_include_entity_names: true
+  targeted_include_postmarket: true
+  targeted_limit: 1000
+  manual_approval_evidence_csv: "data/fda_manual_approval_evidence.csv"
+  manual_approval_source_id: "fda_accessdata_cber"
   user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   endpoints:
     classification:
       enabled: true
       path: "classification.json"
-      max_records: 5000
+      # Current catalog is 7,085 rows; retain headroom and fail on future overflow.
+      max_records: 10000
       search: ""
       sort: ""
     approvals_510k:
@@ -566,30 +585,60 @@ fda_core_ingestion:
       max_records: 25000
       search: ""
       sort: "decision_date:desc"
+      date_field: "decision_date"
+      window_days: 31
+      overlap_days: 45
+      initial_lookback_days: 365
     approvals_pma:
       enabled: true
       path: "pma.json"
       max_records: 25000
       search: ""
       sort: "decision_date:desc"
+      date_field: "decision_date"
+      window_days: 31
+      overlap_days: 45
+      initial_lookback_days: 365
     recall:
       enabled: true
       path: "recall.json"
       max_records: 25000
       search: ""
       sort: "event_date_initiated:desc"
+      date_field: "event_date_posted"
+      window_days: 31
+      overlap_days: 45
+      initial_lookback_days: 365
     enforcement:
       enabled: true
       path: "enforcement.json"
       max_records: 25000
       search: 'product_type:"Devices"'
       sort: "recall_initiation_date:desc"
+      date_field: "report_date"
+      window_days: 31
+      overlap_days: 45
+      initial_lookback_days: 365
     adverse_event:
       enabled: true
       path: "event.json"
       max_records: 25000
       search: ""
       sort: "date_received:desc"
+      date_field: "date_received"
+      window_days: 1
+      overlap_days: 14
+      initial_lookback_days: 30
+      # Some FDA receipt dates are bulk-publication days with >25k MDRs. Numeric
+      # key shards are non-overlapping and total-reconciled before watermark advance.
+      partition_field: "mdr_report_key"
+      partition_width: 10000
+      # Global MDR payloads are too large and mostly irrelevant. The collector
+      # deterministically expands this template into sorted groups from the
+      # governed company-footprint product codes; the unscoped query is never sent.
+      scope_product_code_field: "device.device_report_product_code"
+      scope_manufacturer_field: "device.manufacturer_d_name"
+      scope_group_size: 5
 
 fda_entity_linking:
   output_csv: "../output/med_devices_reports/med_device_fda_entity_mapping.csv"
@@ -756,6 +805,7 @@ fda_features:
   review_override_csv: "data/fda_regulatory_review_overrides.csv"
   footprint_csv: "data/fda_company_footprints.csv"
   manual_footprint_evidence_csv: "data/fda_manual_footprint_evidence.csv"
+  adverse_event_adjudication_csv: "data/fda_adverse_event_adjudications.csv"
   source_id: "openfda_device"
   # Raising this delays FDA event effect by the ingestion lag (user decision pending).
   publication_lag_days: 0
@@ -1317,6 +1367,9 @@ scoring:
     mode: "shadow"
     allow_production_replace: false
     phase1_safety_lock: true
+    production_score_regime_effective_from: "2026-07-27"
+    locked_production_score_regime_version: "med_devices_baseline_composite_shadow_locked_v2_20260727"
+    locked_scoring_model_version: "med_device_score_v24_2026_07_hospital_supplies_promotion_shadow_lock_v2_20260727"
     source_csv: "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv"
     horizon_days: 120
     ic_metric: "net_spearman_ic_excess"
@@ -1826,6 +1879,7 @@ historical_backfill:
   # Re-run FDA entity linking per as-of date during backfill (script 21); default off.
   relink_fda_per_asof: false
   new_daily_columns_required_from: "2019-01-04"
+  score_provenance_columns_required_from: "2026-08-11"
   oos_validation_csv: "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv"
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
 

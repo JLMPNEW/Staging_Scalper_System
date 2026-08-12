@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from dedicated_parser.atomic_io import atomic_text_writer
 from typing import Any, Iterable
 
 from dedicated_parser.storage import load_run
@@ -279,10 +280,7 @@ def write_funnel_csv(
         "distinct_tickers",
         "distinct_accessions",
     ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="") as handle:
+    with atomic_text_writer(path, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(records)
-    os.replace(temporary, path)

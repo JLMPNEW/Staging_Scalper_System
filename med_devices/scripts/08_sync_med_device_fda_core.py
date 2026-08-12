@@ -12,8 +12,8 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,14 +28,22 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.point_in_time import row_is_effective_asof  # noqa: E402
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
-from med_devices.core.text_norm import as_bool, normalize_org_name, normalize_submission_identifier  # noqa: E402
+from med_devices.core.text_norm import (  # noqa: E402
+    as_bool,
+    normalize_org_name,
+    normalize_submission_identifier,
+    normalize_ticker,
+)
 
 
 LOGGER = logging.getLogger("sync_med_device_fda_core")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_SOURCE_ID = "openfda_device"
 DEFAULT_BASE_URL = "https://api.fda.gov/device"
+PMA_IDENTIFIER_RE = re.compile(r"^(?:BP|P|H|N|D)[0-9]{5,}$")
+FDA_510K_OR_DENOVO_IDENTIFIER_RE = re.compile(r"^(?:K[0-9]{5,}|DEN[0-9]{6})$")
 FIELDNAMES = [
     "endpoint_name",
     "path",
@@ -76,6 +84,19 @@ class EndpointConfig:
     search: str
     sort: str
     max_records: int
+    date_field: str = ""
+    window_days: int = 0
+    overlap_days: int = 0
+    initial_lookback_days: int = 0
+    stream_name: str = ""
+    scope_hash: str = ""
+    window_start: str = ""
+    window_end: str = ""
+    partition_field: str = ""
+    partition_width: int = 0
+    scope_product_code_field: str = ""
+    scope_manufacturer_field: str = ""
+    scope_group_size: int = 0
 
 
 @dataclass(frozen=True)
@@ -105,20 +126,59 @@ class FetchedFdaPage:
     response_status: int
     payload_text: str
     payload: dict[str, Any]
+    replayed: bool = False
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sync openFDA core medical-device data into canonical med-device tables.")
+    parser = argparse.ArgumentParser(
+        description="Sync openFDA core medical-device data into canonical med-device tables."
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--endpoints", type=str, default="", help="Optional comma-separated endpoint names.")
     parser.add_argument("--max-records", type=int, default=0, help="Optional per-endpoint max record override.")
-    parser.add_argument("--targeted-footprints", action="store_true", help="Fetch exact FDA submission IDs from the footprint CSV.")
-    parser.add_argument("--targeted-entity-names", action="store_true", help="Also fetch exact applicant-name rows for device footprint entities.")
-    parser.add_argument("--targeted-only", action="store_true", help="Only run targeted footprint fetches, not the broad endpoint sync.")
+    parser.add_argument(
+        "--asof",
+        type=str,
+        default="",
+        help="Target as-of date (YYYY-MM-DD) used to partition and replay raw FDA responses.",
+    )
+    parser.add_argument(
+        "--refresh-network",
+        action="store_true",
+        help="Bypass hash-validated same-date raw responses and fetch every selected FDA request again.",
+    )
+    parser.add_argument(
+        "--incremental-start",
+        type=str,
+        default="",
+        help="Optional inclusive YYYY-MM-DD override for dated FDA streams (governed repair/backfill only).",
+    )
+    parser.add_argument(
+        "--targeted-footprints", action="store_true", help="Fetch exact FDA submission IDs from the footprint CSV."
+    )
+    parser.add_argument(
+        "--targeted-entity-names",
+        action="store_true",
+        help="Also fetch exact applicant-name rows for device footprint entities.",
+    )
+    parser.add_argument(
+        "--targeted-postmarket",
+        action="store_true",
+        help="Also fetch recall, enforcement, and adverse-event rows for targeted footprint product codes and entities.",
+    )
+    parser.add_argument(
+        "--targeted-tickers",
+        type=str,
+        default="",
+        help="Optional comma-separated ticker filter for targeted footprint queries.",
+    )
+    parser.add_argument(
+        "--targeted-only", action="store_true", help="Only run targeted footprint fetches, not the broad endpoint sync."
+    )
     parser.add_argument("--footprint-csv", type=Path, default=None, help="Optional FDA footprint CSV override.")
-    parser.add_argument("--target-limit", type=int, default=100, help="Max records per targeted footprint query.")
+    parser.add_argument("--target-limit", type=int, default=0, help="Max records per targeted footprint query.")
     parser.add_argument(
         "--recompute-adverse-event-counts-only",
         action="store_true",
@@ -171,6 +231,53 @@ def read_csv_flexible(path: Path) -> list[dict[str, str]]:
     raise ValueError(f"Could not decode CSV {path}: {last_error}")
 
 
+def upsert_manual_approval_evidence(conn: Any, path: Path | None, *, source_id: str) -> int:
+    if path is None or not path.exists():
+        return 0
+    count = 0
+    for row in read_csv_flexible(path):
+        pma_number = normalize_submission_identifier(row_get(row, "pma_number", "submission_number"))
+        supplement_number = normalize_submission_identifier(row_get(row, "supplement_number"))
+        if not is_pma_identifier(pma_number):
+            LOGGER.warning("Skipping invalid manual PMA identifier: %s", pma_number)
+            continue
+        applicant = row_get(row, "applicant", "manufacturer_name")
+        product_code = normalize_product_code(row_get(row, "product_code"))
+        decision_date = date_text(row_get(row, "decision_date"))
+        source_url = row_get(row, "source_url")
+        if not applicant or not product_code or not decision_date or not source_url:
+            LOGGER.warning(
+                "Skipping incomplete manual PMA evidence: pma=%s applicant=%s product_code=%s decision_date=%s source_url=%s",
+                pma_number,
+                applicant,
+                product_code,
+                decision_date,
+                source_url,
+            )
+            continue
+        payload = {
+            "pma_number": pma_number,
+            "supplement_number": supplement_number,
+            "applicant": applicant,
+            "product_code": product_code,
+            "trade_name": row_get(row, "trade_name", "device_name"),
+            "decision": row_get(row, "decision") or "Approved",
+            "decision_date": decision_date,
+            "date_received": date_text(row_get(row, "date_received", "receipt_date")),
+            "source_url": source_url,
+            "valid_from": row_get(row, "valid_from"),
+            "reviewed_at": row_get(row, "reviewed_at"),
+            "evidence_method": "authoritative_manual_fda_accessdata",
+        }
+        count += upsert_approval(
+            conn,
+            payload,
+            endpoint_name="approvals_pma",
+            source_id=source_id,
+        )
+    return count
+
+
 def row_get(row: dict[str, str], *keys: str) -> str:
     lowered = {str(key).strip().lower(): str(value or "") for key, value in row.items()}
     for key in keys:
@@ -192,6 +299,19 @@ def split_multi_value(raw: object) -> list[str]:
             out.append(value)
             seen.add(value)
     return out
+
+
+def ticker_filter(raw: object) -> set[str]:
+    values = raw if isinstance(raw, list) else str(raw or "").split(",")
+    return {normalize_ticker(value) for value in values if normalize_ticker(value)}
+
+
+def is_pma_identifier(raw: object) -> bool:
+    return bool(PMA_IDENTIFIER_RE.fullmatch(normalize_submission_identifier(raw)))
+
+
+def is_510k_or_denovo_identifier(raw: object) -> bool:
+    return bool(FDA_510K_OR_DENOVO_IDENTIFIER_RE.fullmatch(normalize_submission_identifier(raw)))
 
 
 def quote_openfda_value(value: str) -> str:
@@ -248,13 +368,24 @@ def fda_policy(config: dict[str, Any]) -> FdaPolicy:
                     search=str(row.get("search") or "").strip(),
                     sort=str(row.get("sort") or "").strip(),
                     max_records=max(0, int(row.get("max_records") or 0)),
+                    date_field=str(row.get("date_field") or "").strip(),
+                    window_days=max(0, int(row.get("window_days") or 0)),
+                    overlap_days=max(0, int(row.get("overlap_days") or 0)),
+                    initial_lookback_days=max(0, int(row.get("initial_lookback_days") or 0)),
+                    partition_field=str(row.get("partition_field") or "").strip(),
+                    partition_width=max(0, int(row.get("partition_width") or 0)),
+                    scope_product_code_field=str(row.get("scope_product_code_field") or "").strip(),
+                    scope_manufacturer_field=str(row.get("scope_manufacturer_field") or "").strip(),
+                    scope_group_size=max(0, int(row.get("scope_group_size") or 0)),
                 )
             )
     return FdaPolicy(
         source_id=str(cfg_get(config, "fda_core_ingestion.source_id", DEFAULT_SOURCE_ID) or DEFAULT_SOURCE_ID),
         base_url=str(cfg_get(config, "fda_core_ingestion.base_url", DEFAULT_BASE_URL) or DEFAULT_BASE_URL).rstrip("/"),
         api_key_env=str(cfg_get(config, "fda_core_ingestion.api_key_env", "OPENFDA_API_KEY") or "OPENFDA_API_KEY"),
-        api_key_file=str(cfg_get(config, "fda_core_ingestion.api_key_file", "secrets.local.yaml") or "secrets.local.yaml"),
+        api_key_file=str(
+            cfg_get(config, "fda_core_ingestion.api_key_file", "secrets.local.yaml") or "secrets.local.yaml"
+        ),
         api_key_file_field=str(
             cfg_get(config, "fda_core_ingestion.api_key_file_field", "openfda_api_key") or "openfda_api_key"
         ),
@@ -264,7 +395,9 @@ def fda_policy(config: dict[str, Any]) -> FdaPolicy:
         sleep_sec=float(cfg_get(config, "fda_core_ingestion.request_sleep_sec", 0.15)),
         page_limit=max(1, min(1000, int(cfg_get(config, "fda_core_ingestion.page_limit", 1000)))),
         commit_every_pages=max(1, int(cfg_get(config, "fda_core_ingestion.commit_every_pages", 10))),
-        user_agent=str(cfg_get(config, "fda_core_ingestion.user_agent", "JL, Independent Research, jm.357@hotmail.com")),
+        user_agent=str(
+            cfg_get(config, "fda_core_ingestion.user_agent", "JL, Independent Research, jm.357@hotmail.com")
+        ),
         endpoints=endpoints,
     )
 
@@ -297,11 +430,44 @@ def ensure_source_registry(conn: Any, config: dict[str, Any], base_dir: Path, so
         raise ValueError(f"Source registry missing required source_id: {source_id}")
 
 
-def start_ingestion_run(conn: Any, source_id: str) -> int:
-    now = utc_now()
+def start_ingestion_run(conn: Any, source_id: str, *, stale_after_hours: int = 6) -> int:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    rows = conn.execute(
+        """
+        SELECT ingestion_run_id, started_at
+        FROM ingestion_runs
+        WHERE source_id = ? AND status = 'running'
+        ORDER BY ingestion_run_id
+        """,
+        (source_id,),
+    ).fetchall()
+    active: list[int] = []
+    for row in rows:
+        try:
+            started = datetime.fromisoformat(str(row["started_at"]).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+        except ValueError:
+            active.append(int(row["ingestion_run_id"]))
+            continue
+        age_hours = (now - started.astimezone(timezone.utc)).total_seconds() / 3600.0
+        if age_hours >= stale_after_hours:
+            conn.execute(
+                """
+                UPDATE ingestion_runs
+                SET completed_at = ?, status = 'failed', message = ?
+                WHERE ingestion_run_id = ? AND status = 'running'
+                """,
+                (utc_now(), f"stale_running_run_recovered_after_{age_hours:.1f}_hours", row["ingestion_run_id"]),
+            )
+        else:
+            active.append(int(row["ingestion_run_id"]))
+    if active:
+        raise RuntimeError(f"FDA ingestion already running for {source_id}: run_ids={active}")
+    now_text = utc_now()
     cur = conn.execute(
         "INSERT INTO ingestion_runs(source_id, started_at, status, created_at) VALUES (?, ?, 'running', ?)",
-        (source_id, now, now),
+        (source_id, now_text, now_text),
     )
     if cur.lastrowid is None:
         raise RuntimeError("Could not create ingestion run")
@@ -336,6 +502,7 @@ def store_raw_response(
     response_status: int,
     payload_text: str,
     ingestion_run_id: int,
+    asof_date: str,
 ) -> None:
     now = utc_now()
     conn.execute(
@@ -353,12 +520,256 @@ def store_raw_response(
             now,
             response_status,
             hashlib.sha256(payload_text.encode("utf-8", errors="replace")).hexdigest(),
-            datetime.now(timezone.utc).date().isoformat(),
+            asof_date,
             payload_text,
             ingestion_run_id,
             now,
         ),
     )
+
+
+ReplayCache = dict[tuple[str, str], tuple[int, str, dict[str, Any]]]
+
+
+def replay_cache_key(endpoint: str, query_params: dict[str, Any]) -> tuple[str, str]:
+    return endpoint, compact_json(query_params)
+
+
+def ingestion_response_set(conn: Any, ingestion_run_id: int) -> tuple[int, str]:
+    rows = conn.execute(
+        """
+        SELECT endpoint, COALESCE(query_params_json, '') AS query_params_json,
+               COALESCE(response_status, 0) AS response_status, response_hash
+        FROM raw_api_responses
+        WHERE ingestion_run_id = ?
+        ORDER BY endpoint, query_params_json, response_status, response_hash
+        """,
+        (ingestion_run_id,),
+    ).fetchall()
+    material = [
+        [str(row["endpoint"]), str(row["query_params_json"]), int(row["response_status"]), str(row["response_hash"])]
+        for row in rows
+    ]
+    return len(material), hashlib.sha256(compact_json(material).encode("utf-8")).hexdigest()
+
+
+def seal_ingestion_run(conn: Any, *, ingestion_run_id: int, source_id: str, asof_date: str) -> str:
+    status_row = conn.execute(
+        "SELECT status, source_id FROM ingestion_runs WHERE ingestion_run_id = ?",
+        (ingestion_run_id,),
+    ).fetchone()
+    if status_row is None:
+        raise ValueError(f"Unknown ingestion_run_id: {ingestion_run_id}")
+    if str(status_row["source_id"]) != source_id:
+        raise ValueError("Ingestion-run source does not match seal source")
+    if str(status_row["status"]) not in {"success", "partial"}:
+        raise ValueError("Only completed success/partial ingestion runs may be sealed")
+    response_count, response_set_hash = ingestion_response_set(conn, ingestion_run_id)
+    conn.execute(
+        """
+        INSERT INTO ingestion_run_seals(
+            ingestion_run_id, source_id, asof_date, response_count, response_set_hash, sealed_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ingestion_run_id) DO UPDATE SET
+            source_id = excluded.source_id,
+            asof_date = excluded.asof_date,
+            response_count = excluded.response_count,
+            response_set_hash = excluded.response_set_hash,
+            sealed_at = excluded.sealed_at
+        """,
+        (ingestion_run_id, source_id, asof_date, response_count, response_set_hash, utc_now()),
+    )
+    return response_set_hash
+
+
+def load_raw_response_replay_cache(
+    conn: Any,
+    *,
+    source_id: str,
+    asof_date: str,
+) -> ReplayCache:
+    """Load only complete, set-sealed same-date responses for deterministic replay."""
+
+    seal_rows = conn.execute(
+        """
+        SELECT s.ingestion_run_id, s.response_count, s.response_set_hash
+        FROM ingestion_run_seals AS s
+        JOIN ingestion_runs AS r ON r.ingestion_run_id = s.ingestion_run_id
+        WHERE s.source_id = ? AND s.asof_date = ? AND r.status IN ('success', 'partial')
+        ORDER BY s.ingestion_run_id
+        """,
+        (source_id, asof_date),
+    ).fetchall()
+    cache: ReplayCache = {}
+    invalid_runs = 0
+    invalid_rows = 0
+    for seal in seal_rows:
+        run_id = int(seal["ingestion_run_id"])
+        count, digest = ingestion_response_set(conn, run_id)
+        if count != int(seal["response_count"]) or digest != str(seal["response_set_hash"]):
+            invalid_runs += 1
+            continue
+        rows = conn.execute(
+            """
+            SELECT endpoint, query_params_json, response_status, response_hash, payload_text
+            FROM raw_api_responses
+            WHERE ingestion_run_id = ? AND response_status IN (200, 404)
+            ORDER BY raw_response_id
+            """,
+            (run_id,),
+        ).fetchall()
+        run_cache: ReplayCache = {}
+        run_valid = True
+        for row in rows:
+            payload_text = str(row["payload_text"] or "")
+            expected_hash = str(row["response_hash"] or "")
+            actual_hash = hashlib.sha256(payload_text.encode("utf-8", errors="replace")).hexdigest()
+            if not payload_text or actual_hash != expected_hash:
+                invalid_rows += 1
+                run_valid = False
+                break
+            try:
+                parsed = json.loads(payload_text)
+            except json.JSONDecodeError:
+                invalid_rows += 1
+                run_valid = False
+                break
+            endpoint = str(row["endpoint"] or "")
+            query_json = str(row["query_params_json"] or "")
+            if not isinstance(parsed, dict) or not endpoint or not query_json:
+                invalid_rows += 1
+                run_valid = False
+                break
+            run_cache[(endpoint, query_json)] = (int(row["response_status"]), payload_text, parsed)
+        if run_valid:
+            cache.update(run_cache)
+        else:
+            invalid_runs += 1
+    if invalid_runs or invalid_rows:
+        LOGGER.warning(
+            "Ignored invalid same-date FDA sealed response sets: asof=%s runs=%d rows=%d",
+            asof_date,
+            invalid_runs,
+            invalid_rows,
+        )
+    return cache
+
+
+def endpoint_scope_hash(endpoint: EndpointConfig) -> str:
+    payload = {
+        "name": endpoint.name,
+        "path": endpoint.path,
+        "search": endpoint.search,
+        "sort": endpoint.sort,
+        "date_field": endpoint.date_field,
+        "window_days": endpoint.window_days,
+        "overlap_days": endpoint.overlap_days,
+        "partition_field": endpoint.partition_field,
+        "partition_width": endpoint.partition_width,
+    }
+    return hashlib.sha256(compact_json(payload).encode("utf-8")).hexdigest()
+
+
+def combine_search(base_search: str, date_field: str, start_date: date, end_date: date) -> str:
+    date_clause = f"{date_field}:[{start_date:%Y%m%d} TO {end_date:%Y%m%d}]"
+    return f"{base_search} AND {date_clause}" if base_search else date_clause
+
+
+def anchored_date_windows(start_date: date, end_date: date, window_days: int) -> list[tuple[date, date]]:
+    if window_days <= 0:
+        raise ValueError("window_days must be positive")
+    if start_date > end_date:
+        return []
+    epoch = date(1970, 1, 1)
+    bucket_start = epoch + timedelta(days=((start_date - epoch).days // window_days) * window_days)
+    out: list[tuple[date, date]] = []
+    cursor = bucket_start
+    while cursor <= end_date:
+        bucket_end = min(cursor + timedelta(days=window_days - 1), end_date)
+        out.append((cursor, bucket_end))
+        cursor += timedelta(days=window_days)
+    return out
+
+
+def get_ingestion_watermark(conn: Any, *, source_id: str, stream_name: str, scope_hash: str) -> date | None:
+    row = conn.execute(
+        """
+        SELECT watermark_date FROM ingestion_watermarks
+        WHERE source_id = ? AND stream_name = ? AND scope_hash = ?
+        """,
+        (source_id, stream_name, scope_hash),
+    ).fetchone()
+    return date.fromisoformat(str(row["watermark_date"])) if row is not None else None
+
+
+def upsert_ingestion_watermark(
+    conn: Any,
+    *,
+    source_id: str,
+    stream_name: str,
+    scope_hash: str,
+    date_field: str,
+    watermark_date: str,
+    ingestion_run_id: int,
+) -> None:
+    existing = get_ingestion_watermark(conn, source_id=source_id, stream_name=stream_name, scope_hash=scope_hash)
+    candidate = date.fromisoformat(watermark_date)
+    if existing is not None and candidate < existing:
+        return
+    conn.execute(
+        """
+        INSERT INTO ingestion_watermarks(
+            source_id, stream_name, scope_hash, date_field, watermark_date,
+            last_ingestion_run_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id, stream_name, scope_hash) DO UPDATE SET
+            date_field = excluded.date_field,
+            watermark_date = excluded.watermark_date,
+            last_ingestion_run_id = excluded.last_ingestion_run_id,
+            updated_at = excluded.updated_at
+        """,
+        (source_id, stream_name, scope_hash, date_field, watermark_date, ingestion_run_id, utc_now()),
+    )
+
+
+def plan_incremental_endpoints(
+    conn: Any,
+    endpoints: list[EndpointConfig],
+    *,
+    source_id: str,
+    run_asof: date,
+    start_override: date | None = None,
+) -> list[EndpointConfig]:
+    planned: list[EndpointConfig] = []
+    for endpoint in endpoints:
+        if not endpoint.date_field or endpoint.window_days <= 0:
+            planned.append(endpoint)
+            continue
+        scope_hash = endpoint_scope_hash(endpoint)
+        watermark = get_ingestion_watermark(conn, source_id=source_id, stream_name=endpoint.name, scope_hash=scope_hash)
+        if watermark is not None and watermark > run_asof:
+            raise ValueError(
+                f"FDA watermark is after run as-of: stream={endpoint.name} watermark={watermark} asof={run_asof}"
+            )
+        if start_override is not None:
+            start_date = start_override
+        elif watermark is not None:
+            start_date = watermark - timedelta(days=max(0, endpoint.overlap_days - 1))
+        else:
+            lookback = max(endpoint.initial_lookback_days, endpoint.window_days, 1)
+            start_date = run_asof - timedelta(days=lookback - 1)
+        for window_start, window_end in anchored_date_windows(start_date, run_asof, endpoint.window_days):
+            planned.append(
+                replace(
+                    endpoint,
+                    search=combine_search(endpoint.search, endpoint.date_field, window_start, window_end),
+                    stream_name=endpoint.name,
+                    scope_hash=scope_hash,
+                    window_start=window_start.isoformat(),
+                    window_end=window_end.isoformat(),
+                )
+            )
+    return planned
 
 
 def fetch_openfda_page(
@@ -416,20 +827,37 @@ def build_targeted_footprint_endpoints(
     *,
     target_limit: int,
     include_entity_names: bool = False,
+    include_postmarket: bool = False,
+    tickers: set[str] | None = None,
+    asof: date | None = None,
 ) -> list[EndpointConfig]:
     if path is None:
         return []
     if not path.exists():
         LOGGER.warning("Configured FDA footprint CSV does not exist: %s", path)
         return []
+    target_asof = asof or datetime.now(timezone.utc).date()
+    effective_rows: dict[str, dict[str, str]] = {}
+    for row in read_csv_flexible(path):
+        ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
+        if not ticker or (tickers and ticker not in tickers):
+            continue
+        if not row_is_effective_asof(row, target_asof, include_missing=True):
+            continue
+        # Governed CSV updates are append-only. The last effective row for a
+        # ticker supersedes older rows while retaining those rows for PIT runs.
+        effective_rows[ticker] = row
+
     out: list[EndpointConfig] = []
     seen: set[tuple[str, str]] = set()
-    for row in read_csv_flexible(path):
+    for ticker, row in effective_rows.items():
+        entity = row_get(row, "primary_fda_entity", "fda_entity", "manufacturer_name")
+        expected_records = as_bool(row_get(row, "expected_cdrh_records"), default=False)
         for raw_identifier in split_multi_value(row_get(row, "premarket_numbers", "premarket_number")):
             identifier = normalize_submission_identifier(raw_identifier)
             if not identifier:
                 continue
-            if identifier.startswith("K") and re.match(r"^K[0-9]{5,}$", identifier):
+            if is_510k_or_denovo_identifier(identifier):
                 endpoint = EndpointConfig(
                     name=f"target_510k_{identifier}",
                     path="510k.json",
@@ -438,7 +866,7 @@ def build_targeted_footprint_endpoints(
                     sort="",
                     max_records=max(1, target_limit),
                 )
-            elif identifier.startswith("P") and re.match(r"^P[0-9]{5,}$", identifier):
+            elif is_pma_identifier(identifier):
                 endpoint = EndpointConfig(
                     name=f"target_pma_{identifier}",
                     path="pma.json",
@@ -454,11 +882,8 @@ def build_targeted_footprint_endpoints(
                 continue
             seen.add(key)
             out.append(endpoint)
-        if include_entity_names and row_get(row, "footprint_category", "category") == "device_manufacturer":
-            entity = row_get(row, "primary_fda_entity", "fda_entity", "manufacturer_name")
-            if not entity:
-                continue
-            slug = endpoint_slug(row_get(row, "ticker", "symbol") + "_" + entity)
+        if include_entity_names and expected_records and entity:
+            slug = endpoint_slug(ticker + "_" + entity)
             for name, path_name in (("510k", "510k.json"), ("pma", "pma.json")):
                 endpoint = EndpointConfig(
                     name=f"target_entity_{name}_{slug}",
@@ -473,7 +898,132 @@ def build_targeted_footprint_endpoints(
                     continue
                 seen.add(key)
                 out.append(endpoint)
+        if include_postmarket and expected_records:
+            for raw_product_code in split_multi_value(row_get(row, "product_codes", "product_code")):
+                product_code = normalize_product_code(raw_product_code)
+                if not product_code:
+                    continue
+                slug = endpoint_slug(ticker + "_" + product_code)
+                for name, path_name, field_name, sort in (
+                    ("recall", "recall.json", "product_code", "event_date_initiated:desc"),
+                    ("enforcement", "enforcement.json", "product_code", "recall_initiation_date:desc"),
+                    ("event", "event.json", "device.device_report_product_code", "date_received:desc"),
+                ):
+                    search_parts = [f"{field_name}:{quote_openfda_value(product_code)}"]
+                    if entity:
+                        entity_field = "device.manufacturer_d_name" if name == "event" else "recalling_firm"
+                        search_parts.append(f"{entity_field}:{quote_openfda_value(entity)}")
+                    endpoint = EndpointConfig(
+                        name=f"target_{name}_code_{slug}",
+                        path=path_name,
+                        enabled=True,
+                        search=" AND ".join(search_parts),
+                        sort=sort,
+                        max_records=max(1, target_limit),
+                    )
+                    key = (endpoint.path, endpoint.search)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(endpoint)
+            if entity:
+                slug = endpoint_slug(ticker + "_" + entity)
+                for name, path_name, field_name, sort in (
+                    ("recall", "recall.json", "recalling_firm", "event_date_initiated:desc"),
+                    ("enforcement", "enforcement.json", "recalling_firm", "recall_initiation_date:desc"),
+                    ("event", "event.json", "device.manufacturer_d_name", "date_received:desc"),
+                ):
+                    endpoint = EndpointConfig(
+                        name=f"target_{name}_entity_{slug}",
+                        path=path_name,
+                        enabled=True,
+                        search=f"{field_name}:{quote_openfda_value(entity)}",
+                        sort=sort,
+                        max_records=max(1, target_limit),
+                    )
+                    key = (endpoint.path, endpoint.search)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(endpoint)
     LOGGER.info("Built targeted FDA footprint queries: rows=%d path=%s", len(out), path)
+    return out
+
+
+def scope_endpoints_to_footprint_product_codes(
+    endpoints: list[EndpointConfig],
+    footprint_path: Path | None,
+    *,
+    asof: date,
+    alias_path: Path | None = None,
+) -> list[EndpointConfig]:
+    scoped_templates = [endpoint for endpoint in endpoints if endpoint.scope_product_code_field]
+    if not scoped_templates:
+        return endpoints
+    if footprint_path is None or not footprint_path.exists():
+        raise ValueError("A governed FDA footprint CSV is required for scoped broad endpoint ingestion")
+    aliases_by_ticker: dict[str, set[str]] = {}
+    if alias_path is not None and alias_path.exists():
+        for row in read_csv_flexible(alias_path):
+            if not row_is_effective_asof(row, asof, include_missing=True):
+                continue
+            ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
+            alias = row_get(row, "alias_raw", "alias", "manufacturer_name")
+            if ticker and alias:
+                aliases_by_ticker.setdefault(ticker, set()).add(alias)
+    code_entity_pairs: set[tuple[str, str]] = set()
+    for row in read_csv_flexible(footprint_path):
+        if not row_is_effective_asof(row, asof, include_missing=True):
+            continue
+        ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
+        primary = row_get(row, "primary_fda_entity", "fda_entity", "manufacturer_name")
+        entities = set(aliases_by_ticker.get(ticker, set()))
+        if primary:
+            entities.add(primary)
+        for raw_code in split_multi_value(row_get(row, "product_codes", "product_code")):
+            code = normalize_product_code(raw_code)
+            if code:
+                for entity in entities or {""}:
+                    code_entity_pairs.add((code, entity))
+    if not code_entity_pairs:
+        raise ValueError(f"No effective FDA product-code/entity pairs found in governed footprint: {footprint_path}")
+    ordered_pairs = sorted(code_entity_pairs)
+    out: list[EndpointConfig] = []
+    for endpoint in endpoints:
+        code_field = endpoint.scope_product_code_field
+        if not code_field:
+            out.append(endpoint)
+            continue
+        manufacturer_field = endpoint.scope_manufacturer_field
+        if not manufacturer_field:
+            raise ValueError(f"Scoped FDA endpoint lacks manufacturer field: {endpoint.name}")
+        group_size = max(1, endpoint.scope_group_size)
+        for group_number, offset in enumerate(range(0, len(ordered_pairs), group_size), start=1):
+            group = ordered_pairs[offset : offset + group_size]
+            clauses: list[str] = []
+            for code, entity in group:
+                code_clause = f"{code_field}:{quote_openfda_value(code)}"
+                clauses.append(
+                    f"({code_clause} AND {manufacturer_field}:{quote_openfda_value(entity)})" if entity else code_clause
+                )
+            pair_filter = "(" + " OR ".join(clauses) + ")"
+            scoped_search = f"{endpoint.search} AND {pair_filter}" if endpoint.search else pair_filter
+            out.append(
+                replace(
+                    endpoint,
+                    name=f"target_event_group_{group_number:03d}",
+                    search=scoped_search,
+                    scope_product_code_field="",
+                    scope_manufacturer_field="",
+                    scope_group_size=0,
+                )
+            )
+    LOGGER.info(
+        "Scoped FDA endpoints to governed product-code/entity pairs: pairs=%d templates=%d endpoints=%d",
+        len(ordered_pairs),
+        len(scoped_templates),
+        len(out),
+    )
     return out
 
 
@@ -503,9 +1053,26 @@ def fetch_fda_page_job(
     skip: int,
     limit: int,
     page_number_hint: int,
+    replay_cache: ReplayCache | None = None,
+    refresh_network: bool = False,
 ) -> FetchedFdaPage:
     url = endpoint_url(policy, endpoint)
     params, public_params = page_params(endpoint, skip=skip, limit=limit, api_key=api_key)
+    if not refresh_network and replay_cache is not None:
+        cached = replay_cache.get(replay_cache_key(url, public_params))
+        if cached is not None:
+            status_code, payload_text, payload = cached
+            return FetchedFdaPage(
+                endpoint_name=endpoint.name,
+                url=url,
+                public_params=public_params,
+                skip=skip,
+                page_number_hint=page_number_hint,
+                response_status=status_code,
+                payload_text=payload_text,
+                payload=payload,
+                replayed=True,
+            )
     with requests.Session() as session:
         status_code, payload_text, payload = fetch_openfda_page(session, url, params, policy=policy)
     return FetchedFdaPage(
@@ -715,7 +1282,9 @@ def upsert_recall(conn: Any, payload: dict[str, Any], *, endpoint_name: str, sou
     manufacturer_id = upsert_manufacturer(conn, firm)
     product_code = normalize_product_code(field(payload, "product_code"))
     if product_code:
-        upsert_product_code(conn, product_code=product_code, device_name=field(payload, "product_description"), source_id=source_id)
+        upsert_product_code(
+            conn, product_code=product_code, device_name=field(payload, "product_description"), source_id=source_id
+        )
     key = recall_key(payload, endpoint_name=endpoint_name)
     classification = field(payload, "classification")
     row = find_existing_recall_row(conn, key=key, source_id=source_id, endpoint_name=endpoint_name)
@@ -900,7 +1469,12 @@ def upsert_adverse_event(conn: Any, payload: dict[str, Any], *, source_id: str) 
     manufacturer_id = upsert_manufacturer(conn, manufacturer)
     product_code = normalize_product_code(field(device, "device_report_product_code", "product_code"))
     if product_code:
-        upsert_product_code(conn, product_code=product_code, device_name=field(device, "brand_name", "generic_name"), source_id=source_id)
+        upsert_product_code(
+            conn,
+            product_code=product_code,
+            device_name=field(device, "brand_name", "generic_name"),
+            source_id=source_id,
+        )
     death_count, injury_count, malfunction_count = event_counts(payload)
     now = utc_now()
     conn.execute(
@@ -937,7 +1511,8 @@ def upsert_adverse_event(conn: Any, payload: dict[str, Any], *, source_id: str) 
             manufacturer_id,
             manufacturer_id,
             product_code or None,
-            date_text(field(payload, "date_of_event")) or date_text(field(payload, "date_received", "date_report", "date_report_to_fda")),
+            date_text(field(payload, "date_of_event"))
+            or date_text(field(payload, "date_received", "date_report", "date_report_to_fda")),
             date_text(field(payload, "date_received", "date_report", "date_report_to_fda")),
             field(payload, "report_source_code", "report_type"),
             death_count,
@@ -975,9 +1550,13 @@ def upsert_endpoint_records(conn: Any, endpoint_name: str, results: list[Any], *
             or endpoint_name.startswith("target_entity_pma_")
         ):
             count += upsert_approval(conn, payload, endpoint_name=endpoint_name, source_id=source_id)
-        elif endpoint_name in {"recall", "enforcement"}:
+        elif (
+            endpoint_name in {"recall", "enforcement"}
+            or endpoint_name.startswith("target_recall_")
+            or endpoint_name.startswith("target_enforcement_")
+        ):
             count += upsert_recall(conn, payload, endpoint_name=endpoint_name, source_id=source_id)
-        elif endpoint_name == "adverse_event":
+        elif endpoint_name == "adverse_event" or endpoint_name.startswith("target_event_"):
             count += upsert_adverse_event(conn, payload, source_id=source_id)
     return count
 
@@ -996,6 +1575,7 @@ def process_fda_page(
     *,
     source_id: str,
     ingestion_run_id: int,
+    asof_date: str,
 ) -> tuple[int, int, str, str]:
     store_raw_response(
         conn,
@@ -1005,6 +1585,7 @@ def process_fda_page(
         response_status=page.response_status,
         payload_text=page.payload_text,
         ingestion_run_id=ingestion_run_id,
+        asof_date=asof_date,
     )
     if page.response_status != 200:
         if page.response_status == 404 and is_openfda_not_found(page.payload):
@@ -1017,29 +1598,386 @@ def process_fda_page(
     return len(results), upserted, "success", ""
 
 
+@dataclass(frozen=True)
+class EndpointSyncResult:
+    pages: int = 0
+    seen: int = 0
+    upserted: int = 0
+    requests: int = 0
+    replayed: int = 0
+    total: int | None = None
+    status: str = "success"
+    reason: str = ""
+
+
+def _merge_sync_results(*results: EndpointSyncResult) -> EndpointSyncResult:
+    failed = next((row for row in results if row.status == "failed"), None)
+    return EndpointSyncResult(
+        pages=sum(row.pages for row in results),
+        seen=sum(row.seen for row in results),
+        upserted=sum(row.upserted for row in results),
+        requests=sum(row.requests for row in results),
+        replayed=sum(row.replayed for row in results),
+        total=sum(int(row.total or 0) for row in results),
+        status="failed" if failed is not None else "success",
+        reason=failed.reason if failed is not None else "",
+    )
+
+
+def sync_single_endpoint_query(
+    conn: Any,
+    endpoint: EndpointConfig,
+    *,
+    policy: FdaPolicy,
+    api_key: str,
+    max_records: int,
+    source_id: str,
+    ingestion_run_id: int,
+    asof_date: str,
+    replay_cache: ReplayCache,
+    refresh_network: bool,
+) -> EndpointSyncResult:
+    first_limit = min(policy.page_limit, max_records)
+    first_page = fetch_fda_page_job(
+        endpoint,
+        policy=policy,
+        api_key=api_key,
+        skip=0,
+        limit=first_limit,
+        page_number_hint=1,
+        replay_cache=replay_cache,
+        refresh_network=refresh_network,
+    )
+    requests = 0 if first_page.replayed else 1
+    replayed = 1 if first_page.replayed else 0
+    total = openfda_total(first_page.payload)
+    if first_page.response_status == 200 and total is not None and total > max_records:
+        store_raw_response(
+            conn,
+            source_id=source_id,
+            endpoint=first_page.url,
+            query_params=first_page.public_params,
+            response_status=first_page.response_status,
+            payload_text=first_page.payload_text,
+            ingestion_run_id=ingestion_run_id,
+            asof_date=asof_date,
+        )
+        return EndpointSyncResult(
+            pages=1,
+            requests=requests,
+            replayed=replayed,
+            total=total,
+            status="failed",
+            reason=f"incremental_window_overflow_total_{total}_cap_{max_records}",
+        )
+
+    page_seen, page_upserted, status, reason = process_fda_page(
+        conn,
+        first_page,
+        source_id=source_id,
+        ingestion_run_id=ingestion_run_id,
+        asof_date=asof_date,
+    )
+    pages = 1
+    seen = page_seen
+    upserted = page_upserted
+    if status == "failed":
+        return EndpointSyncResult(pages, seen, upserted, requests, replayed, total, status, reason)
+    if status == "empty":
+        return EndpointSyncResult(pages, seen, upserted, requests, replayed, total, "success", reason)
+
+    effective_max = min(max_records, total) if total is not None else max_records
+    page_jobs = [
+        (page_number, skip, min(policy.page_limit, effective_max - skip))
+        for page_number, skip in enumerate(range(policy.page_limit, effective_max, policy.page_limit), start=2)
+    ]
+    fetched_pages: list[FetchedFdaPage] = []
+    if policy.parallel_workers > 1 and len(page_jobs) > 1:
+        with ThreadPoolExecutor(max_workers=policy.parallel_workers) as executor:
+            futures = [
+                executor.submit(
+                    fetch_fda_page_job,
+                    endpoint,
+                    policy=policy,
+                    api_key=api_key,
+                    skip=skip,
+                    limit=limit,
+                    page_number_hint=page_number,
+                    replay_cache=replay_cache,
+                    refresh_network=refresh_network,
+                )
+                for page_number, skip, limit in page_jobs
+            ]
+            fetched_pages = [future.result() for future in as_completed(futures)]
+        fetched_pages.sort(key=lambda page: page.page_number_hint)
+    else:
+        for page_number, skip, limit in page_jobs:
+            time.sleep(max(0.0, policy.sleep_sec))
+            fetched_pages.append(
+                fetch_fda_page_job(
+                    endpoint,
+                    policy=policy,
+                    api_key=api_key,
+                    skip=skip,
+                    limit=limit,
+                    page_number_hint=page_number,
+                    replay_cache=replay_cache,
+                    refresh_network=refresh_network,
+                )
+            )
+    for page in fetched_pages:
+        requests += 0 if page.replayed else 1
+        replayed += 1 if page.replayed else 0
+        pages += 1
+        row_seen, row_upserted, row_status, row_reason = process_fda_page(
+            conn,
+            page,
+            source_id=source_id,
+            ingestion_run_id=ingestion_run_id,
+            asof_date=asof_date,
+        )
+        seen += row_seen
+        upserted += row_upserted
+        if row_status == "failed":
+            status = "failed"
+            reason = row_reason
+            break
+        if pages % policy.commit_every_pages == 0:
+            conn.commit()
+    return EndpointSyncResult(pages, seen, upserted, requests, replayed, total, status, reason)
+
+
+def _partition_probe_value(
+    conn: Any,
+    endpoint: EndpointConfig,
+    *,
+    direction: str,
+    policy: FdaPolicy,
+    api_key: str,
+    source_id: str,
+    ingestion_run_id: int,
+    asof_date: str,
+    replay_cache: ReplayCache,
+    refresh_network: bool,
+) -> tuple[int, EndpointSyncResult]:
+    probe_endpoint = replace(endpoint, sort=f"{endpoint.partition_field}:{direction}")
+    page = fetch_fda_page_job(
+        probe_endpoint,
+        policy=policy,
+        api_key=api_key,
+        skip=0,
+        limit=1,
+        page_number_hint=1,
+        replay_cache=replay_cache,
+        refresh_network=refresh_network,
+    )
+    store_raw_response(
+        conn,
+        source_id=source_id,
+        endpoint=page.url,
+        query_params=page.public_params,
+        response_status=page.response_status,
+        payload_text=page.payload_text,
+        ingestion_run_id=ingestion_run_id,
+        asof_date=asof_date,
+    )
+    result = EndpointSyncResult(
+        pages=1,
+        requests=0 if page.replayed else 1,
+        replayed=1 if page.replayed else 0,
+        total=openfda_total(page.payload),
+        status="success" if page.response_status == 200 else "failed",
+        reason="" if page.response_status == 200 else f"partition_probe_http_status_{page.response_status}",
+    )
+    rows = json_list(page.payload.get("results"))
+    raw_value = json_dict(rows[0]).get(endpoint.partition_field) if rows else None
+    try:
+        value = int(str(raw_value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {direction} partition probe for {endpoint.name}: {raw_value!r}") from exc
+    return value, result
+
+
+def sync_endpoint_with_partitions(
+    conn: Any,
+    endpoint: EndpointConfig,
+    *,
+    policy: FdaPolicy,
+    api_key: str,
+    max_records: int,
+    source_id: str,
+    ingestion_run_id: int,
+    asof_date: str,
+    replay_cache: ReplayCache,
+    refresh_network: bool,
+) -> EndpointSyncResult:
+    primary = sync_single_endpoint_query(
+        conn,
+        endpoint,
+        policy=policy,
+        api_key=api_key,
+        max_records=max_records,
+        source_id=source_id,
+        ingestion_run_id=ingestion_run_id,
+        asof_date=asof_date,
+        replay_cache=replay_cache,
+        refresh_network=refresh_network,
+    )
+    if primary.status != "failed" or not primary.reason.startswith("incremental_window_overflow_"):
+        return primary
+    if not endpoint.partition_field or endpoint.partition_width <= 0:
+        return primary
+    if endpoint.partition_width > max_records:
+        return replace(primary, reason="partition_width_exceeds_max_records")
+
+    try:
+        min_key, min_probe = _partition_probe_value(
+            conn,
+            endpoint,
+            direction="asc",
+            policy=policy,
+            api_key=api_key,
+            source_id=source_id,
+            ingestion_run_id=ingestion_run_id,
+            asof_date=asof_date,
+            replay_cache=replay_cache,
+            refresh_network=refresh_network,
+        )
+        max_key, max_probe = _partition_probe_value(
+            conn,
+            endpoint,
+            direction="desc",
+            policy=policy,
+            api_key=api_key,
+            source_id=source_id,
+            ingestion_run_id=ingestion_run_id,
+            asof_date=asof_date,
+            replay_cache=replay_cache,
+            refresh_network=refresh_network,
+        )
+    except ValueError as exc:
+        return replace(primary, reason=f"partition_probe_invalid:{exc}")
+    if min_probe.status == "failed" or max_probe.status == "failed" or min_key > max_key:
+        return replace(primary, reason="partition_probe_failed_or_reversed")
+
+    width = endpoint.partition_width
+    cursor = (min_key // width) * width
+    shard_results: list[EndpointSyncResult] = []
+    while cursor <= max_key:
+        shard_end = cursor + width - 1
+        shard = replace(
+            endpoint,
+            search=(f"{endpoint.search} AND {endpoint.partition_field}:[{cursor} TO {shard_end}]"),
+        )
+        shard_result = sync_single_endpoint_query(
+            conn,
+            shard,
+            policy=policy,
+            api_key=api_key,
+            max_records=max_records,
+            source_id=source_id,
+            ingestion_run_id=ingestion_run_id,
+            asof_date=asof_date,
+            replay_cache=replay_cache,
+            refresh_network=refresh_network,
+        )
+        shard_results.append(shard_result)
+        if shard_result.status == "failed":
+            break
+        cursor += width
+    combined = _merge_sync_results(primary, min_probe, max_probe, *shard_results)
+    shard_total = sum(int(row.total or 0) for row in shard_results)
+    if any(row.status == "failed" for row in shard_results):
+        return replace(combined, status="failed", reason="partition_shard_failed")
+    if primary.total is None or shard_total != primary.total:
+        return replace(
+            combined,
+            status="failed",
+            reason=f"partition_total_mismatch_expected_{primary.total}_actual_{shard_total}",
+        )
+    return replace(
+        combined,
+        seen=sum(row.seen for row in shard_results),
+        upserted=sum(row.upserted for row in shard_results),
+        total=primary.total,
+        status="success",
+        reason="deterministic_numeric_partition",
+    )
+
+
 def main() -> None:
     configure_utc_logging()
     args = parse_args()
+    try:
+        run_asof = date.fromisoformat(args.asof) if args.asof else datetime.now(timezone.utc).date()
+    except ValueError as exc:
+        raise ValueError(f"Invalid --asof date {args.asof!r}; expected YYYY-MM-DD") from exc
+    run_asof_iso = run_asof.isoformat()
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     policy = fda_policy(config)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
         else resolve_path(
-            cfg_get(config, "fda_core_ingestion.output_csv", "../output/med_devices_reports/med_device_fda_core_ingestion_coverage.csv"),
+            cfg_get(
+                config,
+                "fda_core_ingestion.output_csv",
+                "../output/med_devices_reports/med_device_fda_core_ingestion_coverage.csv",
+            ),
             base_dir=base_dir,
         )
     )
+    manual_approval_raw = str(cfg_get(config, "fda_core_ingestion.manual_approval_evidence_csv", "") or "").strip()
+    manual_approval_csv = resolve_path(manual_approval_raw, base_dir=base_dir) if manual_approval_raw else None
+    manual_approval_source_id = str(
+        cfg_get(
+            config,
+            "fda_core_ingestion.manual_approval_source_id",
+            "fda_accessdata_cber",
+        )
+        or "fda_accessdata_cber"
+    ).strip()
     endpoint_filter = {value.strip() for value in str(args.endpoints or "").split(",") if value.strip()}
+    cli_target_tickers = ticker_filter(args.targeted_tickers)
+    configured_target_tickers = ticker_filter(cfg_get(config, "fda_core_ingestion.targeted_tickers", []))
+    selected_target_tickers = cli_target_tickers or configured_target_tickers
+    include_targeted_entities = args.targeted_entity_names or as_bool(
+        cfg_get(config, "fda_core_ingestion.targeted_include_entity_names", False),
+        default=False,
+    )
+    include_targeted_postmarket = args.targeted_postmarket or as_bool(
+        cfg_get(config, "fda_core_ingestion.targeted_include_postmarket", False),
+        default=False,
+    )
+    target_limit = (
+        args.target_limit
+        if args.target_limit > 0
+        else max(1, int(cfg_get(config, "fda_core_ingestion.targeted_limit", 100)))
+    )
+    targeted_requested = bool(
+        args.targeted_footprints
+        or args.targeted_only
+        or args.targeted_entity_names
+        or args.targeted_postmarket
+        or configured_target_tickers
+    )
     endpoints = (
         []
         if args.targeted_only
-        else [endpoint for endpoint in policy.endpoints if endpoint.enabled and (not endpoint_filter or endpoint.name in endpoint_filter)]
+        else [
+            endpoint
+            for endpoint in policy.endpoints
+            if endpoint.enabled and (not endpoint_filter or endpoint.name in endpoint_filter)
+        ]
     )
-    if args.targeted_footprints or args.targeted_only:
+    if targeted_requested:
         footprint_raw = str(
             cfg_get(
                 config,
@@ -1057,8 +1995,11 @@ def main() -> None:
         )
         targeted_endpoints = build_targeted_footprint_endpoints(
             footprint_csv,
-            target_limit=max(1, args.target_limit),
-            include_entity_names=args.targeted_entity_names,
+            target_limit=target_limit,
+            include_entity_names=include_targeted_entities,
+            include_postmarket=include_targeted_postmarket,
+            tickers=selected_target_tickers or None,
+            asof=run_asof,
         )
         if endpoint_filter:
             targeted_endpoints = [
@@ -1069,8 +2010,28 @@ def main() -> None:
                 or ("approvals_pma" in endpoint_filter and endpoint.name.startswith("target_pma_"))
                 or ("entity_510k" in endpoint_filter and endpoint.name.startswith("target_entity_510k_"))
                 or ("entity_pma" in endpoint_filter and endpoint.name.startswith("target_entity_pma_"))
+                or ("recall" in endpoint_filter and endpoint.name.startswith("target_recall_"))
+                or ("enforcement" in endpoint_filter and endpoint.name.startswith("target_enforcement_"))
+                or ("adverse_event" in endpoint_filter and endpoint.name.startswith("target_event_"))
             ]
         endpoints.extend(targeted_endpoints)
+    scope_footprint_raw = str(
+        cfg_get(
+            config,
+            "fda_core_ingestion.targeted_footprint_csv",
+            cfg_get(config, "fda_features.footprint_csv", ""),
+        )
+        or ""
+    ).strip()
+    scope_footprint_csv = resolve_path(scope_footprint_raw, base_dir=base_dir) if scope_footprint_raw else None
+    alias_raw = str(cfg_get(config, "fda_entity_linking.extra_alias_csv", "") or "").strip()
+    alias_csv = resolve_path(alias_raw, base_dir=base_dir) if alias_raw else None
+    endpoints = scope_endpoints_to_footprint_product_codes(
+        endpoints,
+        scope_footprint_csv,
+        asof=run_asof,
+        alias_path=alias_csv,
+    )
     if args.recompute_adverse_event_counts_only:
         with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
             init_db(conn)
@@ -1090,6 +2051,7 @@ def main() -> None:
     coverage_rows: list[dict[str, Any]] = []
     request_count = 0
     canonical_rows = 0
+    replayed_page_count = 0
     failed: list[str] = []
     LOGGER.info("FDA core sync starting: db=%s endpoints=%d output=%s", db_path, len(endpoints), output_csv)
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -1102,152 +2064,147 @@ def main() -> None:
             invalid_severity_payloads,
         )
         ensure_source_registry(conn, config, base_dir, policy.source_id)
-        run_id = start_run(conn, run_type="sync_med_device_fda_core", input_path=config_path)
-        ingestion_run_id = start_ingestion_run(conn, policy.source_id)
+        if manual_approval_csv is not None:
+            ensure_source_registry(
+                conn,
+                config,
+                base_dir,
+                manual_approval_source_id,
+            )
         try:
+            incremental_start = date.fromisoformat(args.incremental_start) if args.incremental_start else None
+        except ValueError as exc:
+            raise ValueError(f"Invalid --incremental-start {args.incremental_start!r}; expected YYYY-MM-DD") from exc
+        if incremental_start is not None and incremental_start > run_asof:
+            raise ValueError("--incremental-start cannot be after --asof")
+        endpoints = plan_incremental_endpoints(
+            conn,
+            endpoints,
+            source_id=policy.source_id,
+            run_asof=run_asof,
+            start_override=incremental_start,
+        )
+        replay_cache = load_raw_response_replay_cache(
+            conn,
+            source_id=policy.source_id,
+            asof_date=run_asof_iso,
+        )
+        if replay_cache and not args.refresh_network:
+            LOGGER.info(
+                "Loaded hash-validated FDA replay cache: asof=%s responses=%d",
+                run_asof_iso,
+                len(replay_cache),
+            )
+        ingestion_run_id = start_ingestion_run(conn, policy.source_id)
+        run_id = start_run(conn, run_type="sync_med_device_fda_core", input_path=config_path)
+        pending_watermarks: list[tuple[str, str, str, str]] = []
+        blocked_incremental_streams: set[str] = set()
+        try:
+            if manual_approval_csv is not None:
+                manual_approval_count = upsert_manual_approval_evidence(
+                    conn,
+                    manual_approval_csv,
+                    source_id=manual_approval_source_id,
+                )
+                canonical_rows += manual_approval_count
+                coverage_rows.append(
+                    {
+                        "endpoint_name": "manual_cber_approval_evidence",
+                        "path": str(manual_approval_csv),
+                        "search": "",
+                        "status": "success" if manual_approval_count else "empty",
+                        "pages_fetched": 0,
+                        "api_records_seen": manual_approval_count,
+                        "canonical_rows_upserted": manual_approval_count,
+                        "review_reason": (
+                            "authoritative_fda_accessdata_evidence"
+                            if manual_approval_count
+                            else "no_manual_approval_rows"
+                        ),
+                    }
+                )
+                conn.commit()
             for endpoint in endpoints:
+                if endpoint.stream_name and endpoint.stream_name in blocked_incremental_streams:
+                    failed.append(endpoint.stream_name)
+                    coverage_rows.append(
+                        {
+                            "endpoint_name": endpoint.stream_name,
+                            "path": endpoint.path,
+                            "search": endpoint.search,
+                            "status": "failed",
+                            "pages_fetched": 0,
+                            "api_records_seen": 0,
+                            "canonical_rows_upserted": 0,
+                            "review_reason": "blocked_by_earlier_failed_incremental_window",
+                        }
+                    )
+                    continue
                 pages = 0
                 seen = 0
                 upserted = 0
+                endpoint_replayed = 0
                 status = "success"
                 reason = ""
                 max_records = args.max_records if args.max_records > 0 else endpoint.max_records
                 max_records = max_records if max_records > 0 else policy.page_limit
                 try:
-                    first_limit = min(policy.page_limit, max_records)
-                    first_page = fetch_fda_page_job(
+                    result = sync_endpoint_with_partitions(
+                        conn,
                         endpoint,
                         policy=policy,
                         api_key=api_key,
-                        skip=0,
-                        limit=first_limit,
-                        page_number_hint=1,
-                    )
-                    request_count += 1
-                    pages += 1
-                    page_seen, page_upserted, page_status, page_reason = process_fda_page(
-                        conn,
-                        first_page,
+                        max_records=max_records,
                         source_id=policy.source_id,
                         ingestion_run_id=ingestion_run_id,
+                        asof_date=run_asof_iso,
+                        replay_cache=replay_cache,
+                        refresh_network=args.refresh_network,
                     )
-                    seen += page_seen
-                    upserted += page_upserted
-                    canonical_rows += page_upserted
-                    if page_status == "failed":
-                        status = "failed"
-                        reason = page_reason
-                        failed.append(endpoint.name)
-                    elif page_status == "empty":
-                        reason = page_reason
+                    pages = result.pages
+                    seen = result.seen
+                    upserted = result.upserted
+                    request_count += result.requests
+                    replayed_page_count += result.replayed
+                    endpoint_replayed += result.replayed
+                    canonical_rows += result.upserted
+                    status = result.status
+                    reason = result.reason
+                    if status == "failed":
+                        failed.append(endpoint.stream_name or endpoint.name)
                     LOGGER.info(
-                        "%s page=%d skip=%d records=%d upserted_total=%d",
+                        "%s window=%s..%s pages=%d records=%d upserted=%d status=%s",
                         endpoint.name,
+                        endpoint.window_start,
+                        endpoint.window_end,
                         pages,
-                        first_page.skip,
-                        page_seen,
+                        seen,
                         upserted,
+                        status,
                     )
-
-                    total = openfda_total(first_page.payload)
-                    effective_max = min(max_records, total) if total is not None else max_records
-                    if first_page.response_status == 200 and page_seen == policy.page_limit and effective_max > policy.page_limit:
-                        page_jobs: list[tuple[int, int, int]] = []
-                        for page_number, skip in enumerate(range(policy.page_limit, effective_max, policy.page_limit), start=2):
-                            page_jobs.append((page_number, skip, min(policy.page_limit, effective_max - skip)))
-                        if policy.parallel_workers > 1 and len(page_jobs) > 1:
-                            LOGGER.info(
-                                "Fetching FDA endpoint in parallel: endpoint=%s pages=%d workers=%d",
-                                endpoint.name,
-                                len(page_jobs) + 1,
-                                policy.parallel_workers,
-                            )
-                            with ThreadPoolExecutor(max_workers=policy.parallel_workers) as executor:
-                                futures = [
-                                    executor.submit(
-                                        fetch_fda_page_job,
-                                        endpoint,
-                                        policy=policy,
-                                        api_key=api_key,
-                                        skip=skip,
-                                        limit=limit,
-                                        page_number_hint=page_number,
-                                    )
-                                    for page_number, skip, limit in page_jobs
-                                ]
-                                for future in as_completed(futures):
-                                    page = future.result()
-                                    request_count += 1
-                                    pages += 1
-                                    page_seen, page_upserted, page_status, page_reason = process_fda_page(
-                                        conn,
-                                        page,
-                                        source_id=policy.source_id,
-                                        ingestion_run_id=ingestion_run_id,
-                                    )
-                                    seen += page_seen
-                                    upserted += page_upserted
-                                    canonical_rows += page_upserted
-                                    if page_status == "failed":
-                                        status = "failed"
-                                        reason = page_reason
-                                        if endpoint.name not in failed:
-                                            failed.append(endpoint.name)
-                                    LOGGER.info(
-                                        "%s page=%d skip=%d records=%d upserted_total=%d",
-                                        endpoint.name,
-                                        page.page_number_hint,
-                                        page.skip,
-                                        page_seen,
-                                        upserted,
-                                    )
-                                    if pages % policy.commit_every_pages == 0:
-                                        conn.commit()
-                                        LOGGER.info("Committed FDA sync progress: endpoint=%s pages=%d", endpoint.name, pages)
-                        else:
-                            for page_number, skip, limit in page_jobs:
-                                time.sleep(max(0.0, policy.sleep_sec))
-                                page = fetch_fda_page_job(
-                                    endpoint,
-                                    policy=policy,
-                                    api_key=api_key,
-                                    skip=skip,
-                                    limit=limit,
-                                    page_number_hint=page_number,
-                                )
-                                request_count += 1
-                                pages += 1
-                                page_seen, page_upserted, page_status, page_reason = process_fda_page(
-                                    conn,
-                                    page,
-                                    source_id=policy.source_id,
-                                    ingestion_run_id=ingestion_run_id,
-                                )
-                                seen += page_seen
-                                upserted += page_upserted
-                                canonical_rows += page_upserted
-                                if page_status == "failed":
-                                    status = "failed"
-                                    reason = page_reason
-                                    if endpoint.name not in failed:
-                                        failed.append(endpoint.name)
-                                    break
-                                LOGGER.info(
-                                    "%s page=%d skip=%d records=%d upserted_total=%d",
-                                    endpoint.name,
-                                    page.page_number_hint,
-                                    page.skip,
-                                    page_seen,
-                                    upserted,
-                                )
-                                if pages % policy.commit_every_pages == 0:
-                                    conn.commit()
-                                    LOGGER.info("Committed FDA sync progress: endpoint=%s pages=%d", endpoint.name, pages)
                 except Exception as exc:
                     status = "failed"
                     reason = f"{type(exc).__name__}: {exc}"
-                    failed.append(endpoint.name)
+                    failed.append(endpoint.stream_name or endpoint.name)
                     LOGGER.warning("FDA endpoint failed: %s %s", endpoint.name, exc)
+                if endpoint.stream_name:
+                    if status == "failed":
+                        blocked_incremental_streams.add(endpoint.stream_name)
+                    elif endpoint.window_end:
+                        pending_watermarks.append(
+                            (
+                                endpoint.stream_name,
+                                endpoint.scope_hash,
+                                endpoint.date_field,
+                                endpoint.window_end,
+                            )
+                        )
+                if not reason and endpoint_replayed:
+                    reason = (
+                        "hash_validated_same_date_replay"
+                        if endpoint_replayed == pages
+                        else "partial_hash_validated_same_date_replay"
+                    )
                 coverage_rows.append(
                     {
                         "endpoint_name": endpoint.name,
@@ -1262,7 +2219,10 @@ def main() -> None:
                 )
                 conn.commit()
             status = "partial" if failed else "success"
-            message = f"endpoints={len(endpoints)} requests={request_count} canonical_rows={canonical_rows} output={output_csv}"
+            message = (
+                f"asof={run_asof_iso} endpoints={len(endpoints)} requests={request_count} "
+                f"replayed_pages={replayed_page_count} canonical_rows={canonical_rows} output={output_csv}"
+            )
             if failed:
                 message += " failed_endpoints=" + ",".join(sorted(set(failed)))
             finish_ingestion_run(
@@ -1273,6 +2233,22 @@ def main() -> None:
                 row_count=canonical_rows,
                 message=message,
             )
+            seal_ingestion_run(
+                conn,
+                ingestion_run_id=ingestion_run_id,
+                source_id=policy.source_id,
+                asof_date=run_asof_iso,
+            )
+            for stream_name, scope_hash, date_field, watermark_date in pending_watermarks:
+                upsert_ingestion_watermark(
+                    conn,
+                    source_id=policy.source_id,
+                    stream_name=stream_name,
+                    scope_hash=scope_hash,
+                    date_field=date_field,
+                    watermark_date=watermark_date,
+                    ingestion_run_id=ingestion_run_id,
+                )
             finish_run(conn, run_id=run_id, status=status, row_count=canonical_rows, message=message)
         except BaseException as exc:
             message = f"{type(exc).__name__}: {exc}"

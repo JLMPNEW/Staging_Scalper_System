@@ -64,6 +64,9 @@ def validate_provider_dependencies(
 def _validate_document(document: object) -> None:
     path = Path(str(getattr(document, "path")))
     stat = path.stat()
+    actual_hash = file_sha256(path)
+    if actual_hash != str(getattr(document, 'content_sha256')):
+        raise RuntimeError(f'Cached document changed after planning: {path}')
     if (
         int(stat.st_size) != int(getattr(document, "file_size"))
         or int(stat.st_mtime_ns) != int(getattr(document, "modified_ns"))

@@ -204,9 +204,9 @@ def _sealed_csv(
     return read_csv(artifact), manifest
 
 
-def _current_price(level: dict[str, str] | None) -> float | None:
+def _level_market_context(level: dict[str, str] | None) -> dict[str, Any]:
     if level is None:
-        return None
+        return {"latest_price": None, "last_market_date": "", "price_basis": ""}
     try:
         market = json.loads(str(level.get("market_structure_json", "{}")))
     except json.JSONDecodeError as exc:
@@ -217,7 +217,15 @@ def _current_price(level: dict[str, str] | None) -> float | None:
         raise ValueError(
             f"Levels market_structure_json is not an object for {level.get('ticker', '')!r}"
         )
-    return _finite(market.get("latest_price"))
+    return {
+        "latest_price": _finite(market.get("latest_price")),
+        "last_market_date": str(market.get("last_market_date", "")).strip(),
+        "price_basis": str(level.get("price_basis", "")).strip(),
+    }
+
+
+def _current_price(level: dict[str, str] | None) -> float | None:
+    return _level_market_context(level)["latest_price"]
 
 
 def _market_context(signal: dict[str, str] | None) -> dict[str, Any]:
@@ -231,6 +239,8 @@ def _market_context(signal: dict[str, str] | None) -> dict[str, Any]:
             "below_ma50": "",
             "below_ma200": "",
             "market_latest_price": None,
+            "market_latest_date": "",
+            "market_price_basis": "",
         }
     try:
         inputs = json.loads(str(signal.get("inputs_json", "{}")))
@@ -251,6 +261,8 @@ def _market_context(signal: dict[str, str] | None) -> dict[str, Any]:
         "below_ma50": signal.get("below_ma50", ""),
         "below_ma200": signal.get("below_ma200", ""),
         "market_latest_price": _finite(inputs.get("latest_adj_close")),
+        "market_latest_date": str(inputs.get("last_market_date", "")).strip(),
+        "market_price_basis": "adjusted_close",
     }
 
 
@@ -578,9 +590,10 @@ def compose_rows(
         state = states.get(ticker)
         market = _market_context(market_signals.get(ticker))
         level = levels.get(ticker)
+        level_market = _level_market_context(level)
         earnings_row = earnings.get(ticker)
         holding = holdings.get(ticker)
-        price = _current_price(level)
+        price = level_market["latest_price"]
         price_source = "levels_market_structure" if price is not None else ""
         if price is None:
             fallback = holding_prices.get(ticker)
@@ -619,6 +632,10 @@ def compose_rows(
             "below_ma50": market["below_ma50"],
             "below_ma200": market["below_ma200"],
             "_market_latest_price": market["market_latest_price"],
+            "_market_latest_date": market["market_latest_date"],
+            "_market_price_basis": market["market_price_basis"],
+            "_level_latest_date": level_market["last_market_date"],
+            "_level_price_basis": level_market["price_basis"],
             "price_band_status": (
                 level.get("band_reference_status", "") if level else ""
             ),
@@ -632,6 +649,40 @@ def compose_rows(
         }
         rows.append(row)
     return rows
+
+
+def _market_level_price_errors(rows: list[dict[str, Any]]) -> tuple[list[str], int, int]:
+    errors: list[str] = []
+    same_basis_count = 0
+    cross_basis_count = 0
+    allowed_cross_basis = {("adjusted_close", "raw_unadjusted_nominal")}
+    for row in rows:
+        market_price = row.get("_market_latest_price")
+        level_price = row.get("current_price")
+        if market_price is None or level_price is None or row.get("price_source") != "levels_market_structure":
+            continue
+        ticker = str(row.get("ticker", ""))
+        market_date = str(row.get("_market_latest_date", "")).strip()
+        level_date = str(row.get("_level_latest_date", "")).strip()
+        if market_date and level_date and market_date != level_date:
+            errors.append(f"{ticker}:date:{market_date}!={level_date}")
+            continue
+        market_basis = str(row.get("_market_price_basis", "")).strip()
+        level_basis = str(row.get("_level_price_basis", "")).strip()
+        if market_basis == level_basis and market_basis:
+            same_basis_count += 1
+            if not math.isclose(
+                float(market_price),
+                float(level_price),
+                rel_tol=1e-10,
+                abs_tol=1e-8,
+            ):
+                errors.append(f"{ticker}:same_basis_price:{market_price}!={level_price}")
+        elif (market_basis, level_basis) in allowed_cross_basis:
+            cross_basis_count += 1
+        else:
+            errors.append(f"{ticker}:unsupported_basis:{market_basis or 'missing'}->{level_basis or 'missing'}")
+    return errors, same_basis_count, cross_basis_count
 
 
 def _missing_market_context(row: dict[str, Any]) -> bool:
@@ -722,6 +773,17 @@ def run_selftest() -> None:
     )
     by_ticker = {row["ticker"]: row for row in rows}
     assert by_ticker["AAA"]["current_price"] == 12.5
+    raw_vs_adjusted = {
+        **by_ticker["AAA"],
+        "_market_latest_price": 12.4,
+        "_market_latest_date": "2026-07-31",
+        "_market_price_basis": "adjusted_close",
+        "_level_latest_date": "2026-07-31",
+        "_level_price_basis": "raw_unadjusted_nominal",
+    }
+    assert _market_level_price_errors([raw_vs_adjusted]) == ([], 0, 1)
+    same_basis_bad = {**raw_vs_adjusted, "_level_price_basis": "adjusted_close"}
+    assert _market_level_price_errors([same_basis_bad])[0]
     assert by_ticker["AAA"]["price_source"] == "levels_market_structure"
     assert by_ticker["AAA"]["benchmark_ticker"] == "XLK"
     assert by_ticker["AAA"]["ma50"] == 11.5
@@ -1043,6 +1105,7 @@ def main() -> int:  # noqa: C901
     publication_flag_mismatch = (
         publication_enabled and published_rows_for_run == 0
     ) or (not publication_enabled and published_rows_for_run > 0)
+    price_context_errors, same_basis_price_count, cross_basis_price_count = _market_level_price_errors(rows)
     checks = [
         {
             "check": "complete_unique_union",
@@ -1126,22 +1189,12 @@ def main() -> int:  # noqa: C901
         },
         {
             "check": "market_and_level_prices_consistent",
-            "status": (
-                "PASS"
-                if all(
-                    row["_market_latest_price"] is None
-                    or row["current_price"] is None
-                    or math.isclose(
-                        float(row["_market_latest_price"]),
-                        float(row["current_price"]),
-                        rel_tol=1e-10,
-                        abs_tol=1e-8,
-                    )
-                    for row in rows
-                )
-                else "FAIL"
+            "status": "PASS" if not price_context_errors else "FAIL",
+            "detail": (
+                "basis-aware same-date validation; "
+                f"same_basis={same_basis_price_count}; cross_basis={cross_basis_price_count}; "
+                f"errors={price_context_errors}"
             ),
-            "detail": "same-date market-signal and levels prices agree when both exist",
         },
         {
             "check": "unscored_unmonitored_visible",

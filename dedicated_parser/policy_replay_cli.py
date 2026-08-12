@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from dedicated_parser.adapters import load_registry
+from dedicated_parser.atomic_io import atomic_write_text
 from dedicated_parser.review_replay import replay_review_policies
 from dedicated_parser.storage import connect_database
 
@@ -44,10 +45,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     payload = {"mode": "policy_replay", **summary.as_dict()}
     if args.output_json is not None:
-        args.output_json.parent.mkdir(parents=True, exist_ok=True)
-        args.output_json.write_text(
+        atomic_write_text(
+            args.output_json,
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
         )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

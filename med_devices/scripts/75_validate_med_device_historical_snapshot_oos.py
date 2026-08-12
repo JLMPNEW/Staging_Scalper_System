@@ -108,10 +108,19 @@ PRODUCT_FAMILY_SHADOW_DAILY_COLUMNS = {
     "fda_product_family_shadow_reason",
 }
 RESEARCH_ELIGIBLE_SAMPLE_ROLES = {"research_calibration_input", "strict_oos"}
+SCORE_PROVENANCE_DAILY_COLUMNS = {
+    "ic_tilted_composite_mode",
+    "production_score_source",
+    "ic_tilt_applied_to_production_flag",
+    "production_score_regime_version",
+}
+IC_TILT_PRODUCTION_SOURCES = {"ic_tilted_composite", "ic_tilted_composite_score"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate med-devices dated snapshots for point-in-time/OOS readiness.")
+    parser = argparse.ArgumentParser(
+        description="Validate med-devices dated snapshots for point-in-time/OOS readiness."
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--asof", type=str, default="")
     parser.add_argument("--start-asof", type=str, default="")
@@ -134,6 +143,14 @@ def parse_args() -> argparse.Namespace:
             "Promote missing FDA product-family shadow daily columns to CRITICAL for snapshots on/after this "
             "as-of date. Before this date, missing shadow columns are WARNINGs so pre-shadow snapshots do not "
             "block calibration. Defaults to historical_backfill.product_family_shadow_columns_required_from."
+        ),
+    )
+    parser.add_argument(
+        "--score-provenance-columns-required-from",
+        default="",
+        help=(
+            "Require explicit production-score provenance columns for snapshots on/after this date. "
+            "Earlier clean shadow snapshots may use the legacy mode field as transitional evidence."
         ),
     )
     parser.add_argument(
@@ -199,7 +216,11 @@ def discover_asofs(root: Path, *, explicit: str, start: str, end: str) -> list[s
     if explicit.strip():
         dates = [item.strip() for item in explicit.split(",") if item.strip()]
     else:
-        dates = [path.name for path in root.iterdir() if path.is_dir() and DATE_RE.match(path.name)] if root.exists() else []
+        dates = (
+            [path.name for path in root.iterdir() if path.is_dir() and DATE_RE.match(path.name)]
+            if root.exists()
+            else []
+        )
     start_date = parse_date(start)
     end_date = parse_date(end)
     out: list[str] = []
@@ -228,6 +249,7 @@ def validate_daily_csv(
     checks: list[dict[str, Any]],
     new_daily_columns_required_from: date | None,
     product_family_shadow_columns_required_from: date | None,
+    score_provenance_columns_required_from: date | None = None,
 ) -> dict[str, Any]:
     artifact = str(path)
     summary: dict[str, Any] = {"row_count": None, "score_model_versions": set()}
@@ -288,6 +310,96 @@ def validate_daily_csv(
         ),
     )
     post_migration_severity = "CRITICAL" if enforce_post_migration else "WARNING"
+    provenance_missing = sorted(SCORE_PROVENANCE_DAILY_COLUMNS - field_set)
+    enforce_score_provenance = (
+        score_provenance_columns_required_from is not None
+        and snapshot_date is not None
+        and snapshot_date >= score_provenance_columns_required_from
+    )
+    provenance_severity = "CRITICAL" if enforce_score_provenance else "WARNING"
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_score_provenance_columns",
+        severity=provenance_severity,
+        passed=not provenance_missing,
+        observed=",".join(provenance_missing),
+        expected="all production-score provenance columns",
+        details=(
+            "Explicit production score source, IC-tilt application flag, mode, and regime version "
+            "are required on/after "
+            f"{score_provenance_columns_required_from.isoformat() if score_provenance_columns_required_from else 'an unset cutover date'}."
+        ),
+    )
+
+    unsafe_replacement_rows = 0
+    inconsistent_provenance_rows = 0
+    allowed_safe_modes = {"shadow", "disabled", "fallback_no_valid_ic"}
+    for row in rows:
+        mode = str(row.get("ic_tilted_composite_mode") or "").strip().lower()
+        source = str(row.get("production_score_source") or "").strip().lower()
+        flag_text = str(row.get("ic_tilt_applied_to_production_flag") or "").strip().lower()
+        regime = str(row.get("production_score_regime_version") or "").strip()
+        flag_true = flag_text in {"1", "1.0", "true", "yes"}
+        unsafe = mode == "replace_raw" or source in IC_TILT_PRODUCTION_SOURCES or flag_true
+        if unsafe:
+            unsafe_replacement_rows += 1
+
+        if provenance_missing:
+            continue
+        if flag_text not in {"0", "1"}:
+            inconsistent_provenance_rows += 1
+            continue
+        if unsafe:
+            if not (
+                mode == "replace_raw"
+                and source == "ic_tilted_composite_score"
+                and flag_text == "1"
+                and regime == "med_devices_ic_tilt_replace_legacy_v1"
+            ):
+                inconsistent_provenance_rows += 1
+        elif (
+            mode not in allowed_safe_modes
+            or source != "baseline_composite_score"
+            or flag_text != "0"
+            or not regime
+        ):
+            inconsistent_provenance_rows += 1
+
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_no_ic_tilt_production_replacement",
+        severity="CRITICAL",
+        passed=unsafe_replacement_rows == 0,
+        observed=unsafe_replacement_rows,
+        expected=0,
+        details=(
+            "IC-tilted scores are shadow diagnostics only. replace_raw mode, an IC production source, "
+            "or an asserted production-application flag makes the snapshot unsafe for OOS/research use."
+        ),
+    )
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_score_provenance_consistency",
+        severity=provenance_severity,
+        passed=not provenance_missing and inconsistent_provenance_rows == 0,
+        observed=(
+            f"missing_fields={','.join(provenance_missing)}"
+            if provenance_missing
+            else inconsistent_provenance_rows
+        ),
+        expected=0,
+        details=(
+            "Safe rows must identify baseline_composite_score with flag 0 and a non-empty regime; "
+            "legacy IC replacements must be fully and consistently labeled even though they remain prohibited."
+        ),
+    )
+
     shadow_missing = sorted(PRODUCT_FAMILY_SHADOW_DAILY_COLUMNS - field_set)
     enforce_shadow_columns = (
         product_family_shadow_columns_required_from is not None
@@ -350,9 +462,7 @@ def validate_daily_csv(
             if str(row.get("research_calibration_input_eligible_flag") or "").strip() not in {"0", "1"}
         )
         invalid_oos_flag_rows = sum(
-            1
-            for row in rows
-            if str(row.get("oos_score_valid_flag") or "").strip() not in {"0", "1"}
+            1 for row in rows if str(row.get("oos_score_valid_flag") or "").strip() not in {"0", "1"}
         )
         unexpected_historical_oos_rows = sum(
             1
@@ -622,8 +732,7 @@ def validate_daily_csv(
     out_of_range_composite_rows = sum(
         1
         for row in rows
-        if (composite := parse_float(row.get("composite_score"))) is not None
-        and (composite < 0.0 or composite > 100.0)
+        if (composite := parse_float(row.get("composite_score"))) is not None and (composite < 0.0 or composite > 100.0)
     )
     add_check(
         checks,
@@ -711,6 +820,10 @@ def static_source_paths(config: dict[str, Any], *, base_dir: Path) -> list[tuple
         ("fda_review_overrides", "fda_features.review_override_csv"),
         ("fda_footprints", "fda_features.footprint_csv"),
         ("fda_manual_footprint_evidence", "fda_features.manual_footprint_evidence_csv"),
+        (
+            "fda_adverse_event_adjudications",
+            "fda_features.adverse_event_adjudication_csv",
+        ),
         ("reimbursement_company_classifications", "reimbursement_features.company_classification_csv"),
         ("reimbursement_mapping_overrides", "reimbursement_entity_linking.override_csv"),
         ("reimbursement_policy_overrides", "reimbursement_entity_linking.policy_override_csv"),
@@ -926,9 +1039,7 @@ def validate_component_ic_provenance(
             ),
         )
         return
-    invalid_provenance_rows = sum(
-        1 for row in rows if parse_date(row_value(row, *provenance_columns)) is None
-    )
+    invalid_provenance_rows = sum(1 for row in rows if parse_date(row_value(row, *provenance_columns)) is None)
     add_check(
         checks,
         asof=asof,
@@ -948,9 +1059,7 @@ def validate_component_ic_provenance(
         return
     target = parse_date(asof)
     generated_dates = [
-        generated
-        for row in rows
-        if (generated := parse_date(row_value(row, *provenance_columns))) is not None
+        generated for row in rows if (generated := parse_date(row_value(row, *provenance_columns))) is not None
     ]
     max_generated = max(generated_dates) if generated_dates else None
     ic_pit_available = target is None or max_generated is None or max_generated <= target
@@ -1057,6 +1166,7 @@ def build_checks(
     start_asof: str,
     new_daily_columns_required_from: date | None,
     product_family_shadow_columns_required_from: date | None,
+    score_provenance_columns_required_from: date | None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     static_paths = static_source_paths(config, base_dir=base_dir)
@@ -1077,6 +1187,7 @@ def build_checks(
                 checks=checks,
                 new_daily_columns_required_from=new_daily_columns_required_from,
                 product_family_shadow_columns_required_from=product_family_shadow_columns_required_from,
+                score_provenance_columns_required_from=score_provenance_columns_required_from,
             )
             score_model_versions |= daily_summary["score_model_versions"]
             if daily_summary["row_count"] is not None:
@@ -1165,6 +1276,17 @@ def main() -> int:
             "Invalid historical_backfill.new_daily_columns_required_from date: "
             f"{new_daily_columns_raw!r}. Use YYYY-MM-DD or leave blank."
         )
+    score_provenance_raw = str(
+        args.score_provenance_columns_required_from
+        or cfg_get(config, "historical_backfill.score_provenance_columns_required_from", "")
+        or ""
+    ).strip()
+    score_provenance_columns_required_from = parse_date(score_provenance_raw)
+    if score_provenance_raw and score_provenance_columns_required_from is None:
+        raise RuntimeError(
+            "Invalid historical_backfill.score_provenance_columns_required_from date: "
+            f"{score_provenance_raw!r}. Use YYYY-MM-DD or leave blank."
+        )
     shadow_columns_raw = str(
         args.product_family_shadow_columns_required_from
         or cfg_get(config, "historical_backfill.product_family_shadow_columns_required_from", "")
@@ -1179,8 +1301,7 @@ def main() -> int:
     config_start_asof = str(cfg_get(config, "historical_backfill.start_asof", "") or "").strip()
     if config_start_asof and parse_date(config_start_asof) is None:
         raise RuntimeError(
-            "Invalid historical_backfill.start_asof date: "
-            f"{config_start_asof!r}. Use YYYY-MM-DD or leave blank."
+            f"Invalid historical_backfill.start_asof date: {config_start_asof!r}. Use YYYY-MM-DD or leave blank."
         )
     detector_start_asof = config_start_asof or asofs[0]
     checks = build_checks(
@@ -1191,6 +1312,7 @@ def main() -> int:
         start_asof=detector_start_asof,
         new_daily_columns_required_from=new_daily_columns_required_from,
         product_family_shadow_columns_required_from=product_family_shadow_columns_required_from,
+        score_provenance_columns_required_from=score_provenance_columns_required_from,
     )
     write_checks(output_csv, checks)
     diagnostic_checks = diagnostic_checks_from_strict(checks)

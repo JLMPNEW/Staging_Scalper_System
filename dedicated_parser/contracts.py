@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dedicated_parser.path_io import open_path
+
 
 DOCUMENT_PARSER_RELEASE = "0.4.6"
 # Version 7 scopes persisted evidence keys to the immutable work identity so
@@ -35,7 +37,7 @@ def stable_hash(payload: Any) -> str:
 
 def file_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with open_path(path, "rb") as handle:
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
@@ -116,6 +118,7 @@ class FilingRef:
     primary_document: str
     source_id: str
     company_currency: str = "USD"
+    archive_cik: str = ""
 
 
 @dataclass(frozen=True)

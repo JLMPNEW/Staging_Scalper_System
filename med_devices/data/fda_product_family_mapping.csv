@@ -1,4 +1,4 @@
-"ticker","product_code","fda_manufacturer_id","product_family","mapping_confidence","mapping_method","source_reference","valid_from","valid_to","reviewed_at","active","notes"
+﻿"ticker","product_code","fda_manufacturer_id","product_family","mapping_confidence","mapping_method","source_reference","valid_from","valid_to","reviewed_at","active","notes"
 "ABT","QBJ","","diabetes_cgm","99","manual_product_code_review","openfda_product_code_and_abt_legal_entity_review_2026-07-24","2026-07-24","","2026-07-24","true","Continuous glucose monitoring system product code"
 "ABT","QLG","","diabetes_cgm","99","manual_product_code_review","openfda_product_code_and_abt_legal_entity_review_2026-07-24","2026-07-24","","2026-07-24","true","Continuous glucose monitoring system product code"
 "ABT","PZE","","diabetes_cgm","99","manual_product_code_review","openfda_product_code_and_abt_legal_entity_review_2026-07-24","2026-07-24","","2026-07-24","true","Continuous glucose monitoring system product code"
@@ -71,3 +71,4 @@
 "ABT","MMI","","diagnostics_laboratory","99","manual_product_code_review","openfda_product_code_and_abt_legal_entity_review_2026-07-24","2026-07-24","","2026-07-24","true","Cardiac biomarker immunoassay"
 "ABT","LOM","","diagnostics_laboratory","99","manual_product_code_review","openfda_product_code_and_abt_legal_entity_review_2026-07-24","2026-07-24","","2026-07-24","true","Infectious-disease immunoassay"
 "ABT","JQT","","diagnostics_laboratory","99","manual_product_code_review","openfda_product_code_and_abt_legal_entity_review_2026-07-24","2026-07-24","","2026-07-24","true","Point-of-care diagnostic analyzer"
+"ABT","MTD","","electrophysiology_ablation","99","manual_product_code_review","openfda_mdr_50099322_product_code_mtd_review_2026-08-11","2026-07-31","","2026-08-11","1","FDA MDR 50099322 identifies MTD as the Advisor HD Grid X Mapping Catheter, generic name Catheter, Intracardiac Mapping, High-Density Array, used during an epicardial ventricular-tachycardia mapping and ablation procedure."

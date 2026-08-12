@@ -208,9 +208,49 @@ def _promotion_block_reason(
 def _filing_metadata(
     conn: sqlite3.Connection,
     *,
+    model_family: str,
     ticker: str,
     accession_number: str,
+    asof_date: str | None = None,
 ) -> dict[str, Any]:
+    if model_family == "consumer_defensive":
+        view = conn.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='view' AND name='consumer_defensive_sec_parser_filing_input'"""
+        ).fetchone()
+        if view is None:
+            raise RuntimeError(
+                "Consumer Defensive parser promotion requires "
+                "consumer_defensive_sec_parser_filing_input"
+            )
+        if asof_date is None:
+            raise RuntimeError(
+                'Consumer Defensive parser metadata requires an explicit as-of date'
+            )
+        row = conn.execute(
+            """
+            SELECT fiscal_year,fiscal_period,form_type,filing_date,accepted_at
+            FROM consumer_defensive_sec_parser_filing_input
+            WHERE ticker=? AND accession_number=?
+              AND SUBSTR(COALESCE(NULLIF(accepted_at,''),filing_date),1,10)<=?
+              AND (SELECT e.event_type
+                  FROM sec_filing_company_association_event e
+                  WHERE e.accession_number=consumer_defensive_sec_parser_filing_input.accession_number
+                    AND e.issuer_company_id=consumer_defensive_sec_parser_filing_input.issuer_company_id
+                    AND e.effective_asof<=? || 'T23:59:59Z'
+                  ORDER BY e.effective_asof DESC,e.event_id DESC LIMIT 1)
+                  IN ('observed','reactivated')
+            ORDER BY COALESCE(NULLIF(accepted_at,''),filing_date) DESC
+            LIMIT 1
+            """,
+            (ticker, accession_number,asof_date,asof_date),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"Consumer Defensive parser promotion has no issuer association "
+                f"for {ticker} {accession_number}"
+            )
+        return dict(row)
     row = conn.execute(
         """
         SELECT fiscal_year, fiscal_period, form_type, filing_date, accepted_at
@@ -271,13 +311,16 @@ def _insert_fact(
     registry: AdapterRegistry,
     source_id: str,
     now: str,
+    asof_date: str,
 ) -> int:
     metric_name = str(row["metric_name"])
     mapping = registry.production_mappings[metric_name]
     metadata = _filing_metadata(
         conn,
+        model_family=registry.model_family,
         ticker=str(row["ticker"]),
         accession_number=str(row["accession_number"]),
+        asof_date=asof_date,
     )
     value = float(row["candidate_value"])
     if mapping.sign_policy == "positive_abs":
@@ -570,6 +613,12 @@ def promote_run(
     source_id: str,
     min_confidence: float = 0.90,
 ) -> dict[str, Any]:
+    if registry.model_family == "consumer_defensive":
+        raise RuntimeError(
+            "Consumer Defensive parser promotion is disabled until its "
+            "financial-fact storage adapter is implemented; catalog and "
+            "shadow census parsing remain available"
+        )
     if not 0.0 <= min_confidence <= 1.0:
         raise ValueError("min_confidence must be in [0, 1]")
     run = conn.execute(
@@ -672,6 +721,7 @@ def promote_run(
                         registry=registry,
                         source_id=source_id,
                         now=now,
+                        asof_date=asof_date,
                     )
                     action = "PROMOTED"
                     reason = "accepted_evidence_promoted"

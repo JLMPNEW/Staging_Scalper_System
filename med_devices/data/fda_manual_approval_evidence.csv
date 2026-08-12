@@ -1,0 +1,3 @@
+"ticker","pma_number","supplement_number","product_code","applicant","trade_name","decision","decision_date","date_received","source_url","valid_from","reviewed_at"
+"CERS","BP140143","","PJF","Cerus Corporation","INTERCEPT Blood System for Platelets","Approved","2014-12-18","","https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfpma/pma.cfm?PMANumber=BP140143&start_search=1","2014-12-18","2026-08-10"
+"CERS","BP140143","S717","PJF","Cerus Corporation","INTERCEPT Blood System for Platelets","Approved","2022-11-02","2021-09-30","https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfpma/pma.cfm?id=BP140143S717","2022-11-02","2026-08-10"

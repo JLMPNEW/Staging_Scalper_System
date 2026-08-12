@@ -770,13 +770,12 @@ def main() -> int:
                 asof=asof_date,
             )
             status = str(row.get("review_status") or "").strip()
-            recorded = analyst_review_core.normalize_key(row.get("analyst_decision"))
-            if status in {"decided", "decision_expires_soon"}:
-                consistent = active is not None and active.decision == recorded
-            elif status == "expired_decision_needs_review":
-                consistent = active is None and expired is not None and expired.decision == recorded
-            else:
-                consistent = active is None and expired is None
+            consistent = analyst_review_core.queue_decision_state_matches(
+                status=status,
+                recorded_decision=row.get("analyst_decision"),
+                active_decision=active,
+                expired_decision=expired,
+            )
             if not consistent:
                 queue_decision_mismatches.append(f"{ticker}:{status or 'open'}")
         add_check(

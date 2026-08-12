@@ -211,7 +211,11 @@ def cfg_bool(config: dict[str, Any], dotted_key: str, default: bool) -> bool:
 
 def reimbursement_policy(config: dict[str, Any], *, billing_zip_override: str = "") -> ReimbursementPolicy:
     source_ids_raw = cfg_get(config, "reimbursement_features.source_ids", ["cms_coverage_api", "cms_payment_files"])
-    source_ids = [str(value).strip() for value in source_ids_raw] if isinstance(source_ids_raw, list) else ["cms_coverage_api", "cms_payment_files"]
+    source_ids = (
+        [str(value).strip() for value in source_ids_raw]
+        if isinstance(source_ids_raw, list)
+        else ["cms_coverage_api", "cms_payment_files"]
+    )
     coverage_weight = cfg_float(config, "reimbursement_features.coverage_weight", 0.60)
     payment_weight = cfg_float(config, "reimbursement_features.payment_weight", 0.40)
     if abs((coverage_weight + payment_weight) - 1.0) > 0.0001:
@@ -243,7 +247,8 @@ def reimbursement_policy(config: dict[str, Any], *, billing_zip_override: str = 
             if str(value).strip()
         },
         zip_mac_csv=str(cfg_get(config, "reimbursement_features.zip_mac_csv", "") or "").strip(),
-        billing_zip=billing_zip_override.strip() or str(cfg_get(config, "reimbursement_features.default_billing_zip", "") or "").strip(),
+        billing_zip=billing_zip_override.strip()
+        or str(cfg_get(config, "reimbursement_features.default_billing_zip", "") or "").strip(),
     )
 
 
@@ -343,7 +348,9 @@ def load_company_classifications(
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            warn_pit_invariant_violations(row, context="reimbursement_classification_csv", logger=LOGGER, require_reviewed_at=True)
+            warn_pit_invariant_violations(
+                row, context="reimbursement_classification_csv", logger=LOGGER, require_reviewed_at=True
+            )
             if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
                 continue
             ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
@@ -449,7 +456,11 @@ def regional_rate_for_codes(
         [*source_ids, *sorted(codes), asof, asof, mac_name, asof],
     ).fetchall()
     if not rows:
-        return {"regional_rate_status": "local_mac_rate_not_found", "billing_zip": billing_zip, "regional_mac_name": mac_name}
+        return {
+            "regional_rate_status": "local_mac_rate_not_found",
+            "billing_zip": billing_zip,
+            "regional_mac_name": mac_name,
+        }
     row = rows[0]
     return {
         "regional_rate_status": "local_mac_rate_found",
@@ -513,7 +524,9 @@ def mapped_reimbursement_row_count(conn: Any, source_ids: list[str]) -> int:
     return int(policy_row["n"] or 0) + int(code_row["n"] or 0)
 
 
-def preflight_reimbursement_links(conn: Any, policy: ReimbursementPolicy, *, require_links: bool, asof: str | None = None) -> None:
+def preflight_reimbursement_links(
+    conn: Any, policy: ReimbursementPolicy, *, require_links: bool, asof: str | None = None
+) -> None:
     if not require_links:
         return
     policy_count, code_count, rate_count = source_row_counts(conn, policy.source_ids, asof=asof)
@@ -626,7 +639,9 @@ def parse_related_codes(raw: object) -> set[str]:
     return {match.group(0) for match in CODE_TOKEN_RE.finditer(text)}
 
 
-def policy_evidence(policy_rows: list[PolicySearchRow], company: Company, product_codes: set[str]) -> tuple[int, int, set[str], list[str]]:
+def policy_evidence(
+    policy_rows: list[PolicySearchRow], company: Company, product_codes: set[str]
+) -> tuple[int, int, set[str], list[str]]:
     if not policy_rows:
         return 0, 0, set(), []
     terms = [term.lower() for term in company_terms(company)]
@@ -808,6 +823,7 @@ RECOGNIZED_BUNDLED_PAYMENT_STATUSES = {
     "component_pricing_no_direct_cms",
     "cpt_category_iii",
     "developmental_premarket_no_active_billing",
+    "direct_hcpcs_and_bundled_hospital",
     "dental_or_cash_pay",
     "enterprise_saas_no_clinical_code",
     "esrd_bundle",
@@ -839,6 +855,7 @@ PROCEDURE_INDIRECT_PAYMENT_STATUSES = {
     "cash_fee_sched",
     "cash_pay_or_out_of_pocket",
     "cpt_category_iii",
+    "direct_hcpcs_and_bundled_hospital",
     "dental_or_cash_pay",
     "ntap_add_on_payment",
     "opo_cost_pass_through",
@@ -949,16 +966,13 @@ def finalize_reimbursement_evidence(row: ReimbursementFeatureRow) -> None:
     row.payment_rate_evidence = int(row.rate_row_count > 0 or row.regional_rate_status == "local_mac_rate_found")
     row.coverage_policy_evidence = int(row.policy_evidence_count > 0)
     row.procedure_bundled_flag = int(
-        status in PROCEDURE_INDIRECT_PAYMENT_STATUSES
-        or has_any_token(descriptor, PROCEDURE_BUNDLED_STATUS_TOKENS)
+        status in PROCEDURE_INDIRECT_PAYMENT_STATUSES or has_any_token(descriptor, PROCEDURE_BUNDLED_STATUS_TOKENS)
     )
     row.capital_equipment_flag = int(
-        status in CAPITAL_EQUIPMENT_PAYMENT_STATUSES
-        or has_any_token(descriptor, CAPITAL_EQUIPMENT_STATUS_TOKENS)
+        status in CAPITAL_EQUIPMENT_PAYMENT_STATUSES or has_any_token(descriptor, CAPITAL_EQUIPMENT_STATUS_TOKENS)
     )
     row.diagnostics_lab_flag = int(
-        status in DIAGNOSTICS_LAB_PAYMENT_STATUSES
-        or has_any_token(descriptor, DIAGNOSTICS_LAB_STATUS_TOKENS)
+        status in DIAGNOSTICS_LAB_PAYMENT_STATUSES or has_any_token(descriptor, DIAGNOSTICS_LAB_STATUS_TOKENS)
     )
     if row.review_reason == "cms_reimbursement_data_not_loaded":
         row.reimbursement_status = "cms_data_not_loaded"
@@ -1018,8 +1032,7 @@ def apply_company_classification(
     status = classification.payment_rate_status.strip().lower()
     review_reason = adjusted_classification_review_reason(row, classification)
     missing_rate_reason = any(
-        reason.strip() in RATE_EVIDENCE_RESOLVED_REVIEW_REASONS
-        for reason in row.review_reason.split(";")
+        reason.strip() in RATE_EVIDENCE_RESOLVED_REVIEW_REASONS for reason in row.review_reason.split(";")
     )
     valid_no_rate_status = status in policy.valid_no_rate_statuses
     if status in RECOGNIZED_BUNDLED_PAYMENT_STATUSES and row.rate_row_count <= 0:
@@ -1074,7 +1087,9 @@ def build_rows(
             matched_policy_ids = evidence.matched_policy_ids
             matched_rate_count = evidence.rate_row_count
         elif not use_mapped_evidence or policy.use_fallback_policy_scan_when_unmapped:
-            evidence_count, mention_count, matched_codes, matched_policy_ids = policy_evidence(policy_rows, company, product_codes)
+            evidence_count, mention_count, matched_codes, matched_policy_ids = policy_evidence(
+                policy_rows, company, product_codes
+            )
             matched_rate_count = rate_count_for_codes(conn, policy.source_ids, matched_codes, asof=asof)
         else:
             evidence_count = 0
@@ -1101,7 +1116,9 @@ def build_rows(
             row.review_reason = "cms_reimbursement_data_not_loaded"
         elif evidence_count > 0 and matched_codes:
             row.coverage_clarity_score = policy.policy_evidence_score
-            row.payment_adequacy_score = policy.rate_evidence_score if matched_rate_count > 0 else policy.no_data_payment_adequacy_score
+            row.payment_adequacy_score = (
+                policy.rate_evidence_score if matched_rate_count > 0 else policy.no_data_payment_adequacy_score
+            )
             row.score = blended_score(row.coverage_clarity_score, row.payment_adequacy_score, policy=policy)
         elif evidence_count > 0 or mention_count > 0:
             mention_boost = min(policy.mention_count_boost_cap, mention_count * policy.mention_count_boost_per_hit)
@@ -1111,7 +1128,9 @@ def build_rows(
             row.review_reason = "company_mentioned_without_product_code_mapping"
         elif matched_codes:
             row.coverage_clarity_score = policy.company_mention_score
-            row.payment_adequacy_score = policy.rate_evidence_score if matched_rate_count > 0 else policy.no_data_payment_adequacy_score
+            row.payment_adequacy_score = (
+                policy.rate_evidence_score if matched_rate_count > 0 else policy.no_data_payment_adequacy_score
+            )
             row.score = blended_score(row.coverage_clarity_score, row.payment_adequacy_score, policy=policy)
             if matched_rate_count <= 0:
                 row.review_reason = "code_mapping_without_payment_rate"
@@ -1338,19 +1357,29 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
         else resolve_path(
-            cfg_get(config, "reimbursement_features.output_csv", "../output/med_devices_reports/med_device_reimbursement_features.csv"),
+            cfg_get(
+                config,
+                "reimbursement_features.output_csv",
+                "../output/med_devices_reports/med_device_reimbursement_features.csv",
+            ),
             base_dir=base_dir,
         )
     )
     policy = reimbursement_policy(config, billing_zip_override=args.billing_zip)
     include_missing_pit_metadata = allow_missing_static_pit_metadata(config)
     classification_raw = str(cfg_get(config, "reimbursement_features.company_classification_csv", "") or "").strip()
-    zip_mac_rules = load_zip_mac_rules(resolve_path(policy.zip_mac_csv, base_dir=base_dir) if policy.zip_mac_csv else None)
+    zip_mac_rules = load_zip_mac_rules(
+        resolve_path(policy.zip_mac_csv, base_dir=base_dir) if policy.zip_mac_csv else None
+    )
     ticker_filter = {normalize_ticker(value) for value in str(args.tickers or "").split(",") if normalize_ticker(value)}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -1377,7 +1406,9 @@ def main() -> None:
             preflight_reimbursement_links(
                 conn,
                 policy,
-                require_links=str(cfg_get(config, "reimbursement_features.require_entity_linking_when_cms_loaded", True))
+                require_links=str(
+                    cfg_get(config, "reimbursement_features.require_entity_linking_when_cms_loaded", True)
+                )
                 .strip()
                 .lower()
                 in {"1", "true", "yes", "y", "on"},

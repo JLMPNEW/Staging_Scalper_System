@@ -1,0 +1,31 @@
+policy_version: consumer_defensive_terminal_events_v1
+model_family: consumer_defensive
+source_id: consumer_defensive_terminal_events_reviewed
+ledger_path: ../system_csvs/consumer_defensive_terminal_events.csv
+reviewed_at: "2026-08-10"
+
+required_delisted_tickers:
+  - WBA
+  - SPTN
+  - SVU
+  - CORE
+  - AVP
+  - VGR
+  - K
+  - TWNK
+  - SAFM
+  - DF
+  - LNCE
+
+successor_prices:
+  allowed_source_ids:
+    - yahoo_finance_adjusted
+    - norgate_us_equities_total_return
+  max_reference_lag_calendar_days: 7
+  maximum_calibration_horizon_trading_days: 126
+  minimum_required_rows_from_reference: 127
+
+contingent_consideration:
+  unresolved_allowed_only_when_excluded: true
+  explicit_exclusions: [WBA]
+

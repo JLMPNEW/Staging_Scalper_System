@@ -45,6 +45,9 @@ SCORE_FIELDS = [
     "eligibility_reason",
     "native_score_field",
     "native_score_value",
+    "production_score_source",
+    "ic_tilt_applied_to_production_flag",
+    "production_score_regime_version",
     "score_zero_is_missing_flag",
     "universe_status",
     "historical_universe_source",
@@ -157,6 +160,17 @@ SCORE_FIELDS = [
     "fda_mdr_malfunction_count_24m",
     "fda_mdr_malfunction_count_per_category",
     "fda_breadth_adjustment_applied",
+    "fda_adjudication_applied_flag",
+    "fda_adjudicated_event_count_24m",
+    "fda_raw_death_count_24m",
+    "fda_adjudicated_device_death_count_24m",
+    "fda_adjudicated_serious_product_event_count_24m",
+    "fda_adjudicated_non_device_death_count_24m",
+    "fda_scoring_death_count_24m",
+    "fda_scoring_injury_count_24m",
+    "fda_scoring_malfunction_count_24m",
+    "fda_adjudication_status",
+    "fda_adjudication_reviewed_at",
     "fda_signal_mode",
     "fda_signal_direction",
     "fda_signal_reliability",
@@ -333,7 +347,9 @@ for field in SCORE_FIELDS:
     if field == "rank":
         DAILY_COMPOSITE_CONTRACT_FIELDS.append("company_id")
     if field == "feature_data_asof_date":
-        DAILY_COMPOSITE_CONTRACT_FIELDS.extend(extra for extra in DAILY_COMPOSITE_EXTRA_FIELDS if extra not in SCORE_FIELDS)
+        DAILY_COMPOSITE_CONTRACT_FIELDS.extend(
+            extra for extra in DAILY_COMPOSITE_EXTRA_FIELDS if extra not in SCORE_FIELDS
+        )
 REVIEW_PACK_OMITTED_CONTRACT_FIELDS = {"company_id"}
 # Enrichment columns present ONLY in the dated review-pack composite CSV, appended
 # after script 13's ordering so positional readers of the rolling and dated files see
@@ -435,6 +451,8 @@ def build_daily_composite_fieldnames() -> list[str]:
     header = [field for field in script13_fields if field not in REVIEW_PACK_OMITTED_CONTRACT_FIELDS]
     header.extend(field for field in PACK_ONLY_COMPOSITE_FIELDS)
     return header
+
+
 DAILY_COMPOSITE_FIELD_DEFAULTS: dict[str, Any] = {
     "score_scale_min": 0.0,
     "score_scale_max": 100.0,
@@ -705,15 +723,16 @@ def configured_gate_value(config: dict[str, Any], cohort: str, key: str) -> floa
 
 
 def production_seed_is_effective(row: dict[str, Any], config: dict[str, Any], cohort: str) -> bool:
-    raw_effective_dates = cfg_get(
-        config,
-        "calibration.calibrated_baseline.production_seed_effective_from",
-        {},
-    ) or {}
-    if not isinstance(raw_effective_dates, dict):
-        raise ValueError(
-            "calibration.calibrated_baseline.production_seed_effective_from must be a mapping"
+    raw_effective_dates = (
+        cfg_get(
+            config,
+            "calibration.calibrated_baseline.production_seed_effective_from",
+            {},
         )
+        or {}
+    )
+    if not isinstance(raw_effective_dates, dict):
+        raise ValueError("calibration.calibrated_baseline.production_seed_effective_from must be a mapping")
     effective_raw = raw_effective_dates.get(cohort)
     if effective_raw in {None, ""}:
         return True
@@ -721,8 +740,7 @@ def production_seed_is_effective(row: dict[str, Any], config: dict[str, Any], co
         effective_date = datetime.strptime(str(effective_raw)[:10], "%Y-%m-%d")
     except ValueError as exc:
         raise ValueError(
-            "Invalid production seed effective date for "
-            f"{cohort}: {effective_raw!r}; expected YYYY-MM-DD"
+            f"Invalid production seed effective date for {cohort}: {effective_raw!r}; expected YYYY-MM-DD"
         ) from exc
     try:
         asof_date = datetime.strptime(str(row.get("asof_date") or "")[:10], "%Y-%m-%d")
@@ -756,7 +774,11 @@ def calibrated_baseline_candidate_status(row: dict[str, Any], config: dict[str, 
     )
     if not production_seed_active and cohort not in watchlist_cohorts:
         return None
-    if str(row.get("classification") or "") in {"manual_review_regulatory_risk", "avoid_confirmed_regulatory_risk", "data_review_required"}:
+    if str(row.get("classification") or "") in {
+        "manual_review_regulatory_risk",
+        "avoid_confirmed_regulatory_risk",
+        "data_review_required",
+    }:
         return None
     if int(row.get("passed_fda_manual_review_gate") or 0) != 1 or int(row.get("hard_red_flag") or 0) == 1:
         return None
@@ -777,7 +799,11 @@ def calibrated_baseline_candidate_status(row: dict[str, Any], config: dict[str, 
     if not passes_max_gate(row, "value_trap_score", configured_gate_value(config, cohort, "value_trap_max")):
         return None
     status = "production_baseline_candidate" if production_seed_active else "watchlist_baseline_candidate"
-    reason = "final_investability_pass" if int(row.get("final_investability_gate") or 0) == 1 else "baseline_gate_pass_not_tier1"
+    reason = (
+        "final_investability_pass"
+        if int(row.get("final_investability_gate") or 0) == 1
+        else "baseline_gate_pass_not_tier1"
+    )
     return status, reason
 
 
@@ -806,10 +832,7 @@ def calibrated_baseline_candidates(rows: list[dict[str, Any]], config: dict[str,
 def clean_row(row: dict[str, Any], *, fieldnames: list[str] | None = None) -> dict[str, Any]:
     item = dict(row)
     item["fda_review_state"] = (
-        item.get("fda_review_state")
-        or item.get("latest_fda_review_state")
-        or item.get("fda_state")
-        or ""
+        item.get("fda_review_state") or item.get("latest_fda_review_state") or item.get("fda_state") or ""
     )
     item["top_positive_drivers"] = decode_driver_list(item.get("top_positive_drivers_json"))
     item["top_negative_drivers"] = decode_driver_list(item.get("top_negative_drivers_json"))
@@ -964,7 +987,8 @@ def write_markdown(
                 f"status={row.get('portfolio_candidate_status') or ''} "
                 f"decision={row.get('analyst_review_decision') or ''}"
                 for row in portfolio_candidates[:25]
-            ] or ["- None"]
+            ]
+            or ["- None"]
         ),
         "",
         section_heading("Calibrated Baseline Candidates", baseline_candidates, 30),
@@ -978,7 +1002,8 @@ def write_markdown(
                 f"class={row.get('classification')} "
                 f"reason={row.get('calibrated_baseline_reason')}"
                 for row in baseline_candidates[:30]
-            ] or ["- None"]
+            ]
+            or ["- None"]
         ),
         "",
         section_heading("Shadow Safe-Core Candidates", safe_core, 25),
@@ -998,7 +1023,8 @@ def write_markdown(
                 f"status={row.get('calibration_status') or 'production_eligible'} "
                 f"reason={row.get('calibration_status_reason') or row.get('classification_reason') or 'not specified'}"
                 for row in restricted[:25]
-            ] or ["- None"]
+            ]
+            or ["- None"]
         ),
         "",
         section_heading("Technical Policy Snapshot", tier1, 25),
@@ -1008,7 +1034,8 @@ def write_markdown(
                 f"overlay={row.get('technical_overlay_status') or row.get('entry_status') or 'unknown'} "
                 f"weight={first_float(row.get('technical_component_weight')):.2f}"
                 for row in tier1[:25]
-            ] or ["- None"]
+            ]
+            or ["- None"]
         ),
         "",
         "## Durable Growth Policy Snapshot",
@@ -1024,7 +1051,8 @@ def write_markdown(
                 f"weight={first_float(row.get('durable_growth_component_weight')):.2f} "
                 f"reason={row.get('durable_growth_validation_reason') or row.get('durable_growth_repair_reason') or 'none'}"
                 for row in top25
-            ] or ["- None"]
+            ]
+            or ["- None"]
         ),
         "",
         "## FDA Policy Snapshot",
@@ -1041,7 +1069,8 @@ def write_markdown(
                 f"mode={row.get('fda_gate_mode') or 'legacy'} "
                 f"source={row.get('fda_score_source') or 'fda_product_score'}"
                 for row in top25
-            ] or ["- None"]
+            ]
+            or ["- None"]
         ),
         "",
         section_heading("Pullback Candidate Tags", pullback_candidates, 25),
@@ -1052,7 +1081,8 @@ def write_markdown(
                 f"tech={first_float(row.get('technical_entry_score')):.2f} "
                 f"template={row.get('pullback_candidate_template_id') or 'unknown'}"
                 for row in pullback_candidates[:25]
-            ] or ["- None"]
+            ]
+            or ["- None"]
         ),
         "",
         "## Regulatory Risk",
@@ -1085,11 +1115,18 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     output_base_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir
-        else resolve_path(cfg_get(config, "scoring.review_pack_dir", "../output/med_devices_reports/score_review_pack"), base_dir=base_dir)
+        else resolve_path(
+            cfg_get(config, "scoring.review_pack_dir", "../output/med_devices_reports/score_review_pack"),
+            base_dir=base_dir,
+        )
     )
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -1132,7 +1169,8 @@ def main() -> None:
         ]
         manual = [row for row in clean_rows if row["classification"] == "manual_review_regulatory_risk"]
         restricted = [
-            row for row in clean_rows
+            row
+            for row in clean_rows
             if str(row.get("calibration_status") or "").strip().lower()
             in {"restricted_research_only", "excluded_from_tier1"}
         ]
@@ -1144,7 +1182,10 @@ def main() -> None:
         ]
         portfolio_candidates = sorted(
             [row for row in clean_rows if int(row.get("portfolio_candidate_gate") or 0) == 1],
-            key=lambda item: (-first_float(item.get("portfolio_candidate_score"), item.get("composite_score")), int(item.get("rank") or 999999)),
+            key=lambda item: (
+                -first_float(item.get("portfolio_candidate_score"), item.get("composite_score")),
+                int(item.get("rank") or 999999),
+            ),
         )
         top25 = clean_rows[:25]
         bottom25 = list(reversed(clean_rows[-25:]))

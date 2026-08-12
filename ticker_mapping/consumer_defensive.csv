@@ -1,0 +1,109 @@
+ticker,investability_status,company_name,cik,exchange,sector,industry,subsector,country,currency,security_type,listing_status,is_primary_listing
+BUD,investable,Anheuser-Busch InBev SA/NV,1668717,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,ADR/ADS,active,TRUE
+STZ,investable,"Constellation Brands, Inc.",16918,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+TAP,investable,Molson Coors Beverage Company,24545,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CCU,investable,Compañía Cervecerías Unidas S.A.,888746,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SAM,investable,"The Boston Beer Company, Inc.",949870,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ABEV,investable,Ambev S.A.,1565025,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,ADR/ADS,active,TRUE
+KO,investable,The Coca-Cola Company,21344,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+PEP,investable,"PepsiCo, Inc.",77476,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+MNST,investable,Monster Beverage Corporation,865752,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CCEP,investable,Coca-Cola Europacific Partners PLC,1650107,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Ordinary Shares,active,TRUE
+KDP,investable,Keurig Dr Pepper Inc.,1418135,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+COKE,investable,"Coca-Cola Consolidated, Inc.",317540,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+PRMB,investable,Primo Brands Corporation,2042694,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CELH,investable,"Celsius Holdings, Inc.",1341766,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+COCO,investable,"The Vita Coco Company, Inc.",1482981,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+FIZZ,investable,National Beverage Corp.,69891,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ZVIA,investable,Zevia PBC,1854139,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+WEST,investable,Westrock Coffee Company,1806347,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+KOF,investable,"Coca-Cola FEMSA, S.A.B. de C.V.",910631,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,ADR/ADS,active,TRUE
+DEO,investable,Diageo plc,835403,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+BF-B,investable,Brown-Forman Corporation,14693,NYSE,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+MGPI,investable,"MGP Ingredients, Inc.",835011,Nasdaq,Consumer Defensive,Beverages,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+FMX,investable,"Fomento Económico Mexicano, S.A.B. de C.V.",1061736,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+WMT,investable,Walmart Inc.,104169,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+COST,investable,Costco Wholesale Corporation,909832,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+TGT,investable,Target Corporation,27419,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+DG,investable,Dollar General Corporation,29534,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+DLTR,investable,"Dollar Tree, Inc.",935703,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+BJ,investable,"BJ's Wholesale Club Holdings, Inc.",1531152,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+PSMT,investable,"PriceSmart, Inc.",1041803,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+TBBB,investable,BBB Foods Inc.,1978954,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+KR,investable,The Kroger Co.,56873,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SYY,investable,Sysco Corporation,96021,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CASY,investable,"Casey's General Stores, Inc.",726958,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ACI,investable,"Albertsons Companies, Inc.",1646972,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CART,investable,Maplebear Inc.,1579091,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CHEF,investable,"The Chefs' Warehouse, Inc.",1517175,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+GO,investable,Grocery Outlet Holding Corp.,1771515,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+IMKTA,investable,"Ingles Markets, Incorporated",50493,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+PFGC,investable,Performance Food Group Company,1618673,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SFM,investable,"Sprouts Farmers Market, Inc.",1575515,Nasdaq,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+UNFI,investable,"United Natural Foods, Inc.",1020859,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+USFD,investable,US Foods Holding Corp.,1665918,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+WMK,investable,"Weis Markets, Inc.",105418,NYSE,Consumer Defensive,Discount Stores,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+PG,investable,The Procter & Gamble Company,80424,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CL,investable,Colgate-Palmolive Company,21665,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+KVUE,investable,Kenvue Inc.,1944048,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+KMB,investable,Kimberly-Clark Corporation,55785,Nasdaq,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+EL,investable,The Estée Lauder Companies Inc.,1001250,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CHD,investable,"Church & Dwight Co., Inc.",313927,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CLX,investable,The Clorox Company,21076,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ELF,investable,"e.l.f. Beauty, Inc.",1600033,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+IPAR,investable,"Interparfums, Inc.",822663,Nasdaq,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+COTY,investable,Coty Inc.,1024305,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SPB,investable,"Spectrum Brands Holdings, Inc.",109177,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+EPC,investable,Edgewell Personal Care Company,1096752,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ODD,investable,Oddity Tech Ltd.,1907085,Nasdaq,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Ordinary Shares,active,TRUE
+HNST,investable,"The Honest Company, Inc.",1530979,Nasdaq,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+NUS,investable,"Nu Skin Enterprises, Inc.",1021561,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+MO,investable,"Altria Group, Inc.",764180,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+PM,investable,Philip Morris International Inc.,1413329,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+BTI,investable,British American Tobacco p.l.c.,1303523,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,ADR/ADS,active,TRUE
+ENR,investable,"Energizer Holdings, Inc.",1632790,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ODC,investable,Oil-Dri Corporation of America,74046,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+REYN,investable,Reynolds Consumer Products Inc.,1786431,Nasdaq,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+TPB,investable,"Turning Point Brands, Inc.",1290677,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+UL,investable,Unilever PLC,217410,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,ADR/ADS,active,TRUE
+UVV,investable,Universal Corporation,102037,NYSE,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+WDFC,investable,WD-40 Company,105132,Nasdaq,Consumer Defensive,Household & Personal Products,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+JBS,investable,JBS N.V.,1791942,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+KHC,investable,The Kraft Heinz Company,1637459,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+GIS,investable,"General Mills, Inc.",40704,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+MKC,investable,"McCormick & Company, Incorporated",63754,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+HRL,investable,Hormel Foods Corporation,48465,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SJM,investable,The J. M. Smucker Company,91419,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+DAR,investable,Darling Ingredients Inc.,916540,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CAG,investable,"Conagra Brands, Inc.",23217,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+LW,investable,"Lamb Weston Holdings, Inc.",1679273,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CPB,investable,The Campbell's Company,16732,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+INGR,investable,Ingredion Incorporated,1046257,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+PPC,investable,Pilgrim's Pride Corporation,802481,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+POST,investable,"Post Holdings, Inc.",1530950,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+FRPT,investable,"Freshpet, Inc.",1611647,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+MZTI,investable,The Marzetti Company,57515,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+JJSF,investable,J&J Snack Foods Corp.,785956,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+NOMD,investable,Nomad Foods Limited,1651717,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Ordinary Shares,active,TRUE
+FLO,investable,"Flowers Foods, Inc.",1128928,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+BRBR,investable,"BellRing Brands, Inc.",1772016,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+HLF,investable,Herbalife Ltd.,1180262,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+UTZ,investable,"Utz Brands, Inc.",1739566,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SENEA,investable,Seneca Foods Corporation,88948,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SMPL,investable,The Simply Good Foods Company,1702744,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+JBSS,investable,"John B. Sanfilippo & Son, Inc.",880117,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+MAMA,investable,"Mama's Creations, Inc.",1520358,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+BGS,investable,"B&G Foods, Inc.",1278027,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+MDLZ,investable,"Mondelez International, Inc.",1103982,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+TSN,investable,"Tyson Foods, Inc.",100493,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ADM,investable,Archer-Daniels-Midland Company,7084,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+ANDE,investable,"The Andersons, Inc.",821026,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+AVO,investable,"Mission Produce, Inc.",1802974,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+BG,investable,Bunge Global SA,1996862,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Ordinary Shares,active,TRUE
+CALM,investable,"Cal-Maine Foods, Inc.",16160,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+CENTA,investable,Central Garden & Pet Company,887733,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+DMC,investable,Del Monte Corporation,1047340,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Ordinary Shares,active,TRUE
+DOLE,investable,Dole plc,1857475,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Ordinary Shares,active,TRUE
+HSY,investable,The Hershey Company,47111,NYSE,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+SFD,investable,"Smithfield Foods, Inc.",91388,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE
+VITL,investable,"Vital Farms, Inc.",1579733,Nasdaq,Consumer Defensive,Packaged Foods,Consumer Defensive,United States,USD,Common Stock,active,TRUE

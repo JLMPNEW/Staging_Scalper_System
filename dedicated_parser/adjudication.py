@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import sqlite3
 from pathlib import Path
+
+from dedicated_parser.atomic_io import atomic_text_writer
 from typing import Any, Iterable
 
 from dedicated_parser.policy import POLICY_FIELDS
@@ -105,9 +107,7 @@ def write_adjudication_skeleton(
     path: Path,
     rows: Iterable[dict[str, Any]],
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="") as handle:
+    with atomic_text_writer(path, newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=SKELETON_FIELDS,
@@ -116,4 +116,3 @@ def write_adjudication_skeleton(
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in SKELETON_FIELDS})
-    temporary.replace(path)

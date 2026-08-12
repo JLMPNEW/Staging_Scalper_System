@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,17 @@ from dedicated_parser.contracts import (
     DocumentRef,
     FilingRef,
     file_sha256,
+)
+from dedicated_parser.path_io import (
+    is_file_path,
+    open_path,
+    resolve_path as resolve_filesystem_path,
+    runtime_path,
+    stat_path,
+)
+from dedicated_parser.sec_paths import (
+    SEC_DOCUMENT_SUFFIXES,
+    validate_sec_relative_document_path,
 )
 
 
@@ -50,7 +62,7 @@ def _optional_path(
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = manifest_path.parent / path
-    return path.resolve()
+    return resolve_filesystem_path(path)
 
 
 def _flag(raw: object, *, default: bool = False) -> bool:
@@ -65,8 +77,8 @@ def _flag(raw: object, *, default: bool = False) -> bool:
 
 
 def load_source_manifest(path: Path) -> SourceManifest:
-    resolved = path.expanduser().resolve()
-    if not resolved.is_file():
+    resolved = resolve_filesystem_path(path.expanduser())
+    if not is_file_path(resolved):
         raise FileNotFoundError(f"Source manifest does not exist: {resolved}")
     documents: dict[tuple[str, str], dict[str, str]] = {}
     direct_filings: dict[tuple[str, str], FilingRef] = {}
@@ -75,7 +87,7 @@ def load_source_manifest(path: Path) -> SourceManifest:
     tickers: set[str] = set()
     accessions: set[str] = set()
     row_count = 0
-    with resolved.open("r", encoding="utf-8-sig", newline="") as handle:
+    with open_path(resolved, "r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         fields = set(reader.fieldnames or ())
         missing_fields = sorted(REQUIRED_FIELDS - fields)
@@ -84,11 +96,16 @@ def load_source_manifest(path: Path) -> SourceManifest:
         for line_number, row in enumerate(reader, start=2):
             ticker = str(row.get("ticker") or "").strip().upper()
             accession = str(row.get("accession_number") or "").strip()
-            document = str(row.get("document_name") or "").strip()
+            document_raw = row.get("document_name")
+            document = str(document_raw or "")
             content_hash = str(row.get("content_sha256") or "").strip().lower()
             cache_status = str(row.get("cache_status") or "").strip().upper()
             if not ticker or not accession or not document:
                 raise ValueError(f"{resolved}:{line_number}: ticker, accession_number, and document_name are required")
+            document = validate_sec_relative_document_path(
+                document_raw, allowed_suffixes=SEC_DOCUMENT_SUFFIXES,
+                context=f"{resolved}:{line_number}: source-manifest document_name",
+            )
             if cache_status != "CACHED_HASHED":
                 raise ValueError(
                     f"{resolved}:{line_number}: source document is not cached and sealed: cache_status={cache_status!r}"
@@ -97,9 +114,9 @@ def load_source_manifest(path: Path) -> SourceManifest:
                 raise ValueError(f"{resolved}:{line_number}: invalid content_sha256")
             key = (ticker, accession)
             scoped = documents.setdefault(key, {})
-            if document in scoped:
+            if document.casefold() in {name.casefold() for name in scoped}:
                 raise ValueError(
-                    f"{resolved}:{line_number}: duplicate source-manifest key {ticker}/{accession}/{document}"
+                    f"{resolved}:{line_number}: duplicate case-insensitive source-manifest key {ticker}/{accession}/{document}"
                 )
             scoped[document] = content_hash
             requested_metrics = {
@@ -111,7 +128,7 @@ def load_source_manifest(path: Path) -> SourceManifest:
                 manifest_path=resolved,
             )
             if local_path is not None:
-                if not local_path.is_file():
+                if not is_file_path(local_path):
                     raise FileNotFoundError(f"{resolved}:{line_number}: local_path does not exist: {local_path}")
                 actual_hash = file_sha256(local_path)
                 if actual_hash != content_hash:
@@ -119,6 +136,18 @@ def load_source_manifest(path: Path) -> SourceManifest:
                         f"{resolved}:{line_number}: local_path hash "
                         f"mismatch expected={content_hash} "
                         f"actual={actual_hash}"
+                    )
+                primary_document = validate_sec_relative_document_path(
+                    row.get("primary_document") or document,
+                    allowed_suffixes=SEC_DOCUMENT_SUFFIXES,
+                    context=f"{resolved}:{line_number}: source-manifest primary_document",
+                )
+                company_currency = str(
+                    row.get('company_currency') or 'USD'
+                ).strip().upper()
+                if not re.fullmatch(r'[A-Z]{3}', company_currency):
+                    raise ValueError(
+                        f'{resolved}:{line_number}: invalid company_currency'
                     )
                 filing = FilingRef(
                     ticker=ticker,
@@ -128,9 +157,9 @@ def load_source_manifest(path: Path) -> SourceManifest:
                     filing_date=str(row.get("filing_date") or "").strip(),
                     accepted_at=str(row.get("accepted_at") or row.get("filing_date") or "").strip(),
                     report_date=str(row.get("report_date") or row.get("filing_date") or "").strip(),
-                    primary_document=str(row.get("primary_document") or document).strip(),
+                    primary_document=primary_document,
                     source_id=str(row.get("source_id") or "local_source_manifest").strip(),
-                    company_currency=str(row.get("company_currency") or "USD").strip().upper(),
+                    company_currency=company_currency,
                 )
                 prior_filing = direct_filings.get(key)
                 if prior_filing is not None and prior_filing != filing:
@@ -138,11 +167,11 @@ def load_source_manifest(path: Path) -> SourceManifest:
                         f"{resolved}:{line_number}: inconsistent direct filing metadata for {ticker}/{accession}"
                     )
                 direct_filings[key] = filing
-                stat = local_path.stat()
+                stat = stat_path(local_path)
                 direct_documents_mutable.setdefault(key, []).append(
                     DocumentRef(
                         name=document,
-                        path=str(local_path),
+                        path=str(runtime_path(local_path)),
                         content_sha256=content_hash,
                         file_size=int(stat.st_size),
                         modified_ns=int(stat.st_mtime_ns),

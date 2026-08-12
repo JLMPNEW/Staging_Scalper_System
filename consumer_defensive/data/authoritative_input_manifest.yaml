@@ -1,0 +1,78 @@
+manifest_version: consumer_defensive_authoritative_inputs_v1
+reviewed_as_of: "2026-08-11"
+path_base: repository_root
+hash_algorithm: sha256
+record_count_method: parsed_csv_records_excluding_header_and_blank_lines
+
+contract:
+  require_exact_path: true
+  require_exact_record_count: true
+  require_exact_sha256: true
+  fail_on_missing_input: true
+  fail_on_unlisted_authoritative_csv: true
+  update_requires_review: true
+
+inputs:
+  - input_id: consumer_defensive_current_universe
+    path: ticker_mapping/consumer_defensive.csv
+    stage: stage2
+    role: authoritative_current_security_and_taxonomy_source
+    schema_version: consumer_defensive_current_universe_v1
+    record_count: 108
+    sha256: be86e0038a2d8b55abea5f8d3c4adebe242c02e7d338e86007934dbc9ec3ced4
+    review_status: reviewed
+
+  - input_id: consumer_defensive_delisted_candidate_seed
+    path: consumer_defensive/system_csvs/consumer_defensive_delisted.csv
+    stage: stage2
+    role: reviewed_historical_candidate_discovery_seed
+    schema_version: consumer_defensive_delisted_seed_v1
+    record_count: 33
+    sha256: a28f286cb25d33b3e3cd7d3ccd26d64e59dfc72882f435646bae9679e5b76700
+    review_status: reviewed
+    notes: Loaded historical scope is further restricted by lineage exclusions, the history window, the terminal-event ledger, and Norgate PIT resolution.
+
+  - input_id: consumer_defensive_security_lineage_events
+    path: consumer_defensive/system_csvs/consumer_defensive_security_events.csv
+    stage: stage2
+    role: authoritative_reviewed_security_lineage_events
+    schema_version: consumer_defensive_security_events_v1
+    record_count: 2
+    sha256: cc8d0b8272bbfd92318ca08b63f1fb41335092df108f4f5d7af4e62f85f5eaa1
+    review_status: reviewed
+
+  - input_id: consumer_defensive_terminal_events
+    path: consumer_defensive/system_csvs/consumer_defensive_terminal_events.csv
+    stage: stage3
+    role: authoritative_primary_document_terminal_event_ledger
+    schema_version: consumer_defensive_terminal_events_v1
+    record_count: 11
+    sha256: e427b6110b634a855489716a99519c71fabe48c2530679d344a448e9c432775c
+    review_status: reviewed
+
+  - input_id: consumer_defensive_ticker_aliases
+    path: consumer_defensive/system_csvs/consumer_defensive_ticker_aliases.csv
+    stage: stage2
+    role: authoritative_reviewed_ticker_alias_and_continuity_map
+    schema_version: consumer_defensive_ticker_aliases_v1
+    record_count: 2
+    sha256: 604ae00abece1ad94bd23d0074cc7764575e533eb0352d06eb28e64a36d3d74d
+    review_status: reviewed
+
+  - input_id: consumer_defensive_historical_issuer_identifiers
+    path: consumer_defensive/data/consumer_defensive_historical_issuer_identifiers.csv
+    stage: stage2
+    role: authoritative_reviewed_historical_sec_identifier_map
+    schema_version: consumer_defensive_historical_issuer_identifiers_v1
+    record_count: 11
+    sha256: d60afb5b469969692366c94dcaeffe002333355d5950b172ff63b4fe00b2b253
+    review_status: reviewed
+
+  - input_id: consumer_defensive_metric_applicability
+    path: consumer_defensive/data/consumer_defensive_metric_applicability.csv
+    stage: stage4
+    role: authoritative_reviewed_metric_applicability_and_subtype_map
+    schema_version: consumer_defensive_metric_applicability_v1
+    record_count: 119
+    sha256: 2dcd63ecaf0dce5aada327cf1c26143a1625f760bc7c867aad79a85db93db834
+    review_status: reviewed

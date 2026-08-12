@@ -372,6 +372,29 @@ sources:
     status: planned
     notes: "Endpoints include 510k.json, pma.json, classification.json, recall.json, enforcement.json, event.json, registrationlisting.json, and udi.json."
 
+  - source_id: fda_accessdata_cber
+    stage: stage_1
+    source_name: "FDA AccessData CBER PMA evidence"
+    source_owner: "U.S. Food and Drug Administration"
+    source_type: curated_official
+    base_url: "https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfpma/"
+    documentation_url: "https://www.fda.gov/vaccines-blood-biologics/development-approval-process-cber"
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: event_driven
+    terms_url: "https://www.fda.gov/about-fda/about-website/website-policies"
+    data_owner: FDA
+    raw_schema:
+      - fda_manual_approval_evidence.csv
+    staging_tables: []
+    canonical_tables:
+      - fact_fda_approval
+    feature_stages:
+      - fda_product_risk
+    priority: 71
+    status: active
+    notes: "Authoritative fallback for CBER BP-prefixed PMAs that are published in FDA AccessData but absent from openFDA PMA query results."
+
   - source_id: accessgudid
     stage: stage_1
     source_name: "AccessGUDID API and downloads"

@@ -5,7 +5,7 @@ Page 1: Final Target Book viewer.
 Reads the sealed final_target_book.csv from a portfolio_layer run directory
 (macro-regime preamble + book table) plus its manifest and the run's ledger
 trades, and renders regime context, KPI tiles, IB realized P&L (MTD/YTD),
-and the book table. Read-only consumer of sealed artifacts — never writes
+and the book table. Read-only consumer of sealed artifacts - never writes
 into portfolio_layer/.
 
 Run:
@@ -33,9 +33,21 @@ RUNS_ROOT = APP_DIR.parent / "portfolio_layer" / "output" / "runs"
 DB_PATH = APP_DIR.parent / "portfolio_layer" / "db" / "portfolio_layer.sqlite"
 H1_ROOT = APP_DIR.parent / "portfolio_layer" / "MacroLayer" / "out" / "regime_h1"
 SERVING_DB_PATH = APP_DIR.parent / "portfolio_layer" / "MacroLayer" / "macro_serving.sqlite"
+SECURITY_MAPPING_PATHS = (
+    APP_DIR.parent / "ticker_mapping" / "All_tickers_biotech_enriched.csv",
+    APP_DIR.parent / "ticker_mapping" / "med_dev_tickers_clean_keep.csv",
+    APP_DIR.parent / "ticker_mapping" / "semiconductor_tickers.csv",
+    APP_DIR.parent / "ticker_mapping" / "software_infrastructure_tickers.csv",
+    APP_DIR.parent / "ticker_mapping" / "technology_hardware.csv",
+    APP_DIR.parent / "ticker_mapping" / "machinery_tickers.csv",
+    APP_DIR.parent / "ticker_mapping" / "defense_tickers.csv",
+    APP_DIR.parent / "ticker_mapping" / "consumer_defensive.csv",
+    APP_DIR.parent / "industrials" / "transportation" / "system_csvs" / "transportation_tickers.csv",
+    APP_DIR.parent / "portfolio_layer" / "data" / "canonical_sector_overrides.csv",
+)
 
 # ---------------------------------------------------------------------------
-# Palette (validated reference palette, light mode — see dataviz skill)
+# Palette (validated reference palette, light mode - see dataviz skill)
 # ---------------------------------------------------------------------------
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -49,7 +61,7 @@ STATUS_CRITICAL = "#d03b3b"
 SUCCESS_TEXT = "#006300"     # success text green (light surface)
 FONT_STACK = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 
-# Status backgrounds (tinted so the cell text stays primary ink — the label,
+# Status backgrounds (tinted so the cell text stays primary ink - the label,
 # not the color, carries the meaning).
 BG_GOOD = "background-color: rgba(12,163,12,0.16)"
 BG_NEUTRAL = ""
@@ -102,13 +114,84 @@ def list_run_dates() -> list[str]:
     return sorted(dates, reverse=True)
 
 
+def security_mapping_signature() -> tuple:
+    """Cache key covering the local ticker-to-company mapping files."""
+    parts = []
+    for path in SECURITY_MAPPING_PATHS:
+        try:
+            stat = path.stat()
+            parts.append((str(path), stat.st_mtime, stat.st_size))
+        except OSError:
+            parts.append((str(path), 0.0, 0))
+    return tuple(parts)
+
+
+@st.cache_data(show_spinner=False)
+def load_security_metadata(signature: tuple) -> pd.DataFrame:
+    """Load company names and fallback industries from local ticker maps."""
+    _ = signature  # cache key only: reload when a mapping file changes
+    company_by_ticker: dict[str, str] = {}
+    industry_by_ticker: dict[str, str] = {}
+    ticker_columns = ("ticker", "Ticker", "symbol", "Symbol")
+    company_columns = ("company_name", "CompanyName", "company", "Company", "name")
+    industry_columns = ("industry", "Industry", "subsector", "Subsector")
+
+    for path in SECURITY_MAPPING_PATHS:
+        if not path.is_file():
+            continue
+        try:
+            raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+        except (OSError, pd.errors.ParserError):
+            continue
+        ticker_col = next((col for col in ticker_columns if col in raw.columns), None)
+        if ticker_col is None:
+            continue
+        company_col = next((col for col in company_columns if col in raw.columns), None)
+        industry_col = next((col for col in industry_columns if col in raw.columns), None)
+        for _, row in raw.iterrows():
+            ticker = str(row.get(ticker_col, "")).strip().upper()
+            if not ticker:
+                continue
+            if company_col:
+                company = str(row.get(company_col, "")).strip()
+                if company and ticker not in company_by_ticker:
+                    company_by_ticker[ticker] = company
+            if industry_col:
+                industry = str(row.get(industry_col, "")).strip()
+                if industry and ticker not in industry_by_ticker:
+                    industry_by_ticker[ticker] = industry
+
+    tickers = sorted(set(company_by_ticker) | set(industry_by_ticker))
+    return pd.DataFrame({
+        "ticker": tickers,
+        "company_name": [company_by_ticker.get(ticker, "") for ticker in tickers],
+        "industry": [industry_by_ticker.get(ticker, "") for ticker in tickers],
+    })
+
+
+@st.cache_data(show_spinner=False)
+def load_score_metadata(run_date: str, mtime: float) -> pd.DataFrame:
+    """Load per-run industries from the sealed canonical score artifact."""
+    _ = mtime  # cache key only: reload when the score artifact changes
+    path = RUNS_ROOT / run_date / "stocks_scores.csv"
+    if not path.is_file():
+        return pd.DataFrame(columns=pd.Index(["ticker", "industry"]))
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for col in ("ticker", "industry"):
+        if col not in df.columns:
+            df[col] = ""
+    df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
+    df["industry"] = df["industry"].astype(str).str.strip()
+    return df.loc[:, ["ticker", "industry"]].drop_duplicates("ticker")
+
+
 @st.cache_data(show_spinner=False)
 def load_book(run_date: str, mtime: float) -> tuple[dict, pd.DataFrame, list[str]]:
     """Parse the preamble key/value block and the book table.
 
     Preamble rows carry one or more ``key,value`` PAIRS per line (the IB P&L rows
     pack a headline figure plus its components), so parse pairwise rather than
-    splitting once. Returns (preamble, book, missing_columns) — older run schemas
+    splitting once. Returns (preamble, book, missing_columns) - older run schemas
     predate several columns and must degrade to blanks instead of raising.
     """
     _ = mtime  # cache key only: reload when the sealed file changes
@@ -293,7 +376,7 @@ def base_layout(fig: go.Figure, height: int) -> None:
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Final Target Book", page_icon="📘", layout="wide")
+st.set_page_config(page_title="Final Target Book", layout="wide")
 
 run_dates = list_run_dates()
 if not run_dates:
@@ -308,6 +391,25 @@ book_path = RUNS_ROOT / run_date / "final" / "final_target_book.csv"
 manifest_path = RUNS_ROOT / run_date / "final" / "final_manifest.json"
 preamble, book, missing_cols = load_book(run_date, book_path.stat().st_mtime)
 manifest = load_manifest(run_date, manifest_path.stat().st_mtime if manifest_path.is_file() else 0.0)
+
+security_metadata = load_security_metadata(security_mapping_signature())
+book = book.merge(security_metadata, on="ticker", how="left", suffixes=("", "_map"))
+for col in ("company_name", "industry"):
+    if col not in book.columns:
+        book[col] = ""
+    book[col] = book[col].fillna("").astype(str).str.strip()
+    mapped_col = f"{col}_map"
+    if mapped_col in book.columns:
+        book[col] = book[col].where(book[col].ne(""), book[mapped_col].fillna("").astype(str).str.strip())
+        book = book.drop(columns=[mapped_col])
+score_path = RUNS_ROOT / run_date / "stocks_scores.csv"
+score_metadata = load_score_metadata(
+    run_date, score_path.stat().st_mtime if score_path.is_file() else 0.0
+)
+book = book.merge(score_metadata.rename(columns={"industry": "score_industry"}), on="ticker", how="left")
+book["score_industry"] = book["score_industry"].fillna("").astype(str).str.strip()
+book["industry"] = book["score_industry"].where(book["score_industry"].ne(""), book["industry"])
+book = book.drop(columns=["score_industry"])
 
 run_ts = pd.Timestamp(run_date)
 book["earnings_in_days"] = (book["next_earnings_date"] - run_ts).dt.days
@@ -325,7 +427,7 @@ else:
     book["avg_cost_price"] = pd.NA
 
 # --- Header -----------------------------------------------------------------
-st.title(f"Final Target Book — {run_date}")
+st.title(f"Final Target Book - {run_date}")
 
 acceptance = manifest.get("acceptance", "UNKNOWN")
 # WARN checks are advisory diagnostics (they never gate acceptance) and must not
@@ -346,27 +448,27 @@ actual_sha = file_sha256(str(book_path), book_path.stat().st_mtime)
 sha_verified = bool(recorded_sha) and recorded_sha == actual_sha
 
 if not manifest:
-    st.error("Manifest missing or empty: final_manifest.json not found for this run — "
-             "the book cannot be verified and must be treated as unsealed.", icon="⚠️")
+    st.error("Manifest missing or empty: final_manifest.json not found for this run - "
+             "the book cannot be verified and must be treated as unsealed.")
 elif recorded_sha and not sha_verified:
-    st.error(f"Integrity error: final_target_book.csv sha256 {actual_sha[:16]}… does not "
-             f"match the manifest-recorded {recorded_sha[:16]}… — "
-             "the displayed book is not the sealed book.", icon="⚠️")
+    st.error(f"Integrity error: final_target_book.csv sha256 {actual_sha[:16]}... does not "
+             f"match the manifest-recorded {recorded_sha[:16]}... - "
+             "the displayed book is not the sealed book.")
 elif acceptance == "PASS" and not failed_checks:
     seal = "sha256 verified" if sha_verified else "NO sha recorded in manifest (unverifiable)"
-    body = (f"Manifest acceptance: PASS — {len(manifest.get('checks', []))} checks, {seal}, "
+    body = (f"Manifest acceptance: PASS - {len(manifest.get('checks', []))} checks, {seal}, "
             f"generated {manifest.get('generated_at', 'n/a')}")
-    (st.success if sha_verified else st.warning)(body, icon="✅" if sha_verified else "⚠️")
+    (st.success if sha_verified else st.warning)(body)
     if warn_checks:
-        st.warning(f"Advisory diagnostics (non-gating): {warn_checks}", icon="ℹ️")
+        st.warning(f"Advisory diagnostics (non-gating): {warn_checks}")
 else:
-    st.error(f"Manifest acceptance: {acceptance} — failing checks: {failed_checks}", icon="⚠️")
+    st.error(f"Manifest acceptance: {acceptance} - failing checks: {failed_checks}")
 
 # The manifest hashes only the book; ledger/DB-sourced panels are not covered by it.
 if missing_cols:
     st.warning(
-        f"This run predates the current book schema — {len(missing_cols)} column(s) are absent "
-        f"and render blank: {', '.join(missing_cols)}.", icon="ℹ️")
+        f"This run predates the current book schema - {len(missing_cols)} column(s) are absent "
+        f"and render blank: {', '.join(missing_cols)}.")
 
 # --- Regime strip -----------------------------------------------------------
 def fmt_regime(label: str) -> str:
@@ -383,7 +485,7 @@ def regime_delta(top_prob: object, confidence: object) -> str:
         parts.append(f"top prob {float(top_prob):.1%}")  # type: ignore[arg-type]
     if confidence is not None and bool(pd.notna(confidence)):
         parts.append(f"conf {float(confidence):.1%}")  # type: ignore[arg-type]
-    return " · ".join(parts)
+    return " - ".join(parts)
 
 
 # V1 top probabilities come from the serving DB decision row; only trust them when
@@ -431,15 +533,15 @@ k[1].metric("Equity gross", f"{book['weight'].sum() - cash_weight:.2%}",
             f"{book['weight'].sum():.2%} incl. CASH", delta_color="off")
 k[2].metric("CASH weight", f"{cash_weight:.2%}")
 k[3].metric("IB holdings", int(is_ib.sum()))
-k[4].metric("IB ∩ target", int(overlap.sum()))
-k[5].metric("Earnings ≤ 7d", int(earnings_soon))
+k[4].metric("IB & target", int(overlap.sum()))
+k[5].metric("Earnings <= 7d", int(earnings_soon))
 
 st.divider()
 
 # --- IB realized P&L (account-level, from the run's normalized IB trades) -----
 st.subheader("IB realized P&L")
 
-# The sealed preamble carries IB's own statement figures — those are authoritative.
+# The sealed preamble carries IB's own statement figures - those are authoritative.
 # Summing broker_trades.realized_pl reproduces only the trade-level short-term
 # component (it excludes dividends and broker interest), so it must not headline.
 sealed_realized_mtd = preamble_float(preamble, "ib_realized_profit_loss_mtd")
@@ -449,13 +551,13 @@ sealed_mtm_ytd = preamble_float(preamble, "ib_mark_to_market_ytd_profit")
 
 if sealed_realized_mtd is not None or sealed_realized_ytd is not None:
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Realized P&L — MTD",
+    s1.metric("Realized P&L - MTD",
               f"${sealed_realized_mtd:,.2f}" if sealed_realized_mtd is not None else "n/a")
-    s2.metric("Realized P&L — YTD",
+    s2.metric("Realized P&L - YTD",
               f"${sealed_realized_ytd:,.2f}" if sealed_realized_ytd is not None else "n/a")
-    s3.metric("Mark-to-market — MTD",
+    s3.metric("Mark-to-market - MTD",
               f"${sealed_mtm_mtd:,.2f}" if sealed_mtm_mtd is not None else "n/a")
-    s4.metric("Mark-to-market — YTD",
+    s4.metric("Mark-to-market - YTD",
               f"${sealed_mtm_ytd:,.2f}" if sealed_mtm_ytd is not None else "n/a")
 
     def component_line(period: str) -> str:
@@ -466,11 +568,11 @@ if sealed_realized_mtd is not None or sealed_realized_ytd is not None:
             value = preamble_float(preamble, f"{key}_{period}")
             if value is not None:
                 parts.append(f"{label} ${value:,.2f}")
-        return " · ".join(parts)
+        return " - ".join(parts)
 
     st.caption(
         f"IB statement figures sealed in the book preamble (as of "
-        f"{preamble.get('ib_profit_as_of_date', 'n/a')}) — the authoritative account numbers.  \n"
+        f"{preamble.get('ib_profit_as_of_date', 'n/a')}) - the authoritative account numbers.  \n"
         f"MTD components: {component_line('mtd') or 'n/a'}  \n"
         f"YTD components: {component_line('ytd') or 'n/a'}"
     )
@@ -487,8 +589,8 @@ else:
     ]
     mtd_trades = ytd_trades.loc[ytd_trades["trade_date"].dt.month.eq(run_ts.month)]
     pl1, pl2 = st.columns(2)
-    pl1.metric("Trade realized — MTD", f"${mtd_trades['realized_pl'].sum():,.2f}")
-    pl2.metric("Trade realized — YTD", f"${ytd_trades['realized_pl'].sum():,.2f}")
+    pl1.metric("Trade realized - MTD", f"${mtd_trades['realized_pl'].sum():,.2f}")
+    pl2.metric("Trade realized - YTD", f"${ytd_trades['realized_pl'].sum():,.2f}")
     with st.expander("Per-symbol breakdown"):
         per_symbol = (
             ytd_trades.groupby("symbol")
@@ -511,16 +613,16 @@ else:
         )
     accounts = sorted(str(a) for a in ytd_trades["account"].dropna().unique())
     st.caption(
-        f"Per-trade `realized_pl` by trade date ≤ {run_date}, all asset categories "
+        f"Per-trade `realized_pl` by trade date <= {run_date}, all asset categories "
         f"(stocks, options, crypto) across account(s) {', '.join(accounts) or 'n/a'}. "
-        f"This is trade-level attribution only — it excludes dividends and broker interest, "
+        f"This is trade-level attribution only - it excludes dividends and broker interest, "
         f"so it will NOT tie to the sealed IB realized total above."
     )
 
 st.divider()
 
 # --- IB positions vs account value ---------------------------------------------
-st.subheader("IB positions — cost vs market value")
+st.subheader("IB positions - cost vs market value")
 if not holdings_path.is_file():
     st.info("No ledger/holding_state.csv in this run (the ledger only runs on the strategic cadence).")
 else:
@@ -528,8 +630,7 @@ else:
     cash = load_ending_cash(run_date, cash_path.stat().st_mtime) if cash_path.is_file() else 0.0
     account_value = float(holdings["market_value"].sum()) + cash
     if account_value <= 0:  # never divide by a zero/absent account value
-        st.warning("Account value is zero or unavailable; percentage-of-account figures are hidden.",
-                   icon="⚠️")
+        st.warning("Account value is zero or unavailable; percentage-of-account figures are hidden.")
 
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("Account value", f"${account_value:,.0f}")
@@ -618,10 +719,10 @@ scoped: pd.DataFrame = book.loc[mask].copy()
 st.divider()
 
 # --- Book table -----------------------------------------------------------------
-st.subheader("Book table")
+st.subheader("Target Portfolio + IB positions")
 
 TABLE_COLUMNS = [
-    "ticker", "weight", "IB_quantity", "earnings_in_days", "next_earnings_date",
+    "ticker", "company_name", "weight", "IB_quantity", "earnings_in_days", "next_earnings_date",
     "sector", "rating", "internal_state", "action_state",
     "benchmark_ticker", "rel_ret_5d", "rel_ret_20d", "avg_cost_price", "current_price",
     "ma50", "ma200", "price_band_status",
@@ -701,12 +802,66 @@ st.dataframe(styler, width="stretch", height=min(46 + 35 * len(table), 900))
 
 _diag = table["price_band_status"].eq("diagnostic_only_missing_intrinsic").sum()
 st.caption(
-    f"`current_price` is green-bold when ≤ `starter_band_high` and filled green when ≤ "
-    f"`add_band_high` — the test is the band's UPPER edge only, so a price that has fallen "
+    f"`current_price` is green-bold when <= `starter_band_high` and filled green when <= "
+    f"`add_band_high` - the test is the band's UPPER edge only, so a price that has fallen "
     f"*below* the band also colors. Check `price_band_status`: "
     f"{_diag} of {len(table)} shown rows are `diagnostic_only_missing_intrinsic` "
-    f"(band derived from market reference, no intrinsic valuation — not an actionable level).  \n"
-    f"Source: `{book_path}` · rows {len(book)} · sha256 {actual_sha[:16]}… "
+    f"(band derived from market reference, no intrinsic valuation - not an actionable level).  \n"
+    f"Source: `{book_path}` - rows {len(book)} - sha256 {actual_sha[:16]}... "
     f"({'verified against manifest' if sha_verified else 'NOT VERIFIED'}). "
-    f"The manifest hashes the book only — ledger, cash and DB panels above are not covered by it."
+    f"The manifest hashes the book only - ledger, cash and DB panels above are not covered by it."
 )
+
+
+# --- Top normalized-score table ---------------------------------------------
+st.divider()
+title_col, control_col = st.columns([3, 1])
+with title_col:
+    st.subheader("Top normalized-score names")
+with control_col:
+    top_n = int(st.selectbox(
+        "Number of names", options=[10, 20, 30, 40, 50], index=0, key="top_n_names"
+    ))
+
+# final_score is the calibrated common-scale score used for cross-sector ranking.
+ranked = scoped.loc[~scoped["ticker"].eq("CASH")].copy()
+ranked["normalized_score"] = pd.to_numeric(ranked["final_score"], errors="coerce")
+ranked = (
+    ranked.loc[ranked["normalized_score"].notna()]
+    .sort_values(["normalized_score", "ticker"], ascending=[False, True])
+    .head(top_n)
+    .reset_index(drop=True)
+)
+TOP_TABLE_COLUMNS = [
+    "ticker", "company_name", "normalized_score", "earnings_in_days", "next_earnings_date",
+    "sector", "industry", "internal_state", "action_state", "current_price",
+    "starter_band_low", "starter_band_high", "add_band_low", "add_band_high",
+]
+top_table = ranked.loc[:, TOP_TABLE_COLUMNS]
+if top_table.empty:
+    st.info("No scored rows are available for the current view and sector filters.")
+else:
+    top_styler = top_table.style.format({
+        "normalized_score": "{:.4f}",
+        "earnings_in_days": "{:.0f}",
+        "current_price": "{:,.2f}",
+        "starter_band_low": "{:,.2f}", "starter_band_high": "{:,.2f}",
+        "add_band_low": "{:,.2f}", "add_band_high": "{:,.2f}",
+        "next_earnings_date": lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "",
+    }, na_rep="")
+    top_styler = top_styler.map(style_internal, subset=["internal_state"])
+    top_styler = top_styler.map(style_action, subset=["action_state"])
+    st.dataframe(top_styler, width="stretch", height=min(46 + 35 * len(top_table), 900))
+    st.caption(
+        f"Top {len(top_table)} rows in the current view, sorted descending by the canonical "
+        f"calibrated `final_score` (shown as normalized score)."
+    )
+
+
+
+
+
+
+
+
+

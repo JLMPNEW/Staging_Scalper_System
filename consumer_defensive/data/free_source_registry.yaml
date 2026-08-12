@@ -1,0 +1,297 @@
+sources:
+  - source_id: consumer_defensive_current_universe
+    stage: security_master
+    source_name: Consumer Defensive reviewed current universe
+    source_owner: internal
+    source_type: local_csv
+    base_url: "ticker_mapping/consumer_defensive.csv"
+    refresh_frequency: manual_review
+    data_owner: internal
+    raw_schema: consumer_defensive_current_universe_csv
+    canonical_tables: [dim_company, dim_security, dim_consumer_defensive_taxonomy, dim_universe_membership]
+    feature_stages: [security_master]
+    subsector_scope: consumer_defensive
+    priority: 1
+    status: active
+    notes: Authoritative current source; Stage 2 owns ingestion.
+
+  - source_id: consumer_defensive_historical_membership_seed
+    stage: security_master
+    source_name: Retired Consumer Defensive historical-membership contract
+    source_owner: internal
+    source_type: retired_contract
+    base_url: "norgate://us-equities"
+    refresh_frequency: manual_review
+    data_owner: internal
+    raw_schema: retired
+    canonical_tables: []
+    feature_stages: [security_master, survivorship_backfill]
+    subsector_scope: consumer_defensive
+    priority: 2
+    status: retired
+    notes: Superseded by norgate_us_equities_pit_membership in data/stage2_source_registry.yaml; retained only for historical run provenance.
+
+  - source_id: consumer_defensive_ticker_aliases_reviewed
+    stage: security_master
+    source_name: Consumer Defensive reviewed ticker-lineage aliases
+    source_owner: internal
+    source_type: local_csv
+    base_url: "consumer_defensive/system_csvs/consumer_defensive_ticker_aliases.csv"
+    refresh_frequency: manual_review
+    data_owner: internal
+    raw_schema: consumer_defensive_ticker_aliases_csv
+    canonical_tables: [dim_security_alias]
+    feature_stages: [security_master, survivorship_backfill]
+    subsector_scope: consumer_defensive
+    priority: 2
+    status: active
+
+  - source_id: consumer_defensive_security_events_reviewed
+    stage: security_master
+    source_name: Consumer Defensive reviewed lineage security events
+    source_owner: internal
+    source_type: local_csv
+    base_url: "consumer_defensive/system_csvs/consumer_defensive_security_events.csv"
+    refresh_frequency: event_driven_manual_review
+    data_owner: internal
+    raw_schema: consumer_defensive_security_events_csv
+    canonical_tables: [fact_security_event]
+    feature_stages: [security_master, survivorship_backfill]
+    subsector_scope: consumer_defensive
+    priority: 2
+    status: active
+
+  - source_id: consumer_defensive_terminal_events_reviewed
+    stage: market_data
+    source_name: Consumer Defensive reviewed terminal-event ledger
+    source_owner: internal_review_of_primary_transaction_documents
+    source_type: local_csv
+    base_url: "consumer_defensive/system_csvs/consumer_defensive_terminal_events.csv"
+    refresh_frequency: event_driven_manual_review
+    data_owner: internal
+    raw_schema: consumer_defensive_terminal_events_csv
+    canonical_tables: [fact_security_event, fact_terminal_event_reconciliation]
+    feature_stages: [market_data, survivorship_backfill, calibration_targets]
+    subsector_scope: consumer_defensive
+    priority: 3
+    status: active
+    notes: Fixed cash and stock terms come from primary filings; unresolved contingent value is never imputed.
+
+  - source_id: sec_company_tickers
+    stage: security_master
+    source_name: SEC company ticker mapping
+    source_owner: SEC
+    source_type: rest_json
+    base_url: "https://www.sec.gov/files/company_tickers_exchange.json"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: company_tickers_exchange_json
+    canonical_tables: [dim_company, dim_security, dim_identifier]
+    feature_stages: [security_master]
+    subsector_scope: consumer_defensive
+    priority: 10
+    status: active
+
+  - source_id: nasdaq_trader_symbol_directory
+    stage: security_master
+    source_name: Nasdaq Trader symbol directory
+    source_owner: Nasdaq Trader
+    source_type: text_file
+    base_url: "https://www.nasdaqtrader.com/dynamic/SymDir/"
+    documentation_url: "https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs"
+    refresh_frequency: daily
+    data_owner: Nasdaq
+    raw_schema: nasdaqlisted_otherlisted_pipe_text
+    canonical_tables: [dim_security]
+    feature_stages: [security_master]
+    subsector_scope: consumer_defensive
+    priority: 20
+    status: active
+
+  - source_id: yahoo_finance_adjusted
+    stage: market_data
+    source_name: Yahoo Finance adjusted chart data
+    source_owner: Yahoo Finance
+    source_type: rest_json
+    base_url: "https://query1.finance.yahoo.com/v8/finance/chart/"
+    refresh_frequency: daily
+    data_owner: Yahoo
+    raw_schema: yahoo_chart_json
+    canonical_tables: [fact_price_ohlcv, fact_corporate_action]
+    feature_stages: [market_data, technical_features]
+    subsector_scope: consumer_defensive
+    priority: 30
+    status: active
+
+  - source_id: norgate_us_equities_total_return
+    stage: market_data
+    source_name: Norgate US equities total-return history
+    source_owner: Norgate Data
+    source_type: local_licensed_database
+    base_url: local_norgate_database
+    refresh_frequency: manual
+    data_owner: Norgate Data
+    raw_schema: norgate_us_equities
+    canonical_tables: [fact_price_ohlcv, fact_corporate_action]
+    feature_stages: [market_data, survivorship_backfill]
+    subsector_scope: consumer_defensive
+    priority: 40
+    status: active
+    notes: Intended for historical and delisted coverage; membership history must be separately verified.
+
+  - source_id: yahoo_fx_rates
+    stage: sec_fundamentals
+    source_name: Yahoo Finance FX chart data
+    source_owner: Yahoo Finance
+    source_type: rest_json
+    base_url: "https://query1.finance.yahoo.com/v8/finance/chart/"
+    refresh_frequency: daily
+    data_owner: Yahoo
+    raw_schema: yahoo_fx_chart_json
+    canonical_tables: [fact_fx_rate]
+    feature_stages: [financial_features, valuation_features]
+    subsector_scope: consumer_defensive
+    priority: 32
+    status: active
+
+  - source_id: sec_submissions
+    stage: sec_fundamentals
+    source_name: SEC submissions API
+    source_owner: SEC
+    source_type: rest_json
+    base_url: "https://data.sec.gov/submissions/"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: sec_submissions_json
+    canonical_tables: [fact_sec_filing]
+    feature_stages: [sec_fundamentals, dedicated_parser]
+    subsector_scope: consumer_defensive
+    priority: 40
+    status: active
+
+  - source_id: sec_companyfacts
+    stage: sec_fundamentals
+    source_name: SEC companyfacts API
+    source_owner: SEC
+    source_type: rest_json
+    base_url: "https://data.sec.gov/api/xbrl/companyfacts/"
+    documentation_url: "https://www.sec.gov/search-filings/edgar-application-programming-interfaces"
+    refresh_frequency: quarterly
+    data_owner: SEC
+    raw_schema: sec_companyfacts_json
+    canonical_tables: [fact_sec_xbrl_fact_raw, fact_financial_statement_canonical]
+    feature_stages: [sec_fundamentals, financial_features]
+    subsector_scope: consumer_defensive
+    priority: 50
+    status: active
+
+  - source_id: sec_inline_xbrl_fallback
+    stage: sec_fundamentals
+    source_name: SEC inline XBRL filing fallback
+    source_owner: SEC
+    source_type: html_inline_xbrl
+    base_url: "https://www.sec.gov/Archives/edgar/data/"
+    refresh_frequency: on_gap_detection
+    data_owner: SEC
+    raw_schema: sec_inline_xbrl_html
+    canonical_tables: [fact_sec_xbrl_fact_raw]
+    feature_stages: [sec_fundamentals, dedicated_parser]
+    subsector_scope: consumer_defensive
+    priority: 51
+    status: active
+
+  - source_id: sec_ownership_direct
+    stage: positioning
+    source_name: SEC direct Forms 3 4 and 5
+    source_owner: SEC
+    source_type: rest_json_archive_xml
+    base_url: "https://data.sec.gov/submissions/"
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: sec_ownership_xml
+    canonical_tables: [fact_sec_ownership_transaction]
+    feature_stages: [positioning]
+    subsector_scope: consumer_defensive
+    priority: 60
+    status: active
+
+  - source_id: sec_insider_upstream
+    stage: positioning
+    source_name: SEC Form 4 upstream database
+    source_owner: local_SEC_FORM4_Runner
+    source_type: sqlite_read_only
+    base_url: "C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite"
+    refresh_frequency: daily
+    data_owner: SEC
+    raw_schema: sec_insider_sqlite
+    canonical_tables: [fact_sec_ownership_transaction]
+    feature_stages: [positioning]
+    subsector_scope: consumer_defensive
+    priority: 61
+    status: active
+
+  - source_id: market_positioning_upstream
+    stage: positioning
+    source_name: Normalized 13F FINRA and IBKR positioning database
+    source_owner: market_positioning_pipeline
+    source_type: sqlite_read_only
+    base_url: "C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite"
+    refresh_frequency: daily
+    data_owner: upstream_positioning_sources
+    raw_schema: market_positioning_sqlite
+    canonical_tables: [fact_13f_positioning, fact_short_interest, fact_borrow_snapshot]
+    feature_stages: [positioning]
+    subsector_scope: consumer_defensive
+    priority: 70
+    status: active
+
+  - source_id: recognized_etf_index_membership_history
+    stage: security_master
+    source_name: Retired generic ETF/index membership contract
+    source_owner: internal
+    source_type: retired_contract
+    base_url: "norgate://us-equities"
+    refresh_frequency: monthly
+    data_owner: external
+    raw_schema: pit_membership_intervals
+    canonical_tables: [dim_universe_membership]
+    feature_stages: [security_master, survivorship_backfill]
+    subsector_scope: consumer_defensive
+    priority: 15
+    status: retired
+    notes: Superseded by the active Norgate PIT source in data/stage2_source_registry.yaml; retained only for historical run provenance.
+
+  - source_id: consumer_defensive_disclosure_census
+    stage: sec_fundamentals
+    source_name: Consumer Defensive discovery-only disclosure term census
+    source_owner: internal
+    source_type: derived_sec_filing_term_search
+    base_url: "sec-cache://consumer-defensive-disclosure-census"
+    refresh_frequency: on_stage4_refresh
+    data_owner: SEC issuers
+    raw_schema: accepted_time_filing_text_term_hits
+    canonical_tables: [fact_specialized_metric_disclosure_census, fact_specialized_metric_disclosure_summary]
+    feature_stages: [disclosure_feasibility]
+    subsector_scope: consumer_defensive
+    priority: 170
+    status: active
+    notes: High-recall phrase discovery only; never represents dedicated-parser extraction or a numeric specialized observation.
+
+  - source_id: shared_dedicated_sec_parser
+    stage: specialized_metrics
+    source_name: Shared sector-neutral dedicated SEC parser
+    source_owner: internal
+    source_type: derived_sec_filing_evidence
+    base_url: "sec-cache://dedicated-parser"
+    refresh_frequency: daily
+    data_owner: SEC issuers
+    raw_schema: sec_parser_metric_evidence_shadow
+    staging_tables: [sec_parser_metric_evidence_shadow]
+    canonical_tables: [fact_specialized_metric_observation]
+    feature_stages: [specialized_metrics]
+    subsector_scope: consumer_defensive
+    priority: 175
+    status: planned
+    notes: Stage 6B future source; Stage 4 census rows must never use this source ID.

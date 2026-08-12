@@ -3,11 +3,12 @@ from __future__ import annotations
 import csv
 import json
 import math
-import os
 import sqlite3
 from collections import Counter
 from datetime import date
 from pathlib import Path
+
+from dedicated_parser.atomic_io import atomic_text_writer
 from typing import Any, Iterable, cast
 
 from dedicated_parser.contracts import AdapterRegistry
@@ -651,8 +652,6 @@ def write_assessment_csv(
     rows: Iterable[dict[str, Any]],
 ) -> None:
     records = list(rows)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
     columns = (
         list(records[0])
         if records
@@ -666,8 +665,7 @@ def write_assessment_csv(
             "status_reason",
         ]
     )
-    with temporary.open("w", encoding="utf-8", newline="") as handle:
+    with atomic_text_writer(path, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(records)
-    os.replace(temporary, path)

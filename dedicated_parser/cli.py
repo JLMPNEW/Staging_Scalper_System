@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sqlite3
 from contextlib import closing
 from dataclasses import asdict
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from dedicated_parser.adapters import load_registry
+from dedicated_parser.atomic_io import atomic_write_text
 from dedicated_parser.adjudication import (
     build_adjudication_skeleton,
     write_adjudication_skeleton,
@@ -144,19 +144,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=30.0,
     )
+    parser.add_argument(
+        '--expected-ingestion-config-sha256',default='',
+        help=(
+            'Independent expected SEC ingestion-config SHA-256; required '
+            'for Consumer Defensive catalog planning.'
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def _write_json(path: Path | None, payload: object) -> None:
     if path is None:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
+    atomic_write_text(
+        path,
         json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
-        encoding="utf-8",
     )
-    os.replace(temporary, path)
 
 
 def _ticker_list(raw: object) -> list[str]:
@@ -379,6 +383,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             "--accessions": bool(args.accessions),
             "--source-manifest": args.source_manifest is not None,
             "--require-complete-cache": args.require_complete_cache,
+            "--expected-ingestion-config-sha256": bool(
+                args.expected_ingestion_config_sha256
+            ),
         }
         invalid = [name for name, enabled in incompatible.items() if enabled]
         if invalid:
@@ -397,7 +404,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     _validate_args(args)
     registry = load_registry(args.adapter)
-    _export_policy_corpus(registry)
     source_manifest = load_source_manifest(args.source_manifest) if args.source_manifest is not None else None
     tickers = (
         list(source_manifest.tickers)
@@ -431,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=args.reassess_run_id,
                 )
             )
+        _export_policy_corpus(registry)
         payload = {
             "mode": "assessment_only",
             "run_id": args.reassess_run_id,
@@ -469,6 +476,9 @@ def main(argv: list[str] | None = None) -> int:
                 max_documents_per_filing=args.max_documents_per_filing,
                 force=args.force,
                 all_metrics=args.all_metrics,
+                expected_ingestion_config_sha256=(
+                    args.expected_ingestion_config_sha256 or None
+                ),
                 document_scope=(source_manifest.documents if source_manifest is not None else None),
                 direct_filings=(
                     source_manifest.direct_filings
@@ -506,6 +516,9 @@ def main(argv: list[str] | None = None) -> int:
             resume=not args.no_resume,
             force=args.force,
             all_metrics=args.all_metrics,
+            expected_ingestion_config_sha256=(
+                args.expected_ingestion_config_sha256 or None
+            ),
             enable_arelle=not args.disable_arelle,
             enable_edgartools=not args.disable_edgartools,
             enable_pdf_ocr=args.enable_pdf_ocr,
@@ -528,6 +541,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             catalog_documents_enabled=not args.plan_only,
         )
+        # Generated policy artifacts are external mutations. Publish only
+        # after sector-specific DB/config/seal validation and planning succeed.
+        _export_policy_corpus(registry)
         plan_payload = _plan_summary_payload(summary)
         plan_payload["execution_scope"] = {
             "max_filings_per_ticker": args.max_filings_per_ticker,

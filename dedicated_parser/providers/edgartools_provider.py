@@ -14,7 +14,20 @@ def inspect_full_submission(
 ) -> dict[str, Any]:
     """Read local SGML metadata through EdgarTools without network acquisition."""
 
-    worker_state_dir = state_dir / f"worker-{os.getpid()}"
+    state_root = state_dir.resolve(strict=False)
+    state_root.mkdir(parents=True, exist_ok=True)
+    state_root = state_root.resolve(strict=True)
+    worker_state_dir = state_root / f"worker-{os.getpid()}"
+    if os.path.lexists(worker_state_dir):
+        resolved_worker = worker_state_dir.resolve(strict=True)
+        if resolved_worker != worker_state_dir or not resolved_worker.is_dir():
+            raise RuntimeError(
+                'EdgarTools worker state directory has a symlinked identity'
+            )
+    else:
+        worker_state_dir.mkdir()
+        if worker_state_dir.resolve(strict=True) != worker_state_dir:
+            raise RuntimeError('EdgarTools worker state directory escaped its root')
     # Unconditional assignment: setdefault is a no-op when the host already
     # exported these, which would leave edgartools network-capable and point
     # every worker at one shared external data dir (concurrent-write races).
@@ -31,7 +44,6 @@ def inspect_full_submission(
                 "status": "dependency_missing",
             }
         else:
-            worker_state_dir.mkdir(parents=True, exist_ok=True)
             try:
                 filing = FilingSGML.from_source(path)
                 attachments = [

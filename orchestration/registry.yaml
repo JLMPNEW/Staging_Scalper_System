@@ -134,6 +134,9 @@ sectors:
     # provenance-ledger row and reconcile the flag against the database (finding 1).
     args_template: ["--asof", "{date}", "--oos-score-valid"]
     force_args: ["--force-refresh"]
+    # Retry through the med runner's own manifest. This preserves successful
+    # network steps (notably FDA) and resumes at the first required failure.
+    retry_args: ["--resume"]
     publish_glob: "output/med_devices_reports/score_review_pack/{date}/med_device_daily_composite_scores.csv"
     publish_date_format: "%Y-%m-%d"
     # med_device_daily_composite_scores.csv carries both oos_score_valid_flag and

@@ -1,0 +1,56 @@
+policy_version: consumer_defensive_market_data_v1
+model_family: consumer_defensive
+history_start: "2017-11-28"
+history_buffer_calendar_days: 400
+requested_snapshot_start: "2019-01-02"
+
+sources:
+  active_primary: yahoo_finance_adjusted
+  historical_delisted_primary: norgate_us_equities_total_return
+  active_whole_ticker_fallback: norgate_us_equities_total_return
+  source_selection_granularity: ticker
+  cross_source_date_splicing_allowed: false
+
+benchmarks:
+  sector: XLP
+  broad: SPY
+  required_source: yahoo_finance_adjusted
+
+yahoo:
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+  interval: 1d
+  events: "div,splits"
+  include_adjusted_close: true
+  timeout_sec: 30
+  max_retries: 3
+  parallel_workers: 4
+  user_agent: "${CONSUMER_DEFENSIVE_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  cache_dir: "${CONSUMER_DEFENSIVE_YAHOO_CACHE_DIR:-../../output/consumer_defensive/cache/yahoo_adjusted}"
+
+norgate:
+  load_active_fallback: true
+  load_delisted: true
+  adjustment: TOTALRETURN
+
+selection:
+  start_tolerance_calendar_days: 10
+  active_max_staleness_calendar_days: 7
+  delisted_end_tolerance_calendar_days: 7
+  minimum_rows_partial: 63
+  minimum_rows_full: 252
+  first_snapshot_minimum_observations: 1
+  maximum_missing_trading_day_ratio: 0.02
+  missing_trading_day_warning_ratio: 0.01
+  maximum_consecutive_missing_trading_days: 5
+  recent_listing_short_history_is_warning: true
+
+features:
+  adv_days: 63
+  momentum_short_days: 63
+  momentum_long_days: 126
+  volatility_days: 63
+  drawdown_days: 252
+  benchmark: XLP
+
+outputs:
+  root: "${CONSUMER_DEFENSIVE_STAGE3_OUTPUT_DIR:-../../output/consumer_defensive/stage3}"

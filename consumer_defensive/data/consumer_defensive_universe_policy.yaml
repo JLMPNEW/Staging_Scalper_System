@@ -1,0 +1,67 @@
+policy_version: consumer_defensive_universe_v1
+model_family: consumer_defensive
+internal_sector: Consumer Defensive
+portfolio_sector: Consumer Staples
+authoritative_current_csv: ../../ticker_mapping/consumer_defensive.csv
+expected_current_rows: 108
+history_start: "2017-11-28"
+requested_snapshot_start: "2019-01-02"
+
+recognized_membership_required: true
+recognized_membership_source_id: norgate_us_equities_pit_membership
+approved_membership_vehicles:
+  - vehicle_id: russell_3000
+    display_name: Russell 3000
+    norgate_index_name: Russell 3000
+    norgate_watchlist_name: Russell 3000 Current & Past
+    vehicle_type: index
+  - vehicle_id: sp_composite_1500
+    display_name: S&P Composite 1500
+    norgate_index_name: S&P Composite 1500
+    norgate_watchlist_name: S&P Composite 1500 Current & Past
+    vehicle_type: index
+  - vehicle_id: nyse_composite
+    display_name: NYSE Composite
+    norgate_index_name: NYSE Composite
+    norgate_watchlist_name: NYSE Composite Current & Past
+    vehicle_type: index
+  - vehicle_id: nasdaq_composite
+    display_name: Nasdaq Composite
+    norgate_index_name: Nasdaq Composite
+    norgate_watchlist_name: Nasdaq Composite Current & Past
+    vehicle_type: index
+
+current_holdings_validation_only: [XLP, IYK, FSTA]
+major_exchange_required: true
+minimum_price: 3.0
+core_minimum_median_dollar_volume_63d: 5000000
+support_minimum_median_dollar_volume_63d: 1000000
+allowed_security_types: [Common Stock, Ordinary Shares, ADR/ADS]
+active_listing_statuses: [active]
+
+lineage_aliases_csv: ../system_csvs/consumer_defensive_ticker_aliases.csv
+security_events_csv: ../system_csvs/consumer_defensive_security_events.csv
+delisted_seed_csv: ../system_csvs/consumer_defensive_delisted.csv
+terminal_event_policy: consumer_defensive_terminal_event_policy.yaml
+historical_identifier_csv: consumer_defensive_historical_issuer_identifiers.csv
+expected_historical_identifier_rows: 11
+delisted_security_exclusions: [CCE, DPS]
+delisted_exclusion_reason: provider_continuous_successor_lineage
+
+cohorts:
+  Beverages:
+    cohort_id: beverages
+    display_name: Beverages
+    expected_current_rows: 22
+  Discount Stores:
+    cohort_id: consumer_staples_distribution_retail
+    display_name: Consumer Staples Distribution & Retail
+    expected_current_rows: 22
+  Household & Personal Products:
+    cohort_id: household_personal_tobacco
+    display_name: Household Personal & Tobacco
+    expected_current_rows: 25
+  Packaged Foods:
+    cohort_id: packaged_foods_agricultural_products
+    display_name: Packaged Foods & Agricultural Products
+    expected_current_rows: 39

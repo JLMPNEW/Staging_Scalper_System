@@ -219,6 +219,7 @@ class Sector:
     daily_post_steps: list[dict[str, Any]]
     timeout_sec: int
     retries: int
+    retry_args: list[str] = field(default_factory=list)
     freshness_probes: list[FreshnessProbe] = field(default_factory=list)
 
 
@@ -382,6 +383,7 @@ def load_registry(path: Path) -> Registry:
                 daily_post_steps=list(entry.get("daily_post_steps") or []),
                 timeout_sec=int(entry.get("timeout_sec", defaults.get("timeout_sec", 21600))),
                 retries=int(entry.get("retries", defaults.get("retries", 1))),
+                retry_args=[str(arg) for arg in _as_list(entry.get("retry_args", defaults.get("retry_args")))],
                 freshness_probes=_parse_freshness_probes(str(entry["name"]), entry.get("freshness_probes")),
             )
         )
@@ -396,6 +398,8 @@ def load_registry(path: Path) -> Registry:
             raise ValueError(f"sector {sector.name}: timeout_sec must be > 0")
         if sector.retries < 0:
             raise ValueError(f"sector {sector.name}: retries must be >= 0")
+        if any(not arg.strip() for arg in sector.retry_args):
+            raise ValueError(f"sector {sector.name}: retry_args cannot contain blank values")
         if sector.staleness_tolerance_days < 0:
             raise ValueError(f"sector {sector.name}: staleness_tolerance_days must be >= 0")
         if sector.backfill_window_days is not None and sector.backfill_window_days < 0:
@@ -943,11 +947,16 @@ class CatchUpPlan:
     best-effort historical backfill groups, newest-first."""
     target: str
     target_missing: bool
-    target_commands: list[list[str]]                       # empty when target already published
+    target_unhealthy: bool
+    target_commands: list[list[str]]  # empty only when target is published and healthy
     backfill_groups: list[tuple[tuple[str, ...], list[list[str]]]]  # (dates, commands), newest-first
     historical_gaps: list[str]
     permanent_gaps: list[str]
     used_native_backfill: bool
+
+    @property
+    def target_needs_run(self) -> bool:
+        return self.target_missing or self.target_unhealthy
 
     @property
     def all_commands(self) -> list[list[str]]:
@@ -964,6 +973,7 @@ class CatchUpPlan:
 def plan_note(plan: CatchUpPlan) -> str:
     return (
         f"target_missing={plan.target_missing}"
+        f" target_unhealthy={plan.target_unhealthy}"
         f" backfill={len(plan.backfill_dates)}"
         f" historical_gaps={len(plan.historical_gaps)}"
         f" permanent_gaps={len(plan.permanent_gaps)}"
@@ -996,8 +1006,12 @@ def build_catch_up_plan(
     # the intended current-session command as historical hours later.
     live_session = live_completed_session or latest_completed_trading_session()
     report = sector_gap_report(reg, sector, target, markers=markers)
+    target_unhealthy = False
+    if not report.target_missing:
+        target_ok, _target_reasons = verify_published_artifact_for_date(sector, target)
+        target_unhealthy = not target_ok
     target_cmds: list[list[str]] = []
-    if report.target_missing:
+    if report.target_missing or target_unhealthy:
         target_cmds.append(
             _catch_up_daily_command(sector, target, force=force, live_completed_session=live_session)
         )
@@ -1029,6 +1043,7 @@ def build_catch_up_plan(
     return CatchUpPlan(
         target=target,
         target_missing=report.target_missing,
+        target_unhealthy=target_unhealthy,
         target_commands=target_cmds,
         backfill_groups=groups,
         historical_gaps=report.historical_gaps,
@@ -2056,7 +2071,7 @@ def run_catch_up_sector(
             return _run_one(sector, command, net_sem=net_sem, logfile=logfile)
 
         # ---- 1) CURRENT TARGET FIRST -------------------------------------- #
-        if plan.target_missing:
+        if plan.target_needs_run:
             target_ok = True
             for command in plan.target_commands:
                 rc = _exec(command)
@@ -2153,10 +2168,20 @@ def _should_retry_rc(rc: int) -> bool:
     return rc not in (0, 124)
 
 
+def _command_for_attempt(sector: Sector, command: list[str], attempt: int) -> list[str]:
+    if attempt <= 1 or not sector.retry_args:
+        return list(command)
+    width = len(sector.retry_args)
+    if any(command[idx : idx + width] == sector.retry_args for idx in range(len(command) - width + 1)):
+        return list(command)
+    return [*command, *sector.retry_args]
+
+
 def _run_one(sector: Sector, command: list[str], *, net_sem: threading.Semaphore | None, logfile) -> int:
     attempts = sector.retries + 1
     rc = 1
     for attempt in range(1, attempts + 1):
+        attempt_command = _command_for_attempt(sector, command, attempt)
         acquired = False
         if sector.network and net_sem is not None:
             net_sem.acquire()
@@ -2164,7 +2189,9 @@ def _run_one(sector: Sector, command: list[str], *, net_sem: threading.Semaphore
         proc: subprocess.Popen[bytes] | None = None
         tracker = _ACTIVE_ORCHESTRATION_LOCK
         try:
-            logfile.write(f"\n=== attempt {attempt}/{attempts}: {subprocess.list2cmdline(command)}\n")
+            logfile.write(
+                f"\n=== attempt {attempt}/{attempts}: {subprocess.list2cmdline(attempt_command)}\n"
+            )
             logfile.flush()
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             child_env = os.environ.copy()
@@ -2174,7 +2201,7 @@ def _run_one(sector: Sector, command: list[str], *, net_sem: threading.Semaphore
             # lock themselves and cannot race a sector refresh.
             child_env["STAGING_ORCHESTRATOR_PID"] = str(os.getpid())
             proc = subprocess.Popen(
-                command,
+                attempt_command,
                 cwd=str(PROJECT_ROOT),
                 stdout=logfile,
                 stderr=subprocess.STDOUT,
@@ -3554,7 +3581,10 @@ def run_selftest() -> int:
         _publish(cus_c, target_cu)
         plan_c = build_catch_up_plan(reg, cus_c, target_cu, force=False,
                                      live_completed_session=target_cu, markers={"sectors": {}})
-        ok("cu_plan_empty_when_current", plan_c.all_commands == [] and not plan_c.target_missing)
+        ok(
+            "cu_plan_empty_when_current",
+            plan_c.all_commands == [] and not plan_c.target_missing and not plan_c.target_unhealthy,
+        )
         res_c = run_catch_up_sector(reg, cus_c, plan_c, run_dir=run_dir_cu, net_sem=None,
                                     log=lambda _m: None, markers_path=markers_path,
                                     runner=lambda _c: 1)  # must never be invoked
@@ -3571,10 +3601,39 @@ def run_selftest() -> int:
         cus_d = _sector(name="cus_d", publish_glob="cud/{date}/t.csv")
         plan_d = build_catch_up_plan(reg, cus_d, target_cu, force=False,
                                      live_completed_session=target_cu, markers={"sectors": {}})
+        ok(
+            "cu_plan_unhealthy_target_is_rerun",
+            plan_d.target_unhealthy and not plan_d.target_missing and bool(plan_d.target_commands),
+        )
         res_d = run_catch_up_sector(reg, cus_d, plan_d, run_dir=run_dir_cu, net_sem=None,
                                     log=lambda _m: None, markers_path=markers_path,
                                     runner=lambda _c: 0)
         ok("cu_exec_unverifiable_target_fails", res_d.status == "FAIL")
+
+        # The same present-but-unhealthy state passes only after the rerun repairs
+        # the current artifact and the normal verification observes that repair.
+        cus_d2 = _sector(name="cus_d2", publish_glob="cud2/{date}/t.csv")
+        bad_dir2 = cu_root / "cud2" / target_cu
+        bad_dir2.mkdir(parents=True, exist_ok=True)
+        (bad_dir2 / "t.csv").write_text(
+            "asof_date,oos_score_valid_flag,ticker\n2026-07-10,1,T0\n", encoding="utf-8"
+        )
+        plan_d2 = build_catch_up_plan(reg, cus_d2, target_cu, force=False,
+                                      live_completed_session=target_cu, markers={"sectors": {}})
+        res_d2 = run_catch_up_sector(
+            reg,
+            cus_d2,
+            plan_d2,
+            run_dir=run_dir_cu,
+            net_sem=None,
+            log=lambda _m: None,
+            markers_path=markers_path,
+            runner=_mk_runner(set(), cus_d2),
+        )
+        ok(
+            "cu_exec_unhealthy_target_repaired",
+            res_d2.status == "PASS" and res_d2.return_codes == [0],
+        )
 
         # {date}-partitioned health manifests are verified PER backfill date (a FAIL
         # per-date manifest turns that date into a recorded gap, not a sector FAIL)
@@ -3655,6 +3714,17 @@ def run_selftest() -> int:
 
     # --- retry policy: success and TIMEOUT are terminal, other failures retry ---
     ok("timeout_not_retried", not _should_retry_rc(124) and not _should_retry_rc(0) and _should_retry_rc(1))
+    retry_sector = Sector(**{**reg.by_name("alpha").__dict__, "retry_args": ["--resume"]})
+    retry_base = ["python", "runner.py", "--asof", "2026-07-17"]
+    ok("retry_args_absent_first_attempt", _command_for_attempt(retry_sector, retry_base, 1) == retry_base)
+    ok(
+        "retry_args_added_after_failure",
+        _command_for_attempt(retry_sector, retry_base, 2) == [*retry_base, "--resume"],
+    )
+    ok(
+        "retry_args_not_duplicated",
+        _command_for_attempt(retry_sector, [*retry_base, "--resume"], 2) == [*retry_base, "--resume"],
+    )
 
     # --- sealed-manifest gate value preserves the BYPASSED distinction ---
     ok("gate_value_bypassed_preserved",

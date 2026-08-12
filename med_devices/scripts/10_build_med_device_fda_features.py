@@ -40,6 +40,7 @@ NON_DATA_QUALITY_REVIEW_REASONS = {
     "regulatory_watch",
     "recent_class_i_recall_watch",
     "recent_death_adverse_event_watch",
+    "adjudicated_serious_product_event_watch",
     "low_fda_mapping_confidence_watch",
     "manual_fda_device_footprint_no_mapped_events",
     "manual_fda_ivd_lab_footprint_no_mapped_events",
@@ -89,6 +90,17 @@ OPTIONAL_FDA_FEATURE_COLUMNS = {
     "fda_signal_reliability": "REAL DEFAULT 0.0",
     "fda_policy_reason": "TEXT DEFAULT ''",
     "class_i_multi_source_recall_count_36m": "INTEGER DEFAULT 0",
+    "fda_adjudication_applied_flag": "INTEGER DEFAULT 0",
+    "fda_adjudicated_event_count_24m": "INTEGER DEFAULT 0",
+    "fda_raw_death_count_24m": "INTEGER DEFAULT 0",
+    "fda_adjudicated_device_death_count_24m": "INTEGER DEFAULT 0",
+    "fda_adjudicated_serious_product_event_count_24m": "INTEGER DEFAULT 0",
+    "fda_adjudicated_non_device_death_count_24m": "INTEGER DEFAULT 0",
+    "fda_scoring_death_count_24m": "INTEGER DEFAULT 0",
+    "fda_scoring_injury_count_24m": "INTEGER DEFAULT 0",
+    "fda_scoring_malfunction_count_24m": "INTEGER DEFAULT 0",
+    "fda_adjudication_status": "TEXT DEFAULT ''",
+    "fda_adjudication_reviewed_at": "TEXT DEFAULT ''",
 }
 FIELDNAMES = [
     "asof_date",
@@ -146,6 +158,17 @@ FIELDNAMES = [
     "fda_mdr_malfunction_count_24m",
     "fda_mdr_malfunction_count_per_category",
     "fda_breadth_adjustment_applied",
+    "fda_adjudication_applied_flag",
+    "fda_adjudicated_event_count_24m",
+    "fda_raw_death_count_24m",
+    "fda_adjudicated_device_death_count_24m",
+    "fda_adjudicated_serious_product_event_count_24m",
+    "fda_adjudicated_non_device_death_count_24m",
+    "fda_scoring_death_count_24m",
+    "fda_scoring_injury_count_24m",
+    "fda_scoring_malfunction_count_24m",
+    "fda_adjudication_status",
+    "fda_adjudication_reviewed_at",
     "fda_signal_mode",
     "fda_signal_direction",
     "fda_signal_reliability",
@@ -246,6 +269,11 @@ class FdaFeatureRow:
     prev_malfunction_count_24m: int = 0
     prev_adverse_event_count_24m: int = 0
     current_adverse_event_count_24m: int = 0
+    prev_scoring_death_count_24m: int = 0
+    prev_scoring_injury_count_24m: int = 0
+    prev_scoring_malfunction_count_24m: int = 0
+    prev_scoring_adverse_event_count_24m: int = 0
+    current_scoring_adverse_event_count_24m: int = 0
     revenue_ttm: float | None = None
     recall_severity_per_billion_revenue: float | None = None
     adverse_event_rate_per_billion_revenue: float | None = None
@@ -278,6 +306,18 @@ class FdaFeatureRow:
     fda_mdr_malfunction_count_24m: int = 0
     fda_mdr_malfunction_count_per_category: float = 0.0
     fda_breadth_adjustment_applied: int = 0
+    fda_adjudication_applied_flag: int = 0
+    fda_adjudicated_event_count_24m: int = 0
+    fda_raw_death_count_24m: int = 0
+    fda_adjudicated_device_death_count_24m: int = 0
+    fda_adjudicated_serious_product_event_count_24m: int = 0
+    fda_adjudicated_non_device_death_count_24m: int = 0
+    fda_scoring_death_count_24m: int = 0
+    fda_scoring_injury_count_24m: int = 0
+    fda_scoring_malfunction_count_24m: int = 0
+    fda_adjudication_status: str = ""
+    fda_adjudication_reviewed_at: str = ""
+    fda_adjudication_details: list[dict[str, Any]] | None = None
     fda_signal_mode: str = FDA_SIGNAL_LEGACY_BROAD
     fda_signal_direction: str = FDA_DIRECTION_POSITIVE
     fda_signal_reliability: float = 1.0
@@ -298,6 +338,29 @@ class FdaFeatureRow:
     next_review_date: str = ""
     manual_evidence_note: str = ""
     payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AdverseEventAdjudication:
+    ticker: str
+    adverse_event_id: str
+    manufacturer_report_id: str
+    expected_raw_death_count: int
+    expected_raw_injury_count: int
+    expected_raw_malfunction_count: int
+    confirmed_device_death_count: int
+    serious_product_event_count: int
+    non_device_death_count: int
+    scoring_death_count: int
+    scoring_injury_count: int
+    scoring_malfunction_count: int
+    causality_status: str
+    root_cause_status: str
+    adjudication_reason: str
+    source_reference: str
+    valid_from: str
+    reviewed_at: str
+    next_review_date: str
 
 
 @dataclass(frozen=True)
@@ -510,7 +573,9 @@ def load_excluded_fda_manufacturer_ids(
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            warn_pit_invariant_violations(row, context="fda_manufacturer_overrides_csv", logger=LOGGER, require_reviewed_at=True)
+            warn_pit_invariant_violations(
+                row, context="fda_manufacturer_overrides_csv", logger=LOGGER, require_reviewed_at=True
+            )
             if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
                 continue
             method = str(row.get("mapping_method") or row.get("method") or "").strip().lower()
@@ -551,15 +616,23 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
         revenue_floor=cfg_float(config, "fda_features.normalization.revenue_floor", 100000000.0),
         recall_decay_half_life_days=cfg_float(config, "fda_features.recall_decay_half_life_days", 730.0),
         innovation_base_score=cfg_float(config, "fda_features.innovation_score.base_score", 25.0),
-        innovation_approval_12m_log_weight=cfg_float(config, "fda_features.innovation_score.approval_12m_log_weight", 24.0),
+        innovation_approval_12m_log_weight=cfg_float(
+            config, "fda_features.innovation_score.approval_12m_log_weight", 24.0
+        ),
         innovation_approval_log_weight=cfg_float(config, "fda_features.innovation_score.approval_log_weight", 18.0),
         innovation_pma_log_weight=cfg_float(config, "fda_features.innovation_score.pma_log_weight", 16.0),
-        innovation_product_code_log_weight=cfg_float(config, "fda_features.innovation_score.product_code_log_weight", 12.0),
-        risk_recall_severity_weight=cfg_float(config, "fda_features.risk_penalties.recall_severity_per_billion_weight", 4.0),
+        innovation_product_code_log_weight=cfg_float(
+            config, "fda_features.innovation_score.product_code_log_weight", 12.0
+        ),
+        risk_recall_severity_weight=cfg_float(
+            config, "fda_features.risk_penalties.recall_severity_per_billion_weight", 4.0
+        ),
         risk_class_i_recall_weight=cfg_float(config, "fda_features.risk_penalties.class_i_recall_weight", 20.0),
         risk_death_per_billion_weight=cfg_float(config, "fda_features.risk_penalties.death_per_billion_weight", 5.0),
         risk_injury_per_billion_weight=cfg_float(config, "fda_features.risk_penalties.injury_per_billion_weight", 0.5),
-        risk_malfunction_per_billion_weight=cfg_float(config, "fda_features.risk_penalties.malfunction_per_billion_weight", 0.1),
+        risk_malfunction_per_billion_weight=cfg_float(
+            config, "fda_features.risk_penalties.malfunction_per_billion_weight", 0.1
+        ),
         risk_adverse_acceleration_per_billion_weight=cfg_float(
             config,
             "fda_features.risk_penalties.adverse_acceleration_per_billion_weight",
@@ -583,7 +656,9 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
         ),
         low_mapping_confidence_is_hard_red=str(
             cfg_get(config, "fda_features.hard_red_flags.low_mapping_confidence_is_hard_red", False)
-        ).strip().lower()
+        )
+        .strip()
+        .lower()
         in {"1", "true", "yes", "y", "on"},
         regulatory_risk_weight=risk_weight,
         regulatory_innovation_weight=innovation_weight,
@@ -595,7 +670,9 @@ def fda_feature_policy(config: dict[str, Any]) -> FdaFeaturePolicy:
         review_required_alpha_cap=cfg_float(config, "fda_features.alpha.review_required_cap", 35.0),
         regulatory_watch_alpha_cap=cfg_float(config, "fda_features.alpha.regulatory_watch_cap", 50.0),
         no_data_default_score=cfg_float(config, "fda_features.alpha.no_data_default_score", 50.0),
-        mapping_confirmed_min_confidence=cfg_float(config, "fda_features.review_state.mapping_confirmed_min_confidence", 95.0),
+        mapping_confirmed_min_confidence=cfg_float(
+            config, "fda_features.review_state.mapping_confirmed_min_confidence", 95.0
+        ),
         open_class_i_12m_confirmed_min_count=int(
             cfg_get(config, "fda_features.review_state.open_class_i_12m_confirmed_min_count", 1)
         ),
@@ -662,9 +739,13 @@ def parse_fda_signal_profile(raw: object, *, default: FdaSignalProfile, context:
         raw.get("safety_direction", default.safety_direction),
         context=f"{context}.safety_direction",
     )
-    innovation_weight = optional_float(raw.get("innovation_weight"), default.innovation_weight, context=f"{context}.innovation_weight")
+    innovation_weight = optional_float(
+        raw.get("innovation_weight"), default.innovation_weight, context=f"{context}.innovation_weight"
+    )
     safety_weight = optional_float(raw.get("safety_weight"), default.safety_weight, context=f"{context}.safety_weight")
-    evidence_weight = optional_float(raw.get("evidence_weight"), default.evidence_weight, context=f"{context}.evidence_weight")
+    evidence_weight = optional_float(
+        raw.get("evidence_weight"), default.evidence_weight, context=f"{context}.evidence_weight"
+    )
     no_data_score = optional_float(raw.get("no_data_score"), default.no_data_score, context=f"{context}.no_data_score")
     if reliability is None or not 0.0 <= reliability <= 1.0:
         raise ValueError(f"{context}.reliability must be in [0, 1]")
@@ -690,10 +771,12 @@ def default_fda_signal_profile(config: dict[str, Any]) -> FdaSignalProfile:
         reliability=cfg_float(config, "fda_features.alpha.default_reliability", 0.35),
         innovation_direction=str(
             cfg_get(config, "fda_features.alpha.default_innovation_direction", FDA_DIRECTION_NEUTRAL)
-        ).strip().lower(),
-        safety_direction=str(
-            cfg_get(config, "fda_features.alpha.default_safety_direction", FDA_DIRECTION_POSITIVE)
-        ).strip().lower(),
+        )
+        .strip()
+        .lower(),
+        safety_direction=str(cfg_get(config, "fda_features.alpha.default_safety_direction", FDA_DIRECTION_POSITIVE))
+        .strip()
+        .lower(),
         innovation_weight=cfg_float(config, "fda_features.alpha.default_innovation_weight", 0.35),
         safety_weight=cfg_float(config, "fda_features.alpha.default_safety_weight", 0.45),
         evidence_weight=cfg_float(config, "fda_features.alpha.default_evidence_weight", 0.20),
@@ -827,6 +910,139 @@ def load_review_overrides(
     return out
 
 
+def required_nonnegative_int(row: dict[str, str], field: str, *, context: str) -> int:
+    raw = row_get(row, field)
+    if not raw:
+        raise ValueError(f"{context}: missing required integer field {field}")
+    try:
+        value_float = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{context}: {field} must be a non-negative integer, got {raw!r}") from exc
+    if not value_float.is_integer() or value_float < 0:
+        raise ValueError(f"{context}: {field} must be a non-negative integer, got {raw!r}")
+    return int(value_float)
+
+
+def load_adverse_event_adjudications(
+    path: Path | None,
+    *,
+    asof: date | None = None,
+    include_missing_pit_metadata: bool = False,
+) -> dict[tuple[str, str], AdverseEventAdjudication]:
+    if path is None:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"Configured FDA adverse-event adjudication CSV does not exist: {path}")
+    out: dict[tuple[str, str], AdverseEventAdjudication] = {}
+    for line_number, source_row in enumerate(read_csv_flexible(path), start=2):
+        context = f"{path}:{line_number}"
+        warn_pit_invariant_violations(
+            source_row,
+            context="fda_adverse_event_adjudication_csv",
+            logger=LOGGER,
+            require_reviewed_at=True,
+        )
+        if not csv_bool(row_get(source_row, "active"), 1):
+            continue
+        if not row_is_effective_asof(
+            source_row,
+            asof,
+            include_missing=include_missing_pit_metadata,
+        ):
+            continue
+        ticker = normalize_ticker(row_get(source_row, "ticker", "symbol"))
+        adverse_event_id = row_get(source_row, "adverse_event_id", "mdr_report_key")
+        manufacturer_report_id = row_get(
+            source_row,
+            "manufacturer_report_id",
+            "manufacturer_report_number",
+            "report_number",
+        )
+        valid_from = row_get(source_row, "valid_from", "effective_date")
+        reviewed_at = row_get(source_row, "reviewed_at", "review_date")
+        required_text = {
+            "ticker": ticker,
+            "adverse_event_id": adverse_event_id,
+            "manufacturer_report_id": manufacturer_report_id,
+            "causality_status": row_get(source_row, "causality_status"),
+            "root_cause_status": row_get(source_row, "root_cause_status"),
+            "adjudication_reason": row_get(source_row, "adjudication_reason", "decision_reason"),
+            "source_reference": row_get(source_row, "source_reference", "source"),
+            "valid_from": valid_from,
+            "reviewed_at": reviewed_at,
+        }
+        missing = [field for field, value in required_text.items() if not value]
+        if missing:
+            raise ValueError(f"{context}: missing required adjudication fields: {','.join(missing)}")
+        adjudication = AdverseEventAdjudication(
+            ticker=ticker,
+            adverse_event_id=adverse_event_id,
+            manufacturer_report_id=manufacturer_report_id,
+            expected_raw_death_count=required_nonnegative_int(
+                source_row,
+                "expected_raw_death_count",
+                context=context,
+            ),
+            expected_raw_injury_count=required_nonnegative_int(
+                source_row,
+                "expected_raw_injury_count",
+                context=context,
+            ),
+            expected_raw_malfunction_count=required_nonnegative_int(
+                source_row,
+                "expected_raw_malfunction_count",
+                context=context,
+            ),
+            confirmed_device_death_count=required_nonnegative_int(
+                source_row,
+                "confirmed_device_death_count",
+                context=context,
+            ),
+            serious_product_event_count=required_nonnegative_int(
+                source_row,
+                "serious_product_event_count",
+                context=context,
+            ),
+            non_device_death_count=required_nonnegative_int(
+                source_row,
+                "non_device_death_count",
+                context=context,
+            ),
+            scoring_death_count=required_nonnegative_int(
+                source_row,
+                "scoring_death_count",
+                context=context,
+            ),
+            scoring_injury_count=required_nonnegative_int(
+                source_row,
+                "scoring_injury_count",
+                context=context,
+            ),
+            scoring_malfunction_count=required_nonnegative_int(
+                source_row,
+                "scoring_malfunction_count",
+                context=context,
+            ),
+            causality_status=required_text["causality_status"],
+            root_cause_status=required_text["root_cause_status"],
+            adjudication_reason=required_text["adjudication_reason"],
+            source_reference=required_text["source_reference"],
+            valid_from=valid_from,
+            reviewed_at=reviewed_at,
+            next_review_date=row_get(source_row, "next_review_date"),
+        )
+        if adjudication.confirmed_device_death_count > adjudication.expected_raw_death_count:
+            raise ValueError(f"{context}: confirmed device deaths exceed expected raw deaths")
+        if adjudication.non_device_death_count > adjudication.expected_raw_death_count:
+            raise ValueError(f"{context}: non-device deaths exceed expected raw deaths")
+        key = (ticker, adverse_event_id)
+        if key in out:
+            raise ValueError(f"{context}: multiple effective adjudications for ticker/event {key}")
+        out[key] = adjudication
+    LOGGER.info("Loaded FDA adverse-event adjudications: rows=%d path=%s", len(out), path)
+    return out
+
+
 def load_footprint_overrides(
     path: Path | None,
     *,
@@ -864,7 +1080,9 @@ def load_manual_footprint_evidence(
         return {}
     out: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
-        warn_pit_invariant_violations(row, context="fda_manual_footprint_evidence_csv", logger=LOGGER, require_reviewed_at=True)
+        warn_pit_invariant_violations(
+            row, context="fda_manual_footprint_evidence_csv", logger=LOGGER, require_reviewed_at=True
+        )
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
@@ -1045,11 +1263,7 @@ def refresh_canonical_recalls(conn: Any, *, excluded_manufacturer_ids: set[int] 
             continue
         eligible_rows.append(item)
 
-    known_event_ids = {
-        event_id
-        for item in eligible_rows
-        if (event_id := normalize_recall_key_text(item["event_id"]))
-    }
+    known_event_ids = {event_id for item in eligible_rows if (event_id := normalize_recall_key_text(item["event_id"]))}
     grouped: dict[str, list[Any]] = {}
     for item in eligible_rows:
         canonical_key = canonical_recall_key_from_row(item, known_event_ids=known_event_ids)
@@ -1064,7 +1278,12 @@ def refresh_canonical_recalls(conn: Any, *, excluded_manufacturer_ids: set[int] 
             key=lambda item: (
                 0 if is_terminated_status(item["status"], item["termination_date"]) else 1,
                 source_rank(source_endpoint_from_row(item)),
-                str(item["termination_date"] or item["center_classification_date"] or item["recall_initiation_date"] or ""),
+                str(
+                    item["termination_date"]
+                    or item["center_classification_date"]
+                    or item["recall_initiation_date"]
+                    or ""
+                ),
                 float(item["mapping_confidence"] or 0.0),
             ),
             reverse=True,
@@ -1280,14 +1499,17 @@ def count_adverse_events(
     asof: date,
     policy: FdaFeaturePolicy,
     excluded_manufacturer_ids: set[int] | None = None,
+    adjudications: dict[tuple[str, str], AdverseEventAdjudication] | None = None,
 ) -> None:
+    adjudications = adjudications or {}
     event_asof = asof - timedelta(days=policy.publication_lag_days)
     medium_start = months_before(event_asof, policy.medium_months)
     previous_start = months_before(event_asof, policy.medium_months * 2)
     exclusion_sql, exclusion_params = fda_exclusion_clause("e.fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
         f"""
-        SELECT e.report_date, e.death_count, e.injury_count, e.malfunction_count,
+        SELECT e.adverse_event_id, e.report_date, e.event_date, e.death_count,
+               e.injury_count, e.malfunction_count, e.payload_json,
                m.mapping_confidence, e.fda_manufacturer_id
         FROM fact_fda_adverse_event e
         LEFT JOIN dim_fda_manufacturer m
@@ -1301,23 +1523,112 @@ def count_adverse_events(
         (row.company_id, event_asof.isoformat(), previous_start.isoformat(), *exclusion_params),
     ).fetchall()
     for item in rows:
-        event_day = parse_date(item["report_date"])
+        event_day = parse_date(item["report_date"]) or parse_date(item["event_date"])
         if event_day is None:
             continue
-        event_count = int(item["death_count"] or 0) + int(item["injury_count"] or 0) + int(item["malfunction_count"] or 0)
+        event_id = str(item["adverse_event_id"] or "").strip()
+        raw_death_count = int(item["death_count"] or 0)
+        raw_injury_count = int(item["injury_count"] or 0)
+        raw_malfunction_count = int(item["malfunction_count"] or 0)
+        event_count = raw_death_count + raw_injury_count + raw_malfunction_count
+        scoring_death_count = raw_death_count
+        scoring_injury_count = raw_injury_count
+        scoring_malfunction_count = raw_malfunction_count
+        adjudication = adjudications.get((row.ticker, event_id))
+        if adjudication is not None:
+            observed_counts = (
+                raw_death_count,
+                raw_injury_count,
+                raw_malfunction_count,
+            )
+            expected_counts = (
+                adjudication.expected_raw_death_count,
+                adjudication.expected_raw_injury_count,
+                adjudication.expected_raw_malfunction_count,
+            )
+            if observed_counts != expected_counts:
+                raise ValueError(
+                    "FDA adverse-event adjudication raw-count mismatch "
+                    f"ticker={row.ticker} event={event_id} "
+                    f"expected={expected_counts} observed={observed_counts}"
+                )
+            event_payload = safe_json_loads(item["payload_json"])
+            observed_report_id = nested_field(
+                event_payload,
+                "report_number",
+                "manufacturer_report_number",
+            )
+            if observed_report_id != adjudication.manufacturer_report_id:
+                raise ValueError(
+                    "FDA adverse-event adjudication manufacturer-report mismatch "
+                    f"ticker={row.ticker} event={event_id} "
+                    f"expected={adjudication.manufacturer_report_id!r} "
+                    f"observed={observed_report_id!r}"
+                )
+            scoring_death_count = adjudication.scoring_death_count
+            scoring_injury_count = adjudication.scoring_injury_count
+            scoring_malfunction_count = adjudication.scoring_malfunction_count
+            row.fda_adjudication_applied_flag = 1
+            row.fda_adjudication_status = "effective_event_level_adjudication"
+            if not row.fda_adjudication_reviewed_at or adjudication.reviewed_at > row.fda_adjudication_reviewed_at:
+                row.fda_adjudication_reviewed_at = adjudication.reviewed_at
+            if row.fda_adjudication_details is None:
+                row.fda_adjudication_details = []
+            row.fda_adjudication_details.append(
+                {
+                    "adverse_event_id": event_id,
+                    "manufacturer_report_id": adjudication.manufacturer_report_id,
+                    "event_window": "current_24m" if event_day >= medium_start else "previous_24m",
+                    "raw_counts": {
+                        "death": raw_death_count,
+                        "injury": raw_injury_count,
+                        "malfunction": raw_malfunction_count,
+                    },
+                    "scoring_counts": {
+                        "death": scoring_death_count,
+                        "injury": scoring_injury_count,
+                        "malfunction": scoring_malfunction_count,
+                    },
+                    "confirmed_device_death_count": adjudication.confirmed_device_death_count,
+                    "serious_product_event_count": adjudication.serious_product_event_count,
+                    "non_device_death_count": adjudication.non_device_death_count,
+                    "causality_status": adjudication.causality_status,
+                    "root_cause_status": adjudication.root_cause_status,
+                    "adjudication_reason": adjudication.adjudication_reason,
+                    "source_reference": adjudication.source_reference,
+                    "valid_from": adjudication.valid_from,
+                    "reviewed_at": adjudication.reviewed_at,
+                    "next_review_date": adjudication.next_review_date,
+                }
+            )
+        scoring_event_count = scoring_death_count + scoring_injury_count + scoring_malfunction_count
         if event_day >= medium_start:
             row.current_adverse_event_count_24m += event_count
-            row.death_count_24m += int(item["death_count"] or 0)
-            row.injury_count_24m += int(item["injury_count"] or 0)
-            row.malfunction_count_24m += int(item["malfunction_count"] or 0)
-            if int(item["death_count"] or 0) > 0:
+            row.death_count_24m += raw_death_count
+            row.injury_count_24m += raw_injury_count
+            row.malfunction_count_24m += raw_malfunction_count
+            row.current_scoring_adverse_event_count_24m += scoring_event_count
+            row.fda_scoring_death_count_24m += scoring_death_count
+            row.fda_scoring_injury_count_24m += scoring_injury_count
+            row.fda_scoring_malfunction_count_24m += scoring_malfunction_count
+            if adjudication is not None:
+                row.fda_adjudicated_event_count_24m += 1
+                row.fda_adjudicated_device_death_count_24m += adjudication.confirmed_device_death_count
+                row.fda_adjudicated_serious_product_event_count_24m += adjudication.serious_product_event_count
+                row.fda_adjudicated_non_device_death_count_24m += adjudication.non_device_death_count
+            if scoring_death_count > 0:
                 update_risk_mapping_confidence(row, item["mapping_confidence"])
         else:
             row.prev_adverse_event_count_24m += event_count
-            row.prev_death_count_24m += int(item["death_count"] or 0)
-            row.prev_injury_count_24m += int(item["injury_count"] or 0)
-            row.prev_malfunction_count_24m += int(item["malfunction_count"] or 0)
+            row.prev_death_count_24m += raw_death_count
+            row.prev_injury_count_24m += raw_injury_count
+            row.prev_malfunction_count_24m += raw_malfunction_count
+            row.prev_scoring_adverse_event_count_24m += scoring_event_count
+            row.prev_scoring_death_count_24m += scoring_death_count
+            row.prev_scoring_injury_count_24m += scoring_injury_count
+            row.prev_scoring_malfunction_count_24m += scoring_malfunction_count
         update_latest_fda_event_date(row, event_day.isoformat())
+    row.fda_raw_death_count_24m = row.death_count_24m
 
 
 def count_device_categories(
@@ -1391,10 +1702,14 @@ def count_device_categories(
             *adverse_exclusion_params,
         ),
     ).fetchall()
-    row.fda_distinct_device_category_count = len({str(item["device_category"] or "").strip() for item in rows if item["device_category"]})
+    row.fda_distinct_device_category_count = len(
+        {str(item["device_category"] or "").strip() for item in rows if item["device_category"]}
+    )
 
 
-def manufacturer_mapping_summary(conn: Any, row: FdaFeatureRow, *, excluded_manufacturer_ids: set[int] | None = None) -> None:
+def manufacturer_mapping_summary(
+    conn: Any, row: FdaFeatureRow, *, excluded_manufacturer_ids: set[int] | None = None
+) -> None:
     exclusion_sql, exclusion_params = fda_exclusion_clause("m.fda_manufacturer_id", excluded_manufacturer_ids or set())
     rows = conn.execute(
         f"""
@@ -1442,12 +1757,14 @@ def directional_score(score: float, direction: str, *, neutral: float) -> float:
     return neutral
 
 
-def apply_breadth_adjusted_event_risk(row: FdaFeatureRow, *, policy: FdaFeaturePolicy, revenue_base: float | None) -> None:
+def apply_breadth_adjusted_event_risk(
+    row: FdaFeatureRow, *, policy: FdaFeaturePolicy, revenue_base: float | None
+) -> None:
     row.fda_recall_count_raw = row.recall_count_36m
     row.fda_class_i_recall_count = row.class_i_recall_count_36m
     row.fda_warning_letter_count_36m = max(0, row.fda_warning_letter_count_36m)
-    row.fda_mdr_death_injury_count_24m = row.death_count_24m + row.injury_count_24m
-    row.fda_mdr_malfunction_count_24m = row.malfunction_count_24m
+    row.fda_mdr_death_injury_count_24m = row.fda_scoring_death_count_24m + row.fda_scoring_injury_count_24m
+    row.fda_mdr_malfunction_count_24m = row.fda_scoring_malfunction_count_24m
     if not row.fda_data_available or revenue_base is None or revenue_base <= 0:
         row.fda_event_risk_breadth_adjusted_score = 0.0
         row.fda_safety_breadth_adjusted_score = 50.0
@@ -1462,19 +1779,28 @@ def apply_breadth_adjusted_event_risk(row: FdaFeatureRow, *, policy: FdaFeatureP
         row.recall_count_36m - row.class_i_recall_count_36m,
     )
     row.fda_recall_count_per_category = round(lower_severity_recall_count / per_category_divisor, 4)
-    row.fda_mdr_malfunction_count_per_category = round(row.malfunction_count_24m / per_category_divisor, 4)
+    row.fda_mdr_malfunction_count_per_category = round(
+        row.fda_scoring_malfunction_count_24m / per_category_divisor,
+        4,
+    )
     row.fda_breadth_adjustment_applied = int(adjustment_applies)
 
     lower_severity_recall_severity = max(0.0, row.recall_severity_36m - row.class_i_recall_severity_36m)
     adjusted_recall_severity = row.class_i_recall_severity_36m + (lower_severity_recall_severity / scoring_divisor)
     adjusted_recall_severity_rate = adjusted_recall_severity / revenue_base
-    death_rate = row.death_count_24m / revenue_base
-    injury_rate = row.injury_count_24m / revenue_base
-    adjusted_malfunction_rate = (row.malfunction_count_24m / scoring_divisor) / revenue_base
-    current_severe_mdr = row.death_count_24m + row.injury_count_24m
-    previous_severe_mdr = row.prev_death_count_24m + row.prev_injury_count_24m
+    death_rate = row.fda_scoring_death_count_24m / revenue_base
+    injury_rate = row.fda_scoring_injury_count_24m / revenue_base
+    adjusted_malfunction_rate = (row.fda_scoring_malfunction_count_24m / scoring_divisor) / revenue_base
+    current_severe_mdr = row.fda_scoring_death_count_24m + row.fda_scoring_injury_count_24m
+    previous_severe_mdr = row.prev_scoring_death_count_24m + row.prev_scoring_injury_count_24m
     severe_mdr_acceleration = max(0, current_severe_mdr - previous_severe_mdr)
-    malfunction_acceleration = max(0, row.malfunction_count_24m - row.prev_malfunction_count_24m) / scoring_divisor
+    malfunction_acceleration = (
+        max(
+            0,
+            row.fda_scoring_malfunction_count_24m - row.prev_scoring_malfunction_count_24m,
+        )
+        / scoring_divisor
+    )
     adjusted_adverse_acceleration_rate = (severe_mdr_acceleration + malfunction_acceleration) / revenue_base
     # The current FDA ingestion schema has no canonical warning-letter source table,
     # so this is zero today. Keep the formula parameterized so it activates when
@@ -1769,11 +2095,20 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
         breadth_adjustment_revenue_base = revenue_base
         recall_severity_rate = round(row.recall_severity_36m / revenue_base, 4)
         row.recall_severity_per_billion_revenue = recall_severity_rate
-        row.adverse_event_rate_per_billion_revenue = round(row.current_adverse_event_count_24m / revenue_base, 4)
-        death_rate = row.death_count_24m / revenue_base
-        injury_rate = row.injury_count_24m / revenue_base
-        malfunction_rate = row.malfunction_count_24m / revenue_base
-        adverse_acceleration_rate = max(0, row.current_adverse_event_count_24m - row.prev_adverse_event_count_24m) / revenue_base
+        row.adverse_event_rate_per_billion_revenue = round(
+            row.current_scoring_adverse_event_count_24m / revenue_base,
+            4,
+        )
+        death_rate = row.fda_scoring_death_count_24m / revenue_base
+        injury_rate = row.fda_scoring_injury_count_24m / revenue_base
+        malfunction_rate = row.fda_scoring_malfunction_count_24m / revenue_base
+        adverse_acceleration_rate = (
+            max(
+                0,
+                row.current_scoring_adverse_event_count_24m - row.prev_scoring_adverse_event_count_24m,
+            )
+            / revenue_base
+        )
         if row.latest_fda_event_date:
             event_day = parse_date(row.latest_fda_event_date)
             if event_day is not None:
@@ -1827,15 +2162,17 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             raw_hard_reasons.append("material_recent_class_i_recall")
         else:
             review_reasons.append("recent_class_i_recall_watch")
-    if row.death_count_24m >= policy.death_event_min_count:
+    if row.fda_scoring_death_count_24m >= policy.death_event_min_count:
         death_is_material = (
-            row.death_count_24m >= policy.death_event_hard_min_count
+            row.fda_scoring_death_count_24m >= policy.death_event_hard_min_count
             or adverse_rate_for_flag >= policy.death_event_min_rate_per_billion
         )
         if death_is_material:
             raw_hard_reasons.append("material_recent_death_adverse_event")
         else:
             review_reasons.append("recent_death_adverse_event_watch")
+    if row.fda_adjudicated_serious_product_event_count_24m > 0:
+        review_reasons.append("adjudicated_serious_product_event_watch")
     if row.avg_mapping_confidence is not None and row.avg_mapping_confidence < policy.min_mapping_confidence:
         if policy.low_mapping_confidence_is_hard_red:
             raw_hard_reasons.append("low_fda_mapping_confidence")
@@ -1845,7 +2182,9 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
     mapping_confidence_for_gate = row.risk_mapping_confidence_min
     if mapping_confidence_for_gate is None:
         mapping_confidence_for_gate = row.avg_mapping_confidence
-    mapping_confirmed = mapping_confidence_for_gate is None or mapping_confidence_for_gate >= policy.mapping_confirmed_min_confidence
+    mapping_confirmed = (
+        mapping_confidence_for_gate is None or mapping_confidence_for_gate >= policy.mapping_confirmed_min_confidence
+    )
     row.raw_fda_red_flag = 1 if raw_hard_reasons else 0
     row.confirmed_hard_red_flag = 0
     if not row.fda_data_available:
@@ -1919,11 +2258,16 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "death_24m": row.death_count_24m,
             "injury_24m": row.injury_count_24m,
             "malfunction_24m": row.malfunction_count_24m,
+            "scoring_death_24m": row.fda_scoring_death_count_24m,
+            "scoring_injury_24m": row.fda_scoring_injury_count_24m,
+            "scoring_malfunction_24m": row.fda_scoring_malfunction_count_24m,
             "fda_mdr_death_injury_count_24m": row.fda_mdr_death_injury_count_24m,
             "fda_mdr_malfunction_count_24m": row.fda_mdr_malfunction_count_24m,
             "fda_mdr_malfunction_count_per_category": row.fda_mdr_malfunction_count_per_category,
             "current_adverse_24m": row.current_adverse_event_count_24m,
             "previous_adverse_24m": row.prev_adverse_event_count_24m,
+            "current_scoring_adverse_24m": row.current_scoring_adverse_event_count_24m,
+            "previous_scoring_adverse_24m": row.prev_scoring_adverse_event_count_24m,
             "approval_prior_12m": prior_12m_count,
             "approval_month_25_36": month_25_36_count,
             "fda_clearance_velocity_raw": row.fda_clearance_velocity_raw,
@@ -1960,6 +2304,17 @@ def score_row(row: FdaFeatureRow, *, policy: FdaFeaturePolicy) -> None:
             "raw_fda_red_flag": row.raw_fda_red_flag,
             "confirmed_hard_red_flag": row.confirmed_hard_red_flag,
             "review_adjusted_fda_state": row.review_adjusted_fda_state,
+        },
+        "adverse_event_adjudication": {
+            "applied_flag": row.fda_adjudication_applied_flag,
+            "adjudicated_event_count_24m": row.fda_adjudicated_event_count_24m,
+            "raw_death_count_24m": row.fda_raw_death_count_24m,
+            "confirmed_device_death_count_24m": (row.fda_adjudicated_device_death_count_24m),
+            "serious_product_event_count_24m": (row.fda_adjudicated_serious_product_event_count_24m),
+            "non_device_death_count_24m": (row.fda_adjudicated_non_device_death_count_24m),
+            "status": row.fda_adjudication_status,
+            "reviewed_at": row.fda_adjudication_reviewed_at,
+            "events": row.fda_adjudication_details or [],
         },
         "score_weights": {
             "regulatory_risk": policy.regulatory_risk_weight,
@@ -2147,6 +2502,7 @@ def build_rows(
     review_overrides: dict[str, dict[str, str]] | None = None,
     footprint_overrides: dict[str, dict[str, str]] | None = None,
     manual_evidence: dict[str, dict[str, str]] | None = None,
+    adverse_event_adjudications: (dict[tuple[str, str], AdverseEventAdjudication] | None) = None,
     default_signal_profile: FdaSignalProfile | None = None,
     signal_profiles: dict[str, FdaSignalProfile] | None = None,
     min_cohort_rank_n: int = 5,
@@ -2155,6 +2511,7 @@ def build_rows(
     review_overrides = review_overrides or {}
     footprint_overrides = footprint_overrides or {}
     manual_evidence = manual_evidence or {}
+    adverse_event_adjudications = adverse_event_adjudications or {}
     default_signal_profile = default_signal_profile or FdaSignalProfile()
     signal_profiles = signal_profiles or {}
     excluded_manufacturer_ids = excluded_manufacturer_ids or set()
@@ -2207,8 +2564,17 @@ def build_rows(
                 "product_line_filter_note",
             )
         count_recalls(conn, row, asof=asof, policy=policy, excluded_manufacturer_ids=excluded_manufacturer_ids)
-        count_adverse_events(conn, row, asof=asof, policy=policy, excluded_manufacturer_ids=excluded_manufacturer_ids)
-        count_device_categories(conn, row, asof=asof, policy=policy, excluded_manufacturer_ids=excluded_manufacturer_ids)
+        count_adverse_events(
+            conn,
+            row,
+            asof=asof,
+            policy=policy,
+            excluded_manufacturer_ids=excluded_manufacturer_ids,
+            adjudications=adverse_event_adjudications,
+        )
+        count_device_categories(
+            conn, row, asof=asof, policy=policy, excluded_manufacturer_ids=excluded_manufacturer_ids
+        )
         manufacturer_mapping_summary(conn, row, excluded_manufacturer_ids=excluded_manufacturer_ids)
         row.revenue_ttm = latest_revenue_ttm(conn, company.company_id, asof=asof)
         score_row(row, policy=policy)
@@ -2235,10 +2601,7 @@ def build_rows(
 def ensure_fda_feature_policy_columns(conn: Any) -> None:
     if not table_exists(conn, "feature_fda_product_risk"):
         return
-    existing = {
-        str(row["name"])
-        for row in conn.execute("PRAGMA table_info(feature_fda_product_risk)").fetchall()
-    }
+    existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(feature_fda_product_risk)").fetchall()}
     for column, ddl in OPTIONAL_FDA_FEATURE_COLUMNS.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE feature_fda_product_risk ADD COLUMN {quote_identifier(column)} {ddl}")
@@ -2275,6 +2638,17 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
         "fda_mdr_malfunction_count_24m",
         "fda_mdr_malfunction_count_per_category",
         "fda_breadth_adjustment_applied",
+        "fda_adjudication_applied_flag",
+        "fda_adjudicated_event_count_24m",
+        "fda_raw_death_count_24m",
+        "fda_adjudicated_device_death_count_24m",
+        "fda_adjudicated_serious_product_event_count_24m",
+        "fda_adjudicated_non_device_death_count_24m",
+        "fda_scoring_death_count_24m",
+        "fda_scoring_injury_count_24m",
+        "fda_scoring_malfunction_count_24m",
+        "fda_adjudication_status",
+        "fda_adjudication_reviewed_at",
         "fda_signal_mode",
         "fda_signal_direction",
         "fda_signal_reliability",
@@ -2345,6 +2719,17 @@ def upsert_feature_rows(conn: Any, rows: list[FdaFeatureRow]) -> int:
             "fda_mdr_malfunction_count_24m": row.fda_mdr_malfunction_count_24m,
             "fda_mdr_malfunction_count_per_category": row.fda_mdr_malfunction_count_per_category,
             "fda_breadth_adjustment_applied": row.fda_breadth_adjustment_applied,
+            "fda_adjudication_applied_flag": row.fda_adjudication_applied_flag,
+            "fda_adjudicated_event_count_24m": row.fda_adjudicated_event_count_24m,
+            "fda_raw_death_count_24m": row.fda_raw_death_count_24m,
+            "fda_adjudicated_device_death_count_24m": (row.fda_adjudicated_device_death_count_24m),
+            "fda_adjudicated_serious_product_event_count_24m": (row.fda_adjudicated_serious_product_event_count_24m),
+            "fda_adjudicated_non_device_death_count_24m": (row.fda_adjudicated_non_device_death_count_24m),
+            "fda_scoring_death_count_24m": row.fda_scoring_death_count_24m,
+            "fda_scoring_injury_count_24m": row.fda_scoring_injury_count_24m,
+            "fda_scoring_malfunction_count_24m": (row.fda_scoring_malfunction_count_24m),
+            "fda_adjudication_status": row.fda_adjudication_status,
+            "fda_adjudication_reviewed_at": row.fda_adjudication_reviewed_at,
             "fda_signal_mode": row.fda_signal_mode,
             "fda_signal_direction": row.fda_signal_direction,
             "fda_signal_reliability": row.fda_signal_reliability,
@@ -2452,7 +2837,9 @@ def write_csv(path: Path, rows: list[FdaFeatureRow]) -> None:
         writer.writerows(row_to_dict(row) for row in rows)
 
 
-def linked_adverse_counts(conn: Any, *, company_id: int, product_code: str, asof: date, months: int = 24) -> tuple[int, int, int]:
+def linked_adverse_counts(
+    conn: Any, *, company_id: int, product_code: str, asof: date, months: int = 24
+) -> tuple[int, int, int]:
     if not product_code:
         return 0, 0, 0
     start = months_before(asof, months).isoformat()
@@ -2508,10 +2895,7 @@ def hard_red_review_rows(conn: Any, rows: list[FdaFeatureRow], *, asof: date) ->
     flagged = {
         row.company_id: row
         for row in rows
-        if (
-            row.raw_fda_red_flag
-            or normalize_fda_state(row.review_adjusted_fda_state) in MANUAL_FDA_REVIEW_STATES
-        )
+        if (row.raw_fda_red_flag or normalize_fda_state(row.review_adjusted_fda_state) in MANUAL_FDA_REVIEW_STATES)
     }
     if not flagged:
         return []
@@ -2614,17 +2998,27 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
         else resolve_path(
-            cfg_get(config, "fda_features.output_csv", "../output/med_devices_reports/med_device_fda_product_risk_features.csv"),
+            cfg_get(
+                config,
+                "fda_features.output_csv",
+                "../output/med_devices_reports/med_device_fda_product_risk_features.csv",
+            ),
             base_dir=base_dir,
         )
     )
     review_csv_template = str(
-        cfg_get(config, "fda_features.hard_red_review_csv", "../output/med_devices_reports/fda_hard_red_review_{asof}.csv")
+        cfg_get(
+            config, "fda_features.hard_red_review_csv", "../output/med_devices_reports/fda_hard_red_review_{asof}.csv"
+        )
         or ""
     ).strip()
     review_override_raw = str(cfg_get(config, "fda_features.review_override_csv", "") or "").strip()
@@ -2633,6 +3027,8 @@ def main() -> None:
     footprint_csv = resolve_path(footprint_raw, base_dir=base_dir) if footprint_raw else None
     manual_evidence_raw = str(cfg_get(config, "fda_features.manual_footprint_evidence_csv", "") or "").strip()
     manual_evidence_csv = resolve_path(manual_evidence_raw, base_dir=base_dir) if manual_evidence_raw else None
+    adjudication_raw = str(cfg_get(config, "fda_features.adverse_event_adjudication_csv", "") or "").strip()
+    adjudication_csv = resolve_path(adjudication_raw, base_dir=base_dir) if adjudication_raw else None
     policy = fda_feature_policy(config)
     include_missing_pit_metadata = allow_missing_static_pit_metadata(config)
     default_signal_profile = default_fda_signal_profile(config)
@@ -2679,6 +3075,11 @@ def main() -> None:
                 asof=asof,
                 include_missing_pit_metadata=include_missing_pit_metadata,
             )
+            adverse_event_adjudications = load_adverse_event_adjudications(
+                adjudication_csv,
+                asof=asof,
+                include_missing_pit_metadata=include_missing_pit_metadata,
+            )
             rows = build_rows(
                 conn,
                 companies,
@@ -2687,6 +3088,7 @@ def main() -> None:
                 review_overrides=review_overrides,
                 footprint_overrides=footprint_overrides,
                 manual_evidence=manual_evidence,
+                adverse_event_adjudications=adverse_event_adjudications,
                 default_signal_profile=default_signal_profile,
                 signal_profiles=signal_profiles,
                 min_cohort_rank_n=min_cohort_rank_n,
@@ -2698,7 +3100,9 @@ def main() -> None:
             review_row_count = 0
             review_csv = ""
             if review_csv_template:
-                review_csv_path = resolve_path(review_csv_template.replace("{asof}", asof.isoformat()), base_dir=base_dir)
+                review_csv_path = resolve_path(
+                    review_csv_template.replace("{asof}", asof.isoformat()), base_dir=base_dir
+                )
                 review_rows = hard_red_review_rows(conn, rows, asof=asof)
                 write_hard_red_review_csv(review_csv_path, review_rows)
                 review_row_count = len(review_rows)

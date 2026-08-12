@@ -51,7 +51,9 @@ portfolio_layer/expectations_monitor/provider_entitlements.local.yaml
 *.pdf
 *.bin
 *.txt
-
+_tmp*
+tmppytest*
+tests\*
 # --- Large data / generated files ---
 tmpomvpuh6h/
 *.xlsx
@@ -72,6 +74,8 @@ tmpomvpuh6h/
 !biotech_index/data/*.csv
 !med_devices/data/fda_company_aliases.csv
 !med_devices/data/fda_company_footprints.csv
+!med_devices/data/fda_adverse_event_adjudications.csv
+!med_devices/data/fda_manual_approval_evidence.csv
 !med_devices/data/fda_manual_footprint_evidence.csv
 !med_devices/data/fda_manufacturer_overrides.csv
 !med_devices/data/fda_product_family_exposure.csv
@@ -81,6 +85,9 @@ tmpomvpuh6h/
 !portfolio_layer/MacroLayer/*.csv
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
 !SEC_fundamentals/sec_metric_mapping_full.csv
+!ticker_mapping/consumer_defensive.csv
+!consumer_defensive/data/*.csv
+!consumer_defensive/system_csvs/*.csv
 !industrials/**/system_csvs/*.csv
 !industrials/transportation/data/transportation_v3_peer_groups.csv
 !industrials/transportation/data/transportation_specialized_metric_discovery_registry.csv

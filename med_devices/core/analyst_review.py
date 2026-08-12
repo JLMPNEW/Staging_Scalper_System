@@ -106,6 +106,16 @@ DECISION_PRIORITY = {
 # shared wildcard set for both calibration_cohort and review_category matching
 GLOBAL_MATCH_VALUES = {"", "*", "all", "any"}
 GLOBAL_CATEGORY_VALUES = GLOBAL_MATCH_VALUES
+ACTIVE_DECISION_QUEUE_STATUSES = frozenset(
+    {
+        "decided",
+        "decision_expires_soon",
+        "decision_review_due_soon",
+        "decision_review_overdue",
+    }
+)
+EXPIRED_DECISION_QUEUE_STATUS = "expired_decision_needs_review"
+OPEN_DECISION_QUEUE_STATUS = "open"
 
 
 @dataclass(frozen=True)
@@ -140,6 +150,34 @@ class AnalystReviewDecision:
 
 def normalize_key(raw: object) -> str:
     return str(raw or "").strip().lower()
+
+
+def queue_decision_state_matches(
+    *,
+    status: object,
+    recorded_decision: object,
+    active_decision: AnalystReviewDecision | None,
+    expired_decision: AnalystReviewDecision | None,
+) -> bool:
+    """Reconcile a published queue lifecycle state against governed decisions.
+
+    Unknown statuses fail closed. This function is shared by validation and tests so
+    queue lifecycle additions cannot silently drift from the production QA contract.
+    """
+
+    normalized_status = normalize_key(status)
+    recorded = normalize_key(recorded_decision)
+    if normalized_status in ACTIVE_DECISION_QUEUE_STATUSES:
+        return active_decision is not None and active_decision.decision == recorded
+    if normalized_status == EXPIRED_DECISION_QUEUE_STATUS:
+        return (
+            active_decision is None
+            and expired_decision is not None
+            and expired_decision.decision == recorded
+        )
+    if normalized_status == OPEN_DECISION_QUEUE_STATUS:
+        return active_decision is None and expired_decision is None and not recorded
+    return False
 
 
 def parse_allowed_decisions(raw: object) -> set[str]:
@@ -570,6 +608,11 @@ def decision_lifecycle_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for decision in decisions:
+        # Dated lifecycle artifacts are point-in-time records. Decisions are
+        # same-day exclusive, so rows reviewed on or after the target as-of
+        # must not appear in an earlier lifecycle snapshot.
+        if not is_reviewed_before_asof(decision, asof=asof):
+            continue
         expiration_status, days_to_expiration, expiration_needs_review = decision_expiration_status(
             decision,
             asof=asof,

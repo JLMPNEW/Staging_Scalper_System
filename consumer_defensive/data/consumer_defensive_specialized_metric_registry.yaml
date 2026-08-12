@@ -1,0 +1,350 @@
+registry_version: "consumer_defensive_specialized_metrics_v1"
+model_family: "consumer_defensive"
+default_initial_status: "research_candidate"
+default_production_weight: 0.0
+admission_stage: "stage_6b_disclosure_census_and_parser_validation"
+scoring_evidence_stage: "signal_diagnostics_and_stage_8"
+source_priority: [sec_xbrl, filing_table, structured_section, filing_prose, manual_adjudication]
+
+metrics:
+  - metric_id: organic_revenue_growth_pct
+    cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
+    applicability_subtypes: [all_operating_issuers]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Underlying growth excluding acquisitions and FX.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: volume_growth_pct
+    cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
+    applicability_subtypes: [non_alcohol, mixed_beverage, household_personal, branded_food, private_label, protein_dairy]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Unit demand separated from pricing.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: price_mix_growth_pct
+    cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
+    applicability_subtypes: [all_operating_issuers]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Pricing and premiumization contribution.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: gross_margin_change_bps
+    cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
+    applicability_subtypes: [all_operating_issuers]
+    unit_family: basis_points
+    direction_hint: positive
+    purpose: Pricing and productivity relative to input-cost pressure.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: advertising_promotion_pct_sales
+    cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
+    applicability_subtypes: [alcohol, non_alcohol, mixed_beverage, household_personal, branded_food]
+    unit_family: percent_of_sales
+    direction_hint: context_dependent
+    purpose: Brand-support intensity.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: market_share_change_bps
+    cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
+    applicability_subtypes: [alcohol, non_alcohol, mixed_beverage, household_personal, branded_food]
+    unit_family: basis_points
+    direction_hint: positive
+    purpose: Issuer-disclosed competitive momentum.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: revenue_per_unit_growth_pct
+    cohorts: [beverages]
+    applicability_subtypes: [alcohol, non_alcohol, mixed_beverage]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Price realization when unit definitions are stable.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: distribution_points_growth_pct
+    cohorts: [beverages]
+    applicability_subtypes: [alcohol, non_alcohol, mixed_beverage]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Route-to-market expansion.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: alcohol_depletion_growth_pct
+    cohorts: [beverages]
+    applicability_subtypes: [alcohol]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Distributor-to-retail alcohol demand.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: non_alcohol_unit_case_growth_pct
+    cohorts: [beverages]
+    applicability_subtypes: [non_alcohol, mixed_beverage]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Non-alcohol unit-case demand.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: comparable_sales_growth_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Comparable-store sales momentum.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: traffic_growth_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Customer-count contribution.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: average_ticket_growth_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Price and basket contribution.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: net_store_growth_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Footprint expansion or contraction.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: sales_per_square_foot
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: currency_per_area
+    direction_hint: positive
+    purpose: Store productivity.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: shrink_change_bps
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: basis_points
+    direction_hint: negative
+    purpose: Inventory-loss and execution pressure.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: private_label_sales_mix_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, food_distribution, hybrid]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Margin and customer-value differentiation.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: digital_sales_mix_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Omnichannel development.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: inventory_turnover
+    cohorts: [consumer_staples_distribution_retail, packaged_foods_agricultural_products]
+    applicability_subtypes: [all_operating_issuers]
+    unit_family: ratio
+    direction_hint: context_dependent
+    purpose: Inventory discipline.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: case_volume_growth_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [food_distribution, hybrid]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Underlying distribution demand.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: gross_profit_per_case
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [food_distribution, hybrid]
+    unit_family: currency_per_unit
+    direction_hint: positive
+    purpose: Distribution unit economics and mix.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: independent_customer_mix_pct
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [food_distribution, hybrid]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Exposure to independent distribution customers.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: lease_adjusted_net_leverage
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: ratio
+    direction_hint: negative
+    purpose: Fixed-obligation leverage risk.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: fixed_charge_coverage
+    cohorts: [consumer_staples_distribution_retail]
+    applicability_subtypes: [retail, hybrid]
+    unit_family: ratio
+    direction_hint: positive
+    purpose: Rent and interest coverage.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: innovation_sales_mix_pct
+    cohorts: [household_personal_tobacco]
+    applicability_subtypes: [household_personal]
+    unit_family: percent
+    direction_hint: positive
+    purpose: New-product contribution.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: active_customer_growth_pct
+    cohorts: [household_personal_tobacco]
+    applicability_subtypes: [direct_selling_wellness]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Direct-selling customer-base health.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: active_representative_growth_pct
+    cohorts: [household_personal_tobacco]
+    applicability_subtypes: [direct_selling_wellness]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Direct-selling distribution-force health.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: tobacco_shipment_volume_growth_pct
+    cohorts: [household_personal_tobacco]
+    applicability_subtypes: [tobacco]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Combustible shipment trajectory.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: tobacco_price_mix_growth_pct
+    cohorts: [household_personal_tobacco]
+    applicability_subtypes: [tobacco]
+    unit_family: percent
+    direction_hint: positive
+    purpose: Pricing offset to shipment decline.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: reduced_risk_sales_mix_pct
+    cohorts: [household_personal_tobacco]
+    applicability_subtypes: [tobacco]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Tobacco portfolio transition.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: excise_tax_impact_bps
+    cohorts: [household_personal_tobacco]
+    applicability_subtypes: [tobacco]
+    unit_family: basis_points
+    direction_hint: negative
+    purpose: Excise-tax burden.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: branded_sales_mix_pct
+    cohorts: [packaged_foods_agricultural_products]
+    applicability_subtypes: [branded_food, private_label]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Branded versus private-label mix quality.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: commodity_cost_impact_bps
+    cohorts: [packaged_foods_agricultural_products]
+    applicability_subtypes: [all_operating_issuers]
+    unit_family: basis_points
+    direction_hint: context_dependent
+    purpose: Disclosed input-cost headwind or benefit.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: capacity_utilization_pct
+    cohorts: [packaged_foods_agricultural_products]
+    applicability_subtypes: [protein_dairy, agricultural_processor]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Manufacturing or processing asset utilization.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: production_volume_growth_pct
+    cohorts: [packaged_foods_agricultural_products]
+    applicability_subtypes: [protein_dairy, agricultural_processor]
+    unit_family: percent
+    direction_hint: context_dependent
+    purpose: Manufacturing or processing throughput.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: agricultural_processing_margin
+    cohorts: [packaged_foods_agricultural_products]
+    applicability_subtypes: [agricultural_processor]
+    unit_family: currency_per_unit_or_percent
+    direction_hint: positive
+    purpose: Crush or processing economics under versioned definitions.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: livestock_feed_cost_change_pct
+    cohorts: [packaged_foods_agricultural_products]
+    applicability_subtypes: [protein_dairy]
+    unit_family: percent
+    direction_hint: negative
+    purpose: Feed-cost pressure.
+    initial_status: research_candidate
+    production_weight: 0.0
+
+  - metric_id: net_debt_to_ebitda
+    cohorts: [packaged_foods_agricultural_products]
+    applicability_subtypes: [all_operating_issuers]
+    unit_family: ratio
+    direction_hint: negative
+    purpose: Balance-sheet resilience.
+    initial_status: research_candidate
+    production_weight: 0.0

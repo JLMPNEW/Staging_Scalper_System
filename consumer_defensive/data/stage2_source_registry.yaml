@@ -1,0 +1,67 @@
+sources:
+  - source_id: norgate_us_equities_pit_membership
+    stage: security_master
+    source_name: Norgate US Equities point-in-time membership
+    source_owner: Norgate Data
+    source_type: licensed_local_database
+    base_url: norgate://us-equities
+    documentation_url: https://norgatedata.com/
+    authentication_required: 1
+    refresh_frequency: provider_database_update
+    data_owner: Norgate Data
+    raw_schema: norgate_assetid_membership_timeseries
+    staging_tables: [fact_recognized_vehicle_membership_daily, fact_major_exchange_listing_daily]
+    canonical_tables: [dim_identifier, dim_universe_membership]
+    feature_stages: [security_master, survivorship_backfill]
+    subsector_scope: consumer_defensive
+    priority: 1
+    status: active
+    notes: Authoritative PIT provider. Approved index union is defined in consumer_defensive_universe_policy.yaml.
+
+  - source_id: state_street_xlp_current_holdings
+    stage: security_master_validation
+    source_name: State Street XLP current holdings
+    source_owner: State Street Global Advisors
+    source_type: issuer_holdings_file
+    base_url: https://www.ssga.com/us/en/individual/etfs/state-street-consumer-staples-select-sector-spdr-etf-xlp
+    refresh_frequency: daily
+    data_owner: State Street Global Advisors
+    raw_schema: current_etf_holdings
+    canonical_tables: []
+    feature_stages: [current_universe_validation]
+    subsector_scope: consumer_defensive
+    priority: 20
+    status: active
+    notes: Validation-only; never used as historical membership.
+
+  - source_id: ishares_iyk_current_holdings
+    stage: security_master_validation
+    source_name: iShares IYK current holdings
+    source_owner: BlackRock
+    source_type: issuer_holdings_file
+    base_url: https://www.ishares.com/us/products/239505/ishares-u-s-consumer-staples-etf
+    refresh_frequency: daily
+    data_owner: BlackRock
+    raw_schema: current_etf_holdings
+    canonical_tables: []
+    feature_stages: [current_universe_validation]
+    subsector_scope: consumer_defensive
+    priority: 21
+    status: active
+    notes: Validation-only; never used as historical membership.
+
+  - source_id: fidelity_fsta_current_holdings
+    stage: security_master_validation
+    source_name: Fidelity FSTA current holdings
+    source_owner: Fidelity Investments
+    source_type: issuer_holdings_file
+    base_url: https://research2.fidelity.com/fidelity/screeners/etf/etfholdings.asp?symbol=FSTA&view=Holdings
+    refresh_frequency: monthly
+    data_owner: Fidelity Investments
+    raw_schema: current_etf_holdings
+    canonical_tables: []
+    feature_stages: [current_universe_validation]
+    subsector_scope: consumer_defensive
+    priority: 22
+    status: active
+    notes: Validation-only; never used as historical membership.

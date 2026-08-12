@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import date, timedelta
@@ -10,6 +13,7 @@ from dedicated_parser.adapters import load_ticker_selector
 from dedicated_parser.catalog import (
     build_document_refs,
     filing_rows,
+    validate_consumer_defensive_catalog_contract,
 )
 from dedicated_parser.contracts import (
     AdapterRegistry,
@@ -19,7 +23,18 @@ from dedicated_parser.contracts import (
     WorkItem,
     file_sha256,
 )
+from dedicated_parser.path_io import (
+    is_file_path,
+    resolve_path as resolve_filesystem_path,
+    runtime_path,
+    stat_path,
+)
 from dedicated_parser.storage import catalog_documents, completed_work_keys
+from dedicated_parser.sec_paths import (
+    SEC_DOCUMENT_SUFFIXES,
+    resolve_sec_seal_root,
+    validate_sec_relative_document_path,
+)
 
 
 MISSING_STATUSES = frozenset(
@@ -35,6 +50,303 @@ DocumentScope = Mapping[tuple[str, str], Mapping[str, str]]
 DirectFilings = Mapping[tuple[str, str], FilingRef]
 DirectDocuments = Mapping[tuple[str, str], tuple[DocumentRef, ...]]
 MetricScope = Mapping[tuple[str, str], frozenset[str]]
+
+
+def _validate_consumer_defensive_direct_filings(
+    conn: sqlite3.Connection,
+    *,
+    direct_filings: DirectFilings,
+    asof_date: str,
+) -> None:
+    cutoff = asof_date + 'T23:59:59Z'
+    for raw_key, filing in sorted(direct_filings.items()):
+        key = (str(raw_key[0]).upper(), str(raw_key[1]))
+        filing_key = (filing.ticker.upper(), filing.accession_number)
+        if key != filing_key:
+            raise ValueError(
+                f'Consumer Defensive direct filing key mismatch: {key!r}'
+            )
+        row = conn.execute('''SELECT f.ticker,f.cik,f.archive_cik,
+            f.accession_number,f.form_type,f.filing_date,f.accepted_at,
+            f.report_date,f.primary_document,f.source_id,f.company_currency
+            FROM consumer_defensive_sec_parser_filing_input f
+            WHERE f.ticker=? AND f.accession_number=?
+              AND SUBSTR(COALESCE(NULLIF(f.accepted_at,''),f.filing_date),1,10)<=?
+              AND (SELECT e.event_type
+                   FROM sec_filing_company_association_event e
+                   WHERE e.accession_number=f.accession_number
+                     AND e.issuer_company_id=f.issuer_company_id
+                     AND e.effective_asof<=?
+                   ORDER BY e.effective_asof DESC,e.event_id DESC LIMIT 1)
+                  IN ('observed','reactivated')''',
+            (key[0],key[1],asof_date,cutoff),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                'Consumer Defensive direct filing is not an active PIT '
+                f'association: {key[0]}/{key[1]}'
+            )
+        actual_cik = str(row[2] or row[1] or '').zfill(10)
+        supplied_cik = str(filing.archive_cik or filing.cik or '').zfill(10)
+        expected = (
+            str(row[4] or ''), str(row[5] or ''),
+            str(row[6] or row[5] or ''), str(row[7] or ''),
+            str(row[8] or ''), str(row[9] or ''), str(row[10] or '').upper(),
+        )
+        supplied = (
+            filing.form_type, filing.filing_date, filing.accepted_at,
+            filing.report_date, filing.primary_document, filing.source_id,
+            filing.company_currency.upper(),
+        )
+        if supplied_cik != actual_cik or supplied != expected:
+            raise ValueError(
+                'Consumer Defensive direct filing metadata does not match '
+                f'the active PIT association: {key[0]}/{key[1]}'
+            )
+
+
+def _validate_consumer_defensive_direct_documents(
+    conn: sqlite3.Connection,
+    *,
+    direct_filings: DirectFilings,
+    direct_documents: DirectDocuments,
+    asof_date: str,
+    cache_dir: Path,
+) -> dict[tuple[str, str], tuple[DocumentRef, ...]]:
+    '''Bind caller-supplied document bytes to the exact immutable Stage4 seal.
+
+    A source manifest is only a transport envelope: its hash and local path
+    are caller-controlled.  Validate those bytes against both the active PIT
+    document projection and the reconciled as-of cache snapshot, then return
+    refs whose paths point at the verified immutable seal objects.  Returning
+    rebound refs closes the validate-then-mutate window between planning and
+    provider execution.
+    '''
+    seal = conn.execute('''SELECT s.seal_relative_path,s.cache_manifest_json,
+        s.cache_manifest_sha256
+        FROM consumer_defensive_sec_cache_snapshot s
+        JOIN consumer_defensive_sec_reconciliation_state r USING(asof_date)
+        WHERE s.asof_date=? AND r.status='complete'
+          AND s.scope_contract_version=3
+          AND r.scope_contract_version=3
+          AND s.trust_state='trusted_current'
+          AND r.trust_state='trusted_current'
+          AND s.cache_manifest_json=r.cache_manifest_json
+          AND s.cache_manifest_sha256=r.cache_manifest_sha256''',
+        (asof_date,),
+    ).fetchone()
+    if seal is None:
+        raise RuntimeError(
+            'Consumer Defensive direct documents require an exact reconciled seal'
+        )
+    try:
+        entries = json.loads(str(seal[1]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError('Consumer Defensive SEC seal manifest is invalid') from exc
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError('Consumer Defensive SEC seal manifest is empty')
+    manifest: dict[str, dict[str, object]] = {}
+    normalized_entries: list[dict[str, object]] = []
+    casefold_paths: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError('Consumer Defensive SEC seal entry is invalid')
+        logical = str(entry.get('logical_path') or '')
+        digest = str(entry.get('sha256') or '').lower()
+        object_path = str(entry.get('object_path') or '')
+        try:
+            byte_count = int(entry.get('bytes'))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError('Consumer Defensive SEC seal byte count is invalid') from exc
+        if (
+            not logical
+            or logical in manifest
+            or logical.casefold() in casefold_paths
+        ):
+            raise RuntimeError('Consumer Defensive SEC seal has duplicate paths')
+        if (
+            not re.fullmatch(r'[0-9a-f]{64}', digest)
+            or byte_count < 0
+            or object_path != f'objects/sha256/{digest}'
+        ):
+            raise RuntimeError('Consumer Defensive SEC seal entry identity is invalid')
+        normalized = {
+            'logical_path': logical,
+            'object_path': object_path,
+            'bytes': byte_count,
+            'sha256': digest,
+        }
+        manifest[logical] = normalized
+        normalized_entries.append(normalized)
+        casefold_paths.add(logical.casefold())
+    normalized_entries.sort(key=lambda item: str(item['logical_path']))
+    encoded = json.dumps(
+        normalized_entries, sort_keys=True, separators=(',', ':'),
+    ).encode()
+    if hashlib.sha256(encoded).hexdigest() != str(seal[2]):
+        raise RuntimeError('Consumer Defensive SEC seal manifest hash mismatch')
+    sealed_root = resolve_sec_seal_root(
+        cache_dir, str(seal[0]), expected_asof=asof_date
+    )
+    cutoff = asof_date + 'T23:59:59Z'
+    normalized_filings: dict[tuple[str, str], FilingRef] = {}
+    for raw_key, filing in direct_filings.items():
+        key = (str(raw_key[0]).upper(), str(raw_key[1]))
+        if key in normalized_filings:
+            raise ValueError(f'Duplicate Consumer Defensive direct filing key: {key!r}')
+        normalized_filings[key] = filing
+    normalized_documents: dict[tuple[str, str], tuple[DocumentRef, ...]] = {}
+    for raw_key, documents in direct_documents.items():
+        key = (str(raw_key[0]).upper(), str(raw_key[1]))
+        if key in normalized_documents:
+            raise ValueError(f'Duplicate Consumer Defensive direct document key: {key!r}')
+        normalized_documents[key] = tuple(documents)
+    rebound: dict[tuple[str, str], tuple[DocumentRef, ...]] = {}
+    for key, filing in sorted(normalized_filings.items()):
+        normalized_key = (str(key[0]).upper(), str(key[1]))
+        documents = normalized_documents.get(normalized_key, ())
+        if not documents:
+            raise ValueError(
+                'Consumer Defensive direct filing has no sealed documents: '
+                f'{normalized_key[0]}/{normalized_key[1]}'
+            )
+        seen_names: set[str] = set()
+        primary_count = 0
+        rebound_documents: list[DocumentRef] = []
+        for document in documents:
+            document_name = validate_sec_relative_document_path(
+                document.name, allowed_suffixes=SEC_DOCUMENT_SUFFIXES,
+                context='Consumer Defensive direct document name',
+            )
+            if document_name.casefold() in seen_names:
+                raise ValueError(
+                    'Duplicate case-insensitive Consumer Defensive direct '
+                    f'document name: {normalized_key[0]}/{normalized_key[1]}/'
+                    f'{document_name}'
+                )
+            seen_names.add(document_name.casefold())
+            primary_count += int(document.is_primary)
+            bridge_rows = conn.execute('''SELECT d.issuer_cik,d.primary_document,
+                d.content_sha256,d.hydration_status,d.accepted_at,d.source_id
+                FROM bridge_sec_filing_document_company d
+                JOIN bridge_sec_filing_company b
+                  ON b.accession_number=d.accession_number
+                 AND b.issuer_company_id=d.issuer_company_id
+                WHERE d.issuer_ticker=? AND d.accession_number=?
+                  AND d.primary_document=? AND d.accepted_at<=?
+                  AND (SELECT e.event_type
+                       FROM sec_filing_company_association_event e
+                       WHERE e.accession_number=b.accession_number
+                         AND e.issuer_company_id=b.issuer_company_id
+                         AND e.effective_asof<=?
+                       ORDER BY e.effective_asof DESC,e.event_id DESC LIMIT 1)
+                      IN ('observed','reactivated')''',
+                (
+                    normalized_key[0], normalized_key[1], document_name,
+                    cutoff, cutoff,
+                ),
+            ).fetchall()
+            if len(bridge_rows) != 1 or str(bridge_rows[0][3]) != 'hydrated':
+                raise ValueError(
+                    'Consumer Defensive direct document is not an active '
+                    'hydrated PIT document: '
+                    f'{normalized_key[0]}/{normalized_key[1]}/{document_name}'
+                )
+            bridge = bridge_rows[0]
+            filing_cik = str(filing.archive_cik or filing.cik or '').zfill(10)
+            if (
+                str(bridge[0] or '').zfill(10) != filing_cik
+                or str(bridge[1]) != document_name
+                or str(bridge[4] or '') != filing.accepted_at
+            ):
+                raise ValueError(
+                    'Consumer Defensive direct document metadata differs from '
+                    f'the active PIT filing: {normalized_key[0]}/'
+                    f'{normalized_key[1]}/{document_name}'
+                )
+            logical = (
+                f'filings/{str(bridge[0]).zfill(10)}/'
+                f'{normalized_key[1]}/{document_name}'
+            )
+            entry = manifest.get(logical)
+            expected_hash = str(bridge[2] or '').lower()
+            if entry is None or any((
+                str(entry.get('sha256') or '') != expected_hash,
+                str(document.content_sha256).lower() != expected_hash,
+                int(entry.get('bytes') or -1) != document.file_size,
+            )):
+                raise ValueError(
+                    'Consumer Defensive direct document does not match the '
+                    f'exact Stage4 seal: {logical}'
+                )
+            try:
+                local_path = resolve_filesystem_path(
+                    Path(document.path), strict=True
+                )
+            except OSError as exc:
+                raise ValueError(
+                    f'Consumer Defensive direct document is unavailable: {logical}'
+                ) from exc
+            if (
+                not is_file_path(local_path)
+                or stat_path(local_path).st_size != int(entry['bytes'])
+                or file_sha256(local_path) != expected_hash
+            ):
+                raise ValueError(
+                    'Consumer Defensive direct document local bytes differ '
+                    f'from the Stage4 seal: {logical}'
+                )
+            sealed_path = resolve_filesystem_path(
+                sealed_root / str(entry.get('object_path') or ''), strict=True
+            )
+            try:
+                sealed_path.relative_to(sealed_root)
+            except ValueError as exc:
+                raise RuntimeError('Consumer Defensive sealed object escapes') from exc
+            if (
+                not is_file_path(sealed_path)
+                or stat_path(sealed_path).st_size != int(entry['bytes'])
+                or file_sha256(sealed_path) != expected_hash
+            ):
+                raise RuntimeError(
+                    f'Consumer Defensive sealed object is corrupt: {logical}'
+                )
+            if document.is_primary and document_name != filing.primary_document:
+                raise ValueError(
+                    'Consumer Defensive direct primary document metadata differs '
+                    f'from the PIT filing: {logical}'
+                )
+            rebound_stat = stat_path(sealed_path)
+            rebound_documents.append(DocumentRef(
+                name=document_name,
+                # Store the Windows extended-length spelling when needed so
+                # provider subprocesses can open an otherwise valid >260-char
+                # immutable CAS object without reintroducing mutable discovery.
+                path=str(runtime_path(sealed_path)),
+                content_sha256=expected_hash,
+                file_size=int(rebound_stat.st_size),
+                modified_ns=int(rebound_stat.st_mtime_ns),
+                is_primary=document.is_primary,
+                # Stage4 hydrates governed primary documents, not raw SEC
+                # full-submission SGML. Never trust a transport-manifest flag
+                # to switch provider routing for otherwise valid sealed bytes.
+                is_full_submission=False,
+                source_kind='stage4_sealed_cas',
+            ))
+        if (
+            primary_count != 1
+            or sum(doc.name == filing.primary_document for doc in documents) != 1
+            or not any(
+                doc.is_primary and doc.name == filing.primary_document
+                for doc in documents
+            )
+        ):
+            raise ValueError(
+                'Consumer Defensive direct documents require exactly one '
+                f'PIT primary document: {normalized_key[0]}/{normalized_key[1]}'
+            )
+        rebound[normalized_key] = tuple(rebound_documents)
+    return rebound
 
 
 def _source_documents(
@@ -426,6 +738,8 @@ def _planning_scope(
     all_metrics: bool,
     document_scope: DocumentScope | None = None,
     direct_filings: DirectFilings | None = None,
+    cache_dir: Path | None = None,
+    expected_ingestion_config_sha256: str | None = None,
 ) -> tuple[
     list[str],
     dict[str, set[str]],
@@ -433,6 +747,15 @@ def _planning_scope(
     dict[str, list[FilingRef]],
     tuple[dict[str, object], ...],
 ]:
+    if registry.model_family == 'consumer_defensive' and direct_filings is not None:
+        validate_consumer_defensive_catalog_contract(
+            conn,asof_date=asof_date,
+            expected_ingestion_config_sha256=expected_ingestion_config_sha256,
+            cache_dir=cache_dir,
+        )
+        _validate_consumer_defensive_direct_filings(
+            conn, direct_filings=direct_filings, asof_date=asof_date
+        )
     selector = load_ticker_selector(adapter_path)
     selected_tickers = sorted(
         set(
@@ -525,6 +848,8 @@ def _planning_scope(
             supported_forms=registry.supported_forms,
             max_filings_per_ticker=max_filings_per_ticker,
             target_periods_by_ticker=target_periods_by_ticker,
+            cache_dir=cache_dir,
+            expected_ingestion_config_sha256=expected_ingestion_config_sha256,
         )
     if document_scope is not None:
         # An accession number identifies an SEC submission, not a ticker
@@ -569,7 +894,38 @@ def audit_cache_completeness(
     document_scope: DocumentScope | None = None,
     direct_filings: DirectFilings | None = None,
     direct_documents: DirectDocuments | None = None,
+    expected_ingestion_config_sha256: str | None = None,
 ) -> PlanSummary:
+    if registry.model_family == 'consumer_defensive':
+        validate_consumer_defensive_catalog_contract(
+            conn,asof_date=asof_date,
+            expected_ingestion_config_sha256=expected_ingestion_config_sha256,
+            cache_dir=cache_dir,
+        )
+        if direct_documents is None or direct_filings is None:
+            raise RuntimeError(
+                'Consumer Defensive cache audit requires paired immutable '
+                'as-of direct_filings and direct_documents bindings'
+            )
+        direct_filing_keys = {
+            (str(key[0]).upper(), str(key[1])) for key in direct_filings
+        }
+        direct_document_keys = {
+            (str(key[0]).upper(), str(key[1])) for key in direct_documents
+        }
+        if not direct_filing_keys or direct_document_keys != direct_filing_keys:
+            raise ValueError(
+                'Consumer Defensive direct filing/document keysets must be '
+                'nonempty and exact'
+            )
+        _validate_consumer_defensive_direct_filings(
+            conn, direct_filings=direct_filings, asof_date=asof_date,
+        )
+        direct_documents = _validate_consumer_defensive_direct_documents(
+            conn, direct_filings=direct_filings,
+            direct_documents=direct_documents, asof_date=asof_date,
+            cache_dir=cache_dir,
+        )
     (
         selected_tickers,
         unresolved,
@@ -588,6 +944,8 @@ def audit_cache_completeness(
         all_metrics=all_metrics,
         document_scope=document_scope,
         direct_filings=direct_filings,
+        cache_dir=cache_dir,
+        expected_ingestion_config_sha256=expected_ingestion_config_sha256,
     )
     available_accessions = 0
     available_documents = 0
@@ -667,7 +1025,44 @@ def build_plan(
     direct_documents: DirectDocuments | None = None,
     metric_scope: MetricScope | None = None,
     catalog_documents_enabled: bool = True,
+    expected_ingestion_config_sha256: str | None = None,
 ) -> tuple[list[WorkItem], PlanSummary]:
+    if registry.model_family == 'consumer_defensive':
+        validate_consumer_defensive_catalog_contract(
+            conn,asof_date=asof_date,
+            expected_ingestion_config_sha256=expected_ingestion_config_sha256,
+            cache_dir=cache_dir,
+        )
+    if registry.model_family == 'consumer_defensive' and (
+        direct_documents is None or direct_filings is None
+    ):
+        raise RuntimeError(
+            'Consumer Defensive dedicated-parser planning requires an immutable '
+            'as-of paired direct_filings/direct_documents binding; mutable '
+            'sec_archive_xbrl discovery is disabled; exact Stage 4 sealed '
+            'bindings are required'
+        )
+    if registry.model_family == 'consumer_defensive' and direct_filings is not None:
+        direct_filing_keys = {
+            (str(key[0]).upper(), str(key[1])) for key in direct_filings
+        }
+        direct_document_keys = {
+            (str(key[0]).upper(), str(key[1])) for key in direct_documents or {}
+        }
+        if not direct_filing_keys or direct_document_keys != direct_filing_keys:
+            raise ValueError(
+                'Consumer Defensive direct filing/document keysets differ: '
+                f'filings_only={sorted(direct_filing_keys-direct_document_keys)} '
+                f'documents_only={sorted(direct_document_keys-direct_filing_keys)}'
+            )
+        _validate_consumer_defensive_direct_filings(
+            conn, direct_filings=direct_filings, asof_date=asof_date,
+        )
+        direct_documents = _validate_consumer_defensive_direct_documents(
+            conn, direct_filings=direct_filings,
+            direct_documents=direct_documents or {}, asof_date=asof_date,
+            cache_dir=cache_dir,
+        )
     review_policy_path = (
         Path(registry.review_policy_path).expanduser().resolve() if registry.review_policy_path else None
     )
@@ -690,6 +1085,8 @@ def build_plan(
         all_metrics=all_metrics,
         document_scope=document_scope,
         direct_filings=direct_filings,
+        cache_dir=cache_dir,
+        expected_ingestion_config_sha256=expected_ingestion_config_sha256,
     )
     completed = (
         completed_work_keys(

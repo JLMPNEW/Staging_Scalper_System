@@ -421,18 +421,24 @@ def load_company_footprints(
         primary_entity = row_get(row, "primary_fda_entity", "fda_entity", "manufacturer_name")
         premarket_numbers = tuple(
             value
-            for value in (normalize_submission_identifier(item) for item in split_multi_value(row_get(row, "premarket_numbers", "premarket_number")))
+            for value in (
+                normalize_submission_identifier(item)
+                for item in split_multi_value(row_get(row, "premarket_numbers", "premarket_number"))
+            )
             if value
         )
         product_codes = tuple(
             value
             for value in (
-                re.sub(r"[^A-Z0-9]+", "", item.upper().strip()) for item in split_multi_value(row_get(row, "product_codes", "product_code"))
+                re.sub(r"[^A-Z0-9]+", "", item.upper().strip())
+                for item in split_multi_value(row_get(row, "product_codes", "product_code"))
             )
             if value
         )
         fei_numbers = tuple(
-            value for value in (normalize_fei(item) for item in split_multi_value(row_get(row, "fei_numbers", "fei_number"))) if value
+            value
+            for value in (normalize_fei(item) for item in split_multi_value(row_get(row, "fei_numbers", "fei_number")))
+            if value
         )
         if not primary_entity and not product_codes and not premarket_numbers and not fei_numbers:
             continue
@@ -830,7 +836,9 @@ def load_product_line_overrides(
     _, by_ticker = load_company_lookup(conn)
     out: list[ProductLineOverride] = []
     for row in read_csv_flexible(path):
-        warn_pit_invariant_violations(row, context="fda_product_line_overrides_csv", logger=LOGGER, require_reviewed_at=True)
+        warn_pit_invariant_violations(
+            row, context="fda_product_line_overrides_csv", logger=LOGGER, require_reviewed_at=True
+        )
         if not row_is_effective_asof(row, asof, include_missing=include_missing_pit_metadata):
             continue
         ticker = normalize_ticker(row_get(row, "ticker", "mapped_ticker", "symbol"))
@@ -844,7 +852,10 @@ def load_product_line_overrides(
         manufacturer_name_norm = normalize_org_name(manufacturer_name)
         product_codes = frozenset(
             code
-            for code in (normalize_product_code(item) for item in split_multi_value(row_get(row, "product_codes", "product_code")))
+            for code in (
+                normalize_product_code(item)
+                for item in split_multi_value(row_get(row, "product_codes", "product_code"))
+            )
             if code
         )
         keywords = tuple(
@@ -883,11 +894,31 @@ def load_product_line_overrides(
 def load_fact_counts(conn: Any) -> dict[int, tuple[int, int, int, int, int]]:
     counts: dict[int, list[int]] = {}
     queries = [
-        (0, "fact_fda_approval", "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_approval WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id"),
-        (1, "fact_fda_recall", "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_recall WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id"),
-        (2, "fact_fda_adverse_event", "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_adverse_event WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id"),
-        (3, "fact_fda_inspection", "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_inspection WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id"),
-        (4, "fact_fda_compliance_action", "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_compliance_action WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id"),
+        (
+            0,
+            "fact_fda_approval",
+            "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_approval WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id",
+        ),
+        (
+            1,
+            "fact_fda_recall",
+            "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_recall WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id",
+        ),
+        (
+            2,
+            "fact_fda_adverse_event",
+            "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_adverse_event WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id",
+        ),
+        (
+            3,
+            "fact_fda_inspection",
+            "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_inspection WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id",
+        ),
+        (
+            4,
+            "fact_fda_compliance_action",
+            "SELECT fda_manufacturer_id, COUNT(*) AS n FROM fact_fda_compliance_action WHERE fda_manufacturer_id IS NOT NULL GROUP BY fda_manufacturer_id",
+        ),
     ]
     for idx, table_name, query in queries:
         if not table_exists(conn, table_name):
@@ -895,7 +926,10 @@ def load_fact_counts(conn: Any) -> dict[int, tuple[int, int, int, int, int]]:
         for row in conn.execute(query).fetchall():
             manufacturer_id = int(row["fda_manufacturer_id"])
             counts.setdefault(manufacturer_id, [0, 0, 0, 0, 0])[idx] = int(row["n"] or 0)
-    return {manufacturer_id: (values[0], values[1], values[2], values[3], values[4]) for manufacturer_id, values in counts.items()}
+    return {
+        manufacturer_id: (values[0], values[1], values[2], values[3], values[4])
+        for manufacturer_id, values in counts.items()
+    }
 
 
 def update_fact_company_ids(conn: Any, *, min_confidence: float) -> None:
@@ -1028,7 +1062,7 @@ def apply_product_line_fact_links(conn: Any, overrides: list[ProductLineOverride
 
 
 def approval_submission_clause(identifier: str) -> tuple[str, list[str]]:
-    if identifier.startswith("P") and re.match(r"^P[0-9]{5,}", identifier):
+    if re.fullmatch(r"(?:BP|P|H|N|D)[0-9]{5,}", identifier):
         return "(submission_number = ? OR submission_number LIKE ?)", [identifier, f"{identifier}-%"]
     return "submission_number = ?", [identifier]
 
@@ -1058,9 +1092,8 @@ def approval_candidate_is_confirmed(footprint: CompanyFootprint, row: Any) -> bo
     manufacturer_name = str(row["manufacturer_name"] or "")
     # Exact submission numbers are still not enough by themselves; analyst-supplied IDs can be stale
     # or wrong. Require the FDA applicant/manufacturer to corroborate the ticker's FDA footprint.
-    return (
-        org_names_corroborate(footprint.primary_fda_entity, manufacturer_name)
-        or org_names_corroborate(footprint.company.company_name, manufacturer_name)
+    return org_names_corroborate(footprint.primary_fda_entity, manufacturer_name) or org_names_corroborate(
+        footprint.company.company_name, manufacturer_name
     )
 
 
@@ -1211,12 +1244,20 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
         else resolve_path(
-            cfg_get(config, "fda_entity_linking.output_csv", "../output/med_devices_reports/med_device_fda_entity_mapping.csv"),
+            cfg_get(
+                config,
+                "fda_entity_linking.output_csv",
+                "../output/med_devices_reports/med_device_fda_entity_mapping.csv",
+            ),
             base_dir=base_dir,
         )
     )
@@ -1272,14 +1313,11 @@ def main() -> None:
     )
     product_line_overrides_raw = str(cfg_get(config, "fda_entity_linking.product_line_overrides_csv", "") or "").strip()
     product_line_overrides_csv = (
-        resolve_path(product_line_overrides_raw, base_dir=base_dir)
-        if product_line_overrides_raw
-        else None
+        resolve_path(product_line_overrides_raw, base_dir=base_dir) if product_line_overrides_raw else None
     )
-    update_facts = (
-        not args.no_fact_update
-        and str(cfg_get(config, "fda_entity_linking.update_fact_company_ids", True)).strip().lower() not in {"0", "false", "no"}
-    )
+    update_facts = not args.no_fact_update and str(
+        cfg_get(config, "fda_entity_linking.update_fact_company_ids", True)
+    ).strip().lower() not in {"0", "false", "no"}
     include_missing_pit_metadata = allow_missing_static_pit_metadata(config)
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
@@ -1349,8 +1387,6 @@ def main() -> None:
                 parent_company_id = match.company_id if match.company_id is not None else None
                 if parent_company_id is not None:
                     mapped += 1
-                if match.method == "ambiguous":
-                    ambiguous += 1
                 conn.execute(
                     """
                     UPDATE dim_fda_manufacturer
@@ -1367,9 +1403,13 @@ def main() -> None:
                     (0, 0, 0, 0, 0),
                 )
                 total_rows = approval_rows + recall_rows + adverse_rows + inspection_rows + compliance_rows
+                if match.method == "ambiguous" and total_rows > 0:
+                    ambiguous += 1
                 high_volume_unmapped = (
                     1
-                    if parent_company_id is None and total_rows >= high_volume_threshold and not is_excluded_match(match)
+                    if parent_company_id is None
+                    and total_rows >= high_volume_threshold
+                    and not is_excluded_match(match)
                     else 0
                 )
                 high_volume_unmapped_count += high_volume_unmapped

@@ -184,7 +184,10 @@ def _audit_mapping_rows(
         method = str(row.get("mapping_method") or "").strip().lower()
         ticker = normalize_ticker(row.get("mapped_ticker"))
         confidence = _as_float(row.get("mapping_confidence"))
-        if method == "ambiguous":
+        total_fda_rows = _as_int(row.get("total_fda_rows"), 0)
+        # Dimension rows can outlive the facts that introduced them. Preserve
+        # them for lineage, but only facts in active use require adjudication.
+        if method == "ambiguous" and total_fda_rows > 0:
             ambiguous_count += 1
             issues.append(
                 _issue(
@@ -324,6 +327,7 @@ def _audit_overrides(
             except ValueError:
                 company_id = -1
             company_by_id = companies_by_id.get(company_id)
+            company_by_id_ticker = str(company_by_id.get("ticker") or "").upper() if company_by_id is not None else ""
             if _company_is_review_status(company_by_id):
                 issues.append(
                     _issue(
@@ -335,14 +339,14 @@ def _audit_overrides(
                         recommended_action="Resolve the universe review status; the company is still active and scored.",
                     )
                 )
-                if ticker and str(company_by_id.get("ticker") or "").upper() != ticker:
+                if ticker and company_by_id_ticker != ticker:
                     issues.append(
                         _issue(
                             severity="critical",
                             issue_type="override_ticker_company_id_mismatch",
                             source="manual_overrides",
                             row=row,
-                            observed=f"ticker={ticker};company_id_ticker={company_by_id.get('ticker')}",
+                            observed=f"ticker={ticker};company_id_ticker={company_by_id_ticker}",
                             recommended_action="Correct either ticker or company_id so they reference the same company.",
                         )
                     )
@@ -357,14 +361,14 @@ def _audit_overrides(
                         recommended_action="Use an active company_id or mark the override out_of_universe.",
                     )
                 )
-            elif ticker and str(company_by_id.get("ticker") or "").upper() != ticker:
+            elif ticker and company_by_id_ticker != ticker:
                 issues.append(
                     _issue(
                         severity="critical",
                         issue_type="override_ticker_company_id_mismatch",
                         source="manual_overrides",
                         row=row,
-                        observed=f"ticker={ticker};company_id_ticker={company_by_id.get('ticker')}",
+                        observed=f"ticker={ticker};company_id_ticker={company_by_id_ticker}",
                         recommended_action="Correct either ticker or company_id so they reference the same company.",
                     )
                 )

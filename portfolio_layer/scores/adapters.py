@@ -590,6 +590,17 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
     return out
 
 
+def _med_device_score_provenance_unsafe(row: dict[str, str]) -> bool:
+    mode = str(row.get("ic_tilted_composite_mode") or "").strip().lower()
+    source = str(row.get("production_score_source") or "").strip().lower()
+    applied = _truthy(row.get("ic_tilt_applied_to_production_flag"))
+    return bool(
+        mode == "replace_raw"
+        or applied
+        or source in {"ic_tilted_composite", "ic_tilted_composite_score"}
+    )
+
+
 def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
     if rows and "portfolio_candidate_gate" not in rows[0]:
         raise ValueError("med_devices score file must include portfolio_candidate_gate")
@@ -630,14 +641,25 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             skipped += 1
             continue
         missing_score = native <= 0.0
-        eligible = _truthy(r.get("portfolio_candidate_gate")) and not missing_score
+        unsafe_score_provenance = _med_device_score_provenance_unsafe(r)
+        eligible = (
+            _truthy(r.get("portfolio_candidate_gate"))
+            and not missing_score
+            and not unsafe_score_provenance
+        )
         reason = (
             "ok"
             if eligible
-            else "missing_score" if missing_score else str(r.get("portfolio_candidate_reason") or "failed_portfolio_candidate_gate").strip()
+            else "unsafe_production_score_provenance"
+            if unsafe_score_provenance
+            else "missing_score"
+            if missing_score
+            else str(r.get("portfolio_candidate_reason") or "failed_portfolio_candidate_gate").strip()
         )
         calibration_ok = _truthy(r.get("calibration_eligible_flag")) if "calibration_eligible_flag" in r else eligible
-        oos_score_valid = _oos_score_valid(r, cfg, default_requires_oos=True)
+        oos_score_valid = bool(
+            _oos_score_valid(r, cfg, default_requires_oos=True) and not unsafe_score_provenance
+        )
         if eligible and not oos_score_valid:
             # investable_eligible must imply oos_score_valid_flag=1 (docs/score_eligibility_flags.md);
             # pre-lock historical exports may set the gate while the score is not yet a frozen OOS model.
@@ -649,6 +671,8 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             else r.get("research_calibration_input_eligible_flag")
         )
         source_role = _sample_role(r, investable=eligible, research_eligible=raw_source_research_eligible)
+        if unsafe_score_provenance:
+            source_role = "excluded"
         if "stage11_calibration_input_eligible_flag" in r:
             raw_research_eligible = _truthy(r.get("stage11_calibration_input_eligible_flag"))
             research_eligible = bool(
@@ -702,6 +726,9 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
                 eligible=research_eligible,
                 reason="not_calibration_eligible" if not calibration_ok else "missing_score",
             )
+        if unsafe_score_provenance:
+            research_eligible = False
+            research_reason = "unsafe_production_score_provenance"
         if eligible:
             research_eligible = True
             research_reason = "ok"

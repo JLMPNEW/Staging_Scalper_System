@@ -1,0 +1,53 @@
+definition_version: consumer_defensive_financial_v3
+metrics:
+  revenue:
+    statement_type: income
+    concepts: [RevenueFromContractWithCustomerExcludingAssessedTax, Revenues, SalesRevenueNet, Revenue]
+  cost_of_revenue:
+    statement_type: income
+    concepts: [CostOfRevenue, CostOfGoodsAndServicesSold, CostOfGoodsSold, CostOfSales]
+  gross_profit:
+    statement_type: income
+    concepts: [GrossProfit]
+  operating_income:
+    statement_type: income
+    concepts: [OperatingIncomeLoss, ProfitLossFromOperatingActivities]
+  net_income:
+    statement_type: income
+    concepts: [NetIncomeLoss, ProfitLoss, ProfitLossAttributableToOwnersOfParent]
+  operating_cash_flow:
+    statement_type: cash_flow
+    concepts: [NetCashProvidedByUsedInOperatingActivities, CashFlowsFromUsedInOperatingActivities]
+  capital_expenditures:
+    statement_type: cash_flow
+    concepts: [PaymentsToAcquirePropertyPlantAndEquipment, PurchaseOfPropertyPlantAndEquipment]
+  cash:
+    statement_type: balance_sheet
+    concepts: [CashAndCashEquivalentsAtCarryingValue, CashAndCashEquivalents]
+  inventory:
+    statement_type: balance_sheet
+    concepts: [InventoryNet, Inventories]
+  equity:
+    statement_type: balance_sheet
+    concepts: [StockholdersEquity, StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest, PartnersCapital, Equity]
+  debt_current:
+    statement_type: balance_sheet
+    components:
+      short_term_borrowings:
+        concepts: [ShortTermBorrowings, CurrentBorrowings]
+      current_maturities:
+        concepts: [LongTermDebtCurrent, LongTermDebtAndFinanceLeaseObligationsCurrent]
+  debt_noncurrent:
+    statement_type: balance_sheet
+    components:
+      long_term_debt:
+        concepts: [LongTermDebtNoncurrent, LongTermDebtAndFinanceLeaseObligationsNoncurrent, NoncurrentBorrowings]
+  depreciation_amortization:
+    statement_type: cash_flow
+    concepts: [DepreciationDepletionAndAmortization, DepreciationAndAmortisationExpense]
+  income_tax_expense:
+    statement_type: income
+    concepts: [IncomeTaxExpenseBenefit, IncomeTaxExpense]
+  pretax_income:
+    statement_type: income
+    concepts: [IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest, ProfitLossBeforeTax]

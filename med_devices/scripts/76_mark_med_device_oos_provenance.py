@@ -61,6 +61,10 @@ REQUIRED_SCORE_COLUMNS = {
     "score_zero_is_missing_flag",
     "native_score_value",
     "composite_score",
+    "ic_tilted_composite_mode",
+    "production_score_source",
+    "ic_tilt_applied_to_production_flag",
+    "production_score_regime_version",
     "source_snapshot_asof_date",
     "research_calibration_input_eligible_flag",
     "research_calibration_status",
@@ -90,11 +94,30 @@ STRICT_OOS_ROW_CRITERIA_TEMPLATE = """
     AND COALESCE({p}composite_score, 0.0) > 0.0
     AND TRIM(COALESCE({p}source_snapshot_asof_date, '')) = {p}asof_date
     AND {p}calibration_sample_role IN ('research_calibration_input', 'strict_oos')
+    AND LOWER(TRIM(COALESCE({p}ic_tilted_composite_mode, ''))) <> 'replace_raw'
+    AND COALESCE({p}ic_tilt_applied_to_production_flag, 0) = 0
+    AND LOWER(TRIM(COALESCE({p}production_score_source, ''))) NOT IN ('ic_tilted_composite', 'ic_tilted_composite_score')
 """
 
 
 def strict_oos_row_criteria(prefix: str = "") -> str:
     return STRICT_OOS_ROW_CRITERIA_TEMPLATE.format(p=prefix)
+
+
+UNSAFE_PRODUCTION_SCORE_CRITERIA_TEMPLATE = """
+    (
+        LOWER(TRIM(COALESCE({p}ic_tilted_composite_mode, ''))) = 'replace_raw'
+        OR COALESCE({p}ic_tilt_applied_to_production_flag, 0) <> 0
+        OR LOWER(TRIM(COALESCE({p}production_score_source, '')))
+           IN ('ic_tilted_composite', 'ic_tilted_composite_score')
+    )
+"""
+
+
+def unsafe_production_score_criteria(prefix: str = "") -> str:
+    return UNSAFE_PRODUCTION_SCORE_CRITERIA_TEMPLATE.format(p=prefix)
+
+
 SUMMARY_FIELDS = [
     "asof_date",
     "evaluated_at_utc",
@@ -106,6 +129,8 @@ SUMMARY_FIELDS = [
     "validator_critical_failures",
     "publisher_defaulted_rows",
     "candidate_rows",
+    "unsafe_production_score_rows",
+    "demoted_unsafe_rows",
     "newly_promoted_rows",
     "previously_promoted_rows",
     "stale_flagged_rows",
@@ -284,6 +309,8 @@ def evaluate_asof(
         "validator_critical_failures": 0,
         "publisher_defaulted_rows": 0,
         "candidate_rows": 0,
+        "unsafe_production_score_rows": 0,
+        "demoted_unsafe_rows": 0,
         "newly_promoted_rows": 0,
         "previously_promoted_rows": 0,
         "stale_flagged_rows": 0,
@@ -327,6 +354,14 @@ def evaluate_asof(
         f"SELECT COUNT(*) FROM med_device_daily_scores WHERE asof_date = ? AND {strict_oos_row_criteria()}",
         (asof, STAGE11_CALIBRATION_PANEL_SOURCE),
     )
+    result["unsafe_production_score_rows"] = count_rows(
+        conn,
+        f"SELECT COUNT(*) FROM med_device_daily_scores WHERE asof_date = ? AND {unsafe_production_score_criteria()}",
+        (asof,),
+    )
+    if result["unsafe_production_score_rows"] > 0:
+        reasons.append("unsafe_production_score_provenance")
+
     result["previously_promoted_rows"] = count_rows(
         conn,
         """
@@ -387,6 +422,50 @@ def promote_asof(conn: Any, *, asof: str, dry_run: bool) -> int:
     return int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
 
 
+def demote_unsafe_asof(conn: Any, *, asof: str, dry_run: bool) -> int:
+    """Remove OOS and research eligibility from rows with unsafe score lineage."""
+
+    pending_sql = f"""
+        asof_date = ?
+          AND {unsafe_production_score_criteria()}
+          AND (
+              oos_score_valid_flag = 1
+              OR calibration_sample_role = 'strict_oos'
+              OR research_calibration_input_eligible_flag = 1
+              OR stage11_calibration_input_eligible_flag = 1
+          )
+    """
+    if dry_run:
+        return count_rows(
+            conn,
+            f"SELECT COUNT(*) FROM med_device_daily_scores WHERE {pending_sql}",
+            (asof,),
+        )
+    cursor = conn.execute(
+        f"""
+        UPDATE med_device_daily_scores
+        SET oos_score_valid_flag = 0,
+            research_calibration_input_eligible_flag = 0,
+            research_calibration_status = 'excluded',
+            research_calibration_reason = 'unsafe_production_score_provenance',
+            stage11_calibration_input_eligible_flag = 0,
+            stage11_calibration_input_reason = 'unsafe_production_score_provenance',
+            calibration_sample_role = 'excluded_from_research_calibration',
+            updated_at = ?
+        WHERE {pending_sql}
+        """,
+        (utc_now(), asof),
+    )
+    return int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
+
+
+def row_has_unsafe_production_score(row: dict[str, str]) -> bool:
+    mode = str(row.get("ic_tilted_composite_mode") or "").strip().lower()
+    source = str(row.get("production_score_source") or "").strip().lower()
+    flag = str(row.get("ic_tilt_applied_to_production_flag") or "").strip().lower()
+    return mode == "replace_raw" or source in {"ic_tilted_composite", "ic_tilted_composite_score"} or flag in {"1", "1.0", "true", "yes"}
+
+
 def demote_pre_lock_asof(conn: Any, *, asof: str, dry_run: bool) -> int:
     """Reverse strict-OOS promotions on a pre-lock as-of: no evidence can make them valid.
 
@@ -445,6 +524,57 @@ def demote_snapshot_csv(path: Path, *, dry_run: bool, only_asof: str = "") -> tu
         if role_oos:
             row["calibration_sample_role"] = "research_calibration_input"
         updated += 1
+    if updated and not dry_run:
+        write_csv_atomic(path, fieldnames, rows)
+    return updated, "ok"
+
+
+def demote_unsafe_snapshot_csv(
+    path: Path,
+    *,
+    dry_run: bool,
+    only_asof: str = "",
+) -> tuple[int, str]:
+    """Mirror unsafe-lineage demotions into a dated or rolling score CSV."""
+
+    if not path.exists():
+        return 0, "snapshot_csv_missing"
+    fieldnames, rows = read_csv_rows(path)
+    provenance_fields = {
+        "ic_tilted_composite_mode",
+        "production_score_source",
+        "ic_tilt_applied_to_production_flag",
+    }
+    if not provenance_fields.intersection(fieldnames):
+        return 0, "snapshot_csv_missing_score_provenance_columns"
+    if only_asof:
+        if "asof_date" not in fieldnames:
+            return 0, "snapshot_csv_missing_asof_date_column"
+        if not any(str(row.get("asof_date") or "").strip()[:10] == only_asof for row in rows):
+            return 0, "asof_not_in_csv"
+
+    desired = {
+        "oos_score_valid_flag": "0",
+        "research_calibration_input_eligible_flag": "0",
+        "research_calibration_status": "excluded",
+        "research_calibration_reason": "unsafe_production_score_provenance",
+        "stage11_calibration_input_eligible_flag": "0",
+        "stage11_calibration_input_reason": "unsafe_production_score_provenance",
+        "calibration_sample_role": "excluded_from_research_calibration",
+    }
+    updated = 0
+    for row in rows:
+        if only_asof and str(row.get("asof_date") or "").strip()[:10] != only_asof:
+            continue
+        if not row_has_unsafe_production_score(row):
+            continue
+        changed = False
+        for field, value in desired.items():
+            if field in fieldnames and str(row.get(field) or "") != value:
+                row[field] = value
+                changed = True
+        if changed:
+            updated += 1
     if updated and not dry_run:
         write_csv_atomic(path, fieldnames, rows)
     return updated, "ok"
@@ -670,6 +800,33 @@ def main() -> int:
                         rolling_updated, rolling_note = sync_snapshot_csv(
                             rolling_csv, tickers=tickers, dry_run=dry_run, only_asof=asof,
                         )
+                elif "unsafe_production_score_provenance" in result["skip_reason"]:
+                    result["demoted_unsafe_rows"] = demote_unsafe_asof(
+                        conn,
+                        asof=asof,
+                        dry_run=dry_run,
+                    )
+                    if not args.skip_snapshot_csv:
+                        snapshot_updated, note = demote_unsafe_snapshot_csv(
+                            reports_root / asof / DAILY_SNAPSHOT_FILENAME,
+                            dry_run=dry_run,
+                        )
+                        snapshot_note = f"demoted_unsafe_provenance:{note}"
+                        rolling_updated, rolling_note_raw = demote_unsafe_snapshot_csv(
+                            rolling_csv,
+                            dry_run=dry_run,
+                            only_asof=asof,
+                        )
+                        rolling_note = f"demoted_unsafe_provenance:{rolling_note_raw}"
+                    LOGGER.warning(
+                        "asof=%s unsafe production score provenance: unsafe_rows=%d "
+                        "demoted_db_rows=%d snapshot_rows=%d rolling_csv_rows=%d",
+                        asof,
+                        result["unsafe_production_score_rows"],
+                        result["demoted_unsafe_rows"],
+                        snapshot_updated,
+                        rolling_updated,
+                    )
                 elif "before_strict_oos_start_date" in result["skip_reason"]:
                     # Pre-lock as-of: any existing promotion is provably invalid — demote it.
                     # Other skip reasons (missing evidence) still leave prior promotions for
@@ -708,6 +865,8 @@ def main() -> int:
                         "validator_critical_failures": result["validator_critical_failures"],
                         "publisher_defaulted_rows": result["publisher_defaulted_rows"],
                         "candidate_rows": result["candidate_rows"],
+                        "unsafe_production_score_rows": result["unsafe_production_score_rows"],
+                        "demoted_unsafe_rows": result["demoted_unsafe_rows"],
                         "newly_promoted_rows": result["newly_promoted_rows"],
                         "previously_promoted_rows": result["previously_promoted_rows"],
                         "stale_flagged_rows": result["stale_flagged_rows"],

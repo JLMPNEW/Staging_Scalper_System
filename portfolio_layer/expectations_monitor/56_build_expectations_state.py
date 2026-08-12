@@ -330,8 +330,8 @@ def _escalations(
             floor_state, "watch", key=_severity_rank
         )
         evidence.extend(str(row["event_id"]) for row in r2)
-    abnormal = market.get("abnormal_ret_1d_z")
-    if abnormal is not None and float(abnormal) <= -2.0 and any(float(row["direction"]) < 0 for row in events):
+    abnormal = finite_number(market.get("abnormal_ret_1d_z"))
+    if abnormal is not None and abnormal <= -2.0 and any(float(row["direction"]) < 0 for row in events):
         flags.append("R4")
         floor_state = max(floor_state, "watch", key=_severity_rank)
     if "estimate_revision_down" in types:
@@ -355,6 +355,11 @@ def run_selftest() -> None:
         {"abnormal_ret_1d_z": -2.1, "rel_ret_5d": -0.1, "rel_ret_20d": -0.2},
     )
     assert "R1" in flags and floor == "watch"
+    blank_flags, blank_floor, _ = _escalations(
+        [{"event_type": "guidance_cut", "severity": 4.5, "event_id": "x", "direction": -1, "material_flag": 1}],
+        {"abnormal_ret_1d_z": "", "rel_ret_5d": "", "rel_ret_20d": ""},
+    )
+    assert "R4" not in blank_flags and "R1" in blank_flags and blank_floor == "watch"
     assert _isolate_missing_market_action(
         "hold",
         market_data_status="missing_latest",

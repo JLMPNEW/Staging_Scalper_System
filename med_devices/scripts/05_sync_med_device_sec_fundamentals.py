@@ -26,7 +26,7 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
-from med_devices.core.text_norm import normalize_cik  # noqa: E402
+from med_devices.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_med_device_sec_fundamentals")
@@ -254,6 +254,7 @@ class SecIngestionPolicy:
     cash_and_investments_securities_concepts: list[str]
     composite_debt_concept_rank: int
     preferred_units: dict[str, set[str]]
+    annual_gross_profit_from_operating_expenses_tickers: set[str]
 
 
 def parse_args() -> argparse.Namespace:
@@ -318,6 +319,11 @@ def concept_map(raw: object, default: dict[str, list[str]]) -> dict[str, list[st
     return out or {metric: list(concepts) for metric, concepts in default.items()}
 
 
+def ticker_set(raw: object) -> set[str]:
+    values = raw if isinstance(raw, list) else []
+    return {normalize_ticker(value) for value in values if normalize_ticker(value)}
+
+
 def preferred_units_map(raw: object) -> dict[str, set[str]]:
     defaults = {"default": {"USD"}, "shares_outstanding": {"SHARES"}}
     if not isinstance(raw, dict):
@@ -347,8 +353,7 @@ def sec_ingestion_policy(config: dict[str, Any]) -> SecIngestionPolicy:
             or DEFAULT_SEC_COMPANYFACTS_SOURCE
         ),
         sec_archives_base=str(
-            cfg_get(config, "sec_ingestion.sec_archives_base", DEFAULT_SEC_ARCHIVES_BASE)
-            or DEFAULT_SEC_ARCHIVES_BASE
+            cfg_get(config, "sec_ingestion.sec_archives_base", DEFAULT_SEC_ARCHIVES_BASE) or DEFAULT_SEC_ARCHIVES_BASE
         ).rstrip("/"),
         submissions_url_template=str(
             cfg_get(config, "sec_ingestion.submissions_url_template", DEFAULT_SEC_SUBMISSIONS_URL)
@@ -396,6 +401,9 @@ def sec_ingestion_policy(config: dict[str, Any]) -> SecIngestionPolicy:
         ),
         composite_debt_concept_rank=int(cfg_get(config, "sec_ingestion.composite_debt_concept_rank", 1000)),
         preferred_units=preferred_units_map(cfg_get(config, "sec_ingestion.preferred_units", {})),
+        annual_gross_profit_from_operating_expenses_tickers=ticker_set(
+            cfg_get(config, "sec_ingestion.annual_gross_profit_from_operating_expenses_tickers", [])
+        ),
     )
 
 
@@ -874,7 +882,9 @@ def build_cash_and_investments_map(
             fiscal_year=template.fiscal_year,
             fiscal_period=template.fiscal_period,
             form=template.form,
-            filed_date=max(cash_obs.filed_date if cash_obs else "", securities_obs.filed_date if securities_obs else ""),
+            filed_date=max(
+                cash_obs.filed_date if cash_obs else "", securities_obs.filed_date if securities_obs else ""
+            ),
             accession_nodash=template.accession_nodash,
             frame=template.frame,
             concept_rank=policy.composite_debt_concept_rank + 2,
@@ -894,7 +904,9 @@ def build_composite_capex_map(
         policy,
     )
     component_best: dict[tuple[str, str, str, str], FactObservation] = {}
-    for obs in flatten_metric_observations(companyfacts, "capital_expenditures", policy.capex_component_concepts, policy):
+    for obs in flatten_metric_observations(
+        companyfacts, "capital_expenditures", policy.capex_component_concepts, policy
+    ):
         key = (obs.period_end, obs.fiscal_period, obs.form, obs.concept)
         existing = component_best.get(key)
         if existing is None or observation_sort_key(obs) > observation_sort_key(existing):
@@ -996,10 +1008,14 @@ def build_financial_statement_rows(
     keys = sorted(set().union(*(set(mapping.keys()) for mapping in metric_maps.values())))
     rows: list[dict[str, Any]] = []
     for period_end, fiscal_period, form in keys:
-        observations = {metric: mapping.get((period_end, fiscal_period, form)) for metric, mapping in metric_maps.items()}
+        observations = {
+            metric: mapping.get((period_end, fiscal_period, form)) for metric, mapping in metric_maps.items()
+        }
         if not any(observations.values()):
             continue
-        fiscal_years = [obs.fiscal_year for obs in observations.values() if obs is not None and obs.fiscal_year is not None]
+        fiscal_years = [
+            obs.fiscal_year for obs in observations.values() if obs is not None and obs.fiscal_year is not None
+        ]
         capex = observation_value(observations, "capital_expenditures")
         ocf = observation_value(observations, "operating_cash_flow")
         filed_date = selected_filed_date(observations)
@@ -1041,9 +1057,9 @@ def build_financial_statement_rows(
                 note="Balance-sheet facts were reported but no recognized debt or finance-lease fact was present.",
             )
 
+        gross_profit = observation_value(observations, "gross_profit")
         operating_income = observation_value(observations, "operating_income")
         if operating_income is None:
-            gross_profit = observation_value(observations, "gross_profit")
             revenue = observation_value(observations, "revenue")
             sg_and_a = observation_value(observations, "selling_general_admin")
             cost_of_revenue = observation_value(observations, "cost_of_revenue")
@@ -1072,6 +1088,48 @@ def build_financial_statement_rows(
                     note="Direct operating-income fact was absent; derived from reported revenue and operating-cost components.",
                 )
 
+        if (
+            gross_profit is None
+            and fiscal_period == "FY"
+            and company.ticker in policy.annual_gross_profit_from_operating_expenses_tickers
+        ):
+            revenue = observation_value(observations, "revenue")
+            direct_operating_income = observation_value(observations, "operating_income")
+            sg_and_a = observation_value(observations, "selling_general_admin")
+            direct_rd = observation_value(observations, "research_and_development")
+            if (
+                revenue is not None
+                and revenue > 0.0
+                and direct_operating_income is not None
+                and sg_and_a is not None
+                and direct_rd is not None
+            ):
+                candidate_gross_profit = direct_operating_income + sg_and_a + direct_rd
+                if 0.0 <= candidate_gross_profit <= revenue:
+                    gross_profit = candidate_gross_profit
+                    payload["gross_profit"] = derived_payload(
+                        "derived_operating_income_plus_sga_and_rd",
+                        inputs={
+                            "operating_income": direct_operating_income,
+                            "selling_general_admin": sg_and_a,
+                            "research_and_development": direct_rd,
+                            "revenue": revenue,
+                        },
+                        note=(
+                            "Reviewed annual issuer statement presents gross contribution before R&D and SG&A "
+                            "but no standardized gross-profit fact; derived only from direct SEC statement inputs."
+                        ),
+                    )
+                else:
+                    LOGGER.warning(
+                        "%s %s %s: rejected gross-profit derivation outside [0, revenue]: %.2f vs %.2f",
+                        company.ticker,
+                        period_end,
+                        fiscal_period,
+                        candidate_gross_profit,
+                        revenue,
+                    )
+
         rows.append(
             {
                 "company_id": company.company_id,
@@ -1082,7 +1140,7 @@ def build_financial_statement_rows(
                 "filed_date": filed_date,
                 "accession_nodash": selected_accession(observations),
                 "revenue": observation_value(observations, "revenue"),
-                "gross_profit": observation_value(observations, "gross_profit"),
+                "gross_profit": gross_profit,
                 "operating_income": operating_income,
                 "net_income": observation_value(observations, "net_income"),
                 "operating_cash_flow": ocf,
@@ -1107,7 +1165,9 @@ def upsert_financial_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
         return 0
     sanitized_rows = [dict(row) for row in rows]
     now = utc_now()
-    accessions = sorted({str(row.get("accession_nodash") or "") for row in sanitized_rows if row.get("accession_nodash")})
+    accessions = sorted(
+        {str(row.get("accession_nodash") or "") for row in sanitized_rows if row.get("accession_nodash")}
+    )
     existing_accessions: set[str] = set()
     for start in range(0, len(accessions), 800):
         chunk = accessions[start : start + 800]
@@ -1209,13 +1269,26 @@ def main() -> None:
     config = load_yaml(config_path)
     policy = sec_ingestion_policy(config)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     output_csv = (
         args.output_csv.expanduser().resolve()
         if args.output_csv
-        else resolve_path(cfg_get(config, "sec_ingestion.output_csv", "../output/med_devices_reports/med_device_sec_ingestion_coverage.csv"), base_dir=base_dir)
+        else resolve_path(
+            cfg_get(
+                config,
+                "sec_ingestion.output_csv",
+                "../output/med_devices_reports/med_device_sec_ingestion_coverage.csv",
+            ),
+            base_dir=base_dir,
+        )
     )
-    cache_dir = resolve_path(cfg_get(config, "sec_ingestion.cache_dir", "../output/med_devices_cache/sec_ingestion"), base_dir=base_dir)
+    cache_dir = resolve_path(
+        cfg_get(config, "sec_ingestion.cache_dir", "../output/med_devices_cache/sec_ingestion"), base_dir=base_dir
+    )
     validation_cache_dir = resolve_path(
         cfg_get(config, "sec_ingestion.validation_cache_dir", "../output/med_devices_cache/universe_validation"),
         base_dir=base_dir,
@@ -1322,7 +1395,9 @@ def main() -> None:
                                     response_status=extra_status_code,
                                     ingestion_run_id=submissions_ingestion_id,
                                 )
-                                filing_rows.extend(parse_recent_filings(company, extra_submissions, policy.forms, policy))
+                                filing_rows.extend(
+                                    parse_recent_filings(company, extra_submissions, policy.forms, policy)
+                                )
                             except Exception as exc:
                                 LOGGER.warning(
                                     "Skipping paginated SEC submissions file for %s file=%s: %s",
@@ -1365,7 +1440,9 @@ def main() -> None:
                     financial_count = upsert_financial_rows(conn, financial_rows)
                     total_financial_rows += financial_count
                     if financial_rows:
-                        periods = sorted({str(row.get("period_end") or "") for row in financial_rows if row.get("period_end")})
+                        periods = sorted(
+                            {str(row.get("period_end") or "") for row in financial_rows if row.get("period_end")}
+                        )
                         first_period = periods[0] if periods else ""
                         latest_period = periods[-1] if periods else ""
                     else:

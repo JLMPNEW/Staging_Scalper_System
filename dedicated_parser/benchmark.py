@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import sqlite3
 from collections import Counter
 from pathlib import Path
+
+from dedicated_parser.atomic_io import atomic_text_writer, atomic_write_text
 from typing import Any, Iterable
 
 from dedicated_parser.adapters import load_ticker_selector
@@ -200,17 +201,12 @@ def write_benchmark_cohort(
     json_path: Path,
     csv_path: Path,
 ) -> None:
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_temporary = json_path.with_suffix(json_path.suffix + ".tmp")
-    json_temporary.write_text(
+    atomic_write_text(
+        json_path,
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
-    os.replace(json_temporary, json_path)
 
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    csv_temporary = csv_path.with_suffix(csv_path.suffix + ".tmp")
-    with csv_temporary.open("w", encoding="utf-8", newline="") as handle:
+    with atomic_text_writer(csv_path, newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=(
@@ -234,4 +230,3 @@ def write_benchmark_cohort(
                     "enabled": "true",
                 }
             )
-    os.replace(csv_temporary, csv_path)

@@ -1,0 +1,175 @@
+paths:
+  database_path: "${CONSUMER_DEFENSIVE_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/consumer_defensive.sqlite"
+  output_dir: "${CONSUMER_DEFENSIVE_OUTPUT_DIR:-../output/consumer_defensive}"
+  authoritative_input_manifest: "data/authoritative_input_manifest.yaml"
+
+runtime:
+  sqlite_timeout_sec: 30.0
+  model_family: "consumer_defensive"
+  internal_sector: "Consumer Defensive"
+  portfolio_sector: "Consumer Staples"
+  timezone: "America/New_York"
+
+source_registry:
+  path: "data/free_source_registry.yaml"
+  stage2_path: "data/stage2_source_registry.yaml"
+
+specialized_metrics:
+  registry_path: "data/consumer_defensive_specialized_metric_registry.yaml"
+  default_status: "research_candidate"
+  production_default_weight: 0.0
+
+sec_fundamentals:
+  submissions_source_id: "sec_submissions"
+  companyfacts_source_id: "sec_companyfacts"
+  inline_xbrl_source_id: "sec_inline_xbrl_fallback"
+  start_date: "2010-01-01"
+  cache_dir: "${CONSUMER_DEFENSIVE_SEC_CACHE_DIR:-../output/consumer_defensive/cache/sec}"
+  submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
+  submissions_archive_url_template: "https://data.sec.gov/submissions/{file_name}"
+  companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  include_submission_archives: true
+  hydrate_documents: true
+  documents_per_issuer: 8
+  companyfacts_lag_days: 120
+  user_agent: "JL, Independent Research, jm.357@hotmail.com"
+  sleep_sec: 0.12
+  timeout_sec: 30
+  retries: 3
+
+fx_rates:
+  source_id: "yahoo_fx_rates"
+  start_date: "2010-01-01"
+  supported_currencies: [ARS, BRL, CAD, CHF, CLF, CLP, CNY, DKK, EUR, GBP, HKD, INR, JPY, KRW, MXN, NOK, NZD, SEK, SGD, VEF, ZAR]
+  non_monetary_three_letter_units: [GAL, JOB, TON]
+  outlier_window: 21
+  outlier_minimum_history: 5
+  outlier_robust_z_threshold: 8.0
+  outlier_relative_deviation_threshold: 0.35
+  redenomination_exemptions: []
+  cache_dir: "${CONSUMER_DEFENSIVE_FX_CACHE_DIR:-../output/consumer_defensive/cache/fx}"
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={period1}&period2={period2}&interval=1d&events=history"
+  user_agent: "Mozilla/5.0 Consumer Defensive Research"
+  sleep_sec: 0.05
+  timeout_sec: 30
+  retries: 3
+
+financial_features:
+  concept_map: "data/consumer_defensive_financial_concept_map.yaml"
+  point_in_time_acceptance_required: true
+  flow_fx_method: "period_average"
+  balance_sheet_fx_method: "latest_on_or_before_period_end"
+  maximum_period_age_days: 550
+
+specialized_disclosure_census:
+  applicability_csv: "data/consumer_defensive_metric_applicability.csv"
+  terms_path: "data/consumer_defensive_specialized_disclosure_terms.yaml"
+  expected_applicability_rows: 119
+  parser_version: "consumer_defensive_disclosure_census_v2"
+  discovery_only: true
+  production_weight: 0.0
+
+universe:
+  policy_path: "data/consumer_defensive_universe_policy.yaml"
+  expected_current_rows: 108
+  authoritative_source: "ticker_mapping/consumer_defensive.csv"
+  minimum_price: 3.0
+  core_minimum_median_dollar_volume_63d: 5000000
+  support_minimum_median_dollar_volume_63d: 1000000
+  recognized_membership_required: true
+  recognized_membership_source_id: "norgate_us_equities_pit_membership"
+  recognized_membership_effective_start: "2017-11-28"
+  recognized_membership_vehicles:
+    - vehicle_id: "russell_3000"
+      display_name: "Russell 3000"
+      norgate_index_name: "Russell 3000"
+      vehicle_type: "index"
+    - vehicle_id: "sp_composite_1500"
+      display_name: "S&P Composite 1500"
+      norgate_index_name: "S&P Composite 1500"
+      vehicle_type: "index"
+    - vehicle_id: "nyse_composite"
+      display_name: "NYSE Composite"
+      norgate_index_name: "NYSE Composite"
+      vehicle_type: "index"
+    - vehicle_id: "nasdaq_composite"
+      display_name: "Nasdaq Composite"
+      norgate_index_name: "Nasdaq Composite"
+      vehicle_type: "index"
+  current_holdings_validation_etfs: [XLP, IYK, FSTA]
+  allowed_security_types: [Common Stock, Ordinary Shares, ADR/ADS]
+  cohorts:
+    beverages:
+      display_name: "Beverages"
+      target_cross_section: 20
+      exploratory_minimum_cross_section: 12
+      applicability_subtypes: [alcohol, non_alcohol, mixed_beverage]
+    consumer_staples_distribution_retail:
+      display_name: "Consumer Staples Distribution & Retail"
+      target_cross_section: 20
+      exploratory_minimum_cross_section: 12
+      applicability_subtypes: [retail, food_distribution, hybrid]
+    household_personal_tobacco:
+      display_name: "Household Personal & Tobacco"
+      target_cross_section: 20
+      exploratory_minimum_cross_section: 12
+      applicability_subtypes: [household_personal, tobacco, direct_selling_wellness]
+    packaged_foods_agricultural_products:
+      display_name: "Packaged Foods & Agricultural Products"
+      target_cross_section: 20
+      exploratory_minimum_cross_section: 12
+      applicability_subtypes: [branded_food, private_label, protein_dairy, agricultural_processor]
+
+historical_contract:
+  requested_snapshot_start: "2019-01-02"
+  market_history_buffer_calendar_days: 400
+  minimum_market_history_start: "2017-11-28"
+  trading_calendar_ticker: "SPY"
+  sector_benchmark_ticker: "XLP"
+  broad_benchmark_ticker: "SPY"
+  frequency: "daily"
+  require_point_in_time_membership: true
+  require_terminal_event_for_delisted_calibration: true
+  current_universe_replay_is_survivorship_correct: false
+
+oos_provenance:
+  strict_oos_start_date: ""
+  calibration_lock_date: ""
+  allow_replay_oos_within_days: 5
+  deep_replay_role: "reconstructed_pit_calibration"
+  deep_replay_oos_score_valid_flag: 0
+
+market_data_policy:
+  policy_path: "data/consumer_defensive_market_data_policy.yaml"
+  adjusted_price_source_priority:
+    - yahoo_finance_adjusted
+    - norgate_us_equities_total_return
+  benchmark_tickers: [XLP, SPY]
+  raw_unadjusted_fallback_allowed: false
+
+dedicated_parser:
+  model_family: "consumer_defensive"
+  parser_schema_owner: "dedicated_parser.schema"
+  forms: [10-K, 10-Q, 8-K, 20-F, 6-K]
+  production_promotion_enabled: false
+
+factor_validation:
+  sector_adapter: "consumer_defensive.adapters.factor_validation"
+  primary_target: "forward_xlp_residual_return"
+  robustness_target: "forward_spy_beta_residual_return"
+  horizons: [21, 63, 126]
+  sector_minimum_cross_section: 30
+  cohort_target_cross_section: 20
+  cohort_exploratory_minimum_cross_section: 12
+
+portfolio_layer:
+  adapter: "consumer_defensive"
+  canonical_sector: "Consumer Staples"
+  sector_etf: "XLP"
+  file_mode: "dated"
+  final_rank_path: "consumer_defensive/dashboard/{yyyy-mm-dd}/consumer_defensive_final_rank_table.csv"
+  require_oos_score_valid: true
+  enabled: false
+  required: false
+  sector_weight_cap: 0.0
+  promotion_state: "deferred"

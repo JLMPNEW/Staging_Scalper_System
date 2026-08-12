@@ -12,6 +12,7 @@ the sole strict-OOS promoter. Passing --oos-score-valid (explicit opt-in, still
 bounded by scoring.oos_replay_window_days) bypasses 76's evidence gates and must
 be followed by a script 76 run so the promotion carries an evidence record.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -119,10 +120,20 @@ def parse_args() -> argparse.Namespace:
             "remains the sole strict-OOS promoter. Requires --asof."
         ),
     )
-    parser.add_argument("--resume", action="store_true", help="Resume from a previous manifest by skipping passed steps.")
-    parser.add_argument("--resume-manifest", type=Path, default=None, help="Manifest JSON to resume from; defaults to latest manifest.")
-    parser.add_argument("--rerun-passed", action="store_true", help="With --resume, rerun passed steps instead of skipping them.")
-    parser.add_argument("--retry-optional", action="store_true", help="With --resume, retry optional failures instead of treating them as done.")
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume from a previous manifest by skipping passed steps."
+    )
+    parser.add_argument(
+        "--resume-manifest", type=Path, default=None, help="Manifest JSON to resume from; defaults to latest manifest."
+    )
+    parser.add_argument(
+        "--rerun-passed", action="store_true", help="With --resume, rerun passed steps instead of skipping them."
+    )
+    parser.add_argument(
+        "--retry-optional",
+        action="store_true",
+        help="With --resume, retry optional failures instead of treating them as done.",
+    )
     parser.add_argument(
         "--import-positioning-sources",
         nargs="?",
@@ -157,16 +168,77 @@ def build_steps(
     import_sources = ",".join(item.strip() for item in import_positioning_sources.split(",") if item.strip())
 
     steps: list[Step] = [
-        Step("00_init_db", "stage_1", "Initialize med-devices DB/schema/source registry", py_script("med_devices/scripts/00_init_med_devices_db.py")),
-        Step("01_load_universe", "stage_2", "Load med-devices investable universe", py_script("med_devices/scripts/01_load_med_device_universe.py")),
-        Step("04_sync_yahoo_prices", "stage_3", "Sync Yahoo adjusted prices", py_script("med_devices/scripts/04_sync_med_device_yahoo_adjusted_prices.py"), [*asof_args, "--allow-partial"], network=True),
-        Step("20_sync_market_snapshots", "stage_3", "Sync market snapshots", py_script("med_devices/scripts/20_sync_med_device_market_snapshots.py"), [*asof_args, "--allow-partial"], network=True),
-        Step("05_sync_sec_fundamentals", "stage_4", "Sync SEC fundamentals", py_script("med_devices/scripts/05_sync_med_device_sec_fundamentals.py"), [*sec_args, "--allow-partial"], network=True),
-        Step("06_build_financial_features", "stage_4", "Build financial/valuation features", py_script("med_devices/scripts/06_build_med_device_financial_features.py"), asof_args),
-        Step("08_sync_fda_core", "stage_5", "Sync FDA core source facts", py_script("med_devices/scripts/08_sync_med_device_fda_core.py"), ["--allow-partial"], network=True),
-        Step("09_link_fda", "stage_5", "Link FDA manufacturers to companies", py_script("med_devices/scripts/09_link_med_device_fda_to_companies.py"), asof_args),
-        Step("70_audit_fda_mapping", "stage_5", "Audit FDA mapping governance", py_script("med_devices/scripts/70_audit_med_device_fda_mapping_governance.py")),
-        Step("10_build_fda_features", "stage_5", "Build FDA product-risk features", py_script("med_devices/scripts/10_build_med_device_fda_features.py"), asof_args),
+        Step(
+            "00_init_db",
+            "stage_1",
+            "Initialize med-devices DB/schema/source registry",
+            py_script("med_devices/scripts/00_init_med_devices_db.py"),
+        ),
+        Step(
+            "01_load_universe",
+            "stage_2",
+            "Load med-devices investable universe",
+            py_script("med_devices/scripts/01_load_med_device_universe.py"),
+        ),
+        Step(
+            "04_sync_yahoo_prices",
+            "stage_3",
+            "Sync Yahoo adjusted prices",
+            py_script("med_devices/scripts/04_sync_med_device_yahoo_adjusted_prices.py"),
+            [*asof_args, "--allow-partial"],
+            network=True,
+        ),
+        Step(
+            "20_sync_market_snapshots",
+            "stage_3",
+            "Sync market snapshots",
+            py_script("med_devices/scripts/20_sync_med_device_market_snapshots.py"),
+            [*asof_args, "--allow-partial"],
+            network=True,
+        ),
+        Step(
+            "05_sync_sec_fundamentals",
+            "stage_4",
+            "Sync SEC fundamentals",
+            py_script("med_devices/scripts/05_sync_med_device_sec_fundamentals.py"),
+            [*sec_args, "--allow-partial"],
+            network=True,
+        ),
+        Step(
+            "06_build_financial_features",
+            "stage_4",
+            "Build financial/valuation features",
+            py_script("med_devices/scripts/06_build_med_device_financial_features.py"),
+            asof_args,
+        ),
+        Step(
+            "08_sync_fda_core",
+            "stage_5",
+            "Sync FDA core source facts",
+            py_script("med_devices/scripts/08_sync_med_device_fda_core.py"),
+            asof_args,
+            network=True,
+        ),
+        Step(
+            "09_link_fda",
+            "stage_5",
+            "Link FDA manufacturers to companies",
+            py_script("med_devices/scripts/09_link_med_device_fda_to_companies.py"),
+            asof_args,
+        ),
+        Step(
+            "70_audit_fda_mapping",
+            "stage_5",
+            "Audit FDA mapping governance",
+            py_script("med_devices/scripts/70_audit_med_device_fda_mapping_governance.py"),
+        ),
+        Step(
+            "10_build_fda_features",
+            "stage_5",
+            "Build FDA product-risk features",
+            py_script("med_devices/scripts/10_build_med_device_fda_features.py"),
+            asof_args,
+        ),
         # Shadow-only discipline (WR-2): 78 stays fail-loud internally (no
         # --warn-only) but optional=True here — mirroring its validator 79 — so
         # exposure-CSV drift or a coverage-threshold regression records
@@ -177,15 +249,32 @@ def build_steps(
             "78_build_fda_product_family_shadow",
             "stage_5",
             "Build governed FDA product-family shadow risk",
-            py_script(
-                "med_devices/scripts/78_build_med_device_fda_product_family_review.py"
-            ),
+            py_script("med_devices/scripts/78_build_med_device_fda_product_family_review.py"),
             asof_args,
             optional=True,
         ),
-        Step("14_sync_cms_reimbursement", "stage_5", "Sync CMS/reimbursement source facts", py_script("med_devices/scripts/14_sync_med_device_cms_reimbursement.py"), ["--allow-partial"], network=True),
-        Step("15_link_reimbursement", "stage_5", "Link reimbursement evidence to companies", py_script("med_devices/scripts/15_link_med_device_reimbursement_to_companies.py"), asof_args),
-        Step("11_build_reimbursement_features", "stage_5", "Build reimbursement features", py_script("med_devices/scripts/11_build_med_device_reimbursement_features.py"), asof_args),
+        Step(
+            "14_sync_cms_reimbursement",
+            "stage_5",
+            "Sync CMS/reimbursement source facts",
+            py_script("med_devices/scripts/14_sync_med_device_cms_reimbursement.py"),
+            ["--allow-partial"],
+            network=True,
+        ),
+        Step(
+            "15_link_reimbursement",
+            "stage_5",
+            "Link reimbursement evidence to companies",
+            py_script("med_devices/scripts/15_link_med_device_reimbursement_to_companies.py"),
+            asof_args,
+        ),
+        Step(
+            "11_build_reimbursement_features",
+            "stage_5",
+            "Build reimbursement features",
+            py_script("med_devices/scripts/11_build_med_device_reimbursement_features.py"),
+            asof_args,
+        ),
         Step(
             "80_sync_company_risk_events",
             "stage_5",
@@ -193,10 +282,42 @@ def build_steps(
             py_script("med_devices/scripts/80_sync_med_device_company_risk_events.py"),
             asof_args,
         ),
-        Step("12_build_technical_features", "stage_6", "Build technical-entry features", py_script("med_devices/scripts/12_build_med_device_technical_features.py"), asof_args),
-        Step("55_sync_finra_short_volume", "stage_7", "Sync FINRA short-volume facts", py_script("med_devices/scripts/55_sync_med_device_finra_short_volume.py"), ["--end-date", asof] if asof else [], network=True, optional=True),
-        Step("65_update_finra_short_interest", "stage_7", "Update shared FINRA short-interest facts", py_script("med_devices/scripts/65_update_med_device_finra_short_interest.py"), asof_args, pass_db=False, network=True, optional=True),
-        Step("62_update_sec13f_positioning", "stage_7", "Update shared SEC 13F positioning facts", py_script("med_devices/scripts/62_update_med_device_market_positioning.py"), asof_args, pass_db=False, network=True, optional=True),
+        Step(
+            "12_build_technical_features",
+            "stage_6",
+            "Build technical-entry features",
+            py_script("med_devices/scripts/12_build_med_device_technical_features.py"),
+            asof_args,
+        ),
+        Step(
+            "55_sync_finra_short_volume",
+            "stage_7",
+            "Sync FINRA short-volume facts",
+            py_script("med_devices/scripts/55_sync_med_device_finra_short_volume.py"),
+            ["--end-date", asof] if asof else [],
+            network=True,
+            optional=True,
+        ),
+        Step(
+            "65_update_finra_short_interest",
+            "stage_7",
+            "Update shared FINRA short-interest facts",
+            py_script("med_devices/scripts/65_update_med_device_finra_short_interest.py"),
+            asof_args,
+            pass_db=False,
+            network=True,
+            optional=True,
+        ),
+        Step(
+            "62_update_sec13f_positioning",
+            "stage_7",
+            "Update shared SEC 13F positioning facts",
+            py_script("med_devices/scripts/62_update_med_device_market_positioning.py"),
+            asof_args,
+            pass_db=False,
+            network=True,
+            optional=True,
+        ),
     ]
     if not skip_ibkr_borrow:
         steps.append(
@@ -223,15 +344,74 @@ def build_steps(
         )
     steps.extend(
         [
-            Step("63_rebuild_sec13f_common_shares", "stage_7", "Rebuild point-in-time SEC 13F common-share facts", py_script("med_devices/scripts/63_rebuild_med_device_sec_13f_common_share_facts.py"), asof_args, optional=True),
-            Step("54_build_borrow_features", "stage_7", "Build borrow-positioning features", py_script("med_devices/scripts/54_build_med_device_borrow_features.py"), asof_args),
-            Step("56_build_short_interest_features", "stage_7", "Build short-interest features", py_script("med_devices/scripts/56_build_med_device_short_interest_features.py"), asof_args),
-            Step("58_build_institutional_flow_features", "stage_7", "Build institutional-flow features", py_script("med_devices/scripts/58_build_med_device_institutional_flow_features.py"), asof_args),
-            Step("68_update_form4_canonical", "stage_7", "Update SEC Form 4 canonical/import path", py_script("med_devices/scripts/68_update_med_device_form4_canonical.py"), form4_args, pass_db=False, network=True, optional=True),
-            Step("60_build_insider_activity_features", "stage_7", "Build insider-activity features", py_script("med_devices/scripts/60_build_med_device_insider_activity_features.py"), asof_args),
-            Step("67_audit_external_positioning", "stage_7", "Audit external-positioning source coverage", py_script("med_devices/scripts/67_audit_med_device_external_positioning_coverage.py"), asof_args, optional=True),
-            Step("13_build_daily_scores", "stage_8", "Build daily composite scores", py_script("med_devices/scripts/13_build_med_device_daily_scores.py"), scoring_args),
-            Step("16_publish_review_pack", "stage_8", "Publish dated score review pack", py_script("med_devices/scripts/16_publish_med_device_score_review_pack.py"), asof_args),
+            Step(
+                "63_rebuild_sec13f_common_shares",
+                "stage_7",
+                "Rebuild point-in-time SEC 13F common-share facts",
+                py_script("med_devices/scripts/63_rebuild_med_device_sec_13f_common_share_facts.py"),
+                asof_args,
+                optional=True,
+            ),
+            Step(
+                "54_build_borrow_features",
+                "stage_7",
+                "Build borrow-positioning features",
+                py_script("med_devices/scripts/54_build_med_device_borrow_features.py"),
+                asof_args,
+            ),
+            Step(
+                "56_build_short_interest_features",
+                "stage_7",
+                "Build short-interest features",
+                py_script("med_devices/scripts/56_build_med_device_short_interest_features.py"),
+                asof_args,
+            ),
+            Step(
+                "58_build_institutional_flow_features",
+                "stage_7",
+                "Build institutional-flow features",
+                py_script("med_devices/scripts/58_build_med_device_institutional_flow_features.py"),
+                asof_args,
+            ),
+            Step(
+                "68_update_form4_canonical",
+                "stage_7",
+                "Update SEC Form 4 canonical/import path",
+                py_script("med_devices/scripts/68_update_med_device_form4_canonical.py"),
+                form4_args,
+                pass_db=False,
+                network=True,
+                optional=True,
+            ),
+            Step(
+                "60_build_insider_activity_features",
+                "stage_7",
+                "Build insider-activity features",
+                py_script("med_devices/scripts/60_build_med_device_insider_activity_features.py"),
+                asof_args,
+            ),
+            Step(
+                "67_audit_external_positioning",
+                "stage_7",
+                "Audit external-positioning source coverage",
+                py_script("med_devices/scripts/67_audit_med_device_external_positioning_coverage.py"),
+                asof_args,
+                optional=True,
+            ),
+            Step(
+                "13_build_daily_scores",
+                "stage_8",
+                "Build daily composite scores",
+                py_script("med_devices/scripts/13_build_med_device_daily_scores.py"),
+                scoring_args,
+            ),
+            Step(
+                "16_publish_review_pack",
+                "stage_8",
+                "Publish dated score review pack",
+                py_script("med_devices/scripts/16_publish_med_device_score_review_pack.py"),
+                asof_args,
+            ),
         ]
     )
     # Post-scoring QA publishers (QA-1/QA-2): default-on so routine refreshes keep the
@@ -264,16 +444,33 @@ def build_steps(
         )
     steps.extend(
         [
-            Step("74_build_analyst_review", "stage_8", "Build analyst review queue", py_script("med_devices/scripts/74_build_med_device_analyst_review_queue.py"), asof_args),
-            Step("72_validate_production_outputs", "stage_8", "Run final production QA gate", py_script("med_devices/scripts/72_validate_med_device_production_outputs.py"), asof_args),
-            Step("73_audit_calibration_governance", "stage_9", "Audit calibration refresh cadence", py_script("med_devices/scripts/73_audit_med_device_calibration_governance.py"), asof_args, optional=True),
+            Step(
+                "74_build_analyst_review",
+                "stage_8",
+                "Build analyst review queue",
+                py_script("med_devices/scripts/74_build_med_device_analyst_review_queue.py"),
+                asof_args,
+            ),
+            Step(
+                "72_validate_production_outputs",
+                "stage_8",
+                "Run final production QA gate",
+                py_script("med_devices/scripts/72_validate_med_device_production_outputs.py"),
+                asof_args,
+            ),
+            Step(
+                "73_audit_calibration_governance",
+                "stage_9",
+                "Audit calibration refresh cadence",
+                py_script("med_devices/scripts/73_audit_med_device_calibration_governance.py"),
+                asof_args,
+                optional=True,
+            ),
             Step(
                 "79_validate_fda_product_family_shadow",
                 "stage_9",
                 "Validate FDA product-family shadow signal",
-                py_script(
-                    "med_devices/scripts/79_validate_med_device_fda_product_family_shadow.py"
-                ),
+                py_script("med_devices/scripts/79_validate_med_device_fda_product_family_shadow.py"),
                 asof_args,
                 optional=True,
             ),
@@ -297,7 +494,7 @@ def validate_step_order(steps: list[Step]) -> None:
 def selected_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:
     out = list(steps)
     if args.from_step:
-        out = out[step_index(out, args.from_step):]
+        out = out[step_index(out, args.from_step) :]
     if args.to_step:
         idx = step_index(out, args.to_step)
         out = out[: idx + 1]
@@ -428,7 +625,11 @@ def main() -> int:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     asof = str(args.asof or "").strip()
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     output_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir
@@ -503,7 +704,9 @@ def main() -> int:
     steps = apply_optional_step_config(steps, configured_optional_step_ids(config))
     if args.list_steps:
         for step in steps:
-            flags = ",".join(flag for flag, enabled in [("network", step.network), ("optional", step.optional)] if enabled)
+            flags = ",".join(
+                flag for flag, enabled in [("network", step.network), ("optional", step.optional)] if enabled
+            )
             print(f"{step.step_id}\t{step.stage}\t{flags}\t{step.description}")
         return 0
 
@@ -512,11 +715,15 @@ def main() -> int:
     resume_skipped_ids: set[str] = set()
     if args.resume:
         resume_manifest_path = (
-            args.resume_manifest.expanduser().resolve()
-            if args.resume_manifest
-            else production_latest_json
+            args.resume_manifest.expanduser().resolve() if args.resume_manifest else production_latest_json
         )
         resumed_from = load_manifest(resume_manifest_path)
+        resumed_asof = str(resumed_from.get("asof") or "").strip()
+        if resumed_asof != asof:
+            raise ValueError(
+                f"Resume manifest asof mismatch: requested={asof or '<live>'} "
+                f"manifest={resumed_asof or '<blank>'} path={resume_manifest_path}"
+            )
         resume_skipped_ids = resume_completed_step_ids(
             resumed_from,
             rerun_passed=bool(args.rerun_passed),
@@ -578,7 +785,9 @@ def main() -> int:
             continue
         start = time.perf_counter()
         with log_path.open("w", encoding="utf-8", newline="") as log:
-            log.write(f"run_id={run_id}\nstep={step.step_id}\nstarted_utc={datetime.now(timezone.utc).isoformat(timespec='seconds')}\n")
+            log.write(
+                f"run_id={run_id}\nstep={step.step_id}\nstarted_utc={datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+            )
             log.write(f"command={' '.join(cmd)}\n\n")
             result = subprocess.run(cmd, cwd=PROJECT_ROOT, stdout=log, stderr=subprocess.STDOUT, text=True, check=False)
         elapsed = time.perf_counter() - start
@@ -622,7 +831,11 @@ def main() -> int:
         "resume_skipped_step_count": len([row for row in rows if row.get("status") == "RESUME_SKIPPED"]),
         "resume_skipped_step_ids": sorted(resume_skipped_ids),
         "resumed_from_run_id": str(resumed_from.get("run_id") or "") if resumed_from else "",
-        "resume_manifest": str(args.resume_manifest.expanduser().resolve() if args.resume_manifest else production_latest_json) if args.resume else "",
+        "resume_manifest": str(
+            args.resume_manifest.expanduser().resolve() if args.resume_manifest else production_latest_json
+        )
+        if args.resume
+        else "",
         "failed_step_count": len([row for row in failures if row.get("status") != "OPTIONAL_FAIL"]),
         "optional_failed_step_count": len([row for row in failures if row.get("status") == "OPTIONAL_FAIL"]),
         "status": "PASS" if not [row for row in failures if row.get("status") != "OPTIONAL_FAIL"] else "FAIL",

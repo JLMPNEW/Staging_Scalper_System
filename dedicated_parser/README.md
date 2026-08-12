@@ -19,6 +19,24 @@ time are unchanged. Work is keyed by accession, document hashes, parser
 release, adapter version, metric registry, and the SHA-256 of the sector
 review-policy registry. Completed keys are skipped.
 
+### Consumer Defensive sealed-input boundary
+
+Consumer Defensive does not let the shared parser discover documents from a mutable archive. Its Stage 4 integration supplies a PIT filing list and a paired direct-document binding from the Consumer Defensive filing/company and document/company bridges. The filing set must match the active Consumer Defensive parser view for the requested date; every supplied document must be an active hydrated PIT bridge row whose metadata and bytes match the exact seal, and the filing/document keysets must be identical.
+
+Planning fails closed unless all of the following agree:
+
+- an independently supplied expected SEC ingestion-config SHA-256;
+- the parser's independently recomputed issuer-scope v3 count and hash, including normalized reporting currency;
+- one complete exact-date Stage 4 reconciliation and cache snapshot;
+- trusted-current scope-contract v3 rows produced by SEC ingestion-config v7 rather than quarantined legacy pointers;
+- the reconciliation and snapshot's config, scope, manifest, and seal identities;
+- complete append-only filing/company lifecycle events and their deterministic hashes; and
+- the exact direct filing/document keysets, metadata, primary-document identity, byte counts, and SHA-256 values.
+
+Consumer Defensive documents are read only from the verified immutable `sealed/YYYY-MM-DD` snapshot. Stage 4 builds each date seal from a global immutable `objects/sha256/<digest>` content-addressed store, never directly from a mutable acquisition alias. The parser requires canonical seal-relative paths, resolves every source beneath the configured cache and accession roots, and rejects traversal, absolute paths, URL query/fragment tricks, Windows reserved names, case-insensitive collisions, unsupported hydration suffixes, and symlink escape. Safe nested SEC archive paths remain supported.
+
+These controls implement the shared-kernel intake boundary only. They do not implement a Consumer Defensive specialized-metric adapter, approve evidence, or make Stage 4 census phrase hits numeric observations. Consumer Defensive production promotion is hard-disabled. Stage 6B must still freeze metric policies, implement the sector-owned adapter, build the complete PIT historical filing/document inventory from `2019-01-02`, run shadow extraction and census reconciliation, pass a reviewed golden corpus, and satisfy explicit promotion governance. A current-date seal is not proof of historical document readiness.
+
 ## Provider Roles
 
 - EdgarTools `5.28.5` reads local full-submission SGML and attachment metadata.

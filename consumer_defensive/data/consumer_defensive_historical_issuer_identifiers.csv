@@ -1,0 +1,12 @@
+ticker,cik,issuer_name,source_url,review_status
+AVP,0000008868,AVON PRODUCTS INC,https://data.sec.gov/submissions/CIK0000008868.json,reviewed
+CORE,0001318084,"Core-Mark Holding Company, LLC",https://data.sec.gov/submissions/CIK0001318084.json,reviewed
+DF,0000931336,DEAN FOODS CO,https://data.sec.gov/submissions/CIK0000931336.json,reviewed
+K,0000055067,KELLANOVA,https://data.sec.gov/submissions/CIK0000055067.json,reviewed
+LNCE,0000057528,"SNYDER'S-LANCE, INC.",https://data.sec.gov/submissions/CIK0000057528.json,reviewed
+SAFM,0000812128,SANDERSON FARMS INC,https://data.sec.gov/submissions/CIK0000812128.json,reviewed
+SPTN,0000877422,SpartanNash Co,https://data.sec.gov/submissions/CIK0000877422.json,reviewed
+SVU,0000095521,SUPERVALU INC,https://data.sec.gov/submissions/CIK0000095521.json,reviewed
+TWNK,0001644406,"Hostess Brands, Inc.",https://data.sec.gov/submissions/CIK0001644406.json,reviewed
+VGR,0000059440,VECTOR GROUP LTD,https://data.sec.gov/submissions/CIK0000059440.json,reviewed
+WBA,0001618921,"Walgreens Boots Alliance, Inc.",https://data.sec.gov/submissions/CIK0001618921.json,reviewed

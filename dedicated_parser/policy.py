@@ -3,11 +3,12 @@ from __future__ import annotations
 import csv
 import json
 import math
-import os
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+
+from dedicated_parser.atomic_io import atomic_write_text
 from typing import Any, Iterable
 
 from dedicated_parser.contracts import (
@@ -574,13 +575,10 @@ def export_policy_golden_corpus(
         ),
         "expectations": expectations,
     }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
-    temporary.write_text(
+    atomic_write_text(
+        output_path,
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
-    os.replace(temporary, output_path)
     return payload
 
 
