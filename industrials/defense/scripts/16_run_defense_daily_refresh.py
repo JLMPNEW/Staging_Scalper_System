@@ -23,7 +23,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.refresh_lock import RefreshLock  # noqa: E402
+from industrials.core.refresh_resume import load_resume_plan  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
+from industrials.core.source_coverage import (  # noqa: E402
+    audit_industrials_source_coverage,
+    require_source_coverage,
+)
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -107,6 +112,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a same-date failed run at its terminal failed step.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the planned step matrix and write a DRY_RUN manifest without executing steps or taking the lock.",
@@ -177,6 +187,18 @@ def build_steps(
                         asof,
                     ],
                     network=True,
+                ),
+                Step(
+                    "07c_recover_financial_lineage",
+                    "stage_4",
+                    "recover exact financial-filing lineage gaps",
+                    [
+                        "industrials/defense/scripts/07c_recover_defense_financial_lineage.py",
+                        "--asof",
+                        asof,
+                    ],
+                    network=True,
+                    accepts_config=True,
                 ),
             ]
         )
@@ -404,58 +426,31 @@ def coverage_audit(config_path: Path, asof: str) -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
-    active_sql = """
-        SELECT DISTINCT c.ticker
-        FROM dim_company c
-        JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id
-        WHERE c.is_active = 1 AND t.model_family = 'defense'
-    """
-    checks = [
-        ("fact_price_ohlcv", "bar_date", "ticker"),
-        ("fact_market_snapshot", "asof_date", "ticker"),
-        ("feature_market_technical", "asof_date", "ticker"),
-        ("feature_financial_statement", "asof_date", "ticker"),
-        ("feature_positioning", "asof_date", "ticker"),
-        ("fact_fx_rate", "rate_date", "currency_pair"),
-    ]
     with sqlite3.connect(db_path) as conn:
-        active_count = int(conn.execute(f"SELECT COUNT(*) FROM ({active_sql})").fetchone()[0] or 0)
-        print(f"[defense_daily_refresh] active_defense_tickers={active_count}", flush=True)
-        for table, date_col, id_col in checks:
-            max_date = conn.execute(f"SELECT MAX({date_col}) FROM {table}").fetchone()[0]
-            rows_on_asof = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {date_col} = ?", (asof,)).fetchone()[0] or 0)
-            if id_col == "ticker":
-                covered = int(
-                    conn.execute(
-                        f"""
-                        SELECT COUNT(DISTINCT x.ticker)
-                        FROM {table} x
-                        JOIN ({active_sql}) a ON a.ticker = x.ticker
-                        WHERE x.{date_col} = ?
-                        """,
-                        (asof,),
-                    ).fetchone()[0]
-                    or 0
-                )
-                print(
-                    f"[defense_daily_refresh] {table}.{date_col}: max={max_date} rows_on_{asof}={rows_on_asof} "
-                    f"active_tickers_on_{asof}={covered}/{active_count}",
-                    flush=True,
-                )
-            else:
-                distinct_count = int(
-                    conn.execute(
-                        f"SELECT COUNT(DISTINCT {id_col}) FROM {table} WHERE {date_col} = ?",
-                        (asof,),
-                    ).fetchone()[0]
-                    or 0
-                )
-                print(
-                    f"[defense_daily_refresh] {table}.{date_col}: max={max_date} rows_on_{asof}={rows_on_asof} "
-                    f"distinct_{id_col}_on_{asof}={distinct_count}",
-                    flush=True,
-                )
-
+        result = audit_industrials_source_coverage(
+            conn,
+            model_family=MODEL_FAMILY,
+            asof=asof,
+        )
+    print(
+        f"[defense_daily_refresh] active_defense_tickers={result.active_ticker_count}",
+        flush=True,
+    )
+    for observation in result.observations:
+        coverage = (
+            f"active_tickers_on_{asof}={observation.active_tickers_on_asof}/"
+            f"{result.active_ticker_count}"
+            if observation.active_tickers_on_asof is not None
+            else f"distinct_{observation.identity_column}_on_{asof}="
+            f"{observation.distinct_identities_on_asof}"
+        )
+        print(
+            f"[defense_daily_refresh] {observation.table}.{observation.date_column}: "
+            f"max={observation.max_date} rows_on_{asof}={observation.rows_on_asof} "
+            f"{coverage}",
+            flush=True,
+        )
+    require_source_coverage(result)
 
 def compute_manifest_acceptance(
     *,
@@ -495,6 +490,8 @@ def write_manifest(
     planned_step_count: int,
     report_rows: list[dict[str, Any]],
     failures: list[dict[str, Any]],
+    resume_start_step: str = "",
+    resumed_from_run_id: str = "",
     error: str | None = None,
 ) -> Path:
     orchestration_root.mkdir(parents=True, exist_ok=True)
@@ -520,6 +517,8 @@ def write_manifest(
         "dry_run": bool(dry_run),
         "planned_step_count": planned_step_count,
         "completed_step_count": completed,
+        "resume_start_step": resume_start_step,
+        "resumed_from_run_id": resumed_from_run_id,
         "recorded_step_count": len(report_rows),
         "failed_step_count": len(failures),
         "error": error or "",
@@ -547,11 +546,14 @@ def run_selftest() -> int:
         positioning_through_publish_only=False,
         include_dedicated_parser_shadow=True,
     )
-    assert len(full) == 14, f"expected 14 full steps, got {len(full)}"
+    assert len(full) == 15, f"expected 15 full steps, got {len(full)}"
     assert len(fast) == 6, f"expected 6 publish-only steps, got {len(fast)}"
-    assert len(shadow) == 17, f"expected 17 parser-production steps, got {len(shadow)}"
+    assert len(shadow) == 18, f"expected 18 parser-production steps, got {len(shadow)}"
     shadow_ids = [step.step_id for step in shadow]
-    assert shadow_ids.index("07_sync_sec") < shadow_ids.index("08d_dedicated_parser_shadow")
+    assert shadow_ids.index("07_sync_sec") < shadow_ids.index("07c_recover_financial_lineage")
+    assert shadow_ids.index("07c_recover_financial_lineage") < shadow_ids.index(
+        "08d_dedicated_parser_shadow"
+    )
     assert shadow_ids.index(
         "08d_dedicated_parser_shadow"
     ) < shadow_ids.index("08e_dedicated_parser_production")
@@ -578,6 +580,7 @@ def run_selftest() -> int:
         "03_sync_prices",
         "11_sync_fx",
         "07_sync_sec",
+        "07c_recover_financial_lineage",
         "13_sync_positioning",
     }, "network step set drifted"
     # Manifest shape parity: acceptance/PASS-FAIL summary keys must exist.
@@ -618,20 +621,22 @@ def run_selftest() -> int:
     def _row(status: str) -> dict[str, Any]:
         return {"status": status}
 
-    all_pass_rows = [_row("PASS") for _ in range(14)]
-    assert compute_manifest_acceptance(planned_step_count=14, report_rows=all_pass_rows, failures=[], dry_run=False) == "PASS"
+    all_pass_rows = [_row("PASS") for _ in range(len(full))]
+    assert compute_manifest_acceptance(
+        planned_step_count=len(full), report_rows=all_pass_rows, failures=[], dry_run=False
+    ) == "PASS"
     # completed < planned (aborted after 3 steps, one failed) must be FAIL.
     partial_rows = [_row("PASS"), _row("PASS"), _row("FAIL")]
-    assert compute_manifest_acceptance(planned_step_count=14, report_rows=partial_rows, failures=[partial_rows[-1]], dry_run=False) == "FAIL"
+    assert compute_manifest_acceptance(planned_step_count=len(full), report_rows=partial_rows, failures=[partial_rows[-1]], dry_run=False) == "FAIL"
     # lock exception: zero completed steps must seal FAIL, never PASS.
-    assert compute_manifest_acceptance(planned_step_count=14, report_rows=[], failures=[], dry_run=False, error="RuntimeError: locked") == "FAIL"
+    assert compute_manifest_acceptance(planned_step_count=len(full), report_rows=[], failures=[], dry_run=False, error="RuntimeError: locked") == "FAIL"
     # empty-planned guard: no PASS is possible with 0 planned steps.
     assert compute_manifest_acceptance(planned_step_count=0, report_rows=[], failures=[], dry_run=False) == "FAIL"
     # completed == planned but zero failures without the error still PASS; with a lingering
     # exception it flips to FAIL even if rows look complete.
-    assert compute_manifest_acceptance(planned_step_count=14, report_rows=all_pass_rows, failures=[], dry_run=False, error="boom") == "FAIL"
+    assert compute_manifest_acceptance(planned_step_count=len(full), report_rows=all_pass_rows, failures=[], dry_run=False, error="boom") == "FAIL"
     # dry-run acceptance is isolated and never an operational verdict.
-    assert compute_manifest_acceptance(planned_step_count=14, report_rows=[_row("DRY_RUN")], failures=[], dry_run=True) == "DRY_RUN"
+    assert compute_manifest_acceptance(planned_step_count=len(full), report_rows=[_row("DRY_RUN")], failures=[], dry_run=True) == "DRY_RUN"
     # dry-run writes a SEPARATE manifest file, never clobbering the operational one.
     assert "dryrun" not in "defense_refresh_manifest.json"
 
@@ -639,6 +644,7 @@ def run_selftest() -> int:
     cfg = Path("industrials/config.yaml")
     config_aware = {s.step_id for s in full if s.accepts_config}
     assert config_aware == {
+        "07c_recover_financial_lineage",
         "13_sync_positioning", "14_validate_positioning", "17_publish", "18_validate_publish", "20_validate_portfolio",
     }, f"config-forwarding step set drifted: {config_aware}"
     pub_step = next(s for s in full if s.step_id == "17_publish")
@@ -679,7 +685,7 @@ def run_selftest() -> int:
     # steps passed but audit never recorded (crash before folding it in) -> completed < planned -> FAIL
     assert compute_manifest_acceptance(planned_step_count=steps_plus_audit, report_rows=[_row("PASS") for _ in range(len(full))], failures=[], dry_run=False) == "FAIL"
 
-    print("SELFTEST PASS: 14 base / 17 parser-production / 6 publish-only steps; "
+    print("SELFTEST PASS: 15 base / 18 parser-production / 6 publish-only steps; "
           "manifest keys OK; acceptance fail-closed; "
           "config forwarding + gated coverage audit + crash-safe lock OK; lock=" + str(lock_path))
     return 0
@@ -721,9 +727,25 @@ def main() -> int:
             )
         ),
     )
+    resume_start_step = ""
+    resumed_from_run_id = ""
+    if args.resume:
+        if args.from_step or args.dry_run or args.list_steps:
+            raise ValueError(
+                "--resume cannot be combined with --from-step, --dry-run, or --list-steps"
+            )
+        resume_plan = load_resume_plan(
+            orchestration_root / "defense_refresh_manifest.json",
+            asof=asof,
+            current_step_ids=[step.step_id for step in steps],
+        )
+        args.from_step = resume_plan.start_step
+        resume_start_step = resume_plan.start_step
+        resumed_from_run_id = resume_plan.source_run_id
     steps = select_steps_from(steps, args.from_step)
     has_parser_steps = any(
-        step.step_id in {"08d_dedicated_parser_shadow", "08e_dedicated_parser_production"}
+        step.step_id
+        in {"08d_dedicated_parser_shadow", "08e_dedicated_parser_production"}
         for step in steps
     )
     dedicated_parser_python = (
@@ -871,6 +893,8 @@ def main() -> int:
             planned_step_count=planned_step_count,
             report_rows=report_rows,
             failures=failures,
+            resume_start_step=resume_start_step,
+            resumed_from_run_id=resumed_from_run_id,
             error=run_error,
         )
     if run_error is not None:

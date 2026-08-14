@@ -1,0 +1,21 @@
+policy_version: financial_lineage_policy_v1
+
+defaults:
+  enabled: false
+  production_policy: disabled
+  research_policy: disabled
+  historical_policy: disabled
+  min_core_metric_count: 2
+
+sectors:
+  defense:
+    enabled: true
+    production_policy: strict_universe
+    research_policy: candidate_only
+    historical_policy: strict_universe
+
+  machinery:
+    enabled: true
+    production_policy: strict_universe
+    research_policy: candidate_only
+    historical_policy: strict_universe

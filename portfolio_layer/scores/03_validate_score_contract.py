@@ -20,6 +20,10 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from orchestration_contracts.financial_lineage import (  # noqa: E402
+    evaluate_financial_lineage_rows,
+    policy_for_model_family,
+)
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
@@ -223,6 +227,12 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         str(s.get("model_family", ""))
         for s in enabled_sectors
         if bool(s.get("required", True)) and str(s.get("model_family", ""))
+    }
+    lineage_policies = {
+        str(sector.get("model_family", "")): policy_for_model_family(
+            str(sector.get("model_family", ""))
+        )
+        for sector in enabled_sectors
     }
     global_native_range = dict(cfg_get(config, "score_contract.native_score_range", {}) or {})
     native_range_by_pipeline = {
@@ -543,10 +553,34 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         }
         for p, _d, _tol in stale
     }
-    record("staleness_within_tolerance", "PASS" if not stale else "WARN",
+    record("staleness_within_tolerance", "PASS" if not stale else "FAIL",
            f"default_tolerance={tolerance}d; over-tolerance sectors={worst}" if stale else (
                f"all within configured per-sector tolerances (default={tolerance}d)"
            ))
+
+    lineage_errors: list[str] = []
+    lineage_rows: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        pipeline = str(row.get("source_pipeline") or "").strip()
+        policy = lineage_policies.get(pipeline)
+        if policy is not None and policy.enabled:
+            lineage_rows.setdefault(pipeline, []).append(row)
+    for pipeline, pipeline_rows in sorted(lineage_rows.items()):
+        policy = lineage_policies[pipeline]
+        evaluation = evaluate_financial_lineage_rows(
+            pipeline_rows,
+            policy_mode=policy.mode_for("production"),
+            expected_asof_field="source_asof_date",
+            min_core_metric_count=policy.min_core_metric_count,
+        )
+        lineage_errors.extend(f"{pipeline}:{error}" for error in evaluation.errors)
+    record(
+        "financial_filing_lineage_safe",
+        "PASS" if not lineage_errors else "FAIL",
+        "required industrial filings reconciled and unresolved rows fail closed"
+        if not lineage_errors
+        else f"{len(lineage_errors)} lineage errors; first={lineage_errors[:10]}",
+    )
 
     # 10b. cross-sector duplicates should be curated by canonical override, not silent confidence parity.
     if duplicate_path.exists():

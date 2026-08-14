@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from industrials.core.financial_filing_lineage import (
+    LINEAGE_FIELDS,
+    validate_financial_lineage_rank_rows,
+    write_financial_lineage_report,
+)
 from industrials.core.policy_loader import PolicyKey, PolicyRow, resolve_policy
 from industrials.core.reports import write_csv_atomic, write_text_atomic
 from industrials.machinery.financial_contract import AVAILABILITY_STATUSES, required_metric_names
@@ -238,6 +243,7 @@ PORTFOLIO_REQUIRED_FIELDS = [
     "oos_score_asof_date",
     "oos_invalid_reason",
     "calibration_lock_date",
+    *LINEAGE_FIELDS,
 ]
 
 FINAL_RANK_FIELDS = [
@@ -266,6 +272,7 @@ FINAL_RANK_FIELDS = [
     "oos_score_asof_date",
     "oos_invalid_reason",
     "calibration_lock_date",
+    *LINEAGE_FIELDS,
 ]
 
 METRIC_DIRECTIONS: dict[str, int] = {
@@ -929,6 +936,11 @@ def finalize_rank_rows(
                 "oos_score_asof_date": "",
                 "oos_invalid_reason": "shadow_pre_oos_calibration",
                 "calibration_lock_date": "",
+                "financial_lineage_checked_asof_date": str(source.get("asof_date") or ""),
+                "financial_lineage_status": "REVIEW_REQUIRED",
+                "financial_lineage_gate": "0",
+                "incorporated_financial_core_metric_count": "0",
+                "financial_lineage_reason": "financial_filing_lineage_not_reconciled",
             }
         )
         final.append({field: row.get(field, "") for field in FINAL_RANK_FIELDS})
@@ -1059,6 +1071,7 @@ def validate_rank_rows(
             errors.append(f"{ticker}: invalid final_rank={row.get('final_rank')!r}")
     if sorted(ranks) != list(range(1, len(rows) + 1)):
         errors.append("final_rank must be contiguous from 1 through row count")
+    errors.extend(validate_financial_lineage_rank_rows(rows))
     return errors
 
 
@@ -1219,8 +1232,13 @@ def publish_dashboard(
     output_dir.mkdir(parents=True, exist_ok=True)
     rank_path = output_dir / "machinery_final_rank_table.csv"
     sidecar_path = output_dir / "machinery_stage11_survivorship_calibration_panel.csv"
+    lineage_path = output_dir / "machinery_financial_filing_lineage.csv"
     manifest_path = output_dir / "machinery_final_rank_table_manifest.json"
-    existing = [path for path in (rank_path, sidecar_path, manifest_path) if path.exists()]
+    existing = [
+        path
+        for path in (rank_path, sidecar_path, lineage_path, manifest_path)
+        if path.exists()
+    ]
     if existing and not allow_overwrite:
         raise FileExistsError(f"Refusing to overwrite immutable machinery dashboard artifacts: {existing}")
     errors = validate_rank_rows(
@@ -1233,14 +1251,22 @@ def publish_dashboard(
     sidecar_rows = survivorship_sidecar(rows)
     write_csv_atomic(rank_path, FINAL_RANK_FIELDS, rows)
     write_csv_atomic(sidecar_path, FINAL_RANK_FIELDS, sidecar_rows)
+    lineage_manifest = write_financial_lineage_report(
+        lineage_path,
+        rows,
+        model_family=MODEL_FAMILY,
+        asof=asof,
+        policy_context="production",
+    )
     manifest = {
-        "acceptance": "PASS",
+        "acceptance": str(lineage_manifest["acceptance"]),
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
         "rank_table": str(rank_path),
         "rank_table_sha256": file_sha256(rank_path),
         "sidecar": str(sidecar_path),
         "sidecar_sha256": file_sha256(sidecar_path),
+        "financial_filing_lineage": lineage_manifest,
         "row_count": len(rows),
         "rank_ready_count": sum(str(row.get("rank_ready_flag") or "") == "1" for row in rows),
         "portfolio_candidate_count": sum(

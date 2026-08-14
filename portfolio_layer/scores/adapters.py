@@ -16,7 +16,12 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from orchestration_contracts.financial_lineage import (
+    lineage_row_is_safe,
+    policy_for_model_family,
+)
 from portfolio_layer.core.contracts import AdapterResult, CanonicalScore
+from portfolio_layer.core.contracts import FINANCIAL_LINEAGE_FIELDS
 from portfolio_layer.core.contracts import read_csv
 
 
@@ -274,6 +279,8 @@ def _adapt_final_rank_family(
 ) -> list[CanonicalScore]:
     out: list[CanonicalScore] = []
     require_oos_score_valid = bool(cfg.get("require_oos_score_valid", False))
+    lineage_policy = policy_for_model_family(str(cfg.get("model_family") or ""))
+    require_financial_lineage = lineage_policy.enabled
     skipped = 0
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
@@ -281,6 +288,20 @@ def _adapt_final_rank_family(
         if not ticker or native is None:
             skipped += 1
             continue
+        missing_lineage_fields = [field for field in FINANCIAL_LINEAGE_FIELDS if field not in r]
+        if require_financial_lineage and missing_lineage_fields:
+            raise ValueError(
+                f"{cfg.get('model_family')} row ticker={ticker} is missing financial lineage fields: "
+                f"{missing_lineage_fields}"
+            )
+        lineage_status = str(r.get("financial_lineage_status") or "").strip()
+        lineage_gate = _truthy(r.get("financial_lineage_gate"))
+        lineage_checked = str(r.get("financial_lineage_checked_asof_date") or "").strip()
+        lineage_ok = not require_financial_lineage or lineage_row_is_safe(
+            r,
+            expected_asof=_source_asof(r),
+            min_core_metric_count=lineage_policy.min_core_metric_count,
+        )
         rank_ready = _truthy(r.get("rank_ready_flag"))
         calib_ok = _truthy(r.get("calibration_eligible_flag"))
         complete = str(r.get("model_status", "")).strip().lower() == "complete"
@@ -297,10 +318,14 @@ def _adapt_final_rank_family(
         demoted_not_oos = bool(eligible and not oos_score_valid)
         if eligible and not oos_score_valid:
             eligible = False
+        demoted_financial_lineage = bool(eligible and not lineage_ok)
+        if eligible and not lineage_ok:
+            eligible = False
         source_reason = str(r.get("portfolio_candidate_reason") or "").strip()
         reason = (
             "ok" if eligible else
             f"not_oos_score_valid:{str(r.get('oos_invalid_reason') or '').strip()[:180]}" if demoted_not_oos else
+            f"financial_lineage:{lineage_status or 'missing'}" if demoted_financial_lineage else
             source_reason if source_reason and source_reason.lower() != "ok" else
             f"portfolio_candidate_status:{str(r.get('portfolio_candidate_status') or '').strip()[:80]}"
             if status_denied else
@@ -368,6 +393,10 @@ def _adapt_final_rank_family(
             if eligible:
                 research_eligible = True
                 research_reason = "ok"
+        if require_financial_lineage and not lineage_ok:
+            research_eligible = False
+            research_reason = f"financial_lineage:{lineage_status or 'missing'}"
+            source_role = "excluded"
         contract_sample_role = _contract_sample_role(
             source_role,
             investable=eligible,
@@ -392,6 +421,19 @@ def _adapt_final_rank_family(
                 else r.get("data_quality_confidence")
             ),
             source_asof_date=_source_asof(r),
+            financial_lineage_checked_asof_date=lineage_checked,
+            financial_lineage_status=lineage_status,
+            financial_lineage_gate=int(lineage_gate),
+            financial_lineage_classification=str(r.get("financial_lineage_classification") or ""),
+            latest_material_financial_filing_date=str(r.get("latest_material_financial_filing_date") or ""),
+            latest_material_financial_form=str(r.get("latest_material_financial_form") or ""),
+            latest_material_financial_accession=str(r.get("latest_material_financial_accession") or ""),
+            latest_material_financial_report_date=str(r.get("latest_material_financial_report_date") or ""),
+            incorporated_financial_filing_date=str(r.get("incorporated_financial_filing_date") or ""),
+            incorporated_financial_accession=str(r.get("incorporated_financial_accession") or ""),
+            incorporated_financial_report_date=str(r.get("incorporated_financial_report_date") or ""),
+            incorporated_financial_core_metric_count=int(_f(r.get("incorporated_financial_core_metric_count")) or 0),
+            financial_lineage_reason=str(r.get("financial_lineage_reason") or ""),
         ))
     if skipped:
         LOGGER.warning("Adapter %s skipped %d rows with blank ticker or non-finite native score",

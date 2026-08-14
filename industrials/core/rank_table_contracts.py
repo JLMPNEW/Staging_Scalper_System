@@ -3,12 +3,15 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from industrials.core.financial_filing_lineage import LINEAGE_FIELDS
+
 
 DEFENSE_FINAL_RANK_EXTRA_COLUMNS = [
     "oos_score_asof_date",
     "research_calibration_eligible_flag",
     "market_cap_source",
     "liquidity_capacity_reason",
+    *LINEAGE_FIELDS,
 ]
 
 

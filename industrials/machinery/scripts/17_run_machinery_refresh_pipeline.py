@@ -26,11 +26,17 @@ from industrials.core.config import (  # noqa: E402
     resolve_path,
 )
 from industrials.core.refresh_lock import RefreshLock  # noqa: E402
+from industrials.core.refresh_resume import load_resume_plan  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
+from industrials.core.source_coverage import (  # noqa: E402
+    audit_industrials_source_coverage,
+    require_source_coverage,
+)
 from industrials.machinery.scoring import parse_asof  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+COVERAGE_AUDIT_STEP_ID = "21_coverage_audit"
 
 
 @dataclass(frozen=True)
@@ -157,6 +163,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--list-steps", action="store_true")
     parser.add_argument("--skip-network", action="store_true")
     parser.add_argument(
@@ -258,6 +265,13 @@ def build_steps(
         Step("05_build_market", "stage_3", "05_build_machinery_market_features.py", ["--asof", asof]),
         Step("06_validate_market", "stage_3", "06_validate_machinery_market_stage.py", ["--asof", asof]),
         Step("07_sync_sec", "stage_4", "07_sync_machinery_sec_fundamentals.py", sec_args, True),
+        Step(
+            "07c_recover_financial_lineage",
+            "stage_4",
+            "07c_recover_machinery_financial_lineage.py",
+            ["--asof", asof],
+            True,
+        ),
         Step(
             "07b_sync_issuer_ir",
             "stage_4",
@@ -468,6 +482,35 @@ def select_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:
     return selected
 
 
+
+def coverage_audit(db_path: Path, asof: str) -> None:
+    with sqlite3.connect(db_path) as conn:
+        result = audit_industrials_source_coverage(
+            conn,
+            model_family="machinery",
+            asof=asof,
+        )
+    print(
+        f"[machinery_refresh] active_machinery_tickers={result.active_ticker_count}",
+        flush=True,
+    )
+    for observation in result.observations:
+        coverage = (
+            f"active_tickers_on_{asof}={observation.active_tickers_on_asof}/"
+            f"{result.active_ticker_count}"
+            if observation.active_tickers_on_asof is not None
+            else f"distinct_{observation.identity_column}_on_{asof}="
+            f"{observation.distinct_identities_on_asof}"
+        )
+        print(
+            f"[machinery_refresh] {observation.table}.{observation.date_column}: "
+            f"max={observation.max_date} rows_on_{asof}={observation.rows_on_asof} "
+            f"{coverage}",
+            flush=True,
+        )
+    require_source_coverage(result)
+
+
 def persist_orchestration_result(
     *,
     orchestration_root: Path,
@@ -480,6 +523,8 @@ def persist_orchestration_result(
     planned_step_count: int,
     report_rows: list[dict[str, Any]],
     failures: list[dict[str, Any]],
+    resume_start_step: str = "",
+    resumed_from_run_id: str = "",
 ) -> dict[str, Any]:
     fields = [
         "run_id",
@@ -494,14 +539,25 @@ def persist_orchestration_result(
         "return_code",
         "elapsed_sec",
     ]
+    acceptance = (
+        "DRY_RUN"
+        if dry_run
+        else "PASS"
+        if not failures
+        and len(report_rows) == planned_step_count
+        and all(str(row.get("status") or "") == "PASS" for row in report_rows)
+        else "FAIL"
+    )
     summary = {
-        "acceptance": "PASS" if not failures else "FAIL",
+        "acceptance": acceptance,
         "run_id": run_id,
         "asof_date": asof,
         "database_path": str(db_path),
         "config_path": str(config_path),
         "dry_run": dry_run,
         "planned_step_count": planned_step_count,
+        "resume_start_step": resume_start_step,
+        "resumed_from_run_id": resumed_from_run_id,
         "completed_step_count": len(report_rows),
         "failed_step_count": len(failures),
         "previous_committed_asof": latest_before_run,
@@ -517,7 +573,7 @@ def persist_orchestration_result(
         runs_root / f"{run_id}_manifest.json",
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
     )
-    if not failures and not dry_run:
+    if acceptance == "PASS":
         write_csv_atomic(
             orchestration_root / "machinery_refresh_steps.csv",
             fields,
@@ -574,6 +630,28 @@ def main() -> int:
         for step in steps:
             print(f"{step.step_id}\t{step.stage}\t{'network' if step.network else 'local'}\t{step.script}")
         return 0
+    resume_start_step = ""
+    resumed_from_run_id = ""
+    if args.resume:
+        if (
+            args.from_step
+            or args.to_step
+            or args.only
+            or args.skip_step
+            or args.skip_network
+        ):
+            raise ValueError(
+                "--resume cannot be combined with manual step selection; "
+                "--force is retained for overwrite-safe tail steps"
+            )
+        resume_plan = load_resume_plan(
+            orchestration_root / "machinery_refresh_last_attempt.json",
+            asof=asof,
+            current_step_ids=[step.step_id for step in steps],
+        )
+        args.from_step = resume_plan.start_step
+        resume_start_step = resume_plan.start_step
+        resumed_from_run_id = resume_plan.source_run_id
     selected = select_steps(steps, args)
     has_parser_steps = any(
         step.step_id
@@ -600,6 +678,8 @@ def main() -> int:
     report_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     latest_before_run = ""
+    run_final_audit = any(step.step_id == "10b_publish" for step in selected)
+    planned_step_count = len(selected) + int(run_final_audit)
     with RefreshLock(lock_path):
         if not args.dry_run:
             latest_before_run = latest_committed_asof(
@@ -640,7 +720,7 @@ def main() -> int:
                 "command": subprocess.list2cmdline(command),
                 "log_path": str(log_path),
             }
-            print(f"[{index}/{len(selected)}] {step.step_id}", flush=True)
+            print(f"[{index}/{planned_step_count}] {step.step_id}", flush=True)
             if args.dry_run:
                 row.update({"status": "DRY_RUN", "return_code": "", "elapsed_sec": 0.0})
                 report_rows.append(row)
@@ -671,15 +751,48 @@ def main() -> int:
                 failures.append(row)
                 if not args.continue_on_error:
                     break
+        if run_final_audit and not failures:
+            audit_row: dict[str, Any] = {
+                "run_id": run_id,
+                "step_number": len(selected) + 1,
+                "step_id": COVERAGE_AUDIT_STEP_ID,
+                "stage": "stage_11",
+                "script": "coverage_audit",
+                "network_flag": 0,
+                "command": f"coverage_audit(db={db_path}, asof={asof})",
+                "log_path": "",
+            }
+            if args.dry_run:
+                audit_row.update(
+                    {"status": "DRY_RUN", "return_code": "", "elapsed_sec": 0.0}
+                )
+            else:
+                started = time.perf_counter()
+                try:
+                    coverage_audit(db_path, asof)
+                    audit_row.update({"status": "PASS", "return_code": 0})
+                except Exception as exc:  # noqa: BLE001 - audit failures gate the run
+                    audit_row.update(
+                        {
+                            "status": "FAIL",
+                            "return_code": 1,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    failures.append(audit_row)
+                audit_row["elapsed_sec"] = round(time.perf_counter() - started, 3)
+            report_rows.append(audit_row)
         summary = persist_orchestration_result(
             orchestration_root=orchestration_root,
             run_id=run_id,
             asof=asof,
             db_path=db_path,
+            resume_start_step=resume_start_step,
+            resumed_from_run_id=resumed_from_run_id,
             config_path=config_path,
             dry_run=bool(args.dry_run),
             latest_before_run=latest_before_run,
-            planned_step_count=len(selected),
+            planned_step_count=planned_step_count,
             report_rows=report_rows,
             failures=failures,
         )

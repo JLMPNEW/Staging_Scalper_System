@@ -95,6 +95,33 @@ def test_incremental_archive_scope_only_contains_new_accessions() -> None:
     ) == {"0000000000-26-000003"}
 
 
+def test_exact_accession_recovery_enables_core_statement_tables() -> None:
+    assert not sec_sync.should_limit_archive_to_special_metrics(
+        archive_all_family_members=True,
+        archive_attempt_override=False,
+        ticker="AIRJ",
+        core_metric_recovery_tickers=set(),
+        accession_filter={"0001193125-26-349663"},
+    )
+
+
+def test_broad_family_scan_remains_special_metrics_only() -> None:
+    assert sec_sync.should_limit_archive_to_special_metrics(
+        archive_all_family_members=True,
+        archive_attempt_override=False,
+        ticker="CAT",
+        core_metric_recovery_tickers=set(),
+        accession_filter=None,
+    )
+    assert not sec_sync.should_limit_archive_to_special_metrics(
+        archive_all_family_members=True,
+        archive_attempt_override=False,
+        ticker="ATS",
+        core_metric_recovery_tickers={"ATS"},
+        accession_filter=None,
+    )
+
+
 def test_filing_keys_respects_pit_end_date() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -291,6 +318,126 @@ def test_text_table_statement_guard_keeps_ifrs_income_statement() -> None:
     assert values_by_concept[("Revenue", "2025-03-31")] == 351_000_000
     assert values_by_concept[("OperatingIncomeLoss", "2026-03-31")] == 40_100_000
     assert values_by_concept[("NetIncomeLoss", "2026-03-31")] == 29_600_000
+
+
+def test_supplemental_earnings_summary_recovers_two_core_facts() -> None:
+    facts = sec_sync.parse_archive_text_table_facts(
+        """
+        <p>National Presto announces increased second quarter 2026 sales and earnings</p>
+        <table>
+          <tr><th></th><th>July 5, 2026</th><th>June 29, 2025</th></tr>
+          <tr><td>Net Sales</td><td>$</td><td>146,596,000</td><td>$</td><td>120,449,000</td></tr>
+          <tr><td>Net Earnings</td><td>$</td><td>15,862,000</td><td>$</td><td>5,152,000</td></tr>
+          <tr><td>Net Earnings Per Share</td><td>$</td><td>2.21</td><td>$</td><td>0.72</td></tr>
+        </table>
+        """,
+        document_name="exhibit-99.htm",
+        filing={
+            "report_date": "2026-07-05",
+            "filing_date": "2026-08-03",
+            "form_type": "8-K",
+        },
+        company_currency="USD",
+    )
+
+    current = {
+        fact.concept_name: fact.value
+        for fact in facts
+        if fact.period_end == "2026-07-05"
+    }
+    assert current["Revenue"] == 146_596_000
+    assert current["NetIncomeLoss"] == 15_862_000
+    assert "DilutedShares" not in current
+
+
+def test_supplemental_two_row_table_without_results_context_is_rejected() -> None:
+    facts = sec_sync.parse_archive_text_table_facts(
+        """
+        <p>Selected unaudited information</p>
+        <table>
+          <tr><th></th><th>July 5, 2026</th><th>June 29, 2025</th></tr>
+          <tr><td>Net Sales</td><td>146,596,000</td><td>120,449,000</td></tr>
+          <tr><td>Net Earnings</td><td>15,862,000</td><td>5,152,000</td></tr>
+        </table>
+        """,
+        document_name="exhibit-99.htm",
+        filing={
+            "report_date": "2026-07-05",
+            "filing_date": "2026-08-03",
+            "form_type": "8-K",
+        },
+        company_currency="USD",
+    )
+
+    assert facts == []
+
+
+def test_semantic_statement_recovers_paragraph_serialized_ifrs_facts() -> None:
+    facts = sec_sync.parse_archive_semantic_statement_facts(
+        """
+        <p>FINANCIAL STATEMENTS</p>
+        <p>Embraer S.A. Consolidated Income Statement
+        (in millions of U.S. dollars, except earnings per share)</p>
+        <p>2Q26 1Q26 2Q25 1H26 1H25 Revenue 2,235.3 1,446.7 1,819.2 3,682.0 2,922.2
+        Cost of sales (1,790.5) (1,186.5) (1,466.3) (2,977.0) (2,380.2)
+        Gross profit 444.8 260.2 352.9 705.0 542.0
+        Operating income before financial result 285.8 81.7 179.5 367.5 230.7
+        Income for the period 213.9 37.1 69.3 251.0 149.1</p>
+        <p>Embraer S.A. Consolidated Balance Sheet (in millions of U.S. dollars)</p>
+        <p>Assets 2Q26 1Q26 2Q25 Current Cash and cash equivalents 1,392.4 1,315.7 654.0
+        Total Assets 13,237.4 12,958.6 12,073.5 Liabilities 2Q26 1Q26 2Q25
+        Total Liabilities 9,406.5 9,294.7 8,465.7 Total Equity 3,830.9 3,663.9 3,607.8</p>
+        <p>Reconciliation of IFRS and NON-GAAP information Revenue 99,999.0 99,999.0 99,999.0</p>
+        """,
+        document_name="embj-results.htm",
+        filing={"report_date": "2026-06-30", "filing_date": "2026-08-10", "form_type": "6-K"},
+        company_currency="USD",
+    )
+
+    current = {
+        fact.concept_name: fact.value
+        for fact in facts
+        if fact.period_end == "2026-06-30" and fact.period_start in {"", "2026-04-01"}
+    }
+    assert current == {
+        "Assets": 13_237_400_000,
+        "Equity": 3_830_900_000,
+        "GrossProfit": 444_800_000,
+        "Liabilities": 9_406_500_000,
+        "NetIncomeLoss": 213_900_000,
+        "OperatingIncomeLoss": 285_800_000,
+        "Revenue": 2_235_300_000,
+    }
+
+
+def test_semantic_statement_rejects_adjusted_summary_without_formal_statement() -> None:
+    facts = sec_sync.parse_archive_semantic_statement_facts(
+        """
+        <p>Financial results and adjusted highlights (in millions of U.S. dollars)</p>
+        <p>2Q26 2Q25 Revenue 2,235.3 1,819.2 Adjusted EBITDA 355.6 245.5</p>
+        """,
+        document_name="presentation.htm",
+        filing={"report_date": "2026-06-30", "filing_date": "2026-08-10", "form_type": "6-K"},
+        company_currency="USD",
+    )
+
+    assert facts == []
+
+
+def test_semantic_statement_rejects_missing_scale() -> None:
+    facts = sec_sync.parse_archive_semantic_statement_facts(
+        """
+        <p>FINANCIAL STATEMENTS</p>
+        <p>Consolidated Income Statement</p>
+        <p>2Q26 2Q25 Revenue 2,235.3 1,819.2 Gross profit 444.8 352.9
+        Operating income before financial result 285.8 179.5 Income for the period 213.9 69.3</p>
+        """,
+        document_name="unscaled.htm",
+        filing={"report_date": "2026-06-30", "filing_date": "2026-08-10", "form_type": "6-K"},
+        company_currency="USD",
+    )
+
+    assert facts == []
 
 
 def test_text_table_statement_guard_still_rejects_conflicting_statement() -> None:

@@ -25,6 +25,7 @@ from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, expected_alpha, fail_if_exists,
+    FINANCIAL_LINEAGE_FIELDS,
     percentiles_within, rating_for_percentile, read_csv, upsert_stocks_scores, validate_rating_bands, write_csv,
 )
 from portfolio_layer.core.db import add_issue, connect, finish_run, start_run  # noqa: E402
@@ -294,6 +295,7 @@ def main() -> int:
                 "missing_score_flag": missing_score_flag,
                 "survivorship_corrected_panel_flag": row_flag(r, "survivorship_corrected_panel_flag"),
                 "source_asof_date": r["source_asof_date"],
+                **{field: r.get(field, "") for field in FINANCIAL_LINEAGE_FIELDS},
                 "staleness_days": staleness_days(run_as_of, r["source_asof_date"]),
                 "score_version": score_version,
             })

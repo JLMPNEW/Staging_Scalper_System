@@ -81,7 +81,7 @@ def main() -> int:
         activation_metadata=production_metadata,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
-    return 0
+    return 0 if manifest.get("acceptance") == "PASS" else 1
 
 
 if __name__ == "__main__":

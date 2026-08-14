@@ -59,6 +59,9 @@ from industrials.machinery.stage9_backtest import (
     summarize_variant,
 )
 from portfolio_layer.scores.adapters import run_adapter
+from portfolio_layer.scores.adapter_semantics import (
+    industrial_adapter_semantic_sha256,
+)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -1257,6 +1260,9 @@ def build_conditional_stage12_candidate(
             protocol["hard_gates"]["minimum_capacity_multiple"]
         ),
         "model_family": MODEL_FAMILY,
+        "portfolio_adapter_semantic_sha256": (
+            industrial_adapter_semantic_sha256()
+        ),
         "portfolio_adapter_sha256": file_sha256(
             PROJECT_ROOT / "portfolio_layer" / "scores" / "adapters.py"
         ),

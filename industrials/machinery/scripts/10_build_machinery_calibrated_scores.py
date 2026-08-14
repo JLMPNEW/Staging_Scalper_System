@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -12,6 +14,11 @@ PROJECT_ROOT = PACKAGE_ROOT.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from industrials.core.financial_filing_lineage import (  # noqa: E402
+    apply_financial_lineage_gate,
+    build_financial_filing_lineage,
+    write_financial_lineage_report,
+)
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.machinery.scoring import (  # noqa: E402
     dated_path,
@@ -34,6 +41,7 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build machinery shadow calibrated scores and ranks.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", required=True)
     parser.add_argument("--input-csv", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
@@ -98,6 +106,20 @@ def main() -> int:
             "production_policy_active": False,
             "production_policy_status": "SHADOW_NO_STAGE12_CONFIG",
         }
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
+    with closing(sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        lineage = build_financial_filing_lineage(
+            conn,
+            model_family="machinery",
+            asof=asof,
+            tickers=(str(row.get("ticker") or "") for row in rows),
+        )
+    rows = apply_financial_lineage_gate(rows, lineage)
     production_active = bool(
         production_metadata["production_policy_active"]
     )
@@ -109,6 +131,13 @@ def main() -> int:
     if errors:
         raise ValueError("; ".join(errors[:20]))
     write_rank_rows(output_path, rows)
+    lineage_manifest = write_financial_lineage_report(
+        output_path.with_name("machinery_financial_filing_lineage.csv"),
+        rows,
+        model_family="machinery",
+        asof=asof,
+        policy_context="production",
+    )
     manifest = {
         "acceptance": "PASS",
         "model_family": "machinery",
@@ -122,6 +151,7 @@ def main() -> int:
         "production_metadata": production_metadata,
         "output_csv": str(output_path),
         "output_sha256": file_sha256(output_path),
+        "financial_filing_lineage": lineage_manifest,
     }
     write_json_atomic(output_path.with_suffix(".manifest.json"), manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True))

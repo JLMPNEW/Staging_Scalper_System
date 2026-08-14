@@ -102,9 +102,18 @@ try:
 except ImportError as exc:  # pragma: no cover - yaml is a hard dependency here
     raise SystemExit("PyYAML is required: pip install pyyaml") from exc
 
-
 ORCH_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ORCH_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from orchestration_contracts.financial_lineage import (  # noqa: E402
+    DEFAULT_MIN_CORE_METRIC_COUNT,
+    POLICY_DISABLED,
+    POLICY_STRICT_UNIVERSE,
+    evaluate_financial_lineage_rows,
+    policy_for_model_family,
+)
 DEFAULT_REGISTRY = ORCH_DIR / "registry.yaml"
 RUNS_ROOT = ORCH_DIR / "runs"                 # live master manifests (resume source)
 DRYRUN_RUNS_ROOT = ORCH_DIR / "runs_dryrun"   # dry-run manifests (NEVER consulted for resume)
@@ -221,6 +230,9 @@ class Sector:
     retries: int
     retry_args: list[str] = field(default_factory=list)
     freshness_probes: list[FreshnessProbe] = field(default_factory=list)
+    financial_lineage_required: bool = False
+    financial_lineage_policy: str = POLICY_DISABLED
+    financial_lineage_min_core_metric_count: int = DEFAULT_MIN_CORE_METRIC_COUNT
 
 
 @dataclass(frozen=True)
@@ -322,6 +334,17 @@ def load_registry(path: Path) -> Registry:
     defaults = raw.get("defaults") or {}
     sectors: list[Sector] = []
     for entry in raw["sectors"]:
+        sector_name = str(entry["name"])
+        lineage_policy = policy_for_model_family(sector_name)
+        legacy_lineage_required = entry.get("financial_lineage_required")
+        if (
+            legacy_lineage_required is not None
+            and bool(legacy_lineage_required) != lineage_policy.enabled
+        ):
+            raise ValueError(
+                f"sector {sector_name}: registry financial_lineage_required conflicts "
+                "with orchestration/financial_lineage_policy.yaml"
+            )
         health_raw = entry.get("health") or {}
         health = HealthSpec(
             manifest=health_raw.get("manifest"),
@@ -351,7 +374,7 @@ def load_registry(path: Path) -> Registry:
             )
         sectors.append(
             Sector(
-                name=str(entry["name"]),
+                name=sector_name,
                 db_group=str(entry["db_group"]),
                 dependency_tier=int(entry.get("dependency_tier", 0)),
                 required=bool(entry.get("required", True)),
@@ -384,7 +407,10 @@ def load_registry(path: Path) -> Registry:
                 timeout_sec=int(entry.get("timeout_sec", defaults.get("timeout_sec", 21600))),
                 retries=int(entry.get("retries", defaults.get("retries", 1))),
                 retry_args=[str(arg) for arg in _as_list(entry.get("retry_args", defaults.get("retry_args")))],
-                freshness_probes=_parse_freshness_probes(str(entry["name"]), entry.get("freshness_probes")),
+                freshness_probes=_parse_freshness_probes(sector_name, entry.get("freshness_probes")),
+                financial_lineage_required=lineage_policy.enabled,
+                financial_lineage_policy=lineage_policy.mode_for("production"),
+                financial_lineage_min_core_metric_count=lineage_policy.min_core_metric_count,
             )
         )
     names = [sector.name for sector in sectors]
@@ -1613,6 +1639,27 @@ def _csv_date_column_matches(path: Path, iso_date: str) -> tuple[bool, bool, str
         return False, False, "unreadable"
 
 
+def _financial_lineage_errors(
+    path: Path,
+    iso_date: str,
+    *,
+    policy_mode: str = POLICY_STRICT_UNIVERSE,
+    min_core_metric_count: int = DEFAULT_MIN_CORE_METRIC_COUNT,
+) -> list[str]:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = [dict(row) for row in csv.DictReader(handle)]
+    except OSError as exc:
+        return [f"financial lineage contract unreadable: {exc}"]
+    evaluation = evaluate_financial_lineage_rows(
+        rows,
+        policy_mode=policy_mode,
+        expected_asof=iso_date,
+        min_core_metric_count=min_core_metric_count,
+    )
+    return evaluation.errors
+
+
 def verify_published_artifact_for_date(
     sector: Sector,
     iso_date: str,
@@ -1661,6 +1708,15 @@ def verify_published_artifact_for_date(
         date_checked, date_ok, date_detail = _csv_date_column_matches(artifact, iso_date)
         if date_checked and not date_ok:
             reasons.append(f"internal as-of column mismatch: {date_detail}")
+        if sector.financial_lineage_required:
+            reasons.extend(
+                _financial_lineage_errors(
+                    artifact,
+                    iso_date,
+                    policy_mode=sector.financial_lineage_policy,
+                    min_core_metric_count=sector.financial_lineage_min_core_metric_count,
+                )
+            )
     if verify_manifest and sector.health.manifest:
         status, asof = read_manifest(sector, iso_date)
         if status != "PASS":

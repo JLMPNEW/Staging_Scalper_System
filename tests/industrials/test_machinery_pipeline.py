@@ -333,6 +333,42 @@ def seed_scoring_features(db_path: Path, *, count: int = 12) -> None:
                 for metric_name in required_metric_names()
             ],
         )
+        for ticker in availability_tickers:
+            accession = f"TEST-{ticker}-2026Q2"
+            conn.execute(
+                """
+                INSERT INTO fact_sec_filing(
+                    ticker, source_id, accession_number, form_type, filing_date,
+                    accepted_at, report_date, fiscal_year, fiscal_period,
+                    primary_document, created_at, updated_at
+                )
+                VALUES (?, 'sec_companyfacts', ?, '10-Q', '2026-07-08',
+                        '2026-07-08T12:00:00Z', '2026-06-30', 2026, 'Q2',
+                        'synthetic-test.htm', ?, ?)
+                """,
+                (ticker, accession, now, now),
+            )
+            conn.executemany(
+                """
+                INSERT INTO fact_financial_statement_canonical(
+                    ticker, source_id, model_family, canonical_metric, period_end,
+                    filing_date, accepted_at, accession_number, form_type,
+                    fiscal_year, fiscal_period, reporting_standard, taxonomy,
+                    concept_name, unit, value, value_usd, source_priority,
+                    canonical_quality, created_at, updated_at
+                )
+                VALUES (?, 'sec_companyfacts', 'machinery', ?, '2026-06-30',
+                        '2026-07-08', '2026-07-08T12:00:00Z', ?, '10-Q',
+                        2026, 'Q2', 'US_GAAP', 'us-gaap', ?, 'USD', ?, ?, 10,
+                        'synthetic_test_fixture', ?, ?)
+                """,
+                [
+                    (ticker, 'revenue', accession, 'Revenue', 1_000_000_000.0,
+                     1_000_000_000.0, now, now),
+                    (ticker, 'assets', accession, 'Assets', 2_000_000_000.0,
+                     2_000_000_000.0, now, now),
+                ],
+            )
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -4884,6 +4920,8 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
         "industrials/machinery/scripts/10_build_machinery_calibrated_scores.py",
         "--config",
         str(MACHINERY_CONFIG),
+        "--db",
+        str(db_path),
         "--asof",
         ASOF,
         "--input-csv",

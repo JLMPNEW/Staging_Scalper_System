@@ -12,6 +12,10 @@ PROJECT_ROOT = PACKAGE_ROOT.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from orchestration_contracts.financial_lineage import (  # noqa: E402
+    evaluate_financial_lineage_rows,
+    policy_for_model_family,
+)
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.machinery.scoring import (  # noqa: E402
     FINAL_RANK_FIELDS,
@@ -62,6 +66,24 @@ def validate_dashboard_artifacts(input_dir: Path, *, asof: str) -> tuple[list[st
             allow_production=production_active,
         )
     )
+    lineage_policy = policy_for_model_family("machinery")
+    lineage_evaluation = evaluate_financial_lineage_rows(
+        rank_rows,
+        policy_mode=lineage_policy.mode_for("production"),
+        expected_asof=asof,
+        min_core_metric_count=lineage_policy.min_core_metric_count,
+    )
+    errors.extend(lineage_evaluation.errors)
+    lineage_manifest = manifest.get("financial_filing_lineage")
+    if not isinstance(lineage_manifest, dict):
+        errors.append("financial filing lineage manifest missing")
+    else:
+        if lineage_manifest.get("acceptance") != lineage_evaluation.acceptance:
+            errors.append("financial filing lineage acceptance differs from shared policy")
+        if lineage_manifest.get("policy_mode") != lineage_evaluation.policy_mode:
+            errors.append("financial filing lineage policy mode differs from shared policy")
+    if manifest.get("acceptance") != lineage_evaluation.acceptance:
+        errors.append("dashboard manifest acceptance differs from shared lineage policy")
     rank_fields = set(rank_rows[0]) if rank_rows else set()
     full_fields = set(FINAL_RANK_FIELDS)
     legacy_shadow_fields = full_fields - PRODUCTION_SELECTION_FIELDS

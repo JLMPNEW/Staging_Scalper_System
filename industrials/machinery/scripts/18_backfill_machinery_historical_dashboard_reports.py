@@ -25,6 +25,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.db import connect  # noqa: E402
+from industrials.core.financial_filing_lineage import (  # noqa: E402
+    apply_financial_lineage_gate,
+    build_financial_filing_lineage,
+)
 from industrials.core.policy_loader import load_eligibility_policy  # noqa: E402
 from industrials.core.refresh_lock import RefreshLock  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
@@ -303,12 +307,24 @@ def repair_membership_sidecars(
         updated, changed = reconcile_membership_metadata(rows, expected=expected)
         if not changed:
             continue
-        publish_dashboard(
+        lineage = build_financial_filing_lineage(
+            conn,
+            model_family="machinery",
+            asof=asof,
+            tickers=(str(row.get("ticker") or "") for row in updated),
+        )
+        updated = apply_financial_lineage_gate(updated, lineage)
+        dashboard_manifest = publish_dashboard(
             output_dir=output_dir,
             rows=updated,
             asof=asof,
             allow_overwrite=True,
         )
+        if dashboard_manifest.get("acceptance") != "PASS":
+            raise ValueError(
+                f"Historical machinery lineage policy failed for {asof}: "
+                f"{dashboard_manifest['financial_filing_lineage'].get('blocking_issues', [])[:10]}"
+            )
         repaired_dates.append(asof)
         repaired_tickers.update(changed)
     return {
@@ -973,9 +989,17 @@ def main() -> int:
                 )
                 historical_rows = survivorship_sidecar(rank_rows)
                 rank_ready_count = sum(row["rank_ready_flag"] == "1" for row in historical_rows)
+                with connect(db_path, timeout_sec=timeout) as conn:
+                    lineage = build_financial_filing_lineage(
+                        conn,
+                        model_family="machinery",
+                        asof=asof,
+                        tickers=(str(row.get("ticker") or "") for row in historical_rows),
+                    )
+                historical_rows = apply_financial_lineage_gate(historical_rows, lineage)
                 if rank_ready_count == 0 and not args.allow_zero_eligible:
                     raise ValueError("No rank-ready machinery rows; build point-in-time source features before publishing")
-                publish_dashboard(
+                dashboard_manifest = publish_dashboard(
                     output_dir=output_dir,
                     rows=historical_rows,
                     asof=asof,
@@ -984,6 +1008,11 @@ def main() -> int:
                         or (args.resume_existing and output_dir.exists())
                     ),
                 )
+                if dashboard_manifest.get("acceptance") != "PASS":
+                    raise ValueError(
+                        f"Historical machinery lineage policy failed for {asof}: "
+                        f"{dashboard_manifest['financial_filing_lineage'].get('blocking_issues', [])[:10]}"
+                    )
                 portfolio_adapter_row_count = validate_portfolio_handoff(
                     sector_output_root=sector_output_root,
                     asof=asof,

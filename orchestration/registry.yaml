@@ -299,6 +299,7 @@ sectors:
     date_flag: "--asof"
     args_template: ["--asof", "{date}"]
     force_args: []                      # runner has no --force flag
+    retry_args: ["--resume"]          # preserve completed network work
     publish_glob: "output/industrials/defense/dashboard/{date}/defense_final_rank_table.csv"
     publish_date_format: "%Y-%m-%d"
     oos_column: "oos_score_valid_flag"
@@ -379,6 +380,7 @@ sectors:
     date_flag: "--asof"
     args_template: ["--asof", "{date}"]
     force_args: ["--force"]
+    retry_args: ["--resume"]          # resume at the terminal failed step
     publish_glob: "output/industrials/machinery/dashboard/{date}/machinery_final_rank_table.csv"
     publish_date_format: "%Y-%m-%d"
     oos_column: "oos_score_valid_flag"

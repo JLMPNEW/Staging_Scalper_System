@@ -35,6 +35,9 @@ from industrials.machinery.stage9_backtest import (
     validate_stage9,
 )
 from portfolio_layer.scores.adapters import run_adapter
+from portfolio_layer.scores.adapter_semantics import (
+    industrial_adapter_semantic_sha256,
+)
 
 
 MODEL_FAMILY = "machinery"
@@ -764,6 +767,9 @@ def build_stage12_lock(
         ),
         "machinery_portfolio_policy_sha256": (
             machinery_portfolio_policy_fingerprint(portfolio_config)
+        ),
+        "portfolio_adapter_semantic_sha256": (
+            industrial_adapter_semantic_sha256()
         ),
         "portfolio_adapter_sha256": file_sha256(
             config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"

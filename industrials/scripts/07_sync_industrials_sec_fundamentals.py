@@ -4365,6 +4365,17 @@ def parse_archive_text_table_facts(
             marker in normalized_table_text
             for marker in ("orders", "bookings", "backlog", "remaining performance obligation")
         )
+        concept_names = {
+            concept[0] for concept in concept_rows if concept is not None
+        }
+        earnings_summary_table = bool(
+            form_type in {"6-K", "6-K/A", "8-K", "8-K/A"}
+            and {"Revenue", "NetIncomeLoss"} <= concept_names
+            and re.search(
+                r"\b(?:sales and earnings|financial results|results of operations)\b",
+                normalized_table_text,
+            )
+        )
         has_actual_columns = "actual" in normalize_table_label(table_text[:500])
         if strict_registration_statements and projection_flag and not has_actual_columns:
             continue
@@ -4375,7 +4386,7 @@ def parse_archive_text_table_facts(
             and not operating_table
         ):
             continue
-        if not financial_table and not operating_table:
+        if not financial_table and not operating_table and not earnings_summary_table:
             continue
         scale, scale_source, scale_confidence = table_scale_info(f"{scale_context} {table_text[:1000]}")
         if scale_confidence == "low" and document_default_scale[2] == "high":
@@ -4807,6 +4818,189 @@ def parse_archive_legacy_ascii_table_facts(
                                 "statement_type": statement_type,
                                 "projection_flag": projection_flag,
                                 "historical_statement_flag": historical_statement_flag,
+                            }
+                        ),
+                        source_detail=TEXT_TABLE_SOURCE_DETAIL,
+                    )
+                )
+    return facts
+
+
+SEMANTIC_STATEMENT_PERIOD_RE = re.compile(r"\b(?P<period>[1-4]Q\d{2,4}|[12]H\d{2,4})\b", re.IGNORECASE)
+SEMANTIC_STATEMENT_NUMBER = r"(?:\(?-?\d[\d,]*(?:\.\d+)?\)?|-)"
+
+
+def semantic_statement_period(
+    alias: str,
+    *,
+    report_date: str,
+) -> tuple[str, int] | None:
+    """Map an explicit calendar-quarter/half-year alias to a period end."""
+    match = re.fullmatch(r"(?P<index>[1-4])(?P<kind>[QH])(?P<year>\d{2,4})", alias.strip(), re.IGNORECASE)
+    report_end = datetime.strptime(report_date, "%Y-%m-%d").date()
+    if match is None:
+        return None
+    raw_year = int(match.group("year"))
+    year = raw_year if raw_year >= 100 else report_end.year // 100 * 100 + raw_year
+    if year > report_end.year + 20:
+        year -= 100
+    elif year < report_end.year - 80:
+        year += 100
+    index = int(match.group("index"))
+    kind = match.group("kind").upper()
+    if kind == "Q":
+        month, day = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}[index]
+        duration_days = 90
+    else:
+        if index not in {1, 2}:
+            return None
+        month, day = (6, 30) if index == 1 else (12, 31)
+        duration_days = 180
+    period_end = date(year, month, day)
+    if year == report_end.year and period_end > report_end:
+        return None
+    return period_end.isoformat(), duration_days
+
+
+def parse_archive_semantic_statement_facts(
+    document_text: str,
+    *,
+    document_name: str,
+    filing: dict[str, Any],
+    company_currency: str = "",
+) -> list[ArchiveFact]:
+    """Recover formal statement rows flattened into paragraph-oriented HTML.
+
+    Some foreign-issuer earnings exhibits preserve statement headings and row
+    order but omit HTML table elements. This parser accepts only formal
+    consolidated statement blocks with explicit scale, currency, and calendar
+    period headers. It never scans adjusted/non-GAAP sections.
+    """
+    form_type = str(filing.get("form_type") or "").strip().upper()
+    if form_type not in {"6-K", "6-K/A", "8-K", "8-K/A"}:
+        return []
+    report_date = parse_date(filing.get("report_date"))
+    if not report_date:
+        return []
+    plain_text = re.sub(r"\s+", " ", strip_html_cell(document_text)).strip()
+    if not re.search(r"\bfinancial statements?\b", plain_text, re.IGNORECASE):
+        return []
+
+    statement_specs: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...] = (
+        (
+            "income_statement",
+            r"\bconsolidated income statement\b",
+            (
+                ("Revenue", "duration", "Revenue"),
+                ("GrossProfit", "duration", "Gross profit"),
+                ("OperatingIncomeLoss", "duration", "Operating income before financial result"),
+                ("NetIncomeLoss", "duration", "Income for the period"),
+            ),
+        ),
+        (
+            "balance_sheet",
+            r"\bconsolidated balance sheet\b",
+            (
+                ("Assets", "instant", "Total Assets"),
+                ("Liabilities", "instant", "Total Liabilities"),
+                ("Equity", "instant", "Total Equity"),
+            ),
+        ),
+    )
+    all_heading_matches = sorted(
+        (match.start(), statement_type, match, rows)
+        for statement_type, heading_pattern, rows in statement_specs
+        for match in re.finditer(heading_pattern, plain_text, re.IGNORECASE)
+    )
+    facts: list[ArchiveFact] = []
+    seen: set[tuple[str, str, str, float]] = set()
+    for heading_index, (block_start, statement_type, heading_match, rows) in enumerate(all_heading_matches):
+        next_start = (
+            all_heading_matches[heading_index + 1][0]
+            if heading_index + 1 < len(all_heading_matches)
+            else len(plain_text)
+        )
+        block = plain_text[block_start:next_start]
+        non_gaap_match = re.search(
+            r"\b(?:reconciliation of .*non-gaap|non-gaap information)\b",
+            block,
+            re.IGNORECASE,
+        )
+        if non_gaap_match:
+            block = block[: non_gaap_match.start()]
+        heading_context = block[: min(len(block), 500)]
+        scale, scale_source, scale_confidence = table_scale_info(heading_context)
+        unit, currency_confidence = text_table_unit(
+            document_text,
+            heading_context,
+            company_currency=company_currency,
+        )
+        if scale_confidence != "high" or currency_confidence == "low":
+            continue
+        first_row_match = min(
+            (
+                row_match.start()
+                for _, _, label in rows
+                if (row_match := re.search(rf"\b{re.escape(label)}\b", block, re.IGNORECASE)) is not None
+            ),
+            default=-1,
+        )
+        if first_row_match < 0:
+            continue
+        header_text = block[heading_match.end() - block_start : first_row_match]
+        aliases = [match.group("period").upper() for match in SEMANTIC_STATEMENT_PERIOD_RE.finditer(header_text)]
+        aliases = list(dict.fromkeys(aliases))
+        if not aliases or len(aliases) > 8:
+            continue
+        parsed_periods = [semantic_statement_period(alias, report_date=report_date) for alias in aliases]
+        if parsed_periods[0] is None or parsed_periods[0][0] != report_date:
+            continue
+        value_pattern = r"\s+".join(f"({SEMANTIC_STATEMENT_NUMBER})" for _ in aliases)
+        for concept_name, period_type, label in rows:
+            row_match = re.search(
+                rf"\b{re.escape(label)}\b\s+{value_pattern}",
+                block,
+                re.IGNORECASE,
+            )
+            if row_match is None:
+                continue
+            for value_index, (alias, period) in enumerate(zip(aliases, parsed_periods, strict=True), start=1):
+                if period is None:
+                    continue
+                parsed_value = parse_table_number(row_match.group(value_index))
+                if parsed_value is None:
+                    continue
+                period_end, duration_days = period
+                value = parsed_value * scale
+                key = (concept_name, period_end, unit, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                facts.append(
+                    ArchiveFact(
+                        taxonomy="sec-text",
+                        concept_name=concept_name,
+                        unit=unit,
+                        value=value,
+                        period_start=(
+                            period_start_for_text_fact(period_end, period_type, duration_days)
+                            if period_type == "duration"
+                            else ""
+                        ),
+                        period_end=period_end,
+                        frame=f"semantic_statement:{document_name}:{statement_type}:{concept_name}:{alias}",
+                        decimals="",
+                        payload_json=compact_json(
+                            {
+                                "currency_confidence": currency_confidence,
+                                "document": document_name,
+                                "label": label,
+                                "period_alias": alias,
+                                "scale": scale,
+                                "scale_confidence": scale_confidence,
+                                "scale_source": scale_source,
+                                "source": "sec_archive_semantic_statement",
+                                "statement_type": statement_type,
                             }
                         ),
                         source_detail=TEXT_TABLE_SOURCE_DETAIL,
@@ -5297,6 +5491,23 @@ def should_attempt_archive(override: ReportingOverride | None) -> bool:
     return override.reporting_profile in ARCHIVE_FALLBACK_PROFILES
 
 
+def should_limit_archive_to_special_metrics(
+    *,
+    archive_all_family_members: bool,
+    archive_attempt_override: bool,
+    ticker: str,
+    core_metric_recovery_tickers: set[str],
+    accession_filter: set[str] | None,
+) -> bool:
+    """Keep broad scans narrow; allow exact accession recovery to parse core tables."""
+    return bool(
+        archive_all_family_members
+        and not archive_attempt_override
+        and ticker not in core_metric_recovery_tickers
+        and accession_filter is None
+    )
+
+
 def select_archive_filing_rows(
     filing_rows: list[Any],
     *,
@@ -5646,6 +5857,16 @@ def sync_archive_xbrl(
                 special_metrics_only=text_tables_only,
                 strict_registration_statements=strict_registration_statements,
             )
+            if not text_tables_only:
+                facts = [
+                    *facts,
+                    *parse_archive_semantic_statement_facts(
+                        document_text,
+                        document_name=document_name,
+                        filing=filing,
+                        company_currency=company_currency,
+                    ),
+                ]
             if document_name.lower().endswith(".txt"):
                 facts = [
                     *facts,
@@ -6452,7 +6673,11 @@ def write_report(
                 ticker = str(row.get("ticker") or "").strip()
                 if ticker and ticker not in merged:
                     merged[ticker] = dict(row)
-    write_csv_atomic(path, REPORT_FIELDS, [merged[ticker] for ticker in sorted(merged)])
+    normalized = [
+        {field: merged[ticker].get(field, "") for field in REPORT_FIELDS}
+        for ticker in sorted(merged)
+    ]
+    write_csv_atomic(path, REPORT_FIELDS, normalized)
 
 
 def source_status(conn: Any, source_id: str) -> str:
@@ -7566,10 +7791,16 @@ def main() -> None:
                                     reporting_override is not None
                                     and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
                                 ),
-                                text_tables_only=(
-                                    archive_all_family_members
-                                    and not should_attempt_archive(reporting_override)
-                                    and ticker not in archive_core_metric_recovery_tickers
+                                text_tables_only=should_limit_archive_to_special_metrics(
+                                    archive_all_family_members=archive_all_family_members,
+                                    archive_attempt_override=should_attempt_archive(
+                                        reporting_override
+                                    ),
+                                    ticker=ticker,
+                                    core_metric_recovery_tickers=(
+                                        archive_core_metric_recovery_tickers
+                                    ),
+                                    accession_filter=archive_accession_filter,
                                 ),
                                 strict_registration_statements=strict_registration_statements,
                                 company_currency=company_currency,
@@ -7699,10 +7930,16 @@ def main() -> None:
                                         reporting_override is not None
                                         and reporting_override.reporting_profile in FPI_HYBRID_PROFILES
                                     ),
-                                    text_tables_only=(
-                                        archive_all_family_members
-                                        and not should_attempt_archive(reporting_override)
-                                        and ticker not in archive_core_metric_recovery_tickers
+                                    text_tables_only=should_limit_archive_to_special_metrics(
+                                        archive_all_family_members=archive_all_family_members,
+                                        archive_attempt_override=should_attempt_archive(
+                                            reporting_override
+                                        ),
+                                        ticker=ticker,
+                                        core_metric_recovery_tickers=(
+                                            archive_core_metric_recovery_tickers
+                                        ),
+                                        accession_filter=archive_accession_filter,
                                     ),
                                     strict_registration_statements=strict_registration_statements,
                                     company_currency=company_currency,

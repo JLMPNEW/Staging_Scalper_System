@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from orchestration_contracts.financial_lineage import LINEAGE_FIELDS
 from industrials.machinery.scoring import file_sha256, survivorship_sidecar
 from industrials.machinery.stage12_activation import (
     ACTIVATION_STATUS_FULLY_VALIDATED,
@@ -22,6 +23,9 @@ from industrials.machinery.stage12_activation import (
     rollback_published_candidate,
 )
 from industrials.machinery.stage12_contract_upgrade import (
+    FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES,
+    _assert_rank_projection_unchanged,
+    _changed_source_keys,
     validate_active_portfolio_contract,
 )
 from industrials.machinery.stage12_activation_transaction import (
@@ -60,6 +64,43 @@ def _portfolio_config() -> dict:
             "sector_weight_caps": {"machinery": 0.0, "defense": 0.05},
             "fixed_equal_weight_sleeves": ["machinery"],
         },
+    }
+
+
+
+def test_lineage_contract_projection_allows_only_lineage_fields() -> None:
+    sealed = [{"ticker": "AAA", "final_rank": "1", "final_score": "75"}]
+    reproduced = [
+        {
+            "ticker": "AAA",
+            "final_rank": "1",
+            "final_score": "75",
+            "financial_lineage_status": "INCORPORATED",
+            "financial_lineage_gate": "1",
+        }
+    ]
+
+    _assert_rank_projection_unchanged(sealed, reproduced)
+
+
+def test_lineage_contract_projection_rejects_score_or_rank_drift() -> None:
+    sealed = [{"ticker": "AAA", "final_rank": "1", "final_score": "75"}]
+    reproduced = [{"ticker": "AAA", "final_rank": "1", "final_score": "74"}]
+
+    with pytest.raises(ValueError, match="final_score"):
+        _assert_rank_projection_unchanged(sealed, reproduced)
+
+
+def test_lineage_contract_source_allowlist_is_narrow() -> None:
+    previous = {name: "old" for name in FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES}
+    current = {name: "new" for name in FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES}
+    current["stage9_backtest.py"] = "unexpected"
+    previous["stage9_backtest.py"] = "sealed"
+
+    changed = _changed_source_keys(previous, current)
+
+    assert changed - FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES == {
+        "stage9_backtest.py"
     }
 
 
@@ -241,6 +282,7 @@ def test_production_dashboard_retains_shadow_calibration_sidecar(
         "calibration_sample_role",
         "survivorship_corrected_panel_flag",
         "scoring_contract_version",
+        *LINEAGE_FIELDS,
         *sorted(production_fields),
     ]
     monkeypatch.setitem(globals_map, "FINAL_RANK_FIELDS", full_fields)
@@ -268,6 +310,19 @@ def test_production_dashboard_retains_shadow_calibration_sidecar(
             "stage11_calibration_input_eligible_flag": "1",
             "calibration_sample_role": "pre_lock_research",
             "survivorship_corrected_panel_flag": "1",
+            "financial_lineage_checked_asof_date": "2026-07-24",
+            "financial_lineage_status": "INCORPORATED",
+            "financial_lineage_gate": "1",
+            "financial_lineage_classification": "INCORPORATED",
+            "latest_material_financial_filing_date": "2026-07-23",
+            "latest_material_financial_form": "10-Q",
+            "latest_material_financial_accession": f"LATEST-{ticker}",
+            "latest_material_financial_report_date": "2026-06-30",
+            "incorporated_financial_filing_date": "2026-07-23",
+            "incorporated_financial_accession": f"LATEST-{ticker}",
+            "incorporated_financial_report_date": "2026-06-30",
+            "incorporated_financial_core_metric_count": "3",
+            "financial_lineage_reason": "test_fixture",
         }
         sidecar_rows.append(
             {
@@ -309,6 +364,10 @@ def test_production_dashboard_retains_shadow_calibration_sidecar(
         "scoring_contract_versions": ["production"],
         "rank_table_sha256": file_sha256(rank_path),
         "sidecar_sha256": file_sha256(sidecar_path),
+        "financial_filing_lineage": {
+            "acceptance": "PASS",
+            "policy_mode": "strict_universe",
+        },
     }
     (tmp_path / "machinery_final_rank_table_manifest.json").write_text(
         json.dumps(manifest),
@@ -579,7 +638,7 @@ def test_resume_contract_reruns_monitor_and_downstream_groups() -> None:
     assert resume.index("bl") < resume.index("sleeves")
     assert resume.index("sleeves") < resume.index("exits")
     assert resume.index("final") < resume.index("final_report")
-    satisfied = set(resume)
+    satisfied: set[str] = set(resume)
     for group, aliases in PORTFOLIO_COMPLETION_ALIASES.items():
         if group in satisfied:
             satisfied.update(aliases)

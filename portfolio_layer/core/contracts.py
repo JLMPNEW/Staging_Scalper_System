@@ -18,11 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from orchestration_contracts.financial_lineage import (
+    LINEAGE_FIELDS as FINANCIAL_LINEAGE_FIELDS,
+)
 from portfolio_layer.core.db import utc_now
 
 
 DEFAULT_CONTRACT_VERSION = "stocks_scores_v1"
 CONTRACT_VERSION = DEFAULT_CONTRACT_VERSION
+
 
 # Intermediate artifact written by Stage 1 collect (native score, pre-calibration).
 COLLECTED_FIELDS = [
@@ -44,6 +48,7 @@ COLLECTED_FIELDS = [
     "survivorship_corrected_panel_flag",  # 0/1 historical replay row came from a PIT survivorship panel
     "score_confidence",      # 0-1
     "source_asof_date",      # the sector file's own date
+    *FINANCIAL_LINEAGE_FIELDS,
 ]
 
 # Final canonical contract consumed by the optimizer.
@@ -69,6 +74,7 @@ CONTRACT_FIELDS = [
     "survivorship_corrected_panel_flag",
     "native_score",
     "source_asof_date",
+    *FINANCIAL_LINEAGE_FIELDS,
     "staleness_days",
     "score_version",
 ]
@@ -103,6 +109,19 @@ class CanonicalScore:
     survivorship_corrected_panel_flag: int
     score_confidence: float
     source_asof_date: str
+    financial_lineage_checked_asof_date: str = ""
+    financial_lineage_status: str = ""
+    financial_lineage_gate: int = 0
+    financial_lineage_classification: str = ""
+    latest_material_financial_filing_date: str = ""
+    latest_material_financial_form: str = ""
+    latest_material_financial_accession: str = ""
+    latest_material_financial_report_date: str = ""
+    incorporated_financial_filing_date: str = ""
+    incorporated_financial_accession: str = ""
+    incorporated_financial_report_date: str = ""
+    incorporated_financial_core_metric_count: int = 0
+    financial_lineage_reason: str = ""
 
 
 @dataclass
@@ -405,6 +424,19 @@ CREATE TABLE IF NOT EXISTS stocks_scores (
     survivorship_corrected_panel_flag INTEGER NOT NULL DEFAULT 0,
     native_score REAL,
     source_asof_date TEXT,
+    financial_lineage_checked_asof_date TEXT,
+    financial_lineage_status TEXT,
+    financial_lineage_gate INTEGER NOT NULL DEFAULT 0,
+    financial_lineage_classification TEXT,
+    latest_material_financial_filing_date TEXT,
+    latest_material_financial_form TEXT,
+    latest_material_financial_accession TEXT,
+    latest_material_financial_report_date TEXT,
+    incorporated_financial_filing_date TEXT,
+    incorporated_financial_accession TEXT,
+    incorporated_financial_report_date TEXT,
+    incorporated_financial_core_metric_count INTEGER NOT NULL DEFAULT 0,
+    financial_lineage_reason TEXT,
     staleness_days INTEGER,
     score_version TEXT,
     created_at TEXT NOT NULL,
@@ -456,6 +488,15 @@ def _ensure_stocks_scores_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE stocks_scores ADD COLUMN missing_score_flag INTEGER NOT NULL DEFAULT 0")
     if "survivorship_corrected_panel_flag" not in existing:
         conn.execute("ALTER TABLE stocks_scores ADD COLUMN survivorship_corrected_panel_flag INTEGER NOT NULL DEFAULT 0")
+    for column in FINANCIAL_LINEAGE_FIELDS:
+        if column in existing:
+            continue
+        if column in {"financial_lineage_gate", "incorporated_financial_core_metric_count"}:
+            conn.execute(
+                f"ALTER TABLE stocks_scores ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+            )
+        else:
+            conn.execute(f"ALTER TABLE stocks_scores ADD COLUMN {column} TEXT")
 
 
 def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequence[dict[str, Any]]) -> int:
@@ -472,6 +513,14 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
             int(r.get("oos_score_valid_flag") or 0), int(r.get("missing_score_flag") or 0),
             int(r.get("survivorship_corrected_panel_flag") or 0),
             r.get("source_asof_date"), _i(r.get("staleness_days")), r.get("score_version"), now,
+            r.get("financial_lineage_checked_asof_date"), r.get("financial_lineage_status"),
+            int(r.get("financial_lineage_gate") or 0), r.get("financial_lineage_classification"),
+            r.get("latest_material_financial_filing_date"),
+            r.get("latest_material_financial_form"), r.get("latest_material_financial_accession"),
+            r.get("latest_material_financial_report_date"), r.get("incorporated_financial_filing_date"),
+            r.get("incorporated_financial_accession"), r.get("incorporated_financial_report_date"),
+            int(r.get("incorporated_financial_core_metric_count") or 0),
+            r.get("financial_lineage_reason"),
         )
         for r in rows
     ]
@@ -484,8 +533,13 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
                 final_score, rating, within_sector_percentile, score_confidence, investable_eligible,
                 eligibility_reason, native_score, calibration_research_eligible, calibration_research_reason,
                 calibration_sample_role, stage1_sample_role, oos_score_valid_flag, missing_score_flag,
-                survivorship_corrected_panel_flag, source_asof_date, staleness_days, score_version, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                survivorship_corrected_panel_flag, source_asof_date, staleness_days, score_version, created_at,
+                financial_lineage_checked_asof_date, financial_lineage_status, financial_lineage_gate,
+                financial_lineage_classification, latest_material_financial_filing_date,
+                latest_material_financial_form, latest_material_financial_accession,
+                latest_material_financial_report_date, incorporated_financial_filing_date, incorporated_financial_accession,
+                incorporated_financial_report_date, incorporated_financial_core_metric_count, financial_lineage_reason)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             payload,
         )

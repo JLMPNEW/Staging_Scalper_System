@@ -38,6 +38,9 @@ from industrials.machinery.stage9_backtest import (
     strategy_spec_by_name,
 )
 from portfolio_layer.scores.adapters import run_adapter
+from portfolio_layer.scores.adapter_semantics import (
+    industrial_adapter_semantic_sha256,
+)
 
 
 ACTIVATION_STATUS_PREPARED = "PREPARED_NOT_ACTIVATED"
@@ -56,6 +59,9 @@ def production_policy_source_hashes() -> dict[str, str]:
             package_root / "stage12_activation_transaction.py"
         ),
         "stage12_governance.py": package_root / "stage12_governance.py",
+        "adapter_semantics.py": (
+            package_root.parents[1] / "portfolio_layer" / "scores" / "adapter_semantics.py"
+        ),
         "stage8_calibration.py": package_root / "stage8_calibration.py",
         "stage9_backtest.py": package_root / "stage9_backtest.py",
         "production_universe.py": package_root / "production_universe.py",
@@ -333,10 +339,6 @@ def _sealed_governance(
             "stage9_run_manifest_sha256",
         ),
         (
-            config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py",
-            "portfolio_adapter_sha256",
-        ),
-        (
             config_path.parents[2] / "portfolio_layer" / "optimizer" / "optimizer_core.py",
             "portfolio_optimizer_sha256",
         ),
@@ -348,6 +350,24 @@ def _sealed_governance(
     for path, field in checks:
         if not path.exists() or file_sha256(path) != lock.get(field):
             raise ValueError(f"Sealed governance dependency changed: {path}")
+    semantic_expected = str(
+        lock.get("portfolio_adapter_semantic_sha256") or ""
+    ).strip()
+    adapter_path = (
+        config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
+    )
+    if semantic_expected:
+        if industrial_adapter_semantic_sha256() != semantic_expected:
+            raise ValueError(
+                "Sealed industrial adapter semantics changed: "
+                f"{adapter_path}"
+            )
+    elif not adapter_path.exists() or file_sha256(adapter_path) != lock.get(
+        "portfolio_adapter_sha256"
+    ):
+        # Legacy locks predate scoped semantic sealing. They remain fail-closed
+        # until migrated through the explicit activation-contract rail.
+        raise ValueError(f"Sealed governance dependency changed: {adapter_path}")
     return lock, paths
 
 

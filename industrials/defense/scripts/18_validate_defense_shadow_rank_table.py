@@ -17,6 +17,10 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from orchestration_contracts.financial_lineage import (  # noqa: E402
+    evaluate_financial_lineage_rows,
+    policy_for_model_family,
+)
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.rank_table_contracts import defense_final_rank_header  # noqa: E402
 from industrials.defense.research_artifacts import load_production_lock, lock_mode_for_asof  # noqa: E402
@@ -125,6 +129,25 @@ def main() -> int:
         errors.append(f"manifest membership_mode invalid: {membership_mode!r}")
         membership_mode = "current"
     research_candidate = bool(manifest.get("research_candidate", False))
+    lineage_policy = policy_for_model_family(MODEL_FAMILY)
+    lineage_context = "research" if research_candidate else "production"
+    lineage_evaluation = evaluate_financial_lineage_rows(
+        rows,
+        policy_mode=lineage_policy.mode_for(lineage_context),
+        expected_asof=asof,
+        min_core_metric_count=lineage_policy.min_core_metric_count,
+    )
+    errors.extend(lineage_evaluation.errors)
+    lineage_manifest = manifest.get("financial_filing_lineage")
+    if not isinstance(lineage_manifest, dict):
+        errors.append("financial filing lineage manifest missing")
+    else:
+        if lineage_manifest.get("acceptance") != lineage_evaluation.acceptance:
+            errors.append("financial filing lineage acceptance differs from shared policy")
+        if lineage_manifest.get("policy_mode") != lineage_evaluation.policy_mode:
+            errors.append("financial filing lineage policy mode differs from shared policy")
+    if manifest.get("acceptance") != lineage_evaluation.acceptance:
+        errors.append("rank manifest acceptance differs from shared lineage policy")
     scoring_mode = str(manifest.get("scoring_mode") or "baseline")
     if scoring_mode not in {"baseline", "specialized_v1"}:
         errors.append(f"manifest scoring_mode invalid: {scoring_mode!r}")

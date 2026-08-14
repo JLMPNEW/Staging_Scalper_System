@@ -24,6 +24,7 @@ from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     COLLECTED_FIELDS,
+    FINANCIAL_LINEAGE_FIELDS,
     fail_if_exists,
     manifest_accepts,
     read_csv,
@@ -449,6 +450,9 @@ def main() -> int:
                 "missing_score_flag": row.missing_score_flag,
                 "survivorship_corrected_panel_flag": row.survivorship_corrected_panel_flag,
                 "source_asof_date": row.source_asof_date,
+                **{
+                    field: getattr(row, field) for field in FINANCIAL_LINEAGE_FIELDS
+                },
             })
 
     out_path = run_dir / "collected_scores.csv"

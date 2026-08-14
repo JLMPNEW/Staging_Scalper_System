@@ -21,6 +21,12 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from industrials.core.financial_filing_lineage import (  # noqa: E402
+    apply_financial_lineage_gate,
+    build_financial_filing_lineage,
+    validate_financial_lineage_rank_rows,
+    write_financial_lineage_report,
+)
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -1189,9 +1195,24 @@ def sealed_artifact_valid(
     except json.JSONDecodeError:
         return False
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    lineage_manifest = manifest.get("financial_filing_lineage")
+    if not isinstance(lineage_manifest, dict):
+        return False
+    lineage_path_text = str(lineage_manifest.get("path") or "").strip()
+    if not lineage_path_text:
+        return False
+    lineage_path = Path(lineage_path_text)
+    if (
+        not lineage_path.is_file()
+        or lineage_manifest.get("sha256") != hashlib.sha256(lineage_path.read_bytes()).hexdigest()
+        or lineage_manifest.get("acceptance") != "PASS"
+        or int(lineage_manifest.get("blocking_issue_count", -1)) != 0
+    ):
+        return False
     expected_shadow_only = calibration_mode != "production"
     return (
-        manifest.get("sha256") == digest
+        manifest.get("acceptance") == "PASS"
+        and manifest.get("sha256") == digest
         and manifest.get("asof_date") == asof
         and manifest.get("model_family") == MODEL_FAMILY
         and manifest.get("membership_mode", "current") == membership_mode
@@ -1214,10 +1235,12 @@ def seal_manifest(
     scoring_mode: str,
     score_model_version: str,
     research_candidate: bool,
+    financial_filing_lineage: dict[str, Any],
     lock: dict[str, Any] | None,
 ) -> Path:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     manifest = {
+        "acceptance": str(financial_filing_lineage["acceptance"]),
         "artifact": str(path),
         "asof_date": asof,
         "rows": rows,
@@ -1230,6 +1253,7 @@ def seal_manifest(
         "scoring_mode": scoring_mode,
         "research_candidate": research_candidate,
         "shadow_only": research_candidate or calibration_mode != "production",
+        "financial_filing_lineage": financial_filing_lineage,
         "sealed_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
     if lock is not None:
@@ -1377,6 +1401,12 @@ def main() -> int:
             base_dir=base_dir,
             membership_mode=args.membership_mode,
         )
+        lineage = build_financial_filing_lineage(
+            conn,
+            model_family=MODEL_FAMILY,
+            asof=asof,
+            tickers=(str(row.get("ticker") or "") for row in rows),
+        )
         # Newest borrow observation at-or-before asof per ticker: the truthful
         # date for borrow_data_asof_date (the feature build consumes exactly
         # this row via its latest<=asof + staleness rule; one registered borrow
@@ -1423,6 +1453,17 @@ def main() -> int:
             mode=calibration_mode,
             is_pit_membership=args.membership_mode == "pit",
         )
+    out_rows = apply_financial_lineage_gate(out_rows, lineage)
+    lineage_errors = validate_financial_lineage_rank_rows(out_rows)
+    if lineage_errors:
+        raise ValueError("; ".join(lineage_errors[:20]))
+    lineage_manifest = write_financial_lineage_report(
+        output_dir / "defense_financial_filing_lineage.csv",
+        out_rows,
+        model_family=MODEL_FAMILY,
+        asof=asof,
+        policy_context="research" if args.research_candidate else "production",
+    )
     write_csv_atomic(output_path, fields, [{field: row.get(field, "") for field in fields} for row in out_rows])
     manifest_path = seal_manifest(
         output_path,
@@ -1435,10 +1476,11 @@ def main() -> int:
         score_model_version=score_model_version,
         research_candidate=bool(args.research_candidate),
         lock=None if args.research_candidate else lock,
+        financial_filing_lineage=lineage_manifest,
     )
     print(f"Wrote {output_path} (calibration_mode={calibration_mode})")
     print(f"Wrote {manifest_path}")
-    return 0
+    return 0 if lineage_manifest.get("acceptance") == "PASS" else 1
 
 
 if __name__ == "__main__":

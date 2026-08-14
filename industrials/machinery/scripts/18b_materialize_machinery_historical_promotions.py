@@ -24,6 +24,10 @@ from industrials.core.config import (  # noqa: E402
     resolve_path,
 )
 from industrials.core.db import connect  # noqa: E402
+from industrials.core.financial_filing_lineage import (  # noqa: E402
+    apply_financial_lineage_gate,
+    build_financial_filing_lineage,
+)
 from industrials.core.policy_loader import load_eligibility_policy  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.machinery.build_contract import (  # noqa: E402
@@ -554,12 +558,25 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 )
                 historical_rows = survivorship_sidecar(rank_rows)
-                publish_dashboard(
+                with connect(db_path) as conn:
+                    lineage = build_financial_filing_lineage(
+                        conn,
+                        model_family="machinery",
+                        asof=asof_date,
+                        tickers=(str(row.get("ticker") or "") for row in historical_rows),
+                    )
+                historical_rows = apply_financial_lineage_gate(historical_rows, lineage)
+                dashboard_manifest = publish_dashboard(
                     output_dir=output_dir,
                     rows=historical_rows,
                     asof=asof_date,
                     allow_overwrite=True,
                 )
+                if dashboard_manifest.get("acceptance") != "PASS":
+                    raise ValueError(
+                        f"Historical machinery lineage policy failed for {asof_date}: "
+                        f"{dashboard_manifest['financial_filing_lineage'].get('blocking_issues', [])[:10]}"
+                    )
                 adapter_count = _validate_portfolio(
                     sector_output_root,
                     asof_date=asof_date,
