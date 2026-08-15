@@ -634,6 +634,7 @@ def test_refresh_orchestrators_use_recoverable_financial_batches(
     step = next(item for item in steps if item.step_id == "08_build_financial_features")
     assert step.script.name == "08_build_technology_financial_features_batched.py"
     assert step.args == [
+        "--current-members-only",
         "--model-family",
         model_family,
         "--batch-size",

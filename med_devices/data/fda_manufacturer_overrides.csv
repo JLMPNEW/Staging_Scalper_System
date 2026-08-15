@@ -1,4 +1,4 @@
-﻿"fda_manufacturer_id","manufacturer_name","ticker","company_id","confidence","mapping_method","note","valid_from","reviewed_at"
+"fda_manufacturer_id","manufacturer_name","ticker","company_id","confidence","mapping_method","note","valid_from","reviewed_at"
 "1108","ABBOTT DIABETES CARE INC","ABT","3","99","manual_override","High-volume FDA manufacturer under Abbott","2026-06-26","2026-06-26"
 "183","ABBOTT MEDICAL","ABT","3","99","manual_override","High-volume FDA manufacturer under Abbott","2026-06-26","2026-06-26"
 "935","Abbott Molecular","ABT","3","99","manual_override","Abbott diagnostics operating unit","2026-06-26","2026-06-26"
@@ -399,3 +399,4 @@
 "6615","Integrated Dental Systems, LLC","","","0","out_of_universe","Private dental systems manufacturer outside the public med-device universe; unrelated to XRAY","2019-01-04","2026-08-13"
 "6665","Mycone Dental Supply Co. Inc. (Dba Keystone Industries)","","","0","out_of_universe","Private dental-products manufacturer outside the public med-device universe; unrelated to XRAY","2019-01-04","2026-08-13"
 "6664","Quest Dental USA Corp.","","","0","out_of_universe","Private dental manufacturer outside the public med-device universe; unrelated to XRAY and DGX","2019-01-04","2026-08-13"
+"1223","Avanos Medical, Inc.","","","0","out_of_universe","Avanos Medical last traded 2026-07-24 and was acquired by American Industrial Partners; exclude post-terminal FDA records from the active public med-device universe","2026-07-25","2026-08-15"

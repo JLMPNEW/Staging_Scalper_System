@@ -16,7 +16,7 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
     conn.executescript(
         """
         CREATE TABLE fact_sec_filing (
-            ticker TEXT, accession_number TEXT, form_type TEXT,
+            ticker TEXT, cik TEXT, accession_number TEXT, form_type TEXT,
             filing_date TEXT, acceptance_datetime TEXT, report_date TEXT,
             primary_document TEXT
         );
@@ -27,6 +27,18 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
         CREATE TABLE feature_financial_statement (
             ticker TEXT, model_family TEXT, asof_date TEXT
         );
+        CREATE TABLE feature_scoring_input (
+            ticker TEXT, model_family TEXT, asof_date TEXT,
+            financial_feature_asof_date TEXT,
+            financial_source_accession TEXT,
+            financial_source_fiscal_period_end TEXT,
+            financial_source_feature_updated_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE raw_api_responses (
+            endpoint TEXT, query_params_json TEXT, request_time_utc TEXT,
+            response_status INTEGER, asof_date TEXT
+        );
         CREATE TABLE sec_parser_document_catalog (
             accession_number TEXT, source_path TEXT,
             is_full_submission INTEGER, is_primary INTEGER, file_size INTEGER
@@ -34,9 +46,9 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
         """
     )
     conn.execute(
-        "INSERT INTO fact_sec_filing VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO fact_sec_filing VALUES (?,?,?,?,?,?,?,?)",
         (
-            "SAFE", "safe-2026", "10-Q", "2026-08-01",
+            "SAFE", "1", "safe-2026", "10-Q", "2026-08-01",
             "2026-08-01T09:30:00", "2026-06-30", "safe.htm",
         ),
     )
@@ -50,6 +62,29 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
     conn.execute(
         "INSERT INTO feature_financial_statement VALUES (?,?,?)",
         ("SAFE", "software_infrastructure", ASOF),
+    )
+    conn.execute(
+        "INSERT INTO feature_scoring_input VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "SAFE",
+            "software_infrastructure",
+            ASOF,
+            "2026-08-01",
+            "safe-2026",
+            "2026-06-30",
+            "2026-08-14T12:01:00Z",
+            "2026-08-14T12:02:00Z",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO raw_api_responses VALUES (?,?,?,?,?)",
+        (
+            "https://data.sec.gov/submissions/CIK0000000001.json",
+            '{"payload_source":"live_network","response_kind":"root_submissions"}',
+            "2026-08-14T12:00:00Z",
+            200,
+            ASOF,
+        ),
     )
     conn.commit()
     conn.close()

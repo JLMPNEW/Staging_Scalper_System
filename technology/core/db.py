@@ -886,6 +886,9 @@ CREATE TABLE IF NOT EXISTS feature_scoring_input (
     calibration_cohort TEXT,
     market_feature_asof_date TEXT,
     financial_feature_asof_date TEXT,
+    financial_source_accession TEXT,
+    financial_source_fiscal_period_end TEXT,
+    financial_source_feature_updated_at TEXT,
     positioning_feature_asof_date TEXT,
     reporting_standard TEXT,
     financial_frequency TEXT,
@@ -1354,6 +1357,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "fact_sec_xbrl_fact_raw", "source_accession_url", "TEXT")
     ensure_column(conn, "fact_financial_statement_canonical", "source_detail", "TEXT")
     ensure_column(conn, "feature_scoring_input", "rel_strength_bench_3m", "REAL")
+    ensure_column(conn, "feature_scoring_input", "financial_source_accession", "TEXT")
+    ensure_column(conn, "feature_scoring_input", "financial_source_fiscal_period_end", "TEXT")
+    ensure_column(conn, "feature_scoring_input", "financial_source_feature_updated_at", "TEXT")
 
 
 def seed_xbrl_concept_map(conn: sqlite3.Connection) -> None:

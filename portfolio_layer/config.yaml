@@ -500,6 +500,7 @@ score_contract:
       industry_aggregate: "Health Care Equipment & Services"
       file_mode: dated
       file_path: "med_devices_reports/score_review_pack/{yyyy-mm-dd}/med_device_daily_composite_scores.csv"
+      financial_lineage_file_path: "med_devices_reports/financial_lineage/{yyyy-mm-dd}/med_device_financial_lineage.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
     # Defense is a production OOS sleeve after the weekly 2019-2026 PIT calibration

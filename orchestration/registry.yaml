@@ -138,6 +138,7 @@ sectors:
     # network steps (notably FDA) and resumes at the first required failure.
     retry_args: ["--resume"]
     publish_glob: "output/med_devices_reports/score_review_pack/{date}/med_device_daily_composite_scores.csv"
+    financial_lineage_artifact: "output/med_devices_reports/financial_lineage/{date}/med_device_financial_lineage.csv"
     publish_date_format: "%Y-%m-%d"
     # med_device_daily_composite_scores.csv carries both oos_score_valid_flag and
     # portfolio_candidate_gate; the portfolio adapter requires oos_score_valid, so gate the
@@ -175,7 +176,7 @@ sectors:
       # freshly synced/imported 13F positioning (steps 62 -> 61) and MUST run before the
       # institutional-flow feature rebuild (58) that consumes them. It leads the rebuild chain,
       # matching 71's canonical order (63 immediately after 61, before 54/56/58/60) -- finding 7.
-      rebuild_steps: ["63_rebuild_sec13f_common_shares", "54_build_borrow_features", "56_build_short_interest_features", "58_build_institutional_flow_features", "60_build_insider_activity_features", "13_build_daily_scores", "16_publish_review_pack"]
+      rebuild_steps: ["63_rebuild_sec13f_common_shares", "54_build_borrow_features", "56_build_short_interest_features", "58_build_institutional_flow_features", "60_build_insider_activity_features", "13_build_daily_scores", "16_publish_review_pack", "81_build_source_incorporation"]
       extra_args: []
 
   # --------------------------------------------------------- semiconductors

@@ -492,3 +492,58 @@ def test_portfolio_adapter_excludes_only_unsafe_med_device_rows() -> None:
         assert (
             adapted[ticker].calibration_research_reason == "unsafe_production_score_provenance"
         )
+
+
+
+def test_portfolio_adapter_requires_lineage_for_med_device_candidate() -> None:
+    cfg = {
+        "model_family": "med_devices",
+        "sector": "Healthcare",
+        "industry": "Medical Devices",
+        "industry_aggregate": "Medical Devices",
+        "_financial_lineage_policy_mode": "candidate_only",
+    }
+    base = {
+        "ticker": "MDX",
+        "asof_date": "2026-08-14",
+        "native_score_value": "60",
+        "portfolio_candidate_gate": "1",
+        "portfolio_candidate_reason": "ok",
+        "calibration_eligible_flag": "1",
+        "oos_score_valid_flag": "1",
+        "calibration_sample_role": "strict_oos",
+        "stage11_calibration_input_eligible_flag": "1",
+        "stage11_calibration_input_reason": "ok",
+        "survivorship_corrected_panel_flag": "1",
+        "source_snapshot_asof_date": "2026-08-14",
+        "ic_tilted_composite_mode": "shadow",
+        "production_score_source": "baseline_composite_score",
+        "ic_tilt_applied_to_production_flag": "0",
+    }
+    missing = _adapt_med_devices(cfg, [base])[0]
+    assert missing.investable_eligible == 0
+    assert missing.eligibility_reason == "financial_lineage:missing"
+
+    incorporated = _adapt_med_devices(
+        cfg,
+        [
+            {
+                **base,
+                "financial_lineage_checked_asof_date": "2026-08-14",
+                "financial_lineage_status": "INCORPORATED",
+                "financial_lineage_gate": "1",
+                "financial_lineage_classification": "INCORPORATED",
+                "latest_material_financial_filing_date": "2026-08-10",
+                "latest_material_financial_form": "10-Q",
+                "latest_material_financial_accession": "000012345624000001",
+                "latest_material_financial_report_date": "2026-06-30",
+                "incorporated_financial_filing_date": "2026-08-10",
+                "incorporated_financial_accession": "000012345624000001",
+                "incorporated_financial_report_date": "2026-06-30",
+                "incorporated_financial_core_metric_count": "5",
+                "financial_lineage_reason": "latest_sources_incorporated_before_scoring",
+            }
+        ],
+    )[0]
+    assert incorporated.investable_eligible == 1
+    assert incorporated.financial_lineage_gate == 1

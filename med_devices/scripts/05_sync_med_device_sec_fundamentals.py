@@ -48,6 +48,9 @@ FIELDNAMES = [
     "company_name",
     "submissions_status",
     "companyfacts_status",
+    "submissions_payload_source",
+    "companyfacts_payload_source",
+    "sec_asof_date",
     "filing_rows",
     "financial_statement_rows",
     "inline_xbrl_fallback_rows",
@@ -274,6 +277,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default="", help="Optional comma-separated ticker subset.")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--refresh-cache", action="store_true")
+    parser.add_argument(
+        "--refresh-submissions",
+        action="store_true",
+        help="Fetch every issuer's root SEC submissions index live.",
+    )
+    parser.add_argument(
+        "--asof",
+        default="",
+        help="Attribute source-discovery evidence to this as-of date (YYYY-MM-DD).",
+    )
     parser.add_argument("--allow-partial", action="store_true")
     return parser.parse_args()
 
@@ -861,23 +874,34 @@ def store_raw_response(
     payload_text: str,
     response_status: int,
     ingestion_run_id: int,
+    asof_date: str,
+    payload_source: str,
+    response_kind: str,
 ) -> None:
     now = utc_now()
     conn.execute(
         """
         INSERT OR IGNORE INTO raw_api_responses(
             source_id, endpoint, query_params_json, request_time_utc, response_status,
-            response_hash, payload_text, ingestion_run_id, created_at
+            response_hash, asof_date, payload_text, ingestion_run_id, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source_id,
             endpoint,
-            "{}",
+            json.dumps(
+                {
+                    "payload_source": payload_source,
+                    "response_kind": response_kind,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
             now,
             response_status,
             hashlib.sha256(payload_text.encode("utf-8", errors="replace")).hexdigest(),
+            asof_date,
             payload_text,
             ingestion_run_id,
             now,
@@ -1606,6 +1630,11 @@ def main() -> None:
     config = load_yaml(config_path)
     policy = sec_ingestion_policy(config)
     base_dir = config_path.parent
+    sec_asof = str(args.asof or "").strip() or datetime.utcnow().date().isoformat()
+    try:
+        datetime.strptime(sec_asof, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("--asof must be a valid ISO date (YYYY-MM-DD)") from exc
     db_path = (
         args.db.expanduser().resolve()
         if args.db
@@ -1687,22 +1716,29 @@ def main() -> None:
                 latest_period = ""
                 latest_financial_filing_date = ""
                 latest_parsed_filed_date = ""
+                submissions_payload_source = "not_requested"
+                companyfacts_payload_source = "not_requested"
                 filing_rows: list[dict[str, Any]] = []
                 try:
                     submissions_url = submissions_url_template.format(cik=company.cik)
-                    submissions, submissions_text, submissions_source, submissions_status_code = fetch_json(
+                    (
+                        submissions,
+                        submissions_text,
+                        submissions_payload_source,
+                        submissions_status_code,
+                    ) = fetch_json(
                         session,
                         submissions_url,
                         primary_cache_path=cache_dir / "sec_submissions" / f"CIK{company.cik}.json",
                         fallback_cache_path=validation_cache_dir / "sec_submissions" / f"CIK{company.cik}.json",
-                        refresh_cache=args.refresh_cache,
+                        refresh_cache=(args.refresh_cache or args.refresh_submissions),
                         cache_ttl_hours=cache_ttl_hours,
                         timeout_sec=timeout_sec,
                         max_retries=max_retries,
                         sleep_sec=sleep_sec,
                         user_agent=user_agent,
                     )
-                    if submissions_source == "fetched":
+                    if submissions_payload_source == "fetched":
                         submissions_request_count += 1
                         time.sleep(max(0.0, sleep_sec))
                     store_raw_response(
@@ -1712,6 +1748,9 @@ def main() -> None:
                         payload_text=submissions_text,
                         response_status=submissions_status_code,
                         ingestion_run_id=submissions_ingestion_id,
+                        asof_date=sec_asof,
+                        payload_source=submissions_payload_source,
+                        response_kind="root_submissions",
                     )
                     filing_rows = parse_recent_filings(company, submissions, policy.forms, policy)
                     if policy.fetch_paginated_submissions:
@@ -1740,6 +1779,9 @@ def main() -> None:
                                     payload_text=extra_text,
                                     response_status=extra_status_code,
                                     ingestion_run_id=submissions_ingestion_id,
+                                    asof_date=sec_asof,
+                                    payload_source=extra_source,
+                                    response_kind="submissions_archive",
                                 )
                                 filing_rows.extend(
                                     parse_recent_filings(company, extra_submissions, policy.forms, policy)
@@ -1759,7 +1801,12 @@ def main() -> None:
 
                 try:
                     companyfacts_url = companyfacts_url_template.format(cik=company.cik)
-                    companyfacts, companyfacts_text, companyfacts_source, companyfacts_status_code = fetch_json(
+                    (
+                        companyfacts,
+                        companyfacts_text,
+                        companyfacts_payload_source,
+                        companyfacts_status_code,
+                    ) = fetch_json(
                         session,
                         companyfacts_url,
                         primary_cache_path=cache_dir / "sec_companyfacts" / f"CIK{company.cik}.json",
@@ -1771,7 +1818,7 @@ def main() -> None:
                         sleep_sec=sleep_sec,
                         user_agent=user_agent,
                     )
-                    if companyfacts_source == "fetched":
+                    if companyfacts_payload_source == "fetched":
                         companyfacts_request_count += 1
                         time.sleep(max(0.0, sleep_sec))
                     store_raw_response(
@@ -1781,6 +1828,9 @@ def main() -> None:
                         payload_text=companyfacts_text,
                         response_status=companyfacts_status_code,
                         ingestion_run_id=companyfacts_ingestion_id,
+                        asof_date=sec_asof,
+                        payload_source=companyfacts_payload_source,
+                        response_kind="companyfacts",
                     )
                     financial_rows = build_financial_statement_rows(company, companyfacts, policy)
                     financial_count = upsert_financial_rows(conn, financial_rows)
@@ -1826,6 +1876,9 @@ def main() -> None:
                                 payload_text=document_text,
                                 response_status=document_status,
                                 ingestion_run_id=inline_xbrl_ingestion_id,
+                                asof_date=sec_asof,
+                                payload_source=document_source,
+                                response_kind="inline_xbrl_document",
                             )
                             fallback_rows = build_inline_fallback_rows(
                                 company,
@@ -1871,6 +1924,9 @@ def main() -> None:
                         "company_name": company.company_name,
                         "submissions_status": submissions_status,
                         "companyfacts_status": companyfacts_status,
+                        "submissions_payload_source": submissions_payload_source,
+                        "companyfacts_payload_source": companyfacts_payload_source,
+                        "sec_asof_date": sec_asof,
                         "filing_rows": filing_count,
                         "financial_statement_rows": financial_count,
                         "inline_xbrl_fallback_rows": inline_xbrl_count,

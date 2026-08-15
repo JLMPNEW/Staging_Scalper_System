@@ -86,3 +86,75 @@ def test_explicit_statement_table_uses_preamble_scale_and_period(tmp_path: Path)
     assert values["Revenue"].end_date == "2026-06-30"
     assert values["Revenue"].unit == "TWD"
     assert values["Revenue"].source_detail == "filing_document_explicit_statement_table"
+
+
+def test_explicit_interim_table_uses_current_period_column_not_note(
+    tmp_path: Path,
+) -> None:
+    filing = tmp_path / "foreign_interim_results.htm"
+    filing.write_text(
+        """
+        <html><body>
+          <p>Unaudited condensed consolidated interim financial statements</p>
+          <p>(Unaudited in thousands of US dollars)</p>
+          <table>
+            <tr><th></th><th></th><th>Three month periods ended</th><th></th>
+                <th>Six month periods ended</th></tr>
+            <tr><th></th><th>Note</th><th>2025</th><th>2024</th>
+                <th>2025</th><th>2024</th></tr>
+            <tr><td>Revenue</td><td>18</td><td>51,450</td><td>59,113</td>
+                <td>102,268</td><td>119,263</td></tr>
+            <tr><td>Gross profit</td><td></td><td>38,246</td><td>40,488</td>
+                <td>75,051</td><td>81,669</td></tr>
+            <tr><td>Net loss</td><td></td><td>(1,996)</td><td>(1,881)</td>
+                <td>(4,333)</td><td>(3,791)</td></tr>
+          </table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    recovered = parse_explicit_statement_tables(
+        [filing],
+        report_date="2025-12-31",
+        taxonomy="ifrs-full",
+        fallback_currency="USD",
+    )
+
+    values = {fact.concept: fact for fact in recovered}
+    assert values["Revenue"].value == pytest.approx(51_450_000.0)
+    assert values["GrossProfit"].value == pytest.approx(38_246_000.0)
+    assert values["ProfitLoss"].value == pytest.approx(-1_996_000.0)
+    assert values["Revenue"].start_date == "2025-10-01"
+    assert values["Revenue"].end_date == "2025-12-31"
+
+
+def test_explicit_statement_table_recognizes_us_dollar_000_scale(
+    tmp_path: Path,
+) -> None:
+    filing = tmp_path / "earnings_release.htm"
+    filing.write_text(
+        """
+        <html><body>
+          <p>Second quarter consolidated financial results</p>
+          <table>
+            <tr><th>in US $000</th><th>Three month periods ended December 31</th></tr>
+            <tr><th></th><th>2025</th></tr>
+            <tr><td>Revenue</td><td>51,450</td></tr>
+            <tr><td>Net loss</td><td>(1,996)</td></tr>
+          </table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    recovered = parse_explicit_statement_tables(
+        [filing],
+        report_date="2025-12-31",
+        taxonomy="ifrs-full",
+        fallback_currency="USD",
+    )
+
+    values = {fact.concept: fact for fact in recovered}
+    assert values["Revenue"].value == pytest.approx(51_450_000.0)
+    assert values["ProfitLoss"].value == pytest.approx(-1_996_000.0)

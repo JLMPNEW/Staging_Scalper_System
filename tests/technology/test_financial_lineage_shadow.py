@@ -16,7 +16,7 @@ def _database(path: Path) -> sqlite3.Connection:
     conn.executescript(
         """
         CREATE TABLE fact_sec_filing (
-            ticker TEXT, accession_number TEXT, form_type TEXT,
+            ticker TEXT, cik TEXT, accession_number TEXT, form_type TEXT,
             filing_date TEXT, acceptance_datetime TEXT, report_date TEXT,
             primary_document TEXT
         );
@@ -26,6 +26,18 @@ def _database(path: Path) -> sqlite3.Connection:
         );
         CREATE TABLE feature_financial_statement (
             ticker TEXT, model_family TEXT, asof_date TEXT
+        );
+        CREATE TABLE feature_scoring_input (
+            ticker TEXT, model_family TEXT, asof_date TEXT,
+            financial_feature_asof_date TEXT,
+            financial_source_accession TEXT,
+            financial_source_fiscal_period_end TEXT,
+            financial_source_feature_updated_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE raw_api_responses (
+            endpoint TEXT, query_params_json TEXT, request_time_utc TEXT,
+            response_status INTEGER, asof_date TEXT
         );
         CREATE TABLE sec_parser_document_catalog (
             accession_number TEXT, source_path TEXT,
@@ -71,9 +83,10 @@ def _rank_table(path: Path, *, gap_is_candidate: bool) -> None:
 
 def _seed_safe_filing(conn: sqlite3.Connection) -> None:
     conn.execute(
-        "INSERT INTO fact_sec_filing VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO fact_sec_filing VALUES (?,?,?,?,?,?,?,?)",
         (
             "SAFE",
+            "1",
             "safe-2026",
             "10-Q",
             "2026-08-01",
@@ -89,6 +102,29 @@ def _seed_safe_filing(conn: sqlite3.Connection) -> None:
     conn.executemany(
         "INSERT INTO feature_financial_statement VALUES (?,?,?)",
         [(ticker, "semiconductors", ASOF) for ticker in ("SAFE", "GAP")],
+    )
+    conn.execute(
+        "INSERT INTO feature_scoring_input VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "SAFE",
+            "semiconductors",
+            ASOF,
+            "2026-08-01",
+            "safe-2026",
+            "2026-06-30",
+            "2026-08-14T12:01:00Z",
+            "2026-08-14T12:02:00Z",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO raw_api_responses VALUES (?,?,?,?,?)",
+        (
+            "https://data.sec.gov/submissions/CIK0000000001.json",
+            '{"payload_source":"live_network","response_kind":"root_submissions"}',
+            "2026-08-14T12:00:00Z",
+            200,
+            ASOF,
+        ),
     )
     conn.commit()
 
@@ -108,6 +144,7 @@ def test_candidate_only_shadow_passes_noncandidate_gap_without_mutating_rank(
         db_path=db_path,
         rank_table_path=rank_path,
         output_dir=tmp_path / "shadow",
+        policy_context="production",
     )
 
     assert manifest["acceptance"] == "PASS"
@@ -133,6 +170,7 @@ def test_candidate_only_shadow_fails_closed_for_unresolved_candidate(
         db_path=db_path,
         rank_table_path=rank_path,
         output_dir=tmp_path / "shadow",
+        policy_context="production",
     )
 
     assert manifest["acceptance"] == "FAIL"

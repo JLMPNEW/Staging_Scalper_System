@@ -681,6 +681,10 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
         bool(completeness_values)
         and len({round(value, 8) for value in completeness_values}) == 1
     )
+    lineage_policy = policy_for_model_family(str(cfg.get("model_family") or "med_devices"))
+    lineage_policy_mode = str(
+        cfg.get("_financial_lineage_policy_mode") or POLICY_DISABLED
+    )
     out: list[CanonicalScore] = []
     skipped = 0
     for r in rows:
@@ -702,10 +706,20 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             continue
         missing_score = native <= 0.0
         unsafe_score_provenance = _med_device_score_provenance_unsafe(r)
+        source_candidate = _truthy(r.get("portfolio_candidate_gate"))
+        lineage_required = lineage_policy_mode == POLICY_STRICT_UNIVERSE or (
+            lineage_policy_mode == POLICY_CANDIDATE_ONLY and source_candidate
+        )
+        lineage_ok = not lineage_required or lineage_row_is_safe(
+            r,
+            expected_asof=str(r.get("asof_date") or "").strip()[:10],
+            min_core_metric_count=lineage_policy.min_core_metric_count,
+        )
         eligible = (
-            _truthy(r.get("portfolio_candidate_gate"))
+            source_candidate
             and not missing_score
             and not unsafe_score_provenance
+            and lineage_ok
         )
         reason = (
             "ok"
@@ -714,6 +728,8 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             if unsafe_score_provenance
             else "missing_score"
             if missing_score
+            else f"financial_lineage:{str(r.get('financial_lineage_status') or 'missing')}"
+            if not lineage_ok
             else str(r.get("portfolio_candidate_reason") or "failed_portfolio_candidate_gate").strip()
         )
         calibration_ok = _truthy(r.get("calibration_eligible_flag")) if "calibration_eligible_flag" in r else eligible
@@ -817,7 +833,43 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
             oos_score_valid_flag=int(oos_score_valid),
             missing_score_flag=int(missing_score),
             survivorship_corrected_panel_flag=int(_survivorship_corrected(r)),
-            score_confidence=conf, source_asof_date=_source_asof(r),
+            score_confidence=conf,
+            source_asof_date=_source_asof(r),
+            financial_lineage_checked_asof_date=str(
+                r.get("financial_lineage_checked_asof_date") or ""
+            ),
+            financial_lineage_status=str(r.get("financial_lineage_status") or ""),
+            financial_lineage_gate=int(
+                _truthy(r.get("financial_lineage_gate"))
+            ),
+            financial_lineage_classification=str(
+                r.get("financial_lineage_classification") or ""
+            ),
+            latest_material_financial_filing_date=str(
+                r.get("latest_material_financial_filing_date") or ""
+            ),
+            latest_material_financial_form=str(
+                r.get("latest_material_financial_form") or ""
+            ),
+            latest_material_financial_accession=str(
+                r.get("latest_material_financial_accession") or ""
+            ),
+            latest_material_financial_report_date=str(
+                r.get("latest_material_financial_report_date") or ""
+            ),
+            incorporated_financial_filing_date=str(
+                r.get("incorporated_financial_filing_date") or ""
+            ),
+            incorporated_financial_accession=str(
+                r.get("incorporated_financial_accession") or ""
+            ),
+            incorporated_financial_report_date=str(
+                r.get("incorporated_financial_report_date") or ""
+            ),
+            incorporated_financial_core_metric_count=int(
+                _f(r.get("incorporated_financial_core_metric_count")) or 0
+            ),
+            financial_lineage_reason=str(r.get("financial_lineage_reason") or ""),
         ))
     if skipped:
         LOGGER.warning("Adapter %s skipped %d rows with blank ticker or non-finite native score",

@@ -59,6 +59,7 @@ PROTECTED_CRITICAL_STEPS = {
     "60_build_insider_activity_features",
     "13_build_daily_scores",
     "16_publish_review_pack",
+    "81_build_source_incorporation",
     "74_build_analyst_review",
     "72_validate_production_outputs",
 }
@@ -161,7 +162,9 @@ def build_steps(
 ) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
     scoring_args = [*asof_args, "--oos-score-valid"] if oos_score_valid else list(asof_args)
-    sec_args = ["--refresh-cache"] if force_refresh else []
+    sec_args = [*asof_args, "--refresh-submissions"]
+    if force_refresh:
+        sec_args.append("--refresh-cache")
     form4_args = [*asof_args, "--skip-feature-build", "--skip-coverage-audit"]
     if skip_form4_runner:
         form4_args.append("--skip-runner")
@@ -412,6 +415,13 @@ def build_steps(
                 py_script("med_devices/scripts/16_publish_med_device_score_review_pack.py"),
                 asof_args,
             ),
+            Step(
+                "81_build_source_incorporation",
+                "stage_8",
+                "Verify latest SEC/FDA sources were incorporated before scoring",
+                py_script("med_devices/scripts/81_build_med_device_source_incorporation.py"),
+                [*asof_args, "--policy-context", "production"],
+            ),
         ]
     )
     # Post-scoring QA publishers (QA-1/QA-2): default-on so routine refreshes keep the
@@ -489,6 +499,10 @@ def step_index(steps: list[Step], step_id: str) -> int:
 def validate_step_order(steps: list[Step]) -> None:
     if step_index(steps, "74_build_analyst_review") > step_index(steps, "72_validate_production_outputs"):
         raise ValueError("74_build_analyst_review must run before 72_validate_production_outputs.")
+    if step_index(steps, "16_publish_review_pack") > step_index(steps, "81_build_source_incorporation"):
+        raise ValueError("Source incorporation must run after the dated review pack is published.")
+    if step_index(steps, "81_build_source_incorporation") > step_index(steps, "72_validate_production_outputs"):
+        raise ValueError("Source incorporation must run before final production validation.")
 
 
 def selected_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:

@@ -53,7 +53,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof", default=date.today().isoformat())
     parser.add_argument("--tickers", default="")
     parser.add_argument("--accessions", default="")
-    parser.add_argument("--lookback-days", type=int, default=180)
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=550,
+        help=(
+            "Calendar-day window for foreign-filer recovery. The default spans "
+            "at least one annual reporting cycle so a valid latest financial 6-K "
+            "is not skipped merely because the issuer files sparse interim reports."
+        ),
+    )
     parser.add_argument("--max-filings-per-ticker", type=int, default=12)
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)

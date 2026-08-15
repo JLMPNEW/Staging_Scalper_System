@@ -51,6 +51,8 @@ class SectorLineagePolicy:
     min_core_metric_count: int
     policy_version: str
     production_valid_from: str = ""
+    require_score_incorporation: bool = False
+    require_live_source_discovery: bool = False
 
     def mode_for(self, context: str) -> str:
         normalized = context.strip().lower()
@@ -137,6 +139,17 @@ def _positive_int(raw: object, *, field: str) -> int:
     return value
 
 
+def _bool_value(raw: object, *, field: str) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "y"}:
+        return True
+    if value in {"0", "false", "no", "n", ""}:
+        return False
+    raise ValueError(f"Invalid {field}={raw!r}; expected a boolean")
+
+
 def _optional_iso_date(raw: object, *, field: str) -> str:
     value = str(raw or "").strip()
     if not value:
@@ -194,6 +207,14 @@ def load_policy_registry(path: Path = DEFAULT_POLICY_REGISTRY) -> dict[str, Sect
                 config.get("production_valid_from"),
                 field=f"{family}.production_valid_from",
             ),
+            require_score_incorporation=_bool_value(
+                config.get("require_score_incorporation", False),
+                field=f"{family}.require_score_incorporation",
+            ),
+            require_live_source_discovery=_bool_value(
+                config.get("require_live_source_discovery", False),
+                field=f"{family}.require_live_source_discovery",
+            ),
         )
     return output
 
@@ -219,6 +240,8 @@ def policy_for_model_family(
             "financial_lineage_policy_unconfigured",
         ),
         production_valid_from="",
+        require_score_incorporation=False,
+        require_live_source_discovery=False,
     )
 
 
@@ -494,6 +517,8 @@ def evaluation_manifest(
         "policy_context": context,
         "policy_mode": evaluation.policy_mode,
         "production_valid_from": policy.production_valid_from,
+        "require_score_incorporation": policy.require_score_incorporation,
+        "require_live_source_discovery": policy.require_live_source_discovery,
         "row_count": evaluation.row_count,
         "incorporated_count": evaluation.incorporated_count,
         "unresolved_count": evaluation.unresolved_count,

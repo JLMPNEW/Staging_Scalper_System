@@ -90,7 +90,12 @@ def build_steps(
     asof_args = ["--asof", asof] if asof else []
     end_date_args = ["--end-date", asof] if asof else []
     refresh_args = ["--force-refresh"] if force_refresh else []
-    sec_args = list(refresh_args)
+    sec_args = [
+        *asof_args,
+        "--force-submissions-refresh",
+        "--current-members-only",
+        *refresh_args,
+    ]
     current_asof = not asof or asof == date.today().isoformat()
     if current_asof and refresh_sec_if_stale_hours and refresh_sec_if_stale_hours > 0:
         sec_args.extend(["--refresh-if-stale-hours", str(refresh_sec_if_stale_hours)])
@@ -119,6 +124,7 @@ def build_steps(
             "Build SEC financial features in recoverable sequential batches",
             py_script("technology/scripts/08_build_technology_financial_features_batched.py"),
             [
+                "--current-members-only",
                 "--model-family",
                 "technology_hardware",
                 "--batch-size",

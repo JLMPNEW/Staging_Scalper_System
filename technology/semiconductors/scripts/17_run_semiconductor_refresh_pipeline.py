@@ -99,7 +99,10 @@ def build_steps(
     yahoo_args = [*semiconductor_market_args, *asof_args]
     if force_refresh:
         yahoo_args.append("--force-refresh")
-    sec_args = ["--force-refresh"] if force_refresh else []
+    sec_args = [*asof_args, "--force-submissions-refresh"]
+    sec_args.append("--current-members-only")
+    if force_refresh:
+        sec_args.append("--force-refresh")
     current_asof = not asof or asof == date.today().isoformat()
     if current_asof and refresh_sec_if_stale_hours and refresh_sec_if_stale_hours > 0:
         sec_args.extend(["--refresh-if-stale-hours", str(refresh_sec_if_stale_hours)])
@@ -132,6 +135,7 @@ def build_steps(
             "Build SEC financial features in recoverable sequential batches",
             py_script("technology/scripts/08_build_technology_financial_features_batched.py"),
             [
+                "--current-members-only",
                 "--model-family",
                 "semiconductors",
                 "--batch-size",

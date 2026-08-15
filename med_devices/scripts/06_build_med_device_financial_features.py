@@ -161,6 +161,7 @@ class Company:
 @dataclass(frozen=True)
 class FinancialRow:
     company_id: int
+    accession_nodash: str
     period_end: str
     fiscal_year: int | None
     fiscal_period: str
@@ -598,7 +599,7 @@ def load_financial_rows(conn: Any, companies: list[Company], *, asof: date) -> d
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
-        SELECT company_id, period_end, fiscal_year, fiscal_period, form, filed_date,
+        SELECT company_id, accession_nodash, period_end, fiscal_year, fiscal_period, form, filed_date,
                revenue, gross_profit, operating_income, net_income, operating_cash_flow,
                capital_expenditures, free_cash_flow, research_and_development, interest_expense,
                cash_and_investments, total_debt, total_assets, stockholders_equity, shares_outstanding,
@@ -617,6 +618,7 @@ def load_financial_rows(conn: Any, companies: list[Company], *, asof: date) -> d
         values = {metric: to_float(row[metric]) for metric in [*FLOW_METRICS, *BALANCE_METRICS]}
         item = FinancialRow(
             company_id=int(row["company_id"]),
+            accession_nodash=str(row["accession_nodash"] or ""),
             period_end=str(row["period_end"] or ""),
             fiscal_year=int(row["fiscal_year"]) if row["fiscal_year"] is not None else None,
             fiscal_period=str(row["fiscal_period"] or "").upper(),
@@ -1293,6 +1295,19 @@ def build_raw_feature_row(
     else:
         feature.data_quality_status = "pass"
 
+    selected_source_rows = {
+        "annual": annual,
+        "prior_annual": prior_annual,
+        "latest_interim": interim,
+        "prior_matching_interim": prior_interim,
+    }
+    selected_financial_accessions = sorted(
+        {
+            row.accession_nodash
+            for row in selected_source_rows.values()
+            if row is not None and row.accession_nodash
+        }
+    )
     feature.payload = {
         "annual_period_end": annual.period_end if annual is not None else "",
         "prior_annual_period_end": prior_annual.period_end if prior_annual is not None else "",
@@ -1301,6 +1316,21 @@ def build_raw_feature_row(
         "ttm_method": feature.ttm_method,
         "metric_ttm_methods": methods,
         "financial_row_count": len(financial_rows),
+        "selected_financial_accessions": selected_financial_accessions,
+        "selected_financial_sources": {
+            label: (
+                {
+                    "accession_nodash": row.accession_nodash,
+                    "filed_date": row.filed_date,
+                    "form": row.form,
+                    "period_end": row.period_end,
+                    "fiscal_period": row.fiscal_period,
+                }
+                if row is not None
+                else None
+            )
+            for label, row in selected_source_rows.items()
+        },
         "missing_fields": feature.missing_fields,
         "shares_source": {
             "concept": feature.shares_source_concept,

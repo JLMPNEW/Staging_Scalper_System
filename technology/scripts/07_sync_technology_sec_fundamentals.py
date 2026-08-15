@@ -125,6 +125,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument(
+        "--force-submissions-refresh",
+        action="store_true",
+        help=(
+            "Fetch each issuer's root SEC submissions index live while leaving "
+            "companyfacts cache behavior unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--asof",
+        default="",
+        help="Attribute the ingestion evidence to this production as-of date (YYYY-MM-DD).",
+    )
+    parser.add_argument(
         "--refresh-if-stale-hours",
         type=float,
         default=None,
@@ -132,6 +145,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--current-members-only",
+        action="store_true",
+        help="Exclude historical PIT members from a current production refresh.",
+    )
     parser.add_argument(
         "--filing-index-only",
         action="store_true",
@@ -343,6 +361,7 @@ def record_raw_response(
     text: str,
     ingestion_run_id: int | None,
     asof: str,
+    query_params: dict[str, Any] | None = None,
 ) -> None:
     now = utc_now()
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
@@ -352,9 +371,20 @@ def record_raw_response(
             source_id, endpoint, query_params_json, request_time_utc, response_status,
             response_hash, asof_date, payload_text, ingestion_run_id, created_at
         )
-        VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (source_id, endpoint, now, status, digest, asof, text, ingestion_run_id, now),
+        (
+            source_id,
+            endpoint,
+            json.dumps(query_params or {}, ensure_ascii=True, sort_keys=True),
+            now,
+            status,
+            digest,
+            asof,
+            text,
+            ingestion_run_id,
+            now,
+        ),
     )
 
 
@@ -1157,6 +1187,7 @@ def maybe_run_inline_fallback(
     retries: int,
     sleep_sec: float,
     force_refresh: bool,
+    asof: str,
 ) -> dict[str, Any]:
     profile = conn.execute(
         """
@@ -1182,7 +1213,19 @@ def maybe_run_inline_fallback(
         sleep_sec=sleep_sec,
         force_refresh=force_refresh,
     )
-    record_raw_response(conn, source_id=source_id, endpoint=url, status=status, text=text, ingestion_run_id=None, asof=date.today().isoformat())
+    record_raw_response(
+        conn,
+        source_id=source_id,
+        endpoint=url,
+        status=status,
+        text=text,
+        ingestion_run_id=None,
+        asof=asof,
+        query_params={
+            "payload_source": cache_status,
+            "response_kind": "inline_xbrl_document",
+        },
+    )
     if status != 200:
         return {"status": f"fetch_failed_{status}", "raw_count": 0, "mapped_count": 0}
     payload_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
@@ -1245,6 +1288,9 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    sec_asof = date_text(args.asof) if args.asof else date.today().isoformat()
+    if args.asof and sec_asof != str(args.asof).strip():
+        raise ValueError("--asof must be a valid ISO date (YYYY-MM-DD)")
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "sec_fundamentals.report_output_csv"), base_dir=base_dir)
     registry_path = resolve_path(cfg_get(config, "source_registry.path"), base_dir=base_dir)
@@ -1271,8 +1317,10 @@ def main() -> None:
     if refresh_if_stale_hours is not None and refresh_if_stale_hours < 0:
         raise ValueError("--refresh-if-stale-hours must be non-negative")
     sec_refresh_mode = (
-        "force"
+        "force_all"
         if args.force_refresh
+        else "live_submissions"
+        if args.force_submissions_refresh
         else f"stale_if_older_than_{refresh_if_stale_hours:g}_hours"
         if refresh_if_stale_hours and refresh_if_stale_hours > 0
         else "cache_reuse"
@@ -1288,7 +1336,17 @@ def main() -> None:
         upsert_source_registry(conn, load_source_registry(registry_path))
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
-            include_historical = str(cfg_get(config, "sec_fundamentals.include_historical_members", True)).strip().lower() in {"1", "true", "yes", "y"}
+            include_historical = (
+                not args.current_members_only
+                and str(
+                    cfg_get(
+                        config,
+                        "sec_fundamentals.include_historical_members",
+                        True,
+                    )
+                ).strip().lower()
+                in {"1", "true", "yes", "y"}
+            )
             companies = load_universe(conn, ticker_filter, model_family=model_family, include_historical=include_historical)
             if max_tickers > 0:
                 companies = companies[:max_tickers]
@@ -1357,16 +1415,35 @@ def main() -> None:
                         timeout_sec=timeout_sec,
                         retries=retries,
                         sleep_sec=sleep_sec,
-                        force_refresh=args.force_refresh,
+                        force_refresh=(
+                            args.force_refresh or args.force_submissions_refresh
+                        ),
                         refresh_if_stale_hours=refresh_if_stale_hours,
                     )
                     with conn:
-                        record_raw_response(conn, source_id=submissions_source, endpoint=sub_url, status=status, text=text, ingestion_run_id=None, asof=date.today().isoformat())
+                        record_raw_response(
+                            conn,
+                            source_id=submissions_source,
+                            endpoint=sub_url,
+                            status=status,
+                            text=text,
+                            ingestion_run_id=None,
+                            asof=sec_asof,
+                            query_params={
+                                "payload_source": submissions_payload_source,
+                                "response_kind": "root_submissions",
+                            },
+                        )
                         records = filing_records(payload)
                         if include_archives:
                             for file_name in archive_file_names(payload):
                                 archive_url = str(cfg_get(config, "sec_fundamentals.submissions_archive_url_template")).format(file_name=file_name)
-                                archive_status, archive_text, archive_payload, _ = cached_json(
+                                (
+                                    archive_status,
+                                    archive_text,
+                                    archive_payload,
+                                    archive_payload_source,
+                                ) = cached_json(
                                     archive_url,
                                     cache_dir / "submissions" / file_name,
                                     headers=headers,
@@ -1382,7 +1459,11 @@ def main() -> None:
                                     status=archive_status,
                                     text=archive_text,
                                     ingestion_run_id=None,
-                                    asof=date.today().isoformat(),
+                                    asof=sec_asof,
+                                    query_params={
+                                        "payload_source": archive_payload_source,
+                                        "response_kind": "submissions_archive",
+                                    },
                                 )
                                 records.extend(filing_records({"filings": {"recent": archive_payload}}))
                         filings_count = upsert_filings(conn, ticker, cik, records, source_id=submissions_source, start=start)
@@ -1478,7 +1559,19 @@ def main() -> None:
                         refresh_if_stale_hours=refresh_if_stale_hours,
                     )
                     with conn:
-                        record_raw_response(conn, source_id=companyfacts_source, endpoint=facts_url, status=status, text=text, ingestion_run_id=None, asof=date.today().isoformat())
+                        record_raw_response(
+                            conn,
+                            source_id=companyfacts_source,
+                            endpoint=facts_url,
+                            status=status,
+                            text=text,
+                            ingestion_run_id=None,
+                            asof=sec_asof,
+                            query_params={
+                                "payload_source": companyfacts_payload_source,
+                                "response_kind": "companyfacts",
+                            },
+                        )
                         payload_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
                         fact_stats = upsert_companyfacts(conn, ticker, cik, payload, source_id=companyfacts_source, start=start, payload_hash=payload_hash)
                         facts_count = int(fact_stats["raw_count"])
@@ -1516,6 +1609,7 @@ def main() -> None:
                                 retries=retries,
                                 sleep_sec=sleep_sec,
                                 force_refresh=args.force_refresh,
+                                asof=sec_asof,
                             )
                             inline_fallback_status = str(fallback_stats.get("status") or "")
                             inline_fallback_mapped = int(fallback_stats.get("mapped_count") or 0)

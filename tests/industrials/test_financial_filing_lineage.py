@@ -540,6 +540,57 @@ def test_explicit_new_period_does_not_pair_stale_periodic_filing(tmp_path: Path)
     assert lineage["financial_lineage_classification"] == "CANONICALIZATION_GAP"
 
 
+def test_comparative_period_does_not_pair_stale_foreign_filing(
+    tmp_path: Path,
+) -> None:
+    conn = _connection()
+    _filing(
+        conn,
+        ticker="SANG",
+        accession="prior-period",
+        form="20-F",
+        filing_date="2025-09-17",
+        accepted_at="2025-09-17T12:00:00",
+        report_date="2025-06-30",
+    )
+    _facts(
+        conn,
+        ticker="SANG",
+        accession="prior-period",
+        filing_date="2025-09-17",
+    )
+    _filing(
+        conn,
+        ticker="SANG",
+        accession="latest-results",
+        form="6-K",
+        filing_date="2026-02-04",
+        accepted_at="2026-02-04T12:00:00",
+        report_date="2025-12-31",
+    )
+    _document(
+        conn,
+        tmp_path,
+        accession="latest-results",
+        text=(
+            "Financial results for the year ended December 31, 2025, "
+            "compared with the six months ended June 30, 2025."
+        ),
+    )
+
+    lineage = build_financial_filing_lineage(
+        conn,
+        model_family="machinery",
+        asof=ASOF,
+        tickers=["SANG"],
+    )["SANG"]
+
+    assert lineage["latest_material_financial_accession"] == "latest-results"
+    assert lineage["financial_lineage_gate"] == "0"
+    assert lineage["financial_lineage_classification"] == "CANONICALIZATION_GAP"
+
+
+
 def test_acquired_business_statement_reference_in_8k_does_not_mask_issuer_filing(
     tmp_path: Path,
 ) -> None:

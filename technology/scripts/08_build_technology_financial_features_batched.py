@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--batch-timeout-sec", type=float, default=1800.0)
     parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument(
+        "--current-members-only",
+        action="store_true",
+        help="Exclude historical PIT members from a current production rebuild.",
+    )
     parser.add_argument("--work-dir", type=Path, default=None)
     return parser.parse_args()
 
@@ -225,9 +230,13 @@ def main() -> int:
     work_dir.mkdir(parents=True, exist_ok=False)
 
     ticker_filter = {normalize_ticker(value) for value in args.tickers.split(",") if normalize_ticker(value)}
-    include_historical = str(
-        cfg_get(config, "sec_fundamentals.include_historical_members", True)
-    ).strip().lower() in {"1", "true", "yes", "y"}
+    include_historical = (
+        not args.current_members_only
+        and str(
+            cfg_get(config, "sec_fundamentals.include_historical_members", True)
+        ).strip().lower()
+        in {"1", "true", "yes", "y"}
+    )
     tickers = load_tickers(
         db_path,
         model_family=model_family,

@@ -17,7 +17,7 @@ from dedicated_parser.semantic import SemanticBlock, parse_semantic_document
 from dedicated_parser.storage import catalog_documents
 
 
-RECOVERY_VERSION = "technology_financial_filing_recovery_v1"
+RECOVERY_VERSION = "technology_financial_filing_recovery_v2"
 CORE_METRICS = frozenset(
     {
         "assets",
@@ -56,7 +56,8 @@ NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 RESULTS_PATTERN = re.compile(
     r"\b(?:financial results|results of operations|unaudited results|"
     r"consolidated statements?|consolidated results|presentation of operations|"
-    r"three months ended|six months ended|nine months ended|"
+    r"three month(?:s| periods?) ended|six month(?:s| periods?) ended|"
+    r"nine month(?:s| periods?) ended|"
     r"quarter ended|year ended|[1-4]Q\d{2,4})\b",
     re.IGNORECASE,
 )
@@ -347,6 +348,12 @@ def _metric_for_label(raw: str) -> str:
 
 
 def _scale(context: str) -> float:
+    if re.search(
+        r"\b(?:in\s+)?(?:U[.]?S[.]?\s*)?(?:\$|USD)\s*0{3}s?\b",
+        context,
+        re.IGNORECASE,
+    ):
+        return 1_000.0
     match = re.search(
         r"\b(?:in|figures? (?:are|in)|unit\s*[:\-]?)\s+"
         r"(?:(?:U[.]?S[.]?\s+)?dollars?|US\$|NT\$|USD|EUR)?\s*"
@@ -376,15 +383,20 @@ def _currency(context: str, fallback: str) -> str:
 
 def _duration_months(context: str) -> int:
     if re.search(
-        r"\b(?:three months|quarter) ended\b|\bQ[1-4]\s+20\d{2}\b|"
+        r"\b(?:three month(?:s| periods?)|quarter) ended\b|"
+        r"\bQ[1-4]\s+20\d{2}\b|"
         r"\b[1-4]Q\d{2,4}\b",
         context,
         re.IGNORECASE,
     ):
         return 3
-    if re.search(r"\bsix months ended\b", context, re.IGNORECASE):
+    if re.search(
+        r"\bsix month(?:s| periods?) ended\b", context, re.IGNORECASE
+    ):
         return 6
-    if re.search(r"\bnine months ended\b", context, re.IGNORECASE):
+    if re.search(
+        r"\bnine month(?:s| periods?) ended\b", context, re.IGNORECASE
+    ):
         return 9
     if re.search(r"\b(?:twelve months|year) ended\b", context, re.IGNORECASE):
         return 12
@@ -482,6 +494,49 @@ def _first_numeric(cells: Iterable[str]) -> tuple[float, int] | None:
     return value, match.start()
 
 
+def _current_period_value_column(
+    rows: Iterable[SemanticBlock],
+    *,
+    financial_period_end: str,
+) -> int | None:
+    """Return the first current-period value column before comparative/YTD columns."""
+    try:
+        period_year = date.fromisoformat(financial_period_end).year
+    except ValueError:
+        return None
+    rows_list = list(rows)
+    first_metric_row = len(rows_list)
+    for offset, row in enumerate(rows_list):
+        nonempty = [cell.strip() for cell in row.cells if cell.strip()]
+        if nonempty and _metric_for_label(nonempty[0]):
+            first_metric_row = offset
+            break
+    year_tokens = {str(period_year), f"'{period_year % 100:02d}"}
+    candidates: set[int] = set()
+    for row in rows_list[:first_metric_row]:
+        for column, cell in enumerate(row.cells):
+            normalized = " ".join(str(cell or "").split())
+            if column == 0 or not normalized:
+                continue
+            tokens = set(re.findall(r"(?<!\d)'?\d{2,4}(?!\d)", normalized))
+            if tokens & year_tokens:
+                candidates.add(column)
+    return min(candidates) if candidates else None
+
+
+def _row_value(
+    row: SemanticBlock,
+    *,
+    preferred_column: int | None,
+) -> tuple[float, int] | None:
+    if preferred_column is not None and preferred_column < len(row.cells):
+        parsed = _first_numeric((row.cells[preferred_column],))
+        if parsed is not None:
+            return parsed
+    nonempty = [cell.strip() for cell in row.cells if cell.strip()]
+    return _first_numeric(nonempty[1:])
+
+
 def _table_groups(blocks: Iterable[SemanticBlock]) -> dict[int, list[SemanticBlock]]:
     output: dict[int, list[SemanticBlock]] = {}
     for block in blocks:
@@ -532,6 +587,10 @@ def parse_explicit_statement_tables(
             financial_period_end = _financial_period_end(table_context, report_date)
             if not financial_period_end:
                 continue
+            current_value_column = _current_period_value_column(
+                rows,
+                financial_period_end=financial_period_end,
+            )
             scale = _scale(table_context + " " + document_text[:3000])
             currency = _currency(table_context, fallback_currency)
             if not currency:
@@ -544,7 +603,10 @@ def parse_explicit_statement_tables(
                 metric = _metric_for_label(nonempty[0])
                 if not metric:
                     continue
-                parsed = _first_numeric(nonempty[1:])
+                parsed = _row_value(
+                    row,
+                    preferred_column=current_value_column,
+                )
                 if parsed is None:
                     continue
                 raw_value, _ = parsed

@@ -1,4 +1,4 @@
-policy_version: financial_lineage_policy_v2
+policy_version: financial_lineage_policy_v5
 
 defaults:
   enabled: false
@@ -8,6 +8,16 @@ defaults:
   min_core_metric_count: 2
 
 sectors:
+  med_devices:
+    enabled: true
+    production_policy: candidate_only
+    require_score_incorporation: true
+    require_live_source_discovery: true
+    production_valid_from: "2026-08-14"
+    research_policy: candidate_only
+    historical_policy: disabled
+    min_core_metric_count: 2
+
   defense:
     enabled: true
     production_policy: strict_universe
@@ -23,6 +33,8 @@ sectors:
   semiconductors:
     enabled: true
     production_policy: candidate_only
+    require_score_incorporation: true
+    require_live_source_discovery: true
     production_valid_from: "2026-08-14"
     research_policy: candidate_only
     historical_policy: disabled
@@ -30,6 +42,8 @@ sectors:
   software_infrastructure:
     enabled: true
     production_policy: candidate_only
+    require_score_incorporation: true
+    require_live_source_discovery: true
     production_valid_from: "2026-08-14"
     research_policy: candidate_only
     historical_policy: disabled
@@ -37,6 +51,8 @@ sectors:
   technology_hardware:
     enabled: true
     production_policy: candidate_only
+    require_score_incorporation: true
+    require_live_source_discovery: true
     production_valid_from: "2026-08-14"
     research_policy: candidate_only
     historical_policy: disabled

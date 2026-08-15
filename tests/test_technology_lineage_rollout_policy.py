@@ -32,6 +32,8 @@ def test_all_technology_families_have_activation_bounded_production_lineage(
     assert policy.mode_for_asof("production", "2026-08-14") == POLICY_CANDIDATE_ONLY
     assert policy.mode_for("research") == POLICY_CANDIDATE_ONLY
     assert policy.mode_for("historical") == POLICY_DISABLED
+    assert policy.require_score_incorporation is True
+    assert policy.require_live_source_discovery is True
 
 
 @pytest.mark.parametrize(
@@ -67,9 +69,20 @@ def test_local_technology_runners_recover_then_publish_then_shadow(
         kwargs["manual_wsts_xlsx"] = None
     steps = namespace["build_steps"](**kwargs)
     ids = [step.step_id for step in steps]
+    sec_sync = next(step for step in steps if step.step_id == "07_sync_sec_fundamentals")
+    financial_build = next(
+        step for step in steps if step.step_id == "08_build_financial_features"
+    )
     recovery = next(step for step in steps if step.step_id == "07b_recover_6k_financials")
     shadow = next(step for step in steps if step.step_id == "10c_financial_lineage_shadow")
 
+    assert sec_sync.args[:3] == [
+        "--asof",
+        "2026-08-14",
+        "--force-submissions-refresh",
+    ]
+    assert "--current-members-only" in sec_sync.args
+    assert "--current-members-only" in financial_build.args
     assert ids.index("07_sync_sec_fundamentals") < ids.index("07b_recover_6k_financials")
     assert ids.index("07b_recover_6k_financials") < ids.index("08_build_financial_features")
     assert ids.index("10b_publish_dashboard") < ids.index("10c_financial_lineage_shadow")

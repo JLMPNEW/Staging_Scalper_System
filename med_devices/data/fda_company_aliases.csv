@@ -12,8 +12,8 @@ ABT,St Jude Medical,acquired_subsidiary,Acquired by Abbott,2017-01-04,2026-06-25
 ABT,Thoratec,acquired_subsidiary,Acquired by St Jude Medical then Abbott,2015-10-08,2026-06-25,
 AORT,Artivion Inc,operating_unit,Artivion operating entity for FDA device records,2026-06-26,2026-06-25,
 AORT,CryoLife,legacy_operating_name,Artivion legacy operating name,2026-06-26,2026-06-25,
-AVNS,Avanos Medical Inc,operating_unit,Avanos operating entity for FDA device records,2026-06-26,2026-06-25,
-AVNS,Halyard Health,legacy_operating_name,Avanos legacy operating name,2026-06-26,2026-06-25,
+AVNS,Avanos Medical Inc,operating_unit,Avanos operating entity for FDA device records through its last public trading date,2026-06-26,2026-06-25,2026-07-24
+AVNS,Halyard Health,legacy_operating_name,Avanos legacy operating name through its last public trading date,2026-06-26,2026-06-25,2026-07-24
 AVR,Anteris Technologies Global Corp,operating_unit,Anteris operating entity for FDA device records,2026-06-26,2026-06-25,
 AXGN,Axogen Corporation,operating_unit,Axogen operating entity for FDA device records,2026-06-26,2026-06-25,
 BDX,C R Bard,acquired_subsidiary,Acquired by Becton Dickinson,2017-12-29,2026-06-25,
