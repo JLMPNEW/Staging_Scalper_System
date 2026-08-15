@@ -34,7 +34,7 @@ def load_script(name: str):
     return module
 
 
-def seed_complete_inputs(db_path: Path) -> None:
+def seed_complete_inputs(db_path: Path) -> int:
     load_scratch_foundation(db_path)
     now = utc_now()
     with connect(db_path) as conn:
@@ -50,7 +50,8 @@ def seed_complete_inputs(db_path: Path) -> None:
             ORDER BY t.ticker
             """
         ).fetchall()
-        assert len(members) == 112
+        assert members
+        member_count = len(members)
         for index, member in enumerate(members, start=1):
             ticker = str(member["ticker"])
             cohort = str(member["calibration_cohort_id"])
@@ -176,6 +177,8 @@ def seed_complete_inputs(db_path: Path) -> None:
                 ),
             )
 
+    return member_count
+
 
 def run_feature_pipeline(
     db_path: Path,
@@ -206,7 +209,7 @@ def test_specialized_metric_and_scoring_contract_is_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "transportation.sqlite"
-    seed_complete_inputs(db_path)
+    member_count = seed_complete_inputs(db_path)
     metric_csv, scoring_csv = run_feature_pipeline(db_path, tmp_path, monkeypatch)
     metric_rows = read_rows(metric_csv)
     score_rows = read_rows(scoring_csv)
@@ -218,7 +221,7 @@ def test_specialized_metric_and_scoring_contract_is_complete(
         INDUSTRIALS_ROOT / family["scoring"]["surface_freight_score_policy"]
     )
     expected_scored = set(surface_policy["eligible_tickers"])
-    assert len(metric_rows) == 112 * len(registry["metrics"])
+    assert len(metric_rows) == member_count * len(registry["metrics"])
     assert {row["ticker"] for row in score_rows} == expected_scored
     assert len(score_rows) == 24
     assert sum(row["rank_ready_flag"] == "1" for row in score_rows) == 24

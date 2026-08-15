@@ -247,6 +247,21 @@ sources:
     priority: 70
     status: active
 
+  - source_id: consumer_defensive_positioning_composite
+    stage: positioning
+    source_name: Consumer Defensive PIT positioning composite
+    source_owner: consumer_defensive
+    source_type: normalized_internal_feature
+    base_url: 'consumer_defensive://stage5/positioning'
+    refresh_frequency: daily
+    data_owner: consumer_defensive
+    raw_schema: consumer_defensive_positioning_v1
+    canonical_tables: [feature_positioning]
+    feature_stages: [positioning]
+    subsector_scope: consumer_defensive
+    priority: 71
+    status: active
+
   - source_id: recognized_etf_index_membership_history
     stage: security_master
     source_name: Retired generic ETF/index membership contract

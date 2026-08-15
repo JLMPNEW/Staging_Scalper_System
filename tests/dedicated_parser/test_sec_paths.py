@@ -184,6 +184,50 @@ def test_generic_catalog_accepts_paper_metadata_and_uses_full_submission(
     assert documents[0].is_full_submission is True
 
 
+def test_event_catalog_ignores_earnings_images_but_parses_release(
+    tmp_path: Path,
+) -> None:
+    filing = FilingRef(
+        ticker="TEST", cik="0000000001",
+        accession_number="0000000001-26-000001", form_type="8-K",
+        filing_date="2026-08-11", accepted_at="2026-08-11T20:00:00Z",
+        report_date="2026-06-30", primary_document="filing.htm",
+        source_id="sec_submissions",
+    )
+    accession = (
+        tmp_path / "sec_archive_xbrl" / "CIK0000000001"
+        / "000000000126000001"
+    )
+    accession.mkdir(parents=True)
+    (accession / "filing.htm").write_text("<html>8-K</html>", encoding="utf-8")
+    (accession / "earnings-release.htm").write_text(
+        "<html>earnings release</html>", encoding="utf-8"
+    )
+    (accession / "earnings-release-005.jpg").write_bytes(b"not-a-document")
+    (accession / "index.json").write_text(
+        '{"directory":{"item":['
+        '{"name":"filing.htm","type":"8-K","description":"Current report"},'
+        '{"name":"earnings-release.htm","type":"EX-99.1","description":"Earnings release"},'
+        '{"name":"earnings-release-005.jpg","type":"GRAPHIC","description":"Earnings release image"}'
+        ']}}',
+        encoding="utf-8",
+    )
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        documents = build_document_refs(
+            conn, cache_dir=tmp_path, filing=filing, keywords=(),
+        )
+    finally:
+        conn.close()
+    assert [document.name for document in documents] == [
+        "filing.htm",
+        "earnings-release.htm",
+    ]
+
+
+
 @pytest.mark.parametrize(
     "name", ["../doc.xml", r"xslF345X06\\doc4.xml", "CON/doc4.xml"],
 )

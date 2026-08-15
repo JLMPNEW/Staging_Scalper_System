@@ -7,6 +7,8 @@ score predates the declared production window.
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -30,6 +32,8 @@ OOS_RANK_FIELDS = [
     "calibration_validation_method",
     "calibration_provenance_version",
     "oos_assertion_basis",
+    "historical_restatement_flag",
+    "historical_restatement_reason",
 ]
 
 
@@ -76,6 +80,12 @@ def build_oos_provenance(
     production_start_date = parse_iso_date(production_start)
 
     reasons: list[str] = []
+    historical_restatement_reason = (
+        str(os.environ.get("TECHNOLOGY_HISTORICAL_RESTATEMENT_REASON") or "").strip()
+        if historical_mode
+        else ""
+    )
+    historical_restatement = bool(historical_restatement_reason)
     scoring_weights_frozen = bool(lock_dt)
     if not scoring_weights_frozen:
         reasons.append("missing_calibration_lock_date")
@@ -111,7 +121,9 @@ def build_oos_provenance(
     replay_within_live_window = (
         not historical_mode
         or (asof_date is not None and 0 <= (date.today() - asof_date).days <= replay_window_days)
-    )
+    ) and not historical_restatement
+    if historical_restatement:
+        reasons.append("historical_restatement_after_data_correction")
     oos_score_valid = int(
         scoring_weights_frozen
         and bool(asof_not_future)
@@ -149,6 +161,8 @@ def build_oos_provenance(
         "calibration_validation_method": validation_method,
         "calibration_provenance_version": provenance_version,
         "oos_assertion_basis": assertion_basis,
+        "historical_restatement_flag": int(historical_restatement),
+        "historical_restatement_reason": historical_restatement_reason,
     }
     manifest_fields = {
         "oos_standards_status": calibration_usage,
@@ -166,6 +180,8 @@ def build_oos_provenance(
         "calibration_validation_method": validation_method,
         "calibration_provenance_version": provenance_version,
         "oos_assertion_basis": assertion_basis,
+        "historical_restatement_flag": int(historical_restatement),
+        "historical_restatement_reason": historical_restatement_reason,
         "oos_governance_note": (
             "OOS flags assert that features are point-in-time, future returns are excluded, "
             "and weights have been frozen according to declared governance metadata; "

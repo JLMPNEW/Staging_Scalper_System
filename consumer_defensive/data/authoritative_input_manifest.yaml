@@ -19,7 +19,7 @@ inputs:
     role: authoritative_current_security_and_taxonomy_source
     schema_version: consumer_defensive_current_universe_v1
     record_count: 108
-    sha256: be86e0038a2d8b55abea5f8d3c4adebe242c02e7d338e86007934dbc9ec3ced4
+    sha256: 5a37893659fbc906e5848c5c5eed3859761bdac98f9d47853e8804ef9ad7fe62
     review_status: reviewed
 
   - input_id: consumer_defensive_delisted_candidate_seed
@@ -68,11 +68,21 @@ inputs:
     sha256: d60afb5b469969692366c94dcaeffe002333355d5950b172ff63b4fe00b2b253
     review_status: reviewed
 
+  - input_id: consumer_defensive_positioning_source_identifiers
+    path: consumer_defensive/data/consumer_defensive_positioning_source_identifiers.csv
+    stage: stage5
+    role: authoritative_reviewed_13f_cusip_and_finra_symbol_map
+    schema_version: consumer_defensive_positioning_source_identifiers_v1
+    record_count: 5
+    sha256: e1710deb164b7be4102a95351f18070d45c1fe39887d7eac537d8c9cdfbaccfe
+    review_status: reviewed
+    notes: Explicit source identifiers only; no fuzzy ticker or issuer-name inference.
+
   - input_id: consumer_defensive_metric_applicability
     path: consumer_defensive/data/consumer_defensive_metric_applicability.csv
     stage: stage4
     role: authoritative_reviewed_metric_applicability_and_subtype_map
     schema_version: consumer_defensive_metric_applicability_v1
     record_count: 119
-    sha256: 2dcd63ecaf0dce5aada327cf1c26143a1625f760bc7c867aad79a85db93db834
+    sha256: a63db9112d5e2f0c5ab7fc32c45f6064a53011c5da25812b5d8adc0906d6feec
     review_status: reviewed

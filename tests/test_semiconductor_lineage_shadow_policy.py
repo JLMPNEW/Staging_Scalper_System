@@ -49,4 +49,4 @@ def test_local_semiconductor_shadow_runs_after_publish_and_is_nonblocking() -> N
     assert step_ids.index("10b_publish_dashboard") < step_ids.index("10c_financial_lineage_shadow")
     assert step_ids.index("10c_financial_lineage_shadow") < step_ids.index("10b_validate_dashboard")
     assert shadow.blocking is False
-    assert shadow.args == ["--asof", "2026-08-14"]
+    assert shadow.args == ["--family", "semiconductors", "--asof", "2026-08-14"]

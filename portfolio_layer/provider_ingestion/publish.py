@@ -19,11 +19,15 @@ if str(PROJECT_ROOT) not in sys.path:
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.contracts import sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.paths import ensure_not_prod_path, resolve_runtime_paths  # noqa: E402
+from portfolio_layer.provider_ingestion.health import (  # noqa: E402
+    validate_provider_ingestion_policy,
+)
 from portfolio_layer.provider_ingestion.store import (  # noqa: E402
     artifact_dependency_errors,
     connect_store,
     digest,
     record_artifact_dependencies,
+    supersede_artifact_dependencies,
     verify_store,
     writer_lock,
 )
@@ -76,9 +80,32 @@ def parse_args() -> argparse.Namespace:
 
 def _default_cutoff(as_of: date, timezone_name: str) -> datetime:
     zone = ZoneInfo(timezone_name)
-    return datetime.combine(as_of + timedelta(days=1), time.min, tzinfo=zone).astimezone(
-        timezone.utc
-    )
+    return datetime.combine(as_of + timedelta(days=1), time.min, tzinfo=zone).astimezone(timezone.utc)
+
+
+def _validated_cutoff(
+    *,
+    as_of: date,
+    timezone_name: str,
+    requested: datetime | None,
+    now_utc: datetime | None = None,
+) -> datetime:
+    current_utc = now_utc or datetime.now(timezone.utc)
+    if current_utc.tzinfo is None:
+        raise ValueError("Publication clock must include a timezone")
+    current_utc = current_utc.astimezone(timezone.utc)
+    local_today = current_utc.astimezone(ZoneInfo(timezone_name)).date()
+    if as_of > local_today:
+        raise ValueError("Provider as-of publication date cannot be in the future")
+    maximum = _default_cutoff(as_of, timezone_name)
+    cutoff = requested or min(maximum, current_utc)
+    if cutoff.tzinfo is None:
+        raise ValueError("--cutoff-utc must include a timezone")
+    if cutoff.astimezone(timezone.utc) > maximum:
+        raise ValueError("Provider publication cutoff cannot extend beyond its as-of date")
+    if cutoff.astimezone(timezone.utc) > current_utc:
+        raise ValueError("Provider publication cutoff cannot be in the future")
+    return cutoff
 
 
 def _as_of_rows(conn: Any, *, as_of: date, cutoff_utc: datetime) -> list[dict[str, Any]]:
@@ -86,13 +113,15 @@ def _as_of_rows(conn: Any, *, as_of: date, cutoff_utc: datetime) -> list[dict[st
     rows = conn.execute(
         "WITH ranked AS ("
         " SELECT s.*,ROW_NUMBER() OVER("
-        "  PARTITION BY s.provider,s.instrument_id,s.estimate_type,s.fiscal_period_end "
+        "  PARTITION BY s.provider,s.instrument_id,s.endpoint_id,s.fiscal_period,"
+        "s.estimate_type,s.fiscal_period_end "
         "  ORDER BY s.available_at_utc DESC,s.snapshot_id DESC"
         " ) AS row_rank FROM provider_estimate_snapshots s"
-        " WHERE s.available_at_utc<? AND s.effective_trading_date<=?"
+        " WHERE s.available_at_utc<? AND s.effective_from_utc<=? "
+        "AND s.effective_trading_date<=?"
         ") SELECT * FROM ranked WHERE row_rank=1 "
-        "ORDER BY provider,ticker,estimate_type,fiscal_period_end",
-        (cutoff, as_of.isoformat()),
+        "ORDER BY provider,ticker,endpoint_id,fiscal_period,estimate_type,fiscal_period_end,snapshot_id",
+        (cutoff, cutoff, as_of.isoformat()),
     ).fetchall()
     return [{field: row[field] for field in FIELDS} for row in rows]
 
@@ -100,6 +129,24 @@ def _as_of_rows(conn: Any, *, as_of: date, cutoff_utc: datetime) -> list[dict[st
 def run_selftest() -> None:
     cutoff = _default_cutoff(date(2026, 8, 3), "America/New_York")
     assert cutoff.isoformat() == "2026-08-04T04:00:00+00:00"
+    validated = _validated_cutoff(
+        as_of=date(2026, 8, 3),
+        timezone_name="America/New_York",
+        requested=None,
+        now_utc=datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
+    )
+    assert validated == datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
+    try:
+        _validated_cutoff(
+            as_of=date(2026, 8, 4),
+            timezone_name="America/New_York",
+            requested=None,
+            now_utc=datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
+        )
+    except ValueError as exc:
+        assert "future" in str(exc)
+    else:
+        raise AssertionError("Future provider publication was accepted")
     print("provider as-of publication selftest: PASS")
 
 
@@ -116,6 +163,7 @@ def main() -> int:
     ingestion = cfg_get(config, "provider_ingestion", {})
     if not isinstance(ingestion, dict):
         raise ValueError("provider_ingestion config must be a mapping")
+    validate_provider_ingestion_policy(ingestion)
     store_path = ensure_not_prod_path(
         resolve_path(
             ingestion.get("database_path", "db/provider_observations.sqlite"),
@@ -124,18 +172,21 @@ def main() -> int:
         label="provider observation database",
     )
     timeout = float(ingestion.get("writer_lock_timeout_sec", 30.0))
-    cutoff = args.cutoff_utc or _default_cutoff(
-        args.as_of, str(ingestion.get("timezone", "America/New_York"))
+    cutoff = _validated_cutoff(
+        as_of=args.as_of,
+        timezone_name=str(ingestion.get("timezone", "America/New_York")),
+        requested=args.cutoff_utc,
     )
-    if cutoff.tzinfo is None:
-        raise ValueError("--cutoff-utc must include a timezone")
-    output_dir = (
-        args.output_dir.resolve()
-        if args.output_dir
-        else paths.output_dir
-        / str(ingestion.get("output_subdir", "provider_ingestion"))
-        / "asof"
-        / args.as_of.isoformat()
+    output_dir = ensure_not_prod_path(
+        (
+            args.output_dir
+            if args.output_dir
+            else paths.output_dir
+            / str(ingestion.get("output_subdir", "provider_ingestion"))
+            / "asof"
+            / args.as_of.isoformat()
+        ),
+        label="provider publication output path",
     )
     output_path = output_dir / "provider_estimates_asof.csv"
     manifest_path = output_dir / "provider_estimates_asof_manifest.json"
@@ -166,10 +217,18 @@ def main() -> int:
                 )
                 if dependency_errors:
                     raise RuntimeError(f"Provider publication lineage failed: {dependency_errors}")
+            else:
+                supersede_artifact_dependencies(
+                    conn,
+                    artifact_path=str(output_path.resolve()),
+                )
             run_digests = [
                 str(row[0])
                 for row in conn.execute(
-                    "SELECT run_digest FROM capture_runs WHERE completed_at_utc<? ORDER BY completed_at_utc",
+                    "SELECT run_digest FROM capture_runs "
+                    "WHERE completed_at_utc<? "
+                    "AND status IN ('PASS','PASS_WITH_WARNINGS','MIGRATED') "
+                    "ORDER BY completed_at_utc,run_id",
                     (cutoff.astimezone(timezone.utc).replace(microsecond=0).isoformat(),),
                 ).fetchall()
             ]
@@ -200,4 +259,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

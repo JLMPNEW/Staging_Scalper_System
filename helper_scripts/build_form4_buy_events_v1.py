@@ -466,6 +466,7 @@ base AS (
       AND COALESCE(n.transaction_code, '') IN ('P', 'S')
       AND (
             lower(COALESCE(n.security_title, '')) LIKE '%common stock%'
+            OR lower(COALESCE(n.security_title, '')) LIKE '%common shares%'
             OR lower(COALESCE(n.security_title, '')) LIKE '%ordinary share%'
             OR lower(COALESCE(n.security_title, '')) LIKE '%ordinary shares%'
             OR lower(COALESCE(n.security_title, '')) LIKE '%class a common%'

@@ -74,9 +74,59 @@ def load_entitlements(path: Path) -> dict[str, Any]:
     config = load_yaml(path)
     if str(config.get("schema_version", "")) != "provider_entitlements_v1":
         raise ValueError(f"Unsupported provider entitlement schema in {path}")
+    probe = config.get("probe")
+    if not isinstance(probe, dict):
+        raise ValueError("Provider entitlements must define probe settings")
+    for field in ("timeout_sec", "max_response_bytes"):
+        value = float(probe.get(field, 0))
+        if value <= 0:
+            raise ValueError(f"Provider probe {field} must be positive")
+    max_retries = int(probe.get("max_retries", -1))
+    if max_retries < 0:
+        raise ValueError("Provider probe max_retries must be non-negative")
+    pause = float(probe.get("request_pause_sec", -1))
+    if pause < 0:
+        raise ValueError("Provider probe request_pause_sec must be non-negative")
+
     providers = config.get("providers")
     if not isinstance(providers, dict) or not providers:
         raise ValueError("Provider entitlements must define a non-empty providers mapping")
+    unknown = set(providers) - set(ALLOWED_BASE_URLS)
+    if unknown:
+        raise ValueError(f"Unsupported provider entitlement entries: {sorted(unknown)}")
+    allowed_payload_kinds = {
+        "rows",
+        "list",
+        "object.estimates",
+        "object.quarterlyearnings",
+    }
+    for provider, raw_provider in providers.items():
+        if not isinstance(raw_provider, dict):
+            raise ValueError(f"{provider} entitlement must be a mapping")
+        if raw_provider.get("enabled") not in {True, False}:
+            raise ValueError(f"{provider}.enabled must be boolean")
+        if str(raw_provider.get("base_url", "")).rstrip("/") != ALLOWED_BASE_URLS[provider]:
+            raise ValueError(f"Refusing untrusted {provider} base URL")
+        if not str(raw_provider.get("api_key_env", "")).strip():
+            raise ValueError(f"{provider}.api_key_env must be configured")
+        request_auth(raw_provider, "validation-only-secret")
+        capabilities = raw_provider.get("capabilities")
+        if not isinstance(capabilities, dict) or not capabilities:
+            raise ValueError(f"{provider} capabilities must be a non-empty mapping")
+        for capability, raw_capability in capabilities.items():
+            if not isinstance(raw_capability, dict):
+                raise ValueError(f"{provider}.{capability} must be a mapping")
+            path_value = str(raw_capability.get("path", ""))
+            if not path_value.startswith("/") or "://" in path_value:
+                raise ValueError(f"{provider}.{capability} path is invalid")
+            if not isinstance(raw_capability.get("query"), dict):
+                raise ValueError(f"{provider}.{capability} query must be a mapping")
+            expected = str(raw_capability.get("expected_payload", "")).casefold()
+            if expected not in allowed_payload_kinds:
+                raise ValueError(f"{provider}.{capability} expected_payload is invalid")
+            required = raw_capability.get("required_any_fields")
+            if not isinstance(required, list) or not required or any(not str(field).strip() for field in required):
+                raise ValueError(f"{provider}.{capability} required_any_fields is invalid")
     return config
 
 
@@ -188,7 +238,7 @@ def classify_payload(
     if not rows:
         return "EMPTY", payload_kind, 0, "", "no_rows"
 
-    fields = sorted({str(key) for row in rows[:5] for key in row})
+    fields = sorted({str(key) for row in rows for key in row})
     if required_any_fields and not any(field in fields for field in required_any_fields):
         return "SCHEMA_MISMATCH", payload_kind, len(rows), ",".join(fields), "required_fields_absent"
     return "AVAILABLE", payload_kind, len(rows), ",".join(fields), "ok"
@@ -201,6 +251,39 @@ def _decode_json(body: bytes) -> Any:
         return json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
+
+
+def _bounded_response_body(
+    response: requests.Response,
+    *,
+    max_response_bytes: int,
+) -> tuple[bytes, bool]:
+    if max_response_bytes <= 0:
+        raise ValueError("max_response_bytes must be positive")
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_response_bytes:
+            return b"", True
+        chunks.append(chunk)
+    return b"".join(chunks), False
+
+
+def _validate_request_limits(
+    *,
+    timeout_sec: float,
+    max_response_bytes: int,
+    max_retries: int,
+) -> None:
+    if timeout_sec <= 0:
+        raise ValueError("Provider request timeout must be positive")
+    if max_response_bytes <= 0:
+        raise ValueError("Provider max_response_bytes must be positive")
+    if max_retries < 0:
+        raise ValueError("Provider max_retries must be non-negative")
 
 
 def fetch_capability_payload(
@@ -218,6 +301,11 @@ def fetch_capability_payload(
     """Fetch one provider payload in memory without logging or persisting its content."""
     import hashlib
 
+    _validate_request_limits(
+        timeout_sec=timeout_sec,
+        max_response_bytes=max_response_bytes,
+        max_retries=max_retries,
+    )
     initial_requested_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     env_name, key = provider_key(provider_config)
     if key is None:
@@ -258,7 +346,15 @@ def fetch_capability_payload(
                 params=auth_params,
                 timeout=timeout_sec,
                 allow_redirects=False,
+                stream=True,
             )
+            try:
+                body, response_too_large = _bounded_response_body(
+                    response,
+                    max_response_bytes=max_response_bytes,
+                )
+            finally:
+                response.close()
         except requests.RequestException as exc:
             received_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             result = ProviderPayloadResult(
@@ -282,10 +378,9 @@ def fetch_capability_payload(
                 time.sleep(0.5 * (attempt + 1))
                 continue
             return result
-        body = response.content[: max_response_bytes + 1]
         elapsed = int((time.monotonic() - started) * 1000)
         received_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        if len(body) > max_response_bytes:
+        if response_too_large:
             return ProviderPayloadResult(
                 provider,
                 capability,
@@ -368,6 +463,11 @@ def probe_capability(
     max_response_bytes: int,
     max_retries: int,
 ) -> ProbeResult:
+    _validate_request_limits(
+        timeout_sec=timeout_sec,
+        max_response_bytes=max_response_bytes,
+        max_retries=max_retries,
+    )
     requested_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     env_name, key = provider_key(provider_config)
     if key is None:
@@ -396,9 +496,16 @@ def probe_capability(
                 params=auth_params,
                 timeout=timeout_sec,
                 allow_redirects=False,
+                stream=True,
             )
             http_status = int(response.status_code)
-            body = response.content[: max_response_bytes + 1]
+            try:
+                body, response_too_large = _bounded_response_body(
+                    response,
+                    max_response_bytes=max_response_bytes,
+                )
+            finally:
+                response.close()
         except requests.RequestException as exc:
             elapsed = int((time.monotonic() - started) * 1000)
             last_result = ProbeResult(
@@ -420,7 +527,7 @@ def probe_capability(
             return last_result
 
         elapsed = int((time.monotonic() - started) * 1000)
-        if len(body) > max_response_bytes:
+        if response_too_large:
             return ProbeResult(
                 provider,
                 capability,
@@ -490,7 +597,9 @@ def probe_capability(
                     fields,
                     detail,
                 )
-        retryable_http = result.status == "RATE_LIMITED" or result.http_status in {408, 425, 500, 502, 503, 504}
+        retryable_http = result.status in {"RATE_LIMITED", "RATE_LIMITED_MESSAGE"} or (
+            result.http_status in {408, 425, 500, 502, 503, 504}
+        )
         if retryable_http and attempt < max_retries:
             time.sleep(0.5 * (attempt + 1))
             last_result = result
@@ -579,7 +688,8 @@ def run_selftest() -> None:
 
     from unittest.mock import Mock, patch
 
-    response = Mock(status_code=200, content=b'[{"epsAvg":1.25}]')
+    response = Mock(status_code=200)
+    response.iter_content.return_value = [b'[{"epsAvg":1.25}]']
     with (
         patch.dict(os.environ, {"PROVIDER_SELFTEST_KEY": "secret-value"}),
         patch.object(requests, "get", return_value=response) as request,

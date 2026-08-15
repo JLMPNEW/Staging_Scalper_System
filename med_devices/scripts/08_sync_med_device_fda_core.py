@@ -830,6 +830,7 @@ def build_targeted_footprint_endpoints(
     include_postmarket: bool = False,
     tickers: set[str] | None = None,
     asof: date | None = None,
+    alias_path: Path | None = None,
 ) -> list[EndpointConfig]:
     if path is None:
         return []
@@ -837,6 +838,15 @@ def build_targeted_footprint_endpoints(
         LOGGER.warning("Configured FDA footprint CSV does not exist: %s", path)
         return []
     target_asof = asof or datetime.now(timezone.utc).date()
+    aliases_by_ticker: dict[str, set[str]] = {}
+    if alias_path is not None and alias_path.exists():
+        for alias_row in read_csv_flexible(alias_path):
+            if not row_is_effective_asof(alias_row, target_asof, include_missing=True):
+                continue
+            alias_ticker = normalize_ticker(row_get(alias_row, "ticker", "symbol"))
+            alias = row_get(alias_row, "alias_raw", "alias", "manufacturer_name")
+            if alias_ticker and alias:
+                aliases_by_ticker.setdefault(alias_ticker, set()).add(alias)
     effective_rows: dict[str, dict[str, str]] = {}
     for row in read_csv_flexible(path):
         ticker = normalize_ticker(row_get(row, "ticker", "symbol"))
@@ -852,6 +862,10 @@ def build_targeted_footprint_endpoints(
     seen: set[tuple[str, str]] = set()
     for ticker, row in effective_rows.items():
         entity = row_get(row, "primary_fda_entity", "fda_entity", "manufacturer_name")
+        entities = set(aliases_by_ticker.get(ticker, set()))
+        if entity:
+            entities.add(entity)
+        ordered_entities = sorted(entities)
         expected_records = as_bool(row_get(row, "expected_cdrh_records"), default=False)
         for raw_identifier in split_multi_value(row_get(row, "premarket_numbers", "premarket_number")):
             identifier = normalize_submission_identifier(raw_identifier)
@@ -882,43 +896,16 @@ def build_targeted_footprint_endpoints(
                 continue
             seen.add(key)
             out.append(endpoint)
-        if include_entity_names and expected_records and entity:
-            slug = endpoint_slug(ticker + "_" + entity)
-            for name, path_name in (("510k", "510k.json"), ("pma", "pma.json")):
-                endpoint = EndpointConfig(
-                    name=f"target_entity_{name}_{slug}",
-                    path=path_name,
-                    enabled=True,
-                    search=f"applicant:{quote_openfda_value(entity)}",
-                    sort="decision_date:desc",
-                    max_records=max(1, target_limit),
-                )
-                key = (endpoint.path, endpoint.search)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(endpoint)
-        if include_postmarket and expected_records:
-            for raw_product_code in split_multi_value(row_get(row, "product_codes", "product_code")):
-                product_code = normalize_product_code(raw_product_code)
-                if not product_code:
-                    continue
-                slug = endpoint_slug(ticker + "_" + product_code)
-                for name, path_name, field_name, sort in (
-                    ("recall", "recall.json", "product_code", "event_date_initiated:desc"),
-                    ("enforcement", "enforcement.json", "product_code", "recall_initiation_date:desc"),
-                    ("event", "event.json", "device.device_report_product_code", "date_received:desc"),
-                ):
-                    search_parts = [f"{field_name}:{quote_openfda_value(product_code)}"]
-                    if entity:
-                        entity_field = "device.manufacturer_d_name" if name == "event" else "recalling_firm"
-                        search_parts.append(f"{entity_field}:{quote_openfda_value(entity)}")
+        if include_entity_names and expected_records:
+            for target_entity in ordered_entities:
+                slug = endpoint_slug(ticker + "_" + target_entity)
+                for name, path_name in (("510k", "510k.json"), ("pma", "pma.json")):
                     endpoint = EndpointConfig(
-                        name=f"target_{name}_code_{slug}",
+                        name=f"target_entity_{name}_{slug}",
                         path=path_name,
                         enabled=True,
-                        search=" AND ".join(search_parts),
-                        sort=sort,
+                        search=f"applicant:{quote_openfda_value(target_entity)}",
+                        sort="decision_date:desc",
                         max_records=max(1, target_limit),
                     )
                     key = (endpoint.path, endpoint.search)
@@ -926,20 +913,112 @@ def build_targeted_footprint_endpoints(
                         continue
                     seen.add(key)
                     out.append(endpoint)
-            if entity:
-                slug = endpoint_slug(ticker + "_" + entity)
-                for name, path_name, field_name, sort in (
-                    ("recall", "recall.json", "recalling_firm", "event_date_initiated:desc"),
-                    ("enforcement", "enforcement.json", "recalling_firm", "recall_initiation_date:desc"),
-                    ("event", "event.json", "device.manufacturer_d_name", "date_received:desc"),
+        if include_postmarket and expected_records:
+            for raw_product_code in split_multi_value(row_get(row, "product_codes", "product_code")):
+                product_code = normalize_product_code(raw_product_code)
+                if not product_code:
+                    continue
+                # Code-scoped searches use the primary entity once. Alias-only
+                # searches below cover subsidiaries without multiplying every
+                # product code by every alias.
+                target_entities = [entity] if entity else [""]
+                for target_entity in target_entities:
+                    base_slug = endpoint_slug(ticker + "_" + product_code)
+                    slug = (
+                        base_slug
+                        if not target_entity or target_entity == entity
+                        else endpoint_slug(base_slug + "_" + target_entity)
+                    )
+                    for name, path_name, field_name, sort, date_field, window_days in (
+                        (
+                            "recall",
+                            "recall.json",
+                            "product_code",
+                            "event_date_initiated:desc",
+                            "event_date_posted",
+                            90,
+                        ),
+                        (
+                            "enforcement",
+                            "enforcement.json",
+                            "product_code",
+                            "recall_initiation_date:desc",
+                            "report_date",
+                            90,
+                        ),
+                        (
+                            "event",
+                            "event.json",
+                            "device.device_report_product_code",
+                            "date_received:desc",
+                            "date_received",
+                            90,
+                        ),
+                    ):
+                        search_parts = [f"{field_name}:{quote_openfda_value(product_code)}"]
+                        if target_entity:
+                            entity_field = "device.manufacturer_d_name" if name == "event" else "recalling_firm"
+                            search_parts.append(f"{entity_field}:{quote_openfda_value(target_entity)}")
+                        endpoint = EndpointConfig(
+                            name=f"target_{name}_code_{slug}",
+                            path=path_name,
+                            enabled=True,
+                            search=" AND ".join(search_parts),
+                            sort=sort,
+                            max_records=max(1, target_limit),
+                            date_field=date_field,
+                            window_days=window_days,
+                            overlap_days=14 if name == "event" else 45,
+                            initial_lookback_days=1096,
+                            partition_field="mdr_report_key" if name == "event" else "",
+                            partition_width=10000 if name == "event" else 0,
+                        )
+                        key = (endpoint.path, endpoint.search)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        out.append(endpoint)
+            for target_entity in ordered_entities:
+                slug = endpoint_slug(ticker + "_" + target_entity)
+                for name, path_name, field_name, sort, date_field, window_days in (
+                    (
+                        "recall",
+                        "recall.json",
+                        "recalling_firm",
+                        "event_date_initiated:desc",
+                        "event_date_posted",
+                            90,
+                    ),
+                    (
+                        "enforcement",
+                        "enforcement.json",
+                        "recalling_firm",
+                        "recall_initiation_date:desc",
+                        "report_date",
+                            90,
+                    ),
+                    (
+                        "event",
+                        "event.json",
+                        "device.manufacturer_d_name",
+                        "date_received:desc",
+                        "date_received",
+                            90,
+                    ),
                 ):
                     endpoint = EndpointConfig(
                         name=f"target_{name}_entity_{slug}",
                         path=path_name,
                         enabled=True,
-                        search=f"{field_name}:{quote_openfda_value(entity)}",
+                        search=f"{field_name}:{quote_openfda_value(target_entity)}",
                         sort=sort,
                         max_records=max(1, target_limit),
+                        date_field=date_field,
+                        window_days=window_days,
+                        overlap_days=14 if name == "event" else 45,
+                        initial_lookback_days=1096,
+                        partition_field="mdr_report_key" if name == "event" else "",
+                        partition_width=10000 if name == "event" else 0,
                     )
                     key = (endpoint.path, endpoint.search)
                     if key in seen:
@@ -1945,6 +2024,8 @@ def main() -> None:
         or "fda_accessdata_cber"
     ).strip()
     endpoint_filter = {value.strip() for value in str(args.endpoints or "").split(",") if value.strip()}
+    alias_raw = str(cfg_get(config, "fda_entity_linking.extra_alias_csv", "") or "").strip()
+    alias_csv = resolve_path(alias_raw, base_dir=base_dir) if alias_raw else None
     cli_target_tickers = ticker_filter(args.targeted_tickers)
     configured_target_tickers = ticker_filter(cfg_get(config, "fda_core_ingestion.targeted_tickers", []))
     selected_target_tickers = cli_target_tickers or configured_target_tickers
@@ -2000,6 +2081,7 @@ def main() -> None:
             include_postmarket=include_targeted_postmarket,
             tickers=selected_target_tickers or None,
             asof=run_asof,
+            alias_path=alias_csv,
         )
         if endpoint_filter:
             targeted_endpoints = [
@@ -2024,8 +2106,6 @@ def main() -> None:
         or ""
     ).strip()
     scope_footprint_csv = resolve_path(scope_footprint_raw, base_dir=base_dir) if scope_footprint_raw else None
-    alias_raw = str(cfg_get(config, "fda_entity_linking.extra_alias_csv", "") or "").strip()
-    alias_csv = resolve_path(alias_raw, base_dir=base_dir) if alias_raw else None
     endpoints = scope_endpoints_to_footprint_product_codes(
         endpoints,
         scope_footprint_csv,

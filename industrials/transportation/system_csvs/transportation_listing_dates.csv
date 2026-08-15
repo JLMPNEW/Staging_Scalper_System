@@ -111,6 +111,14 @@ PAMT,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_m
 TOPP,2025-01-22,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=TOPP; raw_first_quoted_date=2025-01-22
 KNX,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=KNX; raw_first_quoted_date=2010-12-16
 R,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=R; raw_first_quoted_date=1990-01-02
+FRO,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=FRO; raw_first_quoted_date=2001-08-06
+DHT,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=DHT; raw_first_quoted_date=2005-10-13
+TNK,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=TNK; raw_first_quoted_date=2007-12-13
+STNG,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=STNG; raw_first_quoted_date=2010-03-31
+INSW,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=INSW; raw_first_quoted_date=2016-11-16
+TEN,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=TEN; raw_first_quoted_date=2002-03-05
+NAT,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=NAT; raw_first_quoted_date=1997-09-30
+TRMD,2019-01-02,,max_history_start_and_norgate_first_quoted_date,norgate_local_metadata,0.95,norgate_symbol=TRMD; raw_first_quoted_date=2018-02-23
 LCC,1994-08-26,2013-12-06,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=LCC; norgate_symbol=LCC-201312
 NWA,2007-05-18,2008-10-29,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=NWA; norgate_symbol=NWA-200810
 CAL,1993-07-14,2010-09-30,norgate_first_and_last_quoted_dates,norgate_local_metadata,0.95,actual_ticker=CAL; norgate_symbol=CAL-201009

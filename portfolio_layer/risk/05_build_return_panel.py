@@ -5,6 +5,7 @@ Fetches Yahoo adjusted close for eligible names + benchmarks/ETFs, aligns to the
 (no future dates beyond run as-of, no fabricated zero returns), and writes the panel plus a
 provenance-hashed price snapshot so the run reproduces even if the provider later revises prices.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,7 +40,10 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 from portfolio_layer.core.db import connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
-from portfolio_layer.risk.local_prices import load_local_adjusted_price_fallbacks  # noqa: E402
+from portfolio_layer.risk.local_prices import (  # noqa: E402
+    load_local_adjusted_price_fallbacks,
+    prefer_strictly_more_complete_local_history,
+)
 from portfolio_layer.risk.panel import assemble_prices, build_universe, master_calendar, to_returns  # noqa: E402
 from portfolio_layer.risk.readiness import check_stage1_readiness, latest_run_with, readiness_passed  # noqa: E402
 from portfolio_layer.risk.yahoo import fetch_adjclose_with_splits  # noqa: E402
@@ -139,12 +143,16 @@ def parse_ticker_aliases(rc: dict) -> dict[str, dict[str, str]]:
         if not active or not effective:
             raise ValueError(f"risk_panel.ticker_aliases.{ticker} requires active_ticker and effective_date")
         date.fromisoformat(effective)
-        predecessor = str(
-            raw_cfg.get("predecessor_ticker")
-            or raw_cfg.get("legacy_ticker")
-            or raw_cfg.get("old_ticker")
-            or (ticker if ticker != active else "")
-        ).strip().upper()
+        predecessor = (
+            str(
+                raw_cfg.get("predecessor_ticker")
+                or raw_cfg.get("legacy_ticker")
+                or raw_cfg.get("old_ticker")
+                or (ticker if ticker != active else "")
+            )
+            .strip()
+            .upper()
+        )
         aliases[ticker] = {
             "active_ticker": active,
             "predecessor_ticker": predecessor,
@@ -190,20 +198,24 @@ def fetch_segments_for(
     if predecessor and start < effective:
         predecessor_end = min(end, effective - timedelta(days=1))
         if start <= predecessor_end:
-            segments.append({
-                "query_symbol": predecessor,
-                "start": start,
-                "end": predecessor_end,
-                "segment": "predecessor",
-            })
+            segments.append(
+                {
+                    "query_symbol": predecessor,
+                    "start": start,
+                    "end": predecessor_end,
+                    "segment": "predecessor",
+                }
+            )
     active_start = max(start, effective)
     if active_start <= end:
-        segments.append({
-            "query_symbol": active,
-            "start": active_start,
-            "end": end,
-            "segment": "active",
-        })
+        segments.append(
+            {
+                "query_symbol": active,
+                "start": active_start,
+                "end": end,
+                "segment": "active",
+            }
+        )
     return segments or [{"query_symbol": active, "start": start, "end": end, "segment": "active"}]
 
 
@@ -308,7 +320,7 @@ def existing_seed_is_adjusted(prices_path: Path, snapshot_path: Path) -> bool:
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    expected = (((snapshot.get("files") or {}).get("prices_adjclose.csv") or {}).get("sha256"))
+    expected = ((snapshot.get("files") or {}).get("prices_adjclose.csv") or {}).get("sha256")
     exceptions = snapshot.get("adjustment_policy_exceptions") or {}
     exception_names = [ticker for values in exceptions.values() if isinstance(values, list) for ticker in values]
     return bool(expected) and expected == sha256_file(prices_path) and not exception_names
@@ -331,15 +343,17 @@ def load_existing_split_seed(path: Path, *, end: date) -> dict[str, list[dict[st
         query_symbol = str(row.get("query_symbol") or ticker).strip().upper()
         source_symbol = str(row.get("source_symbol") or query_symbol).strip().upper()
         provider = str(row.get("provider") or "existing_price_snapshot").strip()
-        seed.setdefault(ticker, []).append({
-            "split_date": split_date,
-            "numerator": str(row.get("numerator") or "").strip(),
-            "denominator": str(row.get("denominator") or "").strip(),
-            "split_ratio": str(row.get("split_ratio") or "").strip(),
-            "_query_symbol": query_symbol,
-            "_source_symbol": source_symbol,
-            "_provider": provider,
-        })
+        seed.setdefault(ticker, []).append(
+            {
+                "split_date": split_date,
+                "numerator": str(row.get("numerator") or "").strip(),
+                "denominator": str(row.get("denominator") or "").strip(),
+                "split_ratio": str(row.get("split_ratio") or "").strip(),
+                "_query_symbol": query_symbol,
+                "_source_symbol": source_symbol,
+                "_provider": provider,
+            }
+        )
     return seed
 
 
@@ -451,17 +465,19 @@ def main() -> int:
         # verifies their sealed requested universe against the rebuilt risk universe and will
         # fail closed if they are stale. Deleting them here used to destroy valid IB evidence
         # before a replacement price panel had been fetched successfully.
-        unlink_artifacts([
-            risk_dir / "risk_coverage.csv",
-            risk_dir / "covariance.csv",
-            risk_dir / "covariance_period.csv",
-            risk_dir / "correlation_clusters.csv",
-            risk_dir / "covariance_meta.json",
-            risk_dir / "return_outliers.csv",
-            risk_dir / "data_quality_review.csv",
-            risk_dir / "validation" / "risk_panel_validation.csv",
-            risk_dir / "risk_manifest.json",
-        ])
+        unlink_artifacts(
+            [
+                risk_dir / "risk_coverage.csv",
+                risk_dir / "covariance.csv",
+                risk_dir / "covariance_period.csv",
+                risk_dir / "correlation_clusters.csv",
+                risk_dir / "covariance_meta.json",
+                risk_dir / "return_outliers.csv",
+                risk_dir / "data_quality_review.csv",
+                risk_dir / "validation" / "risk_panel_validation.csv",
+                risk_dir / "risk_manifest.json",
+            ]
+        )
     try:
         fail_if_exists([prices_path, returns_path, fetch_path, split_events_path, snapshot_path], force=args.force)
     except FileExistsError as exc:
@@ -474,14 +490,12 @@ def main() -> int:
     lookback = int(cfg_get(config, "risk_panel.lookback_trading_days", 504))
     run_date = date.fromisoformat(run_as_of)
     start = run_date - timedelta(days=int(lookback * 1.6) + 40)
-    local_price_seed, local_price_provenance, local_price_sources = (
-        load_local_adjusted_price_fallbacks(
-            rc.get("local_adjusted_price_fallbacks"),
-            base_dir=config_path.parent,
-            universe=universe,
-            start=start,
-            end=run_date,
-        )
+    local_price_seed, local_price_provenance, local_price_sources = load_local_adjusted_price_fallbacks(
+        rc.get("local_adjusted_price_fallbacks"),
+        base_dir=config_path.parent,
+        universe=universe,
+        start=start,
+        end=run_date,
     )
     if local_price_seed:
         LOGGER.info(
@@ -523,15 +537,17 @@ def main() -> int:
             continue
         history_path = resolve_path(raw_history, base_dir=config_path.parent)
         summary = price_history_csv_summary(history_path)
-        price_history_overrides.append({
-            "ticker": ticker,
-            "path": str(history_path),
-            "exists": summary["exists"],
-            "rows": summary["rows"],
-            "first_date": summary["first_date"],
-            "last_date": summary["last_date"],
-            "sha256": sha256_file(history_path) if history_path.exists() else "",
-        })
+        price_history_overrides.append(
+            {
+                "ticker": ticker,
+                "path": str(history_path),
+                "exists": summary["exists"],
+                "rows": summary["rows"],
+                "first_date": summary["first_date"],
+                "last_date": summary["last_date"],
+                "sha256": sha256_file(history_path) if history_path.exists() else "",
+            }
+        )
 
     def fetch_one(
         ticker: str,
@@ -548,16 +564,31 @@ def main() -> int:
             # Seeded bars preserve the prior split snapshot, but do not update the price cache; a
             # seeded run should not overwrite a provider-fetched cache entry.
             bars = existing_seed[ticker]
-            return bars, existing_split_seed.get(ticker, []), "ok", "existing_price_snapshot", ticker, ticker, False, "", "", ""
+            return (
+                bars,
+                existing_split_seed.get(ticker, []),
+                "ok",
+                "existing_price_snapshot",
+                ticker,
+                ticker,
+                False,
+                "",
+                "",
+                "",
+            )
 
         # Aliased (reused-ticker) names skip the cache so the start-date floor is always re-applied and
         # any pre-effective-date history cached by an earlier run is overwritten.
-        cached = None if alias_applied or not args.reuse_price_cache else load_cached_bars(
-            price_cache_dir,
-            ticker,
-            start=start,
-            end=run_date,
-            expected_query_symbols=expected_query_symbols,
+        cached = (
+            None
+            if alias_applied or not args.reuse_price_cache
+            else load_cached_bars(
+                price_cache_dir,
+                ticker,
+                start=start,
+                end=run_date,
+                expected_query_symbols=expected_query_symbols,
+            )
         )
         if cached:
             bars, split_events, provider, query_symbol, source_symbol = cached
@@ -565,6 +596,36 @@ def main() -> int:
                 LOGGER.warning("Ignoring unadjusted Stooq cache for %s", ticker)
                 cached = None
             else:
+                local_bars = local_price_seed.get(ticker, [])
+                if not alias_applied and prefer_strictly_more_complete_local_history(bars, local_bars):
+                    local_provenance = local_price_provenance[ticker]
+                    LOGGER.info(
+                        "Using strictly more complete local adjusted history for %s "
+                        "(%d rows vs cached %d rows)",
+                        ticker,
+                        len(local_bars),
+                        len(bars),
+                    )
+                    return (
+                        local_bars,
+                        [
+                            {
+                                **row,
+                                "_provider": f"cache:{provider}",
+                                "_query_symbol": query_symbol,
+                                "_source_symbol": source_symbol,
+                            }
+                            for row in split_events
+                        ],
+                        "ok",
+                        local_provenance.provider,
+                        ticker,
+                        ticker,
+                        alias_applied,
+                        alias_effective_date,
+                        alias_issuer_id,
+                        alias_reason,
+                    )
                 return (
                     bars,
                     split_events,
@@ -693,9 +754,7 @@ def main() -> int:
                 source_symbols_used.append(source_symbol)
                 continue
             if lineage_used and alias and query_symbol == alias["active_ticker"]:
-                tail_notes.append(
-                    f"{query_symbol}:{status if bars or status != 'ok' else 'empty_after_lineage_tail'}"
-                )
+                tail_notes.append(f"{query_symbol}:{status if bars or status != 'ok' else 'empty_after_lineage_tail'}")
                 continue
             statuses.append(
                 f"{query_symbol}:{segment['segment']}:"
@@ -736,11 +795,21 @@ def main() -> int:
             if tail_notes:
                 provider = f"{provider};tail_gap={'|'.join(tail_notes)}"
             query_symbol = query_symbols_used[0] if len(query_symbols_used) == 1 else "|".join(query_symbols_used)
-            source_symbol = (
-                source_symbols_used[0]
-                if len(source_symbols_used) == 1
-                else "|".join(source_symbols_used)
-            )
+            source_symbol = source_symbols_used[0] if len(source_symbols_used) == 1 else "|".join(source_symbols_used)
+            local_bars = local_price_seed.get(ticker, [])
+            if not alias_applied and prefer_strictly_more_complete_local_history(bars, local_bars):
+                local_provenance = local_price_provenance[ticker]
+                LOGGER.info(
+                    "Using strictly more complete local adjusted history for %s (%d rows vs fetched %d rows)",
+                    ticker,
+                    len(local_bars),
+                    len(bars),
+                )
+                bars = local_bars
+                provider = local_provenance.provider
+                query_symbol = ticker
+                source_symbol = ticker
+
             write_cached_bars(
                 price_cache_dir,
                 ticker,
@@ -800,26 +869,34 @@ def main() -> int:
             if status == "ok" and bars:
                 series_by_ticker[t] = dict(bars)
                 for row in split_events:
-                    split_rows.append({
-                        "ticker": t,
-                        "query_symbol": row.get("_query_symbol", query_symbol),
-                        "source_symbol": row.get("_source_symbol", source_symbol),
-                        "provider": row.get("_provider", provider),
-                        "split_date": row["split_date"],
-                        "numerator": row.get("numerator", ""),
-                        "denominator": row.get("denominator", ""),
-                        "split_ratio": row.get("split_ratio", ""),
-                    })
-            fetch_rows.append({
-                "ticker": t, "status": status, "provider": provider, "source_symbol": source_symbol,
-                "query_symbol": query_symbol,
-                "alias_applied": int(alias_applied),
-                "alias_effective_date": alias_effective_date,
-                "alias_issuer_id": alias_issuer_id,
-                "alias_reason": alias_reason,
-                "rows": len(bars),
-                "first": bars[0][0] if bars else "", "last": bars[-1][0] if bars else "",
-            })
+                    split_rows.append(
+                        {
+                            "ticker": t,
+                            "query_symbol": row.get("_query_symbol", query_symbol),
+                            "source_symbol": row.get("_source_symbol", source_symbol),
+                            "provider": row.get("_provider", provider),
+                            "split_date": row["split_date"],
+                            "numerator": row.get("numerator", ""),
+                            "denominator": row.get("denominator", ""),
+                            "split_ratio": row.get("split_ratio", ""),
+                        }
+                    )
+            fetch_rows.append(
+                {
+                    "ticker": t,
+                    "status": status,
+                    "provider": provider,
+                    "source_symbol": source_symbol,
+                    "query_symbol": query_symbol,
+                    "alias_applied": int(alias_applied),
+                    "alias_effective_date": alias_effective_date,
+                    "alias_issuer_id": alias_issuer_id,
+                    "alias_reason": alias_reason,
+                    "rows": len(bars),
+                    "first": bars[0][0] if bars else "",
+                    "last": bars[-1][0] if bars else "",
+                }
+            )
 
     if master_ticker not in series_by_ticker and master_retry_attempts > 0:
         LOGGER.warning(
@@ -861,19 +938,23 @@ def main() -> int:
             if status == "ok" and bars:
                 series_by_ticker[master_ticker] = dict(bars)
                 for row in split_events:
-                    split_rows.append({
-                        "ticker": master_ticker,
-                        "query_symbol": row.get("_query_symbol", query_symbol),
-                        "source_symbol": row.get("_source_symbol", source_symbol),
-                        "provider": row.get("_provider", provider),
-                        "split_date": row["split_date"],
-                        "numerator": row.get("numerator", ""),
-                        "denominator": row.get("denominator", ""),
-                        "split_ratio": row.get("split_ratio", ""),
-                    })
+                    split_rows.append(
+                        {
+                            "ticker": master_ticker,
+                            "query_symbol": row.get("_query_symbol", query_symbol),
+                            "source_symbol": row.get("_source_symbol", source_symbol),
+                            "provider": row.get("_provider", provider),
+                            "split_date": row["split_date"],
+                            "numerator": row.get("numerator", ""),
+                            "denominator": row.get("denominator", ""),
+                            "split_ratio": row.get("split_ratio", ""),
+                        }
+                    )
                 LOGGER.info("Master calendar retry succeeded for %s on attempt %d", master_ticker, attempt)
                 break
-            LOGGER.warning("Master calendar retry %d/%d failed for %s: %s", attempt, master_retry_attempts, master_ticker, status)
+            LOGGER.warning(
+                "Master calendar retry %d/%d failed for %s: %s", attempt, master_retry_attempts, master_ticker, status
+            )
         if retry_row is not None:
             fetch_rows = [row for row in fetch_rows if row["ticker"] != master_ticker]
             fetch_rows.append(retry_row)
@@ -919,21 +1000,40 @@ def main() -> int:
     write_csv(
         fetch_path,
         [
-            "ticker", "role", "source_pipeline", "status", "provider", "query_symbol", "source_symbol",
-            "alias_applied", "alias_effective_date", "alias_issuer_id", "alias_reason",
-            "rows", "first", "last",
+            "ticker",
+            "role",
+            "source_pipeline",
+            "status",
+            "provider",
+            "query_symbol",
+            "source_symbol",
+            "alias_applied",
+            "alias_effective_date",
+            "alias_issuer_id",
+            "alias_reason",
+            "rows",
+            "first",
+            "last",
         ],
         sorted(fetch_rows, key=lambda r: r["ticker"]),
     )
     write_csv(
         split_events_path,
-        ["ticker", "query_symbol", "source_symbol", "provider", "split_date", "numerator", "denominator",
-         "split_ratio"],
+        [
+            "ticker",
+            "query_symbol",
+            "source_symbol",
+            "provider",
+            "split_date",
+            "numerator",
+            "denominator",
+            "split_ratio",
+        ],
         sorted(split_rows, key=lambda r: (r["ticker"], r["split_date"])),
     )
-    provider_counts = pd.Series([
-        r["provider"] for r in fetch_rows if r["status"] == "ok" and r["rows"] > 0
-    ]).value_counts().to_dict()
+    provider_counts = (
+        pd.Series([r["provider"] for r in fetch_rows if r["status"] == "ok" and r["rows"] > 0]).value_counts().to_dict()
+    )
 
     snapshot = {
         "provider": str(cfg_get(config, "risk_panel.price_provider", "yahoo_adjusted")),
@@ -985,9 +1085,7 @@ def main() -> int:
             }
             for ticker, item in sorted(local_price_provenance.items())
             if any(
-                row["ticker"] == ticker
-                and row["status"] == "ok"
-                and str(row["provider"]).startswith("local_sqlite:")
+                row["ticker"] == ticker and row["status"] == "ok" and str(row["provider"]).startswith("local_sqlite:")
                 for row in fetch_rows
             )
         ],
@@ -995,7 +1093,8 @@ def main() -> int:
         # This must remain empty: dividend-unadjusted sources are never admitted to this panel.
         "adjustment_policy_exceptions": {
             "stooq_us_daily_close_unadjusted_dividends": sorted(
-                str(r["ticker"]) for r in fetch_rows
+                str(r["ticker"])
+                for r in fetch_rows
                 if r["status"] == "ok" and r["rows"] > 0 and "stooq" in str(r["provider"])
             ),
         },
@@ -1010,12 +1109,24 @@ def main() -> int:
 
     with connect(db_path) as conn:
         run_id = start_run(conn, run_type="build_return_panel", input_path=run_dir / "stocks_scores.csv")
-        finish_run(conn, run_id=run_id, status="success", row_count=len(panel_tickers),
-                   message=(f"as_of={run_as_of} universe={len(panel_tickers)} "
-                            f"ok={snapshot['fetched_ok']} cal_days={len(calendar)}"))
+        finish_run(
+            conn,
+            run_id=run_id,
+            status="success",
+            row_count=len(panel_tickers),
+            message=(
+                f"as_of={run_as_of} universe={len(panel_tickers)} ok={snapshot['fetched_ok']} cal_days={len(calendar)}"
+            ),
+        )
 
-    LOGGER.info("Panel built: %d tickers, %d calendar days, %d fetched ok, %d failed -> %s",
-                len(panel_tickers), len(calendar), snapshot["fetched_ok"], len(snapshot["fetch_failed"]), risk_dir)
+    LOGGER.info(
+        "Panel built: %d tickers, %d calendar days, %d fetched ok, %d failed -> %s",
+        len(panel_tickers),
+        len(calendar),
+        snapshot["fetched_ok"],
+        len(snapshot["fetch_failed"]),
+        risk_dir,
+    )
     if snapshot["fetch_failed"]:
         LOGGER.warning("Failed fetches (routed to coverage): %s", snapshot["fetch_failed"][:20])
     return 0

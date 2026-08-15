@@ -13,7 +13,7 @@ Status: adopted for Stage 2 implementation
 7. Current-universe replay is not survivorship-correct. Historical calibration uses exact membership intervals, delisted securities, and verified terminal events. Unresolved terminal outcomes remain visible in audit coverage but are not calibration-eligible.
 8. `CCE` is a historical ticker in the continuous `CCEP` security lineage, and `DPS` is a historical ticker in the continuous `KDP` lineage. Neither is loaded as a separate delisted calibration security. Both are ticker aliases/security events.
 9. `CENTA`, not `CENT`, is retained. The verified 63-session median dollar volume was approximately $10.8 million for CENTA versus $3.2 million for CENT, and Central designed the non-voting class to enhance liquidity.
-10. `DMC` denotes Del Monte Corporation in this universe. DMC Global trades as `BOOM`; there is no DMC taxonomy collision.
+10. Fresh Del Monte Produce (CIK `1047340`) uses its reviewed NYSE ticker `FDP`. `DMC` is not an alias for Fresh Del Monte; `DMC`/DMC Global (`BOOM`, CIK `34067`) are out of scope.
 11. `country` in the existing live CSV is listing country. It must not be silently treated as issuer domicile; issuer domicile requires issuer-level evidence.
 12. Security types normalize to `Common Stock`, `Ordinary Shares`, or `ADR/ADS`. Duplicate tickers, duplicate provider assets, overlapping alias intervals, cross-cohort assignments, and multiple live primary listings fail closed.
 

@@ -695,6 +695,25 @@ def structured_mdr_metadata(payload_json: object) -> dict[str, Any]:
     }
 
 
+def canonical_mdr_family_key(payload_json: object, fallback_id: object) -> str:
+    """Return a stable report-family key without merging unrelated product rows."""
+
+    metadata = structured_mdr_metadata(payload_json)
+    report_number = normalized_text(metadata.get("report_number"))
+    if report_number:
+        return f"report_number:{report_number.upper()}"
+    event_key = normalized_text(metadata.get("event_key"))
+    if event_key:
+        return f"event_key:{event_key.upper()}"
+    mdr_report_key = normalized_text(metadata.get("mdr_report_key"))
+    if mdr_report_key:
+        return f"mdr_report_key:{mdr_report_key.upper()}"
+    fallback = normalized_text(fallback_id)
+    if not fallback:
+        raise ValueError("FDA adverse event lacks every canonical report-family identifier")
+    return f"adverse_event_id:{fallback.upper()}"
+
+
 def mapping_coverage(
     rows: list[dict[str, Any]],
     *,

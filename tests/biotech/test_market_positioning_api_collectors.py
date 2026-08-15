@@ -451,6 +451,43 @@ def test_finra_equity_short_interest_file_sync_and_export(tmp_path, monkeypatch)
     assert row["source"] == "finra_equity_short_interest_files"
 
 
+def test_finra_equity_short_interest_uses_reviewed_source_symbol(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    universe_csv = tmp_path / "universe.csv"
+    db_path = tmp_path / "market_positioning.sqlite"
+    write_csv(
+        universe_csv,
+        ["ticker", "company_name", "finra_symbol"],
+        [{"ticker": "BF-B", "company_name": "Brown-Forman", "finra_symbol": "BFB"}],
+    )
+    payload = (
+        "accountingYearMonthNumber|symbolCode|issueName|issuerServicesGroupExchangeCode|marketClassCode|"
+        "currentShortPositionQuantity|previousShortPositionQuantity|stockSplitFlag|averageDailyVolumeQuantity|"
+        "daysToCoverQuantity|revisionFlag|changePercent|changePreviousNumber|settlementDate\n"
+        "20250115|BFB|Brown Forman|A|NYSE|1200|1000||300|4.00||20.00|200|2025-01-15\n"
+    ).encode()
+    monkeypatch.setattr(api_collectors, "http_request", lambda *args, **kwargs: payload)
+    with connect(db_path) as conn:
+        init_db(conn)
+        result = sync_finra_equity_short_interest_files(
+            conn,
+            tickers_csv=universe_csv,
+            history_start_date=date(2025, 1, 15),
+            end_date=date(2025, 1, 15),
+            cache_dir=tmp_path / "cache",
+            publication_lag_days=12,
+            user_agent="unit",
+            sleep_sec=0.0,
+        )
+        ticker = conn.execute(
+            "SELECT ticker FROM short_interest_snapshots"
+        ).fetchone()[0]
+    assert result.rows == 1
+    assert ticker == "BF-B"
+
+
 def test_sec_13f_data_set_sync_matches_universe_name(tmp_path, monkeypatch) -> None:
     universe_csv = tmp_path / "universe.csv"
     cache_dir = tmp_path / "cache"

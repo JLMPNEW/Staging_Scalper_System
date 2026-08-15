@@ -335,12 +335,12 @@ def main() -> int:
         }
     errors: list[str] = []
     warnings: list[str] = []
-    if len(taxonomy) != 160:
-        errors.append(f"transportation taxonomy rows={len(taxonomy)} expected=160")
-    if len(active_members) != 112:
-        errors.append(f"active memberships={len(active_members)} expected=112")
-    if len(historical_members) != 159:
-        errors.append(f"historical memberships={len(historical_members)} expected=159")
+    if len(taxonomy) != 168:
+        errors.append(f"transportation taxonomy rows={len(taxonomy)} expected=168")
+    if len(active_members) != 120:
+        errors.append(f"active memberships={len(active_members)} expected=120")
+    if len(historical_members) != 167:
+        errors.append(f"historical memberships={len(historical_members)} expected=167")
     if len(delisted_seed) != 48:
         errors.append(f"delisted seeds={len(delisted_seed)} expected=48")
     if set(db_continuity) != set(continuity_policies):

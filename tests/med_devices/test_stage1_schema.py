@@ -25,6 +25,7 @@ from med_devices.core.db import connect, init_db
 from med_devices.core.fda_mapping_governance import _audit_mapping_rows
 from med_devices.core.fda_product_family_review import (
     build_product_family_shadow_score,
+    canonical_mdr_family_key,
     load_product_family_exposures,
     load_product_family_mappings,
     mapping_for,
@@ -80,6 +81,7 @@ def test_xray_reviewed_manufacturer_overrides_cover_verified_dentsply_entities()
     for manufacturer_id, expected_name in {
         "9252": "DENTSPLY IH INC.",
         "10700": "DENTSPLY SIRONA ORTHODONTICS INC.",
+        "11130": "SIRONA DENTAL SYSTEMS GMBH",
     }.items():
         row = rows[manufacturer_id]
         assert row["manufacturer_name"] == expected_name
@@ -90,6 +92,188 @@ def test_xray_reviewed_manufacturer_overrides_cover_verified_dentsply_entities()
         assert row["valid_from"] == "2026-08-10"
         assert row["reviewed_at"] == "2026-08-10"
         assert "owner/operator 2511302" in row["note"]
+
+    footprint_path = REPO_ROOT / "med_devices" / "data" / "fda_company_footprints.csv"
+    with footprint_path.open(newline="", encoding="utf-8-sig") as handle:
+        footprint = {row["ticker"]: row for row in csv.DictReader(handle)}["XRAY"]
+    codes = set(footprint["product_codes"].split(";"))
+    assert codes.issuperset({"NOF", "EGS", "DZE", "NXC", "EJW", "EBC", "EKB", "NDP"})
+    assert "NMC" not in codes
+
+    mappings, mapping_issues = load_product_family_mappings(
+        FDA_PRODUCT_FAMILY_MAPPING,
+        asof=date(2026, 8, 12),
+    )
+    assert not [issue for issue in mapping_issues if issue.severity == "CRITICAL"]
+    xray_mappings = {mapping.product_code: mapping.product_family for mapping in mappings if mapping.ticker == "XRAY"}
+    assert xray_mappings["NXC"] == "clear_aligners"
+    assert xray_mappings["NDP"] == "dental_implant_accessories"
+    assert "NMC" not in xray_mappings
+
+    decisions, issues = load_analyst_review_decisions(
+        REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    )
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+    decision = effective_decision(
+        decisions,
+        ticker="XRAY",
+        cohort="elective_vision_dental_aesthetic_devices",
+        asof=date(2026, 8, 12),
+    )
+    assert decision is not None
+    assert decision.review_category == "all"
+    assert decision.decision == "data_fix_needed"
+    assert decision.allow_portfolio_candidate_override is False
+
+    completed = effective_decision(
+        decisions,
+        ticker="XRAY",
+        cohort="elective_vision_dental_aesthetic_devices",
+        asof=date(2026, 8, 14),
+    )
+    assert completed is not None
+    assert completed.review_category == "all"
+    assert completed.decision == "watchlist"
+    assert completed.allow_portfolio_candidate_override is False
+
+    feature_module = load_script_module(
+        "10_build_med_device_fda_features.py",
+        "med_device_xray_completed_footprint_test",
+    )
+    effective_footprints = feature_module.load_footprint_overrides(
+        footprint_path,
+        asof=date(2026, 8, 13),
+    )
+    completed_footprint = effective_footprints["XRAY"]
+    assert completed_footprint["review_adjusted_fda_state"] == "manual_fda_footprint_device"
+    assert completed_footprint["review_reason"] == ("canonical_product_family_mapping_complete_no_class_i_zero_deaths")
+    assert set(completed_footprint["product_codes"].split(";")) == {
+        "NOF",
+        "EGS",
+        "DZE",
+        "NXC",
+        "EJW",
+        "EBC",
+        "EKB",
+        "NDP",
+        "DZC",
+        "EFA",
+        "EFB",
+        "EFT",
+        "EIA",
+        "EJL",
+        "EKS",
+        "EKX",
+        "KMY",
+        "LQY",
+        "MQC",
+        "MUH",
+        "NHA",
+    }
+
+
+def test_xray_refresh_ambiguities_have_governed_non_xray_dispositions() -> None:
+    with FDA_MANUFACTURER_OVERRIDES.open(newline="", encoding="utf-8-sig") as handle:
+        rows = {row["fda_manufacturer_id"]: row for row in csv.DictReader(handle)}
+
+    nvst = rows["487"]
+    assert nvst["manufacturer_name"] == "Dental Imaging Technologies Corporation"
+    assert nvst["ticker"] == "NVST"
+    assert nvst["company_id"] == "50"
+    assert nvst["mapping_method"] == "manual_override"
+
+    for manufacturer_id in {"9325", "10035", "7941", "8453", "7292", "6615", "6665", "6664"}:
+        row = rows[manufacturer_id]
+        assert row["ticker"] == ""
+        assert row["company_id"] == ""
+        assert row["mapping_method"] == "out_of_universe"
+
+
+@pytest.mark.parametrize(
+    ("ticker", "cohort", "expected_decision"),
+    [
+        ("RXST", "elective_vision_dental_aesthetic_devices", "data_fix_needed"),
+        ("ISRG", "capital_equipment_procedure_platforms", "watchlist"),
+        ("SENS", "home_chronic_care_devices_dme_drug_delivery", "watchlist"),
+    ],
+)
+def test_durable_active_review_decisions_survive_queue_category_drift(
+    ticker: str,
+    cohort: str,
+    expected_decision: str,
+) -> None:
+    decisions, issues = load_analyst_review_decisions(
+        REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    )
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+    decision = effective_decision(
+        decisions,
+        ticker=ticker,
+        cohort=cohort,
+        asof=date(2026, 8, 12),
+    )
+    assert decision is not None
+    assert decision.review_category == "all"
+    assert decision.decision == expected_decision
+    assert decision.allow_portfolio_candidate_override is False
+
+
+@pytest.mark.parametrize(
+    ("ticker", "cohort", "expected_decision"),
+    [
+        ("TFX", "hospital_supplies_surgical_consumables_oem", "watchlist"),
+        ("EW", "implantable_interventional_devices_direct_payment", "watchlist"),
+        ("FMS", "healthcare_services_cro_lab_services", "reject"),
+    ],
+)
+def test_august_regulatory_reconciliation_supersedes_stale_hard_red_decisions(
+    ticker: str,
+    cohort: str,
+    expected_decision: str,
+) -> None:
+    decisions, issues = load_analyst_review_decisions(
+        REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    )
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+    decision = effective_decision(
+        decisions,
+        ticker=ticker,
+        cohort=cohort,
+        asof=date(2026, 8, 14),
+    )
+    assert decision is not None
+    assert decision.review_category == "all"
+    assert decision.decision == expected_decision
+    assert decision.allow_portfolio_candidate_override is False
+
+
+@pytest.mark.parametrize(
+    ("ticker", "cohort", "expected_decision"),
+    [
+        ("CODX", "diagnostics_clinical_tests", "watchlist"),
+        ("RXST", "elective_vision_dental_aesthetic_devices", "watchlist"),
+        ("TCMD", "home_chronic_care_devices_dme_drug_delivery", "defer"),
+    ],
+)
+def test_august_22_target_reviews_are_recorded_without_portfolio_overrides(
+    ticker: str,
+    cohort: str,
+    expected_decision: str,
+) -> None:
+    decisions, issues = load_analyst_review_decisions(
+        REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    )
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+    decision = effective_decision(
+        decisions,
+        ticker=ticker,
+        cohort=cohort,
+        asof=date(2026, 8, 14),
+    )
+    assert decision is not None
+    assert decision.review_category == "all"
+    assert decision.decision == expected_decision
+    assert decision.allow_portfolio_candidate_override is False
 
 
 def test_confirmed_fda_manufacturer_closure_overrides_are_governed() -> None:
@@ -204,6 +388,27 @@ def test_osur_fda_footprint_correction_is_effective_dated() -> None:
     assert effective["OSUR"]["premarket_numbers"] == "P080027;DEN190025"
     assert effective["OSUR"]["review_adjusted_fda_state"] == "manual_fda_footprint_device"
     assert "MIB" not in effective["OSUR"]["product_codes"].split(";")
+
+
+def test_codx_fda_footprint_correction_is_effective_dated() -> None:
+    module = load_script_module(
+        "10_build_med_device_fda_features.py",
+        "med_device_codx_footprint_test",
+    )
+    path = REPO_ROOT / "med_devices" / "data" / "fda_company_footprints.csv"
+
+    before = module.load_footprint_overrides(path, asof=date(2026, 8, 13))
+    effective = module.load_footprint_overrides(path, asof=date(2026, 8, 14))
+
+    assert before["CODX"]["product_codes"] == "OOI"
+    assert before["CODX"]["fei_numbers"] == "3014521998"
+    assert effective["CODX"]["product_codes"] == "QJR"
+    assert effective["CODX"]["fei_numbers"] == ""
+    assert effective["CODX"]["review_adjusted_fda_state"] == "manual_fda_footprint_device"
+    assert effective["CODX"]["review_adjusted_fda_state"] not in MANUAL_FDA_REVIEW_STATES
+    assert effective["CODX"]["review_reason"] == "verified_active_eua_qjr_no_cleared_510k_platform"
+    assert "OUJ" not in effective["CODX"]["product_codes"].split(";")
+    assert "QKO" not in effective["CODX"]["product_codes"].split(";")
 
 
 def test_vnrx_incorrect_cpt_expires_before_structural_lab_routing() -> None:
@@ -828,6 +1033,38 @@ def test_product_family_shadow_uses_governed_waiver_floor() -> None:
     assert waived_detail["denominator_source"] == "governed_waiver_conservative_floor"
 
 
+def test_product_family_shadow_validator_resolves_effective_locked_model_version() -> None:
+    module = load_script_module(
+        "79_validate_med_device_fda_product_family_shadow.py",
+        "med_device_product_family_shadow_validator_version_test",
+    )
+    config = {
+        "scoring": {
+            "model_version": "base_v1",
+            "ic_tilted_composite": {
+                "phase1_safety_lock": True,
+                "production_score_regime_effective_from": "2026-07-27",
+                "locked_scoring_model_version": "locked_v2",
+            },
+        }
+    }
+
+    assert (
+        module.effective_scoring_model_version(
+            config,
+            asof=date(2026, 7, 26),
+        )
+        == "base_v1"
+    )
+    assert (
+        module.effective_scoring_model_version(
+            config,
+            asof=date(2026, 7, 27),
+        )
+        == "locked_v2"
+    )
+
+
 def test_product_family_mapping_prefers_manufacturer_specific_row(tmp_path: Path) -> None:
     path = tmp_path / "mapping.csv"
     path.write_text(
@@ -1225,6 +1462,100 @@ def test_sec_ingestion_parses_filings_and_companyfacts() -> None:
     assert rows[0]["revenue"] == 1000
     assert rows[0]["free_cash_flow"] == 100
     assert rows[0]["cash_and_investments"] == 300
+
+
+def test_sec_inline_xbrl_fallback_is_current_period_and_dimension_free() -> None:
+    module = load_script_module("05_sync_med_device_sec_fundamentals.py", "med_device_sec_inline_test")
+    company = module.Company(company_id=1, ticker="AAA", cik="0000000001", company_name="AAA Medical")
+    filing = {
+        "accession_nodash": "000000000126000003",
+        "form": "10-Q",
+        "filing_date": "2026-07-28",
+        "report_date": "2026-06-30",
+        "primary_document": "aaa-20260630.htm",
+        "archive_url": "https://www.sec.gov/Archives/edgar/data/1/000000000126000003/aaa-20260630.htm",
+    }
+    document = """
+    <html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL" xmlns:xbrli="http://www.xbrl.org/2003/instance">
+      <ix:nonNumeric name="dei:DocumentFiscalPeriodFocus" contextRef="current">Q2</ix:nonNumeric>
+      <ix:nonNumeric name="dei:DocumentFiscalYearFocus" contextRef="current">2026</ix:nonNumeric>
+      <xbrli:context id="current"><xbrli:period><xbrli:startDate>2026-01-01</xbrli:startDate><xbrli:endDate>2026-06-30</xbrli:endDate></xbrli:period></xbrli:context>
+      <xbrli:context id="prior"><xbrli:period><xbrli:startDate>2025-01-01</xbrli:startDate><xbrli:endDate>2025-06-30</xbrli:endDate></xbrli:period></xbrli:context>
+      <xbrli:context id="segment"><xbrli:period><xbrli:startDate>2026-01-01</xbrli:startDate><xbrli:endDate>2026-06-30</xbrli:endDate></xbrli:period><xbrli:scenario><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">aaa:Segment</xbrldi:explicitMember></xbrli:scenario></xbrli:context>
+      <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+      <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="current" unitRef="USD">1,200</ix:nonFraction>
+      <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="prior" unitRef="USD">900</ix:nonFraction>
+      <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="segment" unitRef="USD">999</ix:nonFraction>
+      <ix:nonFraction name="us-gaap:NetCashProvidedByUsedInOperatingActivities" contextRef="current" unitRef="USD">120</ix:nonFraction>
+      <ix:nonFraction name="us-gaap:PaymentsToAcquirePropertyPlantAndEquipment" contextRef="current" unitRef="USD">20</ix:nonFraction>
+    </html>
+    """
+    policy = module.sec_ingestion_policy({})
+    rows = module.build_inline_fallback_rows(company, filing, document, policy)
+
+    assert len(rows) == 1
+    assert rows[0]["period_end"] == "2026-06-30"
+    assert rows[0]["fiscal_period"] == "Q2"
+    assert rows[0]["revenue"] == 1_200
+    assert rows[0]["free_cash_flow"] == 100
+    assert rows[0]["source_id"] == "sec_inline_xbrl_filing"
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["_filing_fallback"]["comparative_contexts_excluded"] is True
+
+
+def test_sec_inline_xbrl_fallback_only_targets_unrepresented_filings() -> None:
+    module = load_script_module("05_sync_med_device_sec_fundamentals.py", "med_device_sec_gap_test")
+    policy = module.sec_ingestion_policy({})
+    filing = {
+        "accession_nodash": "000000000126000003",
+        "form": "10-Q",
+        "filing_date": "2026-07-28",
+        "report_date": "2026-06-30",
+        "primary_document": "aaa-20260630.htm",
+    }
+    prior_rows = [
+        {
+            "accession_nodash": "000000000126000001",
+            "period_end": "2026-03-31",
+            "form": "10-Q",
+            "filed_date": "2026-04-28",
+        }
+    ]
+    assert module.unrepresented_financial_filings([filing], prior_rows, policy) == [filing]
+
+    represented = [
+        {
+            "accession_nodash": filing["accession_nodash"],
+            "period_end": filing["report_date"],
+            "form": filing["form"],
+            "filed_date": filing["filing_date"],
+        }
+    ]
+    assert module.unrepresented_financial_filings([filing], represented, policy) == []
+
+
+def test_avns_delisting_is_effective_dated_and_non_investable() -> None:
+    universe_path = REPO_ROOT / "ticker_mapping" / "med_dev_tickers_clean_keep.csv"
+    with universe_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        universe = {row["ticker"]: row for row in csv.DictReader(handle)}
+    assert universe["AVNS"]["listing_status"] == "delisted"
+    assert universe["AVNS"]["is_primary_listing"] == "0"
+
+    membership_path = REPO_ROOT / "med_devices" / "data" / "med_device_historical_membership.csv"
+    with membership_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        membership = {row["internal_ticker"]: row for row in csv.DictReader(handle)}
+    assert membership["AVNS"]["start_date"] == "2014-10-21"
+    assert membership["AVNS"]["end_date"] == "2026-07-24"
+    assert membership["AVNS"]["membership_status"] == "historical"
+    assert membership["AVNS"]["event_type"] == "acquired_private"
+
+    config_text = (REPO_ROOT / "med_devices" / "config.yaml").read_text(encoding="utf-8")
+    assert "non_investable_listing_statuses:\n" in config_text
+    assert "    - delisted\n" in config_text
+    source_ids = {
+        row["source_id"] for row in load_source_registry(REPO_ROOT / "med_devices/data/free_source_registry.yaml")
+    }
+    assert "sec_inline_xbrl_filing" in source_ids
 
 
 def test_sec_ingestion_derives_reviewed_gross_profit_with_provenance() -> None:
@@ -1768,6 +2099,206 @@ def test_fda_targeted_footprints_support_denovo_and_supersede_old_product_codes(
         'device.device_report_product_code:"MZO" AND device.manufacturer_d_name:"OraSure Technologies, Inc."'
     )
     assert module.is_510k_or_denovo_identifier("DEN190025")
+
+
+def test_fda_targeted_footprints_expand_governed_manufacturer_aliases(tmp_path: Path) -> None:
+    module = load_script_module(
+        "08_sync_med_device_fda_core.py",
+        "med_device_fda_targeted_alias_test",
+    )
+    footprint_csv = tmp_path / "footprints.csv"
+    alias_csv = tmp_path / "aliases.csv"
+    footprint_csv.write_text(
+        "ticker,primary_fda_entity,product_codes,expected_cdrh_records,valid_from,reviewed_at\n"
+        'XRAY,"Dentsply Sirona, Inc.",NDP,yes,2026-08-10,2026-08-10\n',
+        encoding="utf-8",
+    )
+    alias_csv.write_text(
+        "ticker,alias_raw,valid_from,reviewed_at\nXRAY,DENTSPLY IH INC.,2026-08-10,2026-08-10\n",
+        encoding="utf-8",
+    )
+
+    endpoints = module.build_targeted_footprint_endpoints(
+        footprint_csv,
+        target_limit=1000,
+        include_postmarket=True,
+        tickers={"XRAY"},
+        asof=date(2026, 8, 12),
+        alias_path=alias_csv,
+    )
+    searches = {endpoint.search for endpoint in endpoints if endpoint.path == "event.json"}
+
+    assert 'device.manufacturer_d_name:"DENTSPLY IH INC."' in searches
+    assert not any(
+        'device.device_report_product_code:"NDP"' in search
+        and 'device.manufacturer_d_name:"DENTSPLY IH INC."' in search
+        for search in searches
+    )
+    assert (
+        'device.device_report_product_code:"NDP" AND device.manufacturer_d_name:"Dentsply Sirona, Inc."'
+    ) in searches
+    assert 'device.manufacturer_d_name:"Dentsply Sirona, Inc."' in searches
+    postmarket = [
+        endpoint for endpoint in endpoints if endpoint.path in {"recall.json", "enforcement.json", "event.json"}
+    ]
+    assert postmarket
+    assert all(endpoint.date_field for endpoint in postmarket)
+    assert all(endpoint.window_days > 0 for endpoint in postmarket)
+    assert all(endpoint.initial_lookback_days == 1096 for endpoint in postmarket)
+    event_endpoints = [endpoint for endpoint in postmarket if endpoint.path == "event.json"]
+    assert all(endpoint.window_days == 90 for endpoint in event_endpoints)
+    assert all(endpoint.partition_field == "mdr_report_key" for endpoint in event_endpoints)
+
+
+def test_canonical_mdr_family_dedup_is_deterministic_and_product_scoped() -> None:
+    module = load_script_module(
+        "78_build_med_device_fda_product_family_review.py",
+        "med_device_fda_family_dedup_test",
+    )
+    base = {
+        "asof_date": "2026-08-12",
+        "ticker": "XRAY",
+        "company_id": 64,
+        "report_number": "2511302-2026-00001",
+        "event_key": "",
+        "source_available_date": "2026-08-01",
+        "fda_manufacturer_id": "9252",
+        "product_code": "NDP",
+        "death_designated_flag": 0,
+        "injury_flag": 1,
+        "malfunction_flag": 0,
+    }
+    rows = [
+        {**base, "adverse_event_id": "100", "mdr_report_key": "100"},
+        {
+            **base,
+            "adverse_event_id": "101",
+            "mdr_report_key": "101",
+            "source_available_date": "2026-08-02",
+            "malfunction_flag": 1,
+        },
+        {
+            **base,
+            "adverse_event_id": "102",
+            "mdr_report_key": "102",
+            "product_code": "NOF",
+        },
+    ]
+
+    canonical = module.canonicalize_mdr_review_rows(rows)
+
+    assert (
+        canonical_mdr_family_key(
+            {"report_number": "2511302-2026-00001"},
+            "100",
+        )
+        == "report_number:2511302-2026-00001"
+    )
+    assert len(canonical) == 2
+    ndp = next(row for row in canonical if row["product_code"] == "NDP")
+    assert ndp["adverse_event_id"] == "101"
+    assert ndp["canonical_family_member_count"] == 2
+    assert ndp["canonical_family_member_ids"] == "100|101"
+
+
+def test_fda_late_reports_use_event_date_for_clinical_recency(tmp_path: Path) -> None:
+    feature_module = load_script_module(
+        "10_build_med_device_fda_features.py",
+        "med_device_fda_late_report_feature_test",
+    )
+    review_module = load_script_module(
+        "78_build_med_device_fda_product_family_review.py",
+        "med_device_fda_late_report_review_test",
+    )
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO dim_company(
+                company_id, ticker, cik, company_name, exchange, subsector,
+                country, currency, universe_status, is_active, first_seen_at,
+                updated_at
+            ) VALUES (
+                1, 'XRAY', '0000000001', 'Dentsply Sirona', 'NASDAQ', 'dental',
+                'United States', 'USD', 'active', 1, '2024-01-01', '2026-08-13'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_fda_manufacturer(
+                fda_manufacturer_id, manufacturer_name, manufacturer_name_norm,
+                parent_company_id, mapping_confidence, mapping_method,
+                created_at, updated_at
+            ) VALUES (
+                10, 'DENTSPLY TEST', 'DENTSPLY TEST', 1, 99.0,
+                'manual_override', '2026-08-13', '2026-08-13'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_fda_product_code(
+                product_code, device_name, medical_specialty, device_class,
+                regulation_number, source_id, created_at, updated_at
+            ) VALUES (
+                'DZE', 'Endosseous Dental Implant', 'DE', '2', '872.3640',
+                NULL, '2026-08-13', '2026-08-13'
+            )
+            """
+        )
+        for event_id, event_date, report_date in (
+            ("legacy", "2010-01-01", "2026-07-01"),
+            ("current", "2026-01-01", "2026-02-01"),
+            ("future_report", "2026-01-01", "2026-09-01"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO fact_fda_adverse_event(
+                    adverse_event_id, company_id, fda_manufacturer_id,
+                    product_code, event_date, report_date, death_count,
+                    injury_count, malfunction_count, event_type, payload_json,
+                    created_at, updated_at
+                ) VALUES (
+                    ?, 1, 10, 'DZE', ?, ?, 0, 1, 0, 'Injury', ?,
+                    '2026-08-13', '2026-08-13'
+                )
+                """,
+                (
+                    event_id,
+                    event_date,
+                    report_date,
+                    json.dumps({"mdr_report_key": event_id, "report_number": event_id}),
+                ),
+            )
+
+        policy = feature_module.fda_feature_policy(feature_module.load_yaml(REPO_ROOT / "med_devices" / "config.yaml"))
+        feature_row = feature_module.FdaFeatureRow(
+            asof_date="2026-08-13",
+            company_id=1,
+            ticker="XRAY",
+            company_name="Dentsply Sirona",
+        )
+        feature_module.count_adverse_events(
+            conn,
+            feature_row,
+            asof=date(2026, 8, 13),
+            policy=policy,
+        )
+        review_rows = review_module.mdr_rows(
+            conn,
+            company_id=1,
+            ticker="XRAY",
+            asof=date(2026, 8, 13),
+            window_start=date(2024, 8, 13),
+            mappings=[],
+            minimum_family_confidence=95.0,
+            minimum_manufacturer_confidence=95.0,
+        )
+
+    assert feature_row.injury_count_24m == 1
+    assert {row["adverse_event_id"] for row in review_rows} == {"current"}
 
 
 def test_osur_regulatory_evidence_closes_data_fix_without_override() -> None:

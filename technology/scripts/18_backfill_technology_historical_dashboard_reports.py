@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import csv
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -242,6 +243,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--restatement-reason",
+        default="",
+        help=(
+            "Force selected historical snapshots to research/PIT status rather than strict OOS, "
+            "and stamp this reason into row and manifest provenance."
+        ),
+    )
     parser.add_argument(
         "--include-stage11-survivorship-panel",
         action="store_true",
@@ -553,6 +562,9 @@ class _BackfillAbort(Exception):
 def run_with_args(args: argparse.Namespace) -> int:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
+    restatement_reason = str(args.restatement_reason or "").strip()
+    if restatement_reason:
+        os.environ["TECHNOLOGY_HISTORICAL_RESTATEMENT_REASON"] = restatement_reason
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     command_db_path = args.db.expanduser().resolve() if args.db else None
@@ -695,6 +707,19 @@ def run_with_args(args: argparse.Namespace) -> int:
         # including the abort paths above; a failed run must not leave a historical
         # snapshot in the current-dashboard root.
         if historical_published and not args.dry_run and not args.no_restore_latest_root:
+            preserved_historical_snapshots: dict[tuple[str, str], tuple[Path, dict[Path, bytes]]] = {}
+            for spec in families:
+                current_asof = latest_current_asof(db_path, spec)
+                snapshot_dir = dashboard_dir(config, base_dir, spec) / current_asof
+                if current_asof in dates and snapshot_dir.exists():
+                    preserved_historical_snapshots[(spec.family, current_asof)] = (
+                        snapshot_dir,
+                        {
+                            path.relative_to(snapshot_dir): path.read_bytes()
+                            for path in snapshot_dir.rglob("*")
+                            if path.is_file()
+                        },
+                    )
             restore_aborted = False
             for spec in families:
                 if restore_aborted:
@@ -751,6 +776,44 @@ def run_with_args(args: argparse.Namespace) -> int:
                         )
                         print(f"{type(exc).__name__}: {exc}")
 
+            # Current-root publishers also update their dated current-asof folder.
+            # Restore any selected historical snapshot from memory so root restoration
+            # cannot silently replace a corrected PIT artifact with current-mode output.
+            for spec in families:
+                current_asof = latest_current_asof(db_path, spec)
+                preserved = preserved_historical_snapshots.get((spec.family, current_asof))
+                if preserved is None:
+                    continue
+                snapshot_dir, files = preserved
+                try:
+                    for relative_path, payload in files.items():
+                        destination = snapshot_dir / relative_path
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(payload)
+                    validate_snapshot_files(snapshot_dir, spec, current_asof, historical_mode=True)
+                    if args.include_stage11_survivorship_panel:
+                        validate_stage11_sidecar(snapshot_dir, spec, current_asof)
+                    rows.append(
+                        {
+                            "asof_date": current_asof,
+                            "family": spec.family,
+                            "step_id": "restore_target_historical_snapshot",
+                            "returncode": 0,
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001 - report restoration failure in the run manifest
+                    failures += 1
+                    rows.append(
+                        {
+                            "asof_date": current_asof,
+                            "family": spec.family,
+                            "step_id": "restore_target_historical_snapshot",
+                            "returncode": 1,
+                            "stderr_tail": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    print(f"{type(exc).__name__}: {exc}")
+
     summary = {
         "status": "PASS" if failures == 0 else "FAIL",
         "target_dates": len(dates),
@@ -759,6 +822,7 @@ def run_with_args(args: argparse.Namespace) -> int:
         "families": [spec.family for spec in families],
         "failures": failures,
         "dry_run": bool(args.dry_run),
+        "restatement_reason": restatement_reason,
     }
     write_run_report(output_dir, rows, summary)
     return 0 if failures == 0 else 1

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from portfolio_layer.risk.local_prices import (
     load_local_adjusted_price_fallbacks,
+    prefer_strictly_more_complete_local_history,
 )
 
 
@@ -117,9 +118,7 @@ def test_local_adjusted_price_fallback_is_point_in_time_and_allowlisted(
     )
 
     assert prices == {"GRC": [("2026-07-23", 52.0), ("2026-07-24", 53.0)]}
-    assert provenance["GRC"].provider == (
-        "local_sqlite:test_db:yahoo_finance_adjusted"
-    )
+    assert provenance["GRC"].provider == ("local_sqlite:test_db:yahoo_finance_adjusted")
     assert provenance["GRC"].last_date == "2026-07-24"
     assert len(provenance["GRC"].extracted_sha256) == 64
     assert summaries[0]["loaded_ticker_count"] == 1
@@ -179,8 +178,42 @@ def test_local_adjusted_price_fallback_can_include_market_instruments(
     )
 
     assert prices == {"SPY": [("2026-07-24", 640.0)]}
-    assert provenance["SPY"].provider == (
-        "local_sqlite:test_db:yahoo_finance_adjusted"
-    )
+    assert provenance["SPY"].provider == ("local_sqlite:test_db:yahoo_finance_adjusted")
     assert summaries[0]["include_market_instruments"] is True
     assert summaries[0]["requested_ticker_count"] == 1
+
+
+def test_complete_local_history_can_replace_gapped_fetched_series() -> None:
+    fetched = [
+        ("2026-07-20", 100.0),
+        ("2026-07-22", 102.0),
+    ]
+    local = [
+        ("2026-07-20", 200.0),
+        ("2026-07-21", 201.0),
+        ("2026-07-22", 202.0),
+    ]
+
+    assert prefer_strictly_more_complete_local_history(fetched, local)
+
+
+def test_local_history_never_replaces_with_a_different_gap_or_shorter_edge() -> None:
+    fetched = [
+        ("2026-07-20", 100.0),
+        ("2026-07-21", 101.0),
+        ("2026-07-22", 102.0),
+    ]
+    different_gap = [
+        ("2026-07-19", 199.0),
+        ("2026-07-20", 200.0),
+        ("2026-07-22", 202.0),
+        ("2026-07-23", 203.0),
+    ]
+    shorter_right_edge = [
+        ("2026-07-19", 199.0),
+        ("2026-07-20", 200.0),
+        ("2026-07-21", 201.0),
+    ]
+
+    assert not prefer_strictly_more_complete_local_history(fetched, different_gap)
+    assert not prefer_strictly_more_complete_local_history(fetched, shorter_right_edge)

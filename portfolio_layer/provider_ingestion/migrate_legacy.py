@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.contracts import sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.paths import ensure_not_prod_path, resolve_runtime_paths  # noqa: E402
+from portfolio_layer.provider_ingestion.health import validate_provider_ingestion_policy  # noqa: E402
 from portfolio_layer.provider_ingestion.store import (  # noqa: E402
     connect_store,
     freeze_universe,
@@ -92,6 +93,11 @@ def _cycle_requests(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         grouped.setdefault(key, []).append(row)
     output: list[dict[str, Any]] = []
     for (provider, endpoint, ticker, available), group in sorted(grouped.items()):
+        response_hashes = {str(row["response_sha256"]) for row in group}
+        if len(response_hashes) != 1:
+            raise ValueError(
+                f"Legacy request has conflicting response hashes: {provider}/{endpoint}/{ticker}/{available}"
+            )
         output.append(
             {
                 "provider": provider,
@@ -141,6 +147,7 @@ def main() -> int:
     ingestion = cfg_get(config, "provider_ingestion", {})
     if not isinstance(monitor, dict) or not isinstance(ingestion, dict):
         raise ValueError("Provider and monitor configuration must be mappings")
+    validate_provider_ingestion_policy(ingestion)
     legacy_path = ensure_not_prod_path(
         args.legacy_db.resolve()
         if args.legacy_db
@@ -159,12 +166,18 @@ def main() -> int:
         ),
         label="provider observation database",
     )
-    output_dir = (
-        args.output_dir.resolve()
-        if args.output_dir
-        else paths.output_dir / str(ingestion.get("output_subdir", "provider_ingestion")) / "migration"
+    output_dir = ensure_not_prod_path(
+        (
+            args.output_dir
+            if args.output_dir
+            else paths.output_dir / str(ingestion.get("output_subdir", "provider_ingestion")) / "migration"
+        ),
+        label="provider migration output path",
     )
-    legacy = sqlite3.connect(str(legacy_path))
+    if not legacy_path.is_file():
+        raise FileNotFoundError(f"Legacy expectations-monitor database is missing: {legacy_path}")
+    legacy = sqlite3.connect(legacy_path.as_uri() + "?mode=ro", uri=True)
+    legacy.execute("PRAGMA query_only=ON")
     legacy.row_factory = sqlite3.Row
     try:
         cycles = legacy.execute(
@@ -172,9 +185,7 @@ def main() -> int:
             "MAX(available_at_utc) last_seen FROM provider_estimate_snapshots "
             "GROUP BY retrieval_cycle ORDER BY first_seen,retrieval_cycle"
         ).fetchall()
-        legacy_count = int(
-            legacy.execute("SELECT COUNT(*) FROM provider_estimate_snapshots").fetchone()[0]
-        )
+        legacy_count = int(legacy.execute("SELECT COUNT(*) FROM provider_estimate_snapshots").fetchone()[0])
         if not args.execute:
             write_manifest(
                 output_dir / "legacy_migration_manifest.json",
@@ -196,7 +207,7 @@ def main() -> int:
         calendar_name = str(ingestion.get("exchange_calendar", "XNYS"))
         decision_cutoff = str(ingestion.get("decision_cutoff_local", "09:25"))
         summary: list[dict[str, Any]] = []
-        lock_path = store_path.with_suffix(store_path.suffix + ".migration.lock")
+        lock_path = store_path.with_suffix(store_path.suffix + ".writer.lock")
         with writer_lock(lock_path, timeout_sec=timeout):
             store = connect_store(store_path, timeout_sec=timeout)
             try:
@@ -220,9 +231,10 @@ def main() -> int:
                     providers = sorted({str(row["provider"]) for row in rows})
                     available_start = min(str(row["available_at_utc"]) for row in rows)
                     available_end = max(str(row["available_at_utc"]) for row in rows)
-                    observed_date = datetime.fromisoformat(
-                        available_end.replace("Z", "+00:00")
-                    ).astimezone(zone).date().isoformat()
+                    cycle_started = min(str(row["fetched_at_utc"]) for row in rows)
+                    observed_date = (
+                        datetime.fromisoformat(available_end.replace("Z", "+00:00")).astimezone(zone).date().isoformat()
+                    )
                     stated_date = _cycle_date(cycle)
                     mismatch = bool(stated_date and stated_date != observed_date)
                     universe_id = freeze_universe(
@@ -240,7 +252,7 @@ def main() -> int:
                         requested_portfolio_as_of=stated_date,
                         actual_capture_date=observed_date,
                         universe_id=universe_id,
-                        started_at_utc=available_start,
+                        started_at_utc=cycle_started,
                         completed_at_utc=available_end,
                         request_records=requests,
                         source_code_digest=sha256_file(Path(__file__).resolve()),
@@ -281,9 +293,7 @@ def main() -> int:
                                 annotation["annotation_version"],
                                 datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                                 hashlib.sha256(
-                                    json.dumps(
-                                        annotation, sort_keys=True, separators=(",", ":")
-                                    ).encode("utf-8")
+                                    json.dumps(annotation, sort_keys=True, separators=(",", ":")).encode("utf-8")
                                 ).hexdigest(),
                             ),
                         )

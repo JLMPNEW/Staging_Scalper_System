@@ -147,6 +147,7 @@ universe_validation:
     - active_financial_status_e
     - inactive_or_not_investable
     - invalid_or_inactive
+    - delisted
   investable_security_types:
     - common stock
     - ordinary shares
@@ -305,6 +306,7 @@ sec_ingestion:
   output_csv: "../output/med_devices_reports/med_device_sec_ingestion_coverage.csv"
   submissions_source_id: "sec_submissions"
   companyfacts_source_id: "sec_companyfacts"
+  inline_xbrl_source_id: "sec_inline_xbrl_filing"
   sec_archives_base: "https://www.sec.gov/Archives/edgar/data"
   cache_dir: "../output/med_devices_cache/sec_ingestion"
   validation_cache_dir: "../output/med_devices_cache/universe_validation"
@@ -312,6 +314,8 @@ sec_ingestion:
   companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
   submissions_file_url_template: "https://data.sec.gov/submissions/{file_name}"
   fetch_paginated_submissions: true
+  inline_xbrl_fallback_enabled: true
+  inline_xbrl_max_filings_per_company: 1
   user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
   cache_ttl_hours: 24.0
   request_sleep_sec: 0.15

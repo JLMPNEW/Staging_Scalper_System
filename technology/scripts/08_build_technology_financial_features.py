@@ -46,6 +46,18 @@ FLOW_METRICS = {
     "stock_based_compensation",
 }
 CRITICAL_METRICS = {"revenue", "assets"}
+SIX_K_CORE_METRICS = frozenset(
+    {
+        "assets",
+        "cash_and_equivalents",
+        "equity",
+        "gross_profit",
+        "net_income",
+        "operating_cash_flow",
+        "operating_income",
+        "revenue",
+    }
+)
 FLOW_USD_METRICS = {
     "revenue",
     "gross_profit",
@@ -247,7 +259,7 @@ def rebuild_canonical_for_ticker(conn: Any, ticker: str, source_id: str) -> int:
         FROM fact_sec_xbrl_fact_raw
         WHERE ticker = ?
           AND source_id = ?
-          AND form_type IN ('10-K', '10-K/A', '10-Q', '10-Q/A', '20-F', '20-F/A', '40-F')
+          AND form_type IN ('10-K', '10-K/A', '10-Q', '10-Q/A', '20-F', '20-F/A', '40-F', '6-K', '6-K/A')
           AND COALESCE(accession_number, '') <> ''
           AND COALESCE(end_date, '') <> ''
         ORDER BY accession_number, taxonomy, concept, unit
@@ -452,12 +464,47 @@ def load_filings(conn: Any, ticker: str, source_id: str) -> list[dict[str, Any]]
         SELECT accession_number, form_type, filing_date, report_date, fiscal_year, fiscal_period
         FROM fact_sec_filing
         WHERE ticker = ? AND source_id = ?
-          AND form_type IN ('10-K', '10-K/A', '10-Q', '10-Q/A', '20-F', '20-F/A', '40-F')
+          AND (
+                form_type IN ('10-K', '10-K/A', '10-Q', '10-Q/A', '20-F', '20-F/A', '40-F')
+                OR (
+                    form_type IN ('6-K', '6-K/A')
+                    AND (
+                        SELECT COUNT(DISTINCT canonical_metric)
+                        FROM fact_financial_statement_canonical AS canonical
+                        WHERE canonical.ticker = fact_sec_filing.ticker
+                          AND canonical.accession_number = fact_sec_filing.accession_number
+                          AND canonical.canonical_metric IN (
+                              'assets', 'cash_and_equivalents', 'equity',
+                              'gross_profit', 'net_income', 'operating_cash_flow',
+                              'operating_income', 'revenue'
+                          )
+                    ) >= 2
+                )
+              )
         ORDER BY COALESCE(report_date, filing_date), filing_date
         """,
         (ticker, source_id),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def filing_financial_period_end(
+    form_type: str,
+    metadata_report_date: date,
+    filing_facts: list[CanonicalFact],
+) -> date | None:
+    if form_type.upper() not in {"6-K", "6-K/A"}:
+        return metadata_report_date
+    metrics_by_end: dict[date, set[str]] = defaultdict(set)
+    for fact in filing_facts:
+        if fact.metric in SIX_K_CORE_METRICS and fact.end_date <= metadata_report_date:
+            metrics_by_end[fact.end_date].add(fact.metric)
+    coherent_periods = [
+        period_end
+        for period_end, metrics in metrics_by_end.items()
+        if len(metrics) >= 2
+    ]
+    return max(coherent_periods) if coherent_periods else None
 
 
 def duration_days(fact: CanonicalFact) -> int | None:
@@ -748,6 +795,22 @@ def financial_sanity_issues(feature: dict[str, Any]) -> list[str]:
     return issues
 
 
+def delete_ticker_feature_rows(
+    conn: Any,
+    *,
+    ticker: str,
+    source_id: str,
+    model_family: str,
+) -> None:
+    conn.execute(
+        """
+        DELETE FROM feature_financial_statement
+        WHERE ticker = ? AND source_id = ? AND model_family = ?
+        """,
+        (ticker, source_id, model_family),
+    )
+
+
 def upsert_feature(conn: Any, feature: dict[str, Any]) -> None:
     now = utc_now()
     fields = [
@@ -943,11 +1006,18 @@ def build_ticker_features(
     for filing in load_filings(conn, ticker, filings_source):
         accession = str(filing.get("accession_number") or "")
         filing_facts = by_accession.get(accession, [])
-        report_date = parse_date(filing.get("report_date"))
+        metadata_report_date = parse_date(filing.get("report_date"))
         filing_date = parse_date(filing.get("filing_date"))
-        if not accession or not filing_facts or report_date is None or filing_date is None:
+        if not accession or not filing_facts or metadata_report_date is None or filing_date is None:
             continue
         form_type = str(filing.get("form_type") or "")
+        report_date = filing_financial_period_end(
+            form_type,
+            metadata_report_date,
+            filing_facts,
+        )
+        if report_date is None:
+            continue
         is_annual = form_type.startswith(("10-K", "20-F", "40-F"))
         selected_facts: dict[str, CanonicalFact] = {}
         metric_values: dict[str, float | None] = {}
@@ -1248,6 +1318,15 @@ def main() -> None:
                     )
                     if not features:
                         add_issue(conn, ticker, facts_source, "missing_financial_features", "No canonical SEC financial features could be built.")
+                    else:
+                        # A successful ticker rebuild is a full replacement. This removes
+                        # stale rows when corrected filing periods change a feature key.
+                        delete_ticker_feature_rows(
+                            conn,
+                            ticker=ticker,
+                            source_id=facts_source,
+                            model_family=model_family,
+                        )
                     rows: list[dict[str, Any]] = []
                     for feature in features:
                         sanity_issues = financial_sanity_issues(feature)

@@ -62,9 +62,7 @@ def _read_source_rows(
                 if adjustment not in accepted_adjustments:
                     continue
                 ticker = str(raw_ticker).strip().upper()
-                grouped.setdefault(ticker, []).append(
-                    (str(raw_date)[:10], float(raw_value))
-                )
+                grouped.setdefault(ticker, []).append((str(raw_date)[:10], float(raw_value)))
     return grouped
 
 
@@ -73,6 +71,27 @@ def _series_sha256(rows: list[tuple[str, float]]) -> str:
     for bar_date, value in rows:
         digest.update(f"{bar_date},{value:.17g}\n".encode())
     return digest.hexdigest()
+
+
+def prefer_strictly_more_complete_local_history(
+    fetched_rows: list[tuple[str, float]],
+    local_rows: list[tuple[str, float]],
+) -> bool:
+    """Return whether a whole local series safely supersedes a fetched series.
+
+    Price levels from different adjusted-data providers must never be spliced.
+    A local series is preferred only when it contains every fetched session,
+    covers at least the same date range, and adds one or more observations.
+    """
+    if not fetched_rows or not local_rows or len(local_rows) <= len(fetched_rows):
+        return False
+    fetched_dates = {bar_date for bar_date, _ in fetched_rows}
+    local_dates = {bar_date for bar_date, _ in local_rows}
+    return (
+        local_rows[0][0] <= fetched_rows[0][0]
+        and local_rows[-1][0] >= fetched_rows[-1][0]
+        and fetched_dates.issubset(local_dates)
+    )
 
 
 def load_local_adjusted_price_fallbacks(
@@ -108,43 +127,23 @@ def load_local_adjusted_price_fallbacks(
     summaries: list[dict[str, Any]] = []
 
     for index, raw_source in enumerate(raw_sources):
-        if not isinstance(raw_source, dict) or not bool(
-            raw_source.get("enabled", True)
-        ):
+        if not isinstance(raw_source, dict) or not bool(raw_source.get("enabled", True)):
             continue
         name = str(raw_source.get("name") or f"local_sqlite_{index + 1}").strip()
-        database_path = resolve_path(
-            raw_source.get("database_path"), base_dir=base_dir
-        )
-        source_ids = [
-            str(value).strip()
-            for value in raw_source.get("source_ids", [])
-            if str(value).strip()
-        ]
-        pipelines = {
-            str(value).strip()
-            for value in raw_source.get("source_pipelines", [])
-            if str(value).strip()
-        }
-        include_market_instruments = bool(
-            raw_source.get("include_market_instruments", False)
-        )
+        database_path = resolve_path(raw_source.get("database_path"), base_dir=base_dir)
+        source_ids = [str(value).strip() for value in raw_source.get("source_ids", []) if str(value).strip()]
+        pipelines = {str(value).strip() for value in raw_source.get("source_pipelines", []) if str(value).strip()}
+        include_market_instruments = bool(raw_source.get("include_market_instruments", False))
         accepted_adjustments = {
             str(value).strip().lower()
-            for value in raw_source.get(
-                "accepted_price_adjustments", ["adjusted_close"]
-            )
+            for value in raw_source.get("accepted_price_adjustments", ["adjusted_close"])
             if str(value).strip()
         }
         candidate_tickers = sorted(
             ticker
             for ticker, (pipeline, role) in universe_metadata.items()
             if ticker not in prices
-            and (
-                not pipelines
-                or pipeline in pipelines
-                or (include_market_instruments and role == "market_instrument")
-            )
+            and (not pipelines or pipeline in pipelines or (include_market_instruments and role == "market_instrument"))
         )
         source_summary: dict[str, Any] = {
             "name": name,
@@ -166,9 +165,7 @@ def load_local_adjusted_price_fallbacks(
 
         loaded_dates: list[str] = []
         for source_id in source_ids:
-            remaining = [
-                ticker for ticker in candidate_tickers if ticker not in prices
-            ]
+            remaining = [ticker for ticker in candidate_tickers if ticker not in prices]
             grouped = _read_source_rows(
                 database_path,
                 tickers=remaining,
@@ -194,13 +191,10 @@ def load_local_adjusted_price_fallbacks(
         loaded_for_source = [
             item
             for item in provenance.values()
-            if item.database_path == str(database_path)
-            and item.provider.startswith(f"local_sqlite:{name}:")
+            if item.database_path == str(database_path) and item.provider.startswith(f"local_sqlite:{name}:")
         ]
         source_summary["loaded_ticker_count"] = len(loaded_for_source)
-        source_summary["loaded_row_count"] = sum(
-            item.row_count for item in loaded_for_source
-        )
+        source_summary["loaded_row_count"] = sum(item.row_count for item in loaded_for_source)
         source_summary["first_date"] = min(loaded_dates) if loaded_dates else ""
         source_summary["last_date"] = max(loaded_dates) if loaded_dates else ""
         summaries.append(source_summary)

@@ -1,6 +1,6 @@
 # Consumer Defensive Implementation Plan
 
-Status: Stages 0-4 structurally implemented; the isolated hardened replay passes 38/39 Stage 4 checks, six Companyfacts fallback gaps and the census terminology review remain open, the production database is untouched, and later stages are deferred  
+Status: Stages 0-4 are deployed through migration v10; Stage 5 is implemented and passes its disposable `2026-08-10` validation and foundation audit, with production Stage 5 rollout awaiting explicit approval; Stage 6A is next
 Package: `consumer_defensive`  
 Canonical Portfolio Layer sector: `Consumer Staples`  
 Internal universe sector label: `Consumer Defensive`
@@ -122,6 +122,7 @@ consumer_defensive/
         db.py
         financial_pipeline.py
         financial_semantics.py
+        inline_xbrl.py
         input_manifest.py
         market_data.py
         market_validation.py
@@ -167,15 +168,17 @@ consumer_defensive/
         05_build_consumer_defensive_market_features.py
         06_validate_consumer_defensive_market_stage.py
         07_sync_consumer_defensive_sec_fundamentals.py
+        07a_sync_consumer_defensive_inline_xbrl_fallback.py
         08_build_consumer_defensive_financial_features.py
         08a_run_consumer_defensive_specialized_disclosure_census.py
         08b_validate_consumer_defensive_financial_and_disclosure_stage.py
+        08c_build_consumer_defensive_census_review_pack.py
         11_sync_consumer_defensive_fx_rates.py
 tests/
     consumer_defensive/
 ```
 
-Stage 5 and later modules—including positioning, Stage 6 scoring features, the Consumer Defensive dedicated-parser and factor-validation adapters, calibrated scoring, publishing, Portfolio Layer handoff, orchestration, and backfill—remain deferred. Their filenames and numbers must be assigned without colliding with implemented entry points. Once Stage 12 exists, the refresh runner's explicit step table is the authoritative run order.
+Stage 5 modules now occupy scripts `09`, `09a`, `10`, `10a`, and `10b`. Stage 6 scoring features, the Consumer Defensive dedicated-parser and factor-validation adapters, calibrated scoring, publishing, Portfolio Layer handoff, orchestration, and backfill remain deferred. Their filenames and numbers must not collide with implemented entry points. Once Stage 12 exists, the refresh runner's explicit step table is the authoritative run order.
 
 The repository ignores `*.csv` by default. Every reviewed input listed in `data/authoritative_input_manifest.yaml` must have a narrow `.gitignore` exception and be tracked, including `ticker_mapping/consumer_defensive.csv`, `consumer_defensive/system_csvs/*.csv`, and the authoritative CSVs under `consumer_defensive/data/`. `core/input_manifest.py` verifies the entire discovered authoritative CSV inventory, exact repository-relative paths, parsed nonblank row counts, review/schema metadata, and SHA-256 hashes. Missing, extra, duplicate, escaping, or tampered inputs fail configuration loading before database mutation.
 
@@ -629,14 +632,16 @@ Ten terminal events are calibration eligible. WBA remains explicitly excluded on
 ### Stage 4 - SEC Financial Statements
 
 Load SEC submissions, filing metadata, raw XBRL facts, canonical financial statements, issuer reporting profiles, and FX history before building point-in-time common financial features.
-Implemented order, following Technology's SEC -> FX -> canonical-feature dependency:
+Implemented Consumer Defensive order. It follows the same SEC -> FX -> canonical-feature data dependency but does not invoke Technology scripts, configuration, caches, tables, or sector logic:
 
 ```powershell
 python consumer_defensive\scripts\07_sync_consumer_defensive_sec_fundamentals.py
+python consumer_defensive\scripts\07a_sync_consumer_defensive_inline_xbrl_fallback.py
 python consumer_defensive\scripts\11_sync_consumer_defensive_fx_rates.py
 python consumer_defensive\scripts\08_build_consumer_defensive_financial_features.py
 python consumer_defensive\scripts\08a_run_consumer_defensive_specialized_disclosure_census.py
 python consumer_defensive\scripts\08b_validate_consumer_defensive_financial_and_disclosure_stage.py
+python consumer_defensive\scripts\08c_build_consumer_defensive_census_review_pack.py
 ```
 
 Stage 4 also runs the first disclosure-availability census because it already owns the accepted-time filing cache. `data/consumer_defensive_metric_applicability.csv` assigns all 108 active and 11 historical names to a reviewed applicability subtype. `data/consumer_defensive_specialized_disclosure_terms.yaml` defines explicit search phrases for every registered candidate metric. The census is routed by cohort and subtype and stores only discovery evidence and coverage status; it does not parse numeric specialized observations and cannot change a production weight.
@@ -647,7 +652,7 @@ SEC and FX cache writes are atomic and return per-file byte/SHA-256 records plus
 
 Yahoo FX validation preserves the provider's positional timestamp/close semantics. A JSON `null` close represents a missing daily quote and is skipped; non-null values must remain numeric, finite, and positive. At most two rows no more than seven calendar days beyond the requested boundaries may be validated and filtered, covering Yahoo's in-progress next-day FX row without allowing a materially wrong cache object. The exact symbol, equal nonempty arrays, unique increasing timestamps and UTC dates, and at least one usable requested-window observation remain mandatory.
 
-Stage 4 schema changes are frozen ordered migration units registered by checksum through migration v9. The current SEC ingestion-config is v8, and issuer-scope contract v3 binds normalized reporting currency with ticker/company/CIK identity. Ingestion-config v8 explicitly maps recognized amendment and transitional financial-form variants to their base Companyfacts family while continuing to reject cross-family conflicts. Schema migration v8 quarantines earlier-scope reconciliation/snapshot pointers in place and invalidates trust when filing-company or reporting-currency inputs change. Schema migration v9 adds exact accession-keyed indexes on raw facts, canonical facts, and disclosure-census evidence so shared-accession reconciliation remains proportional to the affected filing rather than the full Stage 4 history. A migration ledger gap, future version, checksum mismatch, backfill-parity failure, or foreign-key failure aborts the complete unit. Large identity/lifecycle backfills use bounded keyset batches. Legacy current projections and incompatible legacy identities cannot be accepted as a current reconciliation.
+Stage 4 schema changes are frozen ordered migration units registered by checksum through migration v10. The current SEC ingestion-config is v8, and issuer-scope contract v3 binds normalized reporting currency with ticker/company/CIK identity. Ingestion-config v8 explicitly maps recognized amendment and transitional financial-form variants to their base Companyfacts family while continuing to reject cross-family conflicts. Schema migration v8 quarantines earlier-scope reconciliation/snapshot pointers in place and invalidates trust when filing-company or reporting-currency inputs change. Migration v9 adds exact accession-keyed indexes for bounded shared-accession reconciliation; migration v10 adds exact sealed inline-XBRL fallback run provenance and reporting-profile fallback lineage without changing the SEC acquisition snapshot. A migration ledger gap, future version, checksum mismatch, backfill-parity failure, or foreign-key failure aborts the complete unit. Large identity/lifecycle backfills use bounded keyset batches. Legacy current projections and incompatible legacy identities cannot be accepted as a current reconciliation.
 
 The SEC ingestion contract is chronological. The singleton as-of watermark advances transactionally with full, targeted, partial, and reconciliation mutations. A request older than the watermark is rejected before configuration, cache, provider, or database mutation. Historical reconstruction from `2019-01-02` must use a fresh scratch database initialized at the earliest required date and advance in order; the current production database is never rewound.
 
@@ -663,11 +668,11 @@ This early census answers which specialized metrics have enough issuer disclosur
 
 The `2026-08-11` report is retained only as a legacy pre-hardening baseline. The fresh isolated chronological v5 replay completed under schema migration v9, SEC ingestion-config v8, and issuer-scope v3 without writing the production database. SEC cache-only reconciliation covered all 119 issuers with zero failures: 209,111 issuer-filing associations, 208,705 unique accessions, 406 shared accessions, 2,149,695 raw XBRL facts, and 952 selected sealed documents. The exact 1,287-file, 947,150,199-byte SEC cache manifest has SHA-256 `caf6d962f05485aa46a123bc488d32f53b851dc3b7f0e338e7adea3af6fd669c`; the association manifest has SHA-256 `d1300f5fd1eb15b3dd1431b2f9312c4f5658df9689c5c2a9f8c6fd31437fa540`.
 
-The current validator passes 38/39 checks; only `companyfacts_coverage_complete` is false. It reports 113/119 covered profiles, 230,913 canonical facts, zero missing canonical FX conversions, and 119 feature rows: 11 complete, 85 partial, 3 missing, 9 stale, and 11 ineligible. The sealed census parsed 952 documents with zero failures and produced 4,522 summary rows, 781 evidence rows, and 38 metrics. The database contains 956 hydrated document records, of which 952 are selected into and parsed from the current exact seal.
+A fresh chronological migration-v10 replay began with an empty database and consumed only the retained `2026-08-10` caches. BTI and BUD's later 6-K primary documents contain no non-DEI numeric inline facts, so they do not move the financial reporting anchor. FMX, JBS, KOF, and UL produced 13,176 numeric facts, 3,111 consolidated facts, and 130 model-mapped facts under `consumer_defensive_inline_xbrl_v1`. After rebuild the validator passes 40/40 checks with 119/119 covered profiles, zero fallback-provenance mismatches, 2,152,806 raw facts, 231,024 canonical facts, zero missing canonical FX conversions, and 119 feature rows with the prior quality distribution. Streamed semantic hashes for raw, canonical, feature, and current census-v3 tables exactly match the retained migration-v10 continuation.
 
 The official FX cache-only replay for `2010-01-01` through `2026-08-10` accepted 12 currencies and published 49,867 rows: 49,815 usable and 52 quarantined. Its exact 12-file, 5,694,168-byte range manifest has SHA-256 `99deee8510b8e10b4ed581930fe1ad7f06fa01c67f9532563809126f19e486f6`. CLF is the sole upstream source gap because its preserved Yahoo payload contains only `2026-08-11`, outside the requested cutoff; the sync correctly reports partial status and exits nonzero. No selected canonical fact requires CLF, all five required currencies are covered, and `canonical_fx_missing` is zero, so this disclosed source gap is not an additional validator failure.
 
-BTI, BUD, FMX, JBS, KOF, and UL are the six confirmed foreign-private-issuer/inline-XBRL Companyfacts fallback gaps. They are coverage work, not canonicalization or shared-parser-kernel defects, and require explicit resolution or governance adjudication. Stage 4 therefore remains open, as does the separate census terminology review. Separately, Stage 6B must establish a complete PIT historical filing/document inventory back to `2019-01-02`; a complete current-date seal does not prove that inventory.
+The Companyfacts/inline-XBRL code gap is resolved. The terminology workflow generated and adjudicated a deterministic 10-row review pack from 1,067 candidates, covering all four cohorts, both census outcomes, active/historical roles, domestic/foreign profiles, annual/interim forms, and all six metric families. The reviewed standalone `sales leaders` trigger was removed, census parser v3 was rerun from the exact seal, and the regenerated ledger validates `ADJUDICATED`. The explicitly approved production rollout completed after a transactionally consistent 1.382 GB pre-change backup and backup-only rehearsal. Migrations v2-v10, full `2026-08-11` SEC/FX/fallback/financial/census rebuild, and the live 40-check validator pass. Production integrity and foreign keys are clean; the full Consumer Defensive/shared-parser suite passes 402 tests with 6 platform-specific skips. Stage 4 production rollout is complete. Separately, Stage 6B must establish a complete PIT historical filing/document inventory back to `2019-01-02`; a complete current-date seal does not prove that inventory.
 
 
 Exit gate:
@@ -691,6 +696,14 @@ Exit gate:
 
 Load Consumer Defensive-owned normalized insider, 13F, short-interest, and borrow facts from approved sources. External upstream stores are read-only.
 
+Implemented boundary:
+
+- `core/stage5_schema.py` owns the checksummed, atomic Stage 5 schema migration and source contract.
+- `core/stage5_import.py` imports Form 4 current truth by CIK, authoritative-source 13F/FINRA/borrow rows, stable observation identities, and PIT share-count proxies used only when FINRA does not provide short float percentage.
+- `core/stage5.py` owns upstream handoff generation, read-only source audits, validation, and the daily foundation-coverage audit.
+- scripts `09`, `09a`, `10`, `10a`, and `10b` are Consumer Defensive entry points. The optional cache rematch utility is owned by the neutral `market_positioning` package and writes only the explicit target passed to it.
+- source birthdates, age limits, required coverage thresholds, and exact allowed upstream source names are configuration contracts. Missing pre-birth or unavailable data remain null.
+
 Exit gate:
 
 - source birthdates are explicit;
@@ -699,6 +712,17 @@ Exit gate:
 - one PIT source row exists for each eligible ticker/date where the source should exist;
 - the foundation-coverage audit reports daily cohort breadth, source availability, identifier gaps, and terminal-event gaps from January 2, 2019; and
 - the continuation review decides whether to proceed to Stage 6A, implement a limited shadow candidate, or defer. This checkpoint does not certify the final feature panel.
+
+Disposable acceptance evidence at `2026-08-10`:
+
+- Form 4: 14,239 observations / 104 taxonomy tickers;
+- 13F: 1,652 PIT observations / 114 tickers, with 104/108 numeric current coverage;
+- FINRA short interest: 12,335 observations / 114 tickers, with 104/108 numeric current coverage;
+- borrow: zero observations, explicitly optional;
+- required positioning features: 100/108 current names complete (`92.593%`, minimum `80%`);
+- foundation audit: PASS over 1,911 dates and 7,644 date/cohort rows, no canonical FX gap, WBA terminal gap explicitly represented, earliest potential common positioning date `2026-02-27`, continuation `proceed_stage6a`.
+
+The rehearsal used disposable database copies and cache-only neutral-source rematching. Production Consumer Defensive and shared positioning databases were not mutated. Production rollout remains a separately approved operational step.
 
 ### Stage 6A - Core Scoring Feature Contract
 
@@ -1116,15 +1140,12 @@ The second slice is Technology Stage 3: load the complete market/corporate-actio
 
 ### Current ordered checkpoint
 
-Stages 0-4 and terminal-event reconciliation are structurally implemented. The hardened Stage 4 code contract now includes ordered immutable migrations, chronological SEC mutation, exact config/scope reconciliation, lifecycle identities, immutable CAS-backed date seals, contained SEC paths, exact sealed census input, and a fail-closed shared-parser intake boundary. The final isolated replay completed and passes 38/39 validator checks; only the six-name Companyfacts/inline-XBRL coverage gate is false. CLF remains a disclosed non-gating upstream FX source gap, while all canonical-required currencies are covered. The production database remains untouched. Stage 4 also remains open on the separate census terminology review, and Stage 5 remains deferred until Stage 4 closes. The next work must proceed in this order:
+Stages 0-4 and terminal-event reconciliation are implemented in production. The hardened Stage 4 code contract includes ordered immutable migrations, chronological SEC mutation, exact config/scope reconciliation, lifecycle identities, immutable CAS-backed date seals, contained SEC paths, exact sealed census input, a sealed sector-owned inline-XBRL fallback, and a fail-closed shared-parser intake boundary. After the fresh migration-v10 acceptance replay and backup-only rehearsal, the explicitly approved production rollout completed at the existing `2026-08-11` watermark. The production validator passes 40/40 with 119/119 reporting profiles covered, zero stale lifecycle outputs, zero missing required FX conversions, zero lineage mismatches, clean foreign keys, and `integrity_check=ok`. The 10-row terminology ledger remains adjudicated against its exact `2026-08-10` sample. Stage 4 is closed. Stage 5 implementation and disposable acceptance are complete; its production rollout remains separately gated. The remaining work must proceed in this order:
 
-1. resolve or explicitly adjudicate the BTI, BUD, FMX, JBS, KOF, and UL inline-XBRL coverage gap, while continuing to disclose the CLF upstream source gap;
-2. obtain final independent acceptance, then run the reviewed production migration/rebuild and validator;
-3. close the stratified census terminology audit without beginning numeric parser work;
-4. implement Stage 5 direct ownership and read-only positioning normalization, then run the post-load foundation-coverage audit and record the continuation decision;
-5. implement and validate Stage 6A common scoring inputs with specialized rows reserved and zero-weight;
-6. implement Stage 6B's Consumer Defensive parser adapter, complete historical document inventory, shadow reconciliation, reviewed golden corpus, and viable specialized overlays;
-7. build and validate the definitive Stage 6C PIT historical feature panel from `2019-01-02`, then run signal diagnostics and the dedicated `factor_validation` adapter before Stage 7 calibration; and
-8. continue through Stages 7-12 only in the documented dependency order.
+1. rehearse and explicitly approve the production Stage 5 rollout without allowing Consumer Defensive to mutate shared upstream stores;
+2. implement and validate Stage 6A common scoring inputs with specialized rows reserved and zero-weight;
+3. implement Stage 6B's Consumer Defensive parser adapter, complete historical document inventory, shadow reconciliation, reviewed golden corpus, and viable specialized overlays;
+4. build and validate the definitive Stage 6C PIT historical feature panel from `2019-01-02`, then run signal diagnostics and the dedicated `factor_validation` adapter before Stage 7 calibration; and
+5. continue through Stages 7-12 only in the documented dependency order.
 
 Therefore, parser validation has priority over the definitive historical-readiness audit, and that audit has priority over signal diagnostics and factor validation. The earlier Stage 5 checkpoint is foundation coverage only.

@@ -61,11 +61,41 @@ financial_features:
   balance_sheet_fx_method: "latest_on_or_before_period_end"
   maximum_period_age_days: 550
 
+positioning:
+  ownership_source_id: 'sec_insider_upstream'
+  market_positioning_source_id: 'market_positioning_upstream'
+  feature_source_id: 'consumer_defensive_positioning_composite'
+  form4_upstream_db: '${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}'
+  market_positioning_upstream_db: '${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}'
+  upstream_universe_csv: '../output/consumer_defensive/cache/positioning/consumer_defensive_positioning_universe.csv'
+  source_identifier_map: 'data/consumer_defensive_positioning_source_identifiers.csv'
+  start_date: '2019-01-02'
+  source_birthdates:
+    sec_form4: '2019-01-02'
+    institutional_13f: '2019-01-02'
+    short_interest: '2021-07-01'
+    borrow: '2019-06-06'
+  maximum_age_days:
+    sec_form4: null
+    institutional_13f: 150
+    short_interest: 45
+    borrow: 10
+  minimum_current_coverage:
+    institutional_13f: 1.0
+    short_interest: 1.0
+    borrow: 0.0
+  lookback_days:
+    insider: 90
+  upstream_source_names:
+    institutional_13f: 'sec_13f_data_sets'
+    short_interest: 'finra_equity_short_interest_files'
+    borrow: 'interactive_brokers'
+
 specialized_disclosure_census:
   applicability_csv: "data/consumer_defensive_metric_applicability.csv"
   terms_path: "data/consumer_defensive_specialized_disclosure_terms.yaml"
   expected_applicability_rows: 119
-  parser_version: "consumer_defensive_disclosure_census_v2"
+  parser_version: "consumer_defensive_disclosure_census_v3"
   discovery_only: true
   production_weight: 0.0
 

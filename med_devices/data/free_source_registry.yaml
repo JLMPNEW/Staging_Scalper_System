@@ -78,6 +78,33 @@ sources:
     priority: 30
     status: planned
 
+  - source_id: sec_inline_xbrl_filing
+    stage: stage_1
+    source_name: "SEC inline XBRL filing fallback"
+    source_owner: "U.S. Securities and Exchange Commission"
+    source_type: filing_document
+    base_url: "https://www.sec.gov/Archives/edgar/data"
+    documentation_url: "https://www.sec.gov/structured-data/osd-inline-xbrl.html"
+    authentication_required: false
+    free_key_required: false
+    rate_limit_notes: "Use an identifying User-Agent, cache filing documents, and request only filings absent from Company Facts."
+    refresh_frequency: daily
+    terms_url: "https://www.sec.gov/os/accessing-edgar-data"
+    data_owner: SEC
+    raw_schema:
+      - raw_api_responses
+    staging_tables:
+      - stg_sec_inline_xbrl_filing
+    canonical_tables:
+      - fact_financial_statement
+    feature_stages:
+      - fundamental_quality
+      - durable_growth
+      - valuation
+    priority: 31
+    status: active
+    notes: "Bounded fallback for newer periodic filings absent from Company Facts; only non-dimensional facts for the filing report date are ingested."
+
   - source_id: nasdaq_trader_symbols
     stage: stage_1
     source_name: "Nasdaq Trader symbol directory"

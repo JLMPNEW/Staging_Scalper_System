@@ -107,6 +107,49 @@ def as_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def bool_from_raw(raw: object, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return default
+
+
+def effective_scoring_model_version(config: dict[str, Any], *, asof: date) -> str:
+    """Resolve the score version emitted by script 13 for a specific as-of."""
+    base_version = str(cfg_get(config, "scoring.model_version", "") or "").strip()
+    lock_key = "scoring.ic_tilted_composite"
+    if not bool_from_raw(cfg_get(config, f"{lock_key}.phase1_safety_lock", False)):
+        return base_version
+
+    effective_from = parse_iso_date(
+        cfg_get(config, f"{lock_key}.production_score_regime_effective_from", "")
+    )
+    if effective_from is None:
+        raise ValueError(
+            f"{lock_key}.production_score_regime_effective_from must be YYYY-MM-DD"
+        )
+    if asof < effective_from:
+        return base_version
+
+    locked_version = str(
+        cfg_get(config, f"{lock_key}.locked_scoring_model_version", "") or ""
+    ).strip()
+    if not locked_version:
+        raise ValueError(
+            f"{lock_key}.locked_scoring_model_version is required after "
+            f"{effective_from.isoformat()}"
+        )
+    return locked_version
+
+
 def fractional_ranks(values: list[float]) -> list[float]:
     ordered = sorted(enumerate(values), key=lambda item: item[1])
     ranks = [0.0] * len(values)
@@ -359,18 +402,29 @@ def contract_checks(
         ),
     )
 
-    # (VD-2a) A governed target ticker must have shadow rows once 78 has run;
-    # an empty result for any requested ticker means there is nothing to
-    # validate, which is a failure rather than a silent exit-0.
+    # (VD-2a) A governed target ticker must have shadow rows once 78 has run.
+    # Non-target tickers may be reviewed explicitly without being enrolled in
+    # shadow promotion; their absent shadow rows are not a contract failure.
     check(
         "shadow_rows_present",
-        passed=bool(score_rows),
+        passed=not governed or bool(score_rows),
         observed=len(score_rows),
-        expected=">= 1 shadow-available score row",
+        expected=(
+            ">= 1 shadow-available score row"
+            if governed
+            else "not applicable for non-target ticker"
+        ),
         details=(
-            f"Ticker {ticker} is {'a governed' if governed else 'not a governed'} "
-            "fda_product_family_review target; zero shadow-available rows means "
-            "script 78 is not writing the shadow feature."
+            (
+                f"Ticker {ticker} is a governed fda_product_family_review target; "
+                "zero shadow-available rows means script 78 is not writing the "
+                "shadow feature."
+            )
+            if governed
+            else (
+                f"Ticker {ticker} is not a governed fda_product_family_review "
+                "target; shadow-row presence is not required."
+            )
         ),
     )
 
@@ -387,7 +441,14 @@ def contract_checks(
     # (VD-1a) Model-version pin: every shadow row must carry a scoring model
     # version and the latest rows must match the pinned config version, so a
     # composite change without a version bump cannot pass silently.
-    pinned_version = str(cfg_get(config, "scoring.model_version", "") or "").strip()
+    latest_asof = max(
+        (str(row.get("asof_date") or "") for row in score_rows), default=""
+    )
+    latest_score_date = parse_iso_date(latest_asof) or generated_asof
+    pinned_version = effective_scoring_model_version(
+        config,
+        asof=latest_score_date,
+    )
     missing_version_rows = sum(
         1
         for row in score_rows
@@ -399,9 +460,6 @@ def contract_checks(
         observed=missing_version_rows,
         expected=0,
         details="Shadow-available score rows with an empty scoring_model_version.",
-    )
-    latest_asof = max(
-        (str(row.get("asof_date") or "") for row in score_rows), default=""
     )
     latest_versions = sorted(
         {

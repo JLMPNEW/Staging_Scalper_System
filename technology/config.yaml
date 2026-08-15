@@ -1,4 +1,4 @@
-paths:
+﻿paths:
   database_path: "${TECHNOLOGY_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/technology.sqlite"
   output_dir: "../output/technology_reports"
   cache_dir: "../output/technology_cache"
@@ -346,11 +346,16 @@ sec_fundamentals:
   inline_xbrl_source_detail: "inline_xbrl_fallback"
   inline_xbrl_fallback_enabled: true
   inline_xbrl_fallback_forms:
+    - "10-K"
+    - "10-K/A"
+    - "10-Q"
+    - "10-Q/A"
     - "20-F"
     - "20-F/A"
     - "40-F"
   start_date: "2010-01-01"
   include_historical_members: true
+  refresh_if_stale_hours: 24.0
   report_output_csv: "../output/technology_reports/sec_fundamentals/sec_fundamentals_sync_coverage.csv"
   feature_output_csv: "../output/technology_reports/sec_fundamentals/sec_financial_feature_coverage.csv"
   cache_dir: "../output/technology_cache/sec_fundamentals"

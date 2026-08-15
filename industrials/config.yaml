@@ -70,6 +70,8 @@ model_families:
       security_continuity_source_id: transportation_security_continuity_policy
       classification_overlays_csv: "transportation/system_csvs/transportation_classification_overlays.csv"
       classification_policy_version: transportation_classification_v1
+      investable_universe_policy: "transportation/data/transportation_investable_universe_v4.yaml"
+      investable_universe_version: transportation_investable_universe_v4
       optimization_start_date: "2019-01-02"
       delisted_default_start_date: "2000-01-01"
       sector: Industrials
@@ -174,6 +176,7 @@ model_families:
       supporting_scope_version: transportation_dedicated_parser_support_scope_v1
       supporting_scope_manifest_csv: "transportation/data/transportation_dedicated_parser_support_scope.csv"
       dp0_manifest_json: "transportation/data/transportation_dp0_contract_manifest.json"
+      dp0_active_seed_csv: "transportation/system_csvs/dp0_v1/transportation_tickers.csv"
       dp1_readiness_audit_json: "transportation/data/transportation_dp1_readiness_audit.json"
       source_census_version: transportation_dp3_source_census_v2
       # Active issuers need the 400-day PIT lead-in to the 2019 research
@@ -190,6 +193,7 @@ model_families:
       source_census_manifest_json: "transportation/data/transportation_dp3_source_census_manifest.json"
       source_gap_overrides_csv: "transportation/review_policies/transportation_source_gap_overrides.csv"
       output_root: "../output/industrials/transportation/dedicated_parser"
+      tanker_delta_output_root: "../output/industrials/transportation/investable_v3/tanker_delta"
       provider_state_dir: "../tmp/edgartools/transportation"
       workers: 4
       hydration_passes: 3

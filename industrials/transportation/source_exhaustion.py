@@ -84,12 +84,16 @@ EVENT_METADATA_PATTERN = re.compile(
     r"\b(?:earnings|financial\s+results|operating\s+results|"
     r"quarterly\s+results|annual\s+results|results\s+release|"
     r"earnings\s+release|press\s+release|investor\s+presentation|"
-    r"traffic\s+release|operating\s+statistics)\b",
+    r"traffic\s+release|operating\s+statistics|railroad\s+performance|"
+    r"network\s+velocity|terminal\s+dwell|service\s+reliability|"
+    r"sustainability|ESG|driver\s+turnover|empty\s+miles)\b",
     re.IGNORECASE,
 )
 RELEVANT_DOCUMENT_PATTERN = re.compile(
     r"(?:\bex(?:hibit)?[-_ ]?(?:13|99)\b|earnings|results|release|"
-    r"presentation|traffic|operating\s+statistics|fleet|annual\s+report)",
+    r"presentation|traffic|operating\s+statistics|railroad\s+performance|"
+    r"network\s+velocity|terminal\s+dwell|service\s+reliability|"
+    r"sustainability|ESG|driver\s+turnover|empty\s+miles|fleet|annual\s+report)",
     re.IGNORECASE,
 )
 DOCUMENT_SUFFIXES = frozenset({".htm", ".html", ".txt", ".xml", ".xhtml", ".pdf"})

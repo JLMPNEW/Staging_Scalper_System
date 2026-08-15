@@ -38,7 +38,7 @@ def main() -> int:
     baseline_paths = [resolve_path(value, base_dir=base_dir) for value in parser_cfg.get("baseline_artifacts", [])]
     manifest = build_and_write_contract(
         project_root=PROJECT_ROOT,
-        active_path=resolve_path(universe["seed_csv"], base_dir=base_dir),
+        active_path=resolve_path(parser_cfg.get("dp0_active_seed_csv", universe["seed_csv"]), base_dir=base_dir),
         delisted_path=resolve_path(universe["delisted_seed_csv"], base_dir=base_dir),
         metric_registry_path=resolve_path(parser_cfg["discovery_registry_csv"], base_dir=base_dir),
         supporting_registry_path=resolve_path(parser_cfg["supporting_registry_csv"], base_dir=base_dir),

@@ -1,0 +1,12 @@
+metric_id,concept_pattern,operand_role,normalized_unit,priority,semantic_posture
+operating_ratio,(?i)^(?:OperatingExpenses|OperatingCostsAndExpenses|CostsAndExpenses)$,operating_expense,currency,1,audited_operand_review
+operating_ratio,(?i)^OperatingIncomeLoss$,operating_income,currency,2,audited_operand_review
+operating_ratio,(?i)^(?:Revenues|SalesRevenueNet|RevenueFromContractWithCustomerExcludingAssessedTax)$,revenue,currency,1,audited_operand_review
+operating_ratio,(?i)^OperatingRatio$,direct_value,ratio,1,issuer_extension_direct_review
+purchased_transportation_ratio,(?i)^PurchasedTransportation(?:Expense|Expenses|Cost|Costs)?$,purchased_transportation,currency,1,audited_operand_review
+purchased_transportation_ratio,(?i)^PurchasedTransportationAndRelatedServices(?:Expense|Expenses|Cost|Costs)?$,purchased_transportation,currency,2,audited_operand_review
+purchased_transportation_ratio,(?i)^PurchasedTransportationAndWarehousing$,purchased_transportation_broad,currency,2,broad_concept_requires_note_confirmation
+purchased_transportation_ratio,(?i)^RentsPurchasedTransportationOtherCostsOfServices$,purchased_transportation_broad,currency,2,broad_concept_requires_note_confirmation
+purchased_transportation_ratio,(?i)^ContractedServices(?:Expense|Expenses|Cost|Costs)?$,purchased_transportation_broad,currency,3,broad_concept_requires_note_confirmation
+purchased_transportation_ratio,(?i)^(?:Revenues|SalesRevenueNet|RevenueFromContractWithCustomerExcludingAssessedTax)$,revenue,currency,1,audited_operand_review
+purchased_transportation_ratio,(?i)^PurchasedTransportationRatio$,direct_value,ratio,1,issuer_extension_direct_review

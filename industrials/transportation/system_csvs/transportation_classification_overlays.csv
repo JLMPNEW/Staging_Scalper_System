@@ -9,3 +9,24 @@ CYRX,2019-01-02,,pharma_cold_chain,,reviewed,transportation_classification_revie
 R,2019-01-02,,fleet_leasing_and_dedicated,,reviewed,transportation_classification_review_20260731,Fleet leasing and dedicated transport peer group
 PAL,2019-01-02,,auto_haul,,reviewed,transportation_classification_review_20260731,Automotive hauling peer group
 PBI,2019-01-02,,mail_presort_under_review,universe_review,pending_universe_review,transportation_classification_review_20260731,Transportation membership requires explicit review before portfolio eligibility
+AAL,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+ALGT,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+ALK,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+CPA,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+DAL,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+JBLU,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+LUV,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+RYAAY,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+UAL,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+ULCC,2026-08-14,,passenger_airline,airline_satellite_research,reviewed,transportation_investable_universe_v4,Retained in the research catalogue; excluded from production calibration and portfolio eligibility.
+DHT,2026-08-14,,crude_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+ECO,2026-08-14,,crude_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+FRO,2026-08-14,,crude_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+NAT,2026-08-14,,crude_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+ASC,2026-08-14,,product_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+HAFN,2026-08-14,,product_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+STNG,2026-08-14,,product_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+TRMD,2026-08-14,,product_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+INSW,2026-08-14,,diversified_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+TNK,2026-08-14,,diversified_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.
+TEN,2026-08-14,,diversified_tanker,core_candidate,reviewed,transportation_investable_universe_v3,Outcome-blind v3 investable-universe classification.

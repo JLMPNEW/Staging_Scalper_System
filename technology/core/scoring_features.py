@@ -19,6 +19,24 @@ from technology.core.text_norm import normalize_ticker
 
 LOGGER = logging.getLogger("technology_scoring_features")
 
+FINANCIAL_LATEST_ORDER = """
+    fiscal_period_end DESC,
+    CASE data_quality_status
+        WHEN 'complete' THEN 2
+        WHEN 'review' THEN 1
+        ELSE 0
+    END DESC,
+    (
+        (revenue IS NOT NULL) + (gross_profit IS NOT NULL) +
+        (operating_income IS NOT NULL) + (net_income IS NOT NULL) +
+        (assets IS NOT NULL) + (equity IS NOT NULL) +
+        (cash_and_equivalents IS NOT NULL) +
+        (operating_cash_flow IS NOT NULL) + (free_cash_flow IS NOT NULL) +
+        (diluted_shares IS NOT NULL)
+    ) DESC,
+    asof_date DESC
+"""
+
 CORE_COMPONENT_DEFS = [
     {
         "component_name": "quality",
@@ -559,9 +577,9 @@ def build_raw_rows(
             financial_source,
             model_family,
             asof,
-            # fiscal_period_end first: an amendment (10-K/A) carries a newer
-            # asof_date but an older period; the newest reported period wins.
-            "fiscal_period_end DESC, asof_date DESC",
+            # The newest period wins. For the same period, retain the richer
+            # statement instead of letting a sparse 6-K earnings release displace it.
+            FINANCIAL_LATEST_ORDER,
         )
         positioning = latest_row(
             conn,

@@ -101,7 +101,7 @@ def test_transportation_seed_contract_counts_and_expected_warning() -> None:
         model_family=MODEL_FAMILY,
     )
     assert errors == []
-    assert counts == {"active": 112, "delisted": 48, "cohorts": 4}
+    assert counts == {"active": 120, "delisted": 48, "cohorts": 4}
     assert warnings == [
         "no curated delisted rows for cohort=development_stage_and_speculative_transport"
     ]
@@ -117,8 +117,8 @@ def test_transportation_foundation_load_and_validate(tmp_path: Path) -> None:
             active_source_id=str(paths["seed_source"]),
             historical_source_id=str(paths["historical_source"]),
             delisted_source_id=str(paths["delisted_source"]),
-            expected_active=112,
-            expected_historical=159,
+            expected_active=120,
+            expected_historical=167,
             expected_delisted=48,
         )
         assert errors == []
@@ -142,7 +142,7 @@ def test_transportation_foundation_load_and_validate(tmp_path: Path) -> None:
         assert cohorts == {
             "air_transport_and_aviation_services": 22,
             "development_stage_and_speculative_transport": 29,
-            "marine_shipping_and_maritime": 21,
+            "marine_shipping_and_maritime": 29,
             "surface_freight_and_logistics": 40,
         }
         # Loading lifecycle history after the active seed must not erase the
@@ -161,7 +161,7 @@ def test_transportation_foundation_load_and_validate(tmp_path: Path) -> None:
                 (MODEL_FAMILY, str(paths["seed_source"])),
             ).fetchall()
         )
-        assert len(active_industries) == 112
+        assert len(active_industries) == 120
         assert active_industries["UNP"] == "Railroads"
         assert active_industries["ODFL"] == "Trucking"
         assert active_industries["DAL"] == "Airlines"

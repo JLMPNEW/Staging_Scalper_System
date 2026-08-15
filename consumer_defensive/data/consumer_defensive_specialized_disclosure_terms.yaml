@@ -1,4 +1,4 @@
-parser_version: consumer_defensive_disclosure_census_v2
+parser_version: consumer_defensive_disclosure_census_v3
 metrics:
   organic_revenue_growth_pct: [organic sales growth, organic revenue growth, organic net sales]
   volume_growth_pct: [volume growth, organic volume, shipment volume]
@@ -26,7 +26,7 @@ metrics:
   fixed_charge_coverage: [fixed charge coverage, fixed-charge coverage]
   innovation_sales_mix_pct: [innovation sales, new product sales, innovation portfolio]
   active_customer_growth_pct: [active customers, active customer growth]
-  active_representative_growth_pct: [active representatives, sales leaders, active distributors]
+  active_representative_growth_pct: [active representatives, active distributors]
   tobacco_shipment_volume_growth_pct: [shipment volume, cigarette volume, tobacco volume]
   tobacco_price_mix_growth_pct: [tobacco price mix, price realization, pricing and mix]
   reduced_risk_sales_mix_pct: [reduced-risk products, smoke-free products, oral tobacco mix]

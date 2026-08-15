@@ -174,14 +174,6 @@ def _supplemental_financial_evidence(
             Path(source_path), form_type=form_type
         ):
             return True, "cached_document_financial_disclosure"
-    if (
-        form_type in {"6-K", "6-K/A"}
-        and report_date
-        and report_date != filing_date
-        and _quarter_end(report_date)
-        and _valid_asof(report_date, filing_date)
-    ):
-        return True, "quarter_end_report_date_metadata"
     return False, "no_financial_disclosure_evidence"
 
 

@@ -80,9 +80,12 @@ def load_scratch_foundation(db_path: Path) -> None:
 def test_norgate_identity_contract_is_reviewed_and_fail_closed() -> None:
     mapping = rows(SYSTEM_CSVS / "transportation_norgate_symbol_map.csv")
     history = rows(SYSTEM_CSVS / "transportation_historical_membership.csv")
-    assert len(mapping) == 160
-    assert sum(row["calibration_usable_flag"] == "1" for row in mapping) == 159
+    assert len(mapping) == 168
+    assert sum(row["calibration_usable_flag"] == "1" for row in mapping) == 167
     assert not [row for row in mapping if row["review_status"] == "review_required"]
+    assert {"FRO", "DHT", "TNK", "STNG", "INSW", "TEN", "NAT", "TRMD"} <= {
+        row["actual_ticker"] for row in mapping
+    }
     excluded = {row["actual_ticker"]: row for row in mapping if row["calibration_usable_flag"] == "0"}
     assert set(excluded) == {"RRTS"}
     assert {row["mapping_status"] for row in excluded.values()} == {"verified_excluded"}
@@ -97,7 +100,7 @@ def test_norgate_identity_contract_is_reviewed_and_fail_closed() -> None:
     assert celadon["norgate_symbol"] != "GIB"
     active_history = [row for row in history if row["membership_status"] == "active"]
     delisted_history = [row for row in history if row["membership_status"] == "delisted"]
-    assert len(active_history) == 112
+    assert len(active_history) == 120
     assert len(delisted_history) == 47
     celadon_history = next(row for row in delisted_history if row["internal_ticker"] == "CGI")
     assert celadon_history["end_date"] == "2019-12-09"
@@ -201,7 +204,7 @@ def test_shared_yahoo_loader_uses_family_membership_not_global_company_activity(
             asof=module.date(2026, 7, 22),
         )
     tickers = {job.ticker for job in jobs}
-    assert len(tickers) == 112
+    assert len(tickers) == 120
     assert "FLY" not in tickers
 
 
@@ -258,6 +261,29 @@ def test_explicit_transportation_benchmarks_override_legacy_secondary_defaults()
         load_yaml(CONFIG_PATH),
         benchmark_override="IYT,XTN,SPY",
         primary_override="IYT",
+    )
+    assert benchmarks == ["IYT", "XTN", "SPY"]
+    assert primary == "IYT"
+    assert secondary == ["XTN", "SPY"]
+
+
+def test_transportation_family_benchmarks_override_legacy_defaults_without_cli_flags() -> None:
+    builder_path = (
+        INDUSTRIALS_ROOT / "scripts" / "05_build_industrials_market_features.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "shared_transportation_family_benchmark_mapping_test",
+        builder_path,
+    )
+    assert spec and spec.loader
+    builder = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = builder
+    spec.loader.exec_module(builder)
+    benchmarks, primary, secondary = builder.resolve_benchmark_mapping(
+        load_yaml(CONFIG_PATH),
+        benchmark_override=None,
+        primary_override=None,
+        model_family="transportation",
     )
     assert benchmarks == ["IYT", "XTN", "SPY"]
     assert primary == "IYT"

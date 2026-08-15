@@ -25,3 +25,15 @@ sectors:
     production_policy: disabled
     research_policy: candidate_only
     historical_policy: disabled
+
+  software_infrastructure:
+    enabled: true
+    production_policy: disabled
+    research_policy: candidate_only
+    historical_policy: disabled
+
+  technology_hardware:
+    enabled: true
+    production_policy: disabled
+    research_policy: candidate_only
+    historical_policy: disabled

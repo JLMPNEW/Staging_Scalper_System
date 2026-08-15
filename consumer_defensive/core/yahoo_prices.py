@@ -71,6 +71,31 @@ def _yahoo_cache_path(
     return lexical
 
 
+def _legacy_yahoo_cache_path(
+    policy: MarketDataPolicy, ticker: str, start: date, end: date,
+) -> Path:
+    """Resolve the pre-hardening cache name without weakening containment."""
+    canonical = validate_investable_ticker(
+        ticker, context='legacy Yahoo cache ticker'
+    )
+    root = policy.resolve('yahoo.cache_dir').resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    component = canonical.replace('.', '_')
+    lexical = root / (
+        f'{component}_{start.isoformat()}_{end.isoformat()}.json'
+    )
+    resolved = lexical.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            'Legacy Yahoo cache path escapes its configured directory'
+        ) from exc
+    if lexical.exists() and resolved != lexical:
+        raise ValueError('Legacy Yahoo cache entry is a symlink or redirected path')
+    return lexical
+
+
 def _epoch(day: date) -> int:
     return int(datetime.combine(day, datetime_time.min, tzinfo=timezone.utc).timestamp())
 
@@ -199,11 +224,26 @@ def parse_yahoo_payload(
                 source_timestamp=source_timestamp,
             )
         )
-    if start is not None and end is not None and any(
-        action.action_date < start.isoformat() or action.action_date > end.isoformat()
-        for action in actions
-    ):
-        return (), (), 'yahoo_action_outside_requested_window'
+    if start is not None and end is not None:
+        outside_actions = [
+            action for action in actions
+            if action.action_date < start.isoformat()
+            or action.action_date > end.isoformat()
+        ]
+        boundary_distances = [
+            (start - date.fromisoformat(action.action_date)).days
+            if action.action_date < start.isoformat()
+            else (date.fromisoformat(action.action_date) - end).days
+            for action in outside_actions
+        ]
+        if len(outside_actions) > 2 or any(
+            distance > 7 for distance in boundary_distances
+        ):
+            return (), (), 'yahoo_action_outside_requested_window'
+        actions = [
+            action for action in actions
+            if start.isoformat() <= action.action_date <= end.isoformat()
+        ]
     return tuple(bars), tuple(actions), "" if bars else "yahoo_no_usable_bars"
 
 
@@ -261,11 +301,19 @@ def fetch_yahoo_job(
         "includeAdjustedClose": "true",
     }
     cache_path = _yahoo_cache_path(policy, ticker, start, end)
+    legacy_cache_path = _legacy_yahoo_cache_path(policy, ticker, start, end)
     cache_only = os.environ.get(
         'CONSUMER_DEFENSIVE_CACHE_ONLY', ''
     ).strip().casefold() in {'1', 'true', 'yes', 'on'}
-    if cache_path.exists() and not force_refresh:
-        cached_payload = cache_path.read_text(encoding='utf-8', errors='replace')
+    selected_cache_path = cache_path
+    selected_cache_status = 'cache'
+    if not cache_path.exists() and legacy_cache_path.exists():
+        selected_cache_path = legacy_cache_path
+        selected_cache_status = 'legacy_cache'
+    if selected_cache_path.exists() and not force_refresh:
+        cached_payload = selected_cache_path.read_text(
+            encoding='utf-8', errors='replace'
+        )
         cached_bars, cached_actions, cached_error = parse_yahoo_payload(
             ticker,
             symbol,
@@ -284,7 +332,7 @@ def fetch_yahoo_job(
                 cached_bars,
                 cached_actions,
                 cached_error,
-                'cache',
+                selected_cache_status,
             )
         cache_status = 'live_repair'
     else:

@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from consumer_defensive.core.config import load_config
+from consumer_defensive.core.config import load_config, load_yaml
 from consumer_defensive.core.db import connect
 from consumer_defensive.core.market_data import (
     MarketDataPolicy,
@@ -50,6 +50,7 @@ SCRIPTS = PACKAGE / "scripts"
 CONFIG = PACKAGE / "config.yaml"
 POLICY = PACKAGE / "data" / "consumer_defensive_universe_policy.yaml"
 MARKET_POLICY = PACKAGE / "data" / "consumer_defensive_market_data_policy.yaml"
+DISCLOSURE_TERMS = PACKAGE / "data" / "consumer_defensive_specialized_disclosure_terms.yaml"
 
 
 def _load_preflight_module():
@@ -73,7 +74,7 @@ def _current_only_db(tmp_path: Path):
 
 def test_all_consumer_defensive_scripts_import_and_expose_help() -> None:
     scripts = sorted(SCRIPTS.glob("*.py"))
-    assert len(scripts) == 17
+    assert len(scripts) == 24
     for script in scripts:
         completed = subprocess.run(
             [sys.executable, str(script), "--help"],
@@ -85,6 +86,17 @@ def test_all_consumer_defensive_scripts_import_and_expose_help() -> None:
         )
         assert completed.returncode == 0, f"{script.name}: {completed.stderr}"
         assert "usage:" in completed.stdout.casefold(), script.name
+
+
+def test_reviewed_disclosure_terminology_contract_is_versioned_and_narrowed() -> None:
+    bundle = load_config(CONFIG)
+    terms = load_yaml(DISCLOSURE_TERMS)
+    expected_version = "consumer_defensive_disclosure_census_v3"
+    assert bundle.payload["specialized_disclosure_census"]["parser_version"] == expected_version
+    assert terms["parser_version"] == expected_version
+    triggers = terms["metrics"]["active_representative_growth_pct"]
+    assert triggers == ["active representatives", "active distributors"]
+    assert "sales leaders" not in triggers
 
 
 def test_date_and_ticker_cli_contracts_are_fail_closed() -> None:

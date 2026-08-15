@@ -10,9 +10,12 @@ duplicate IDs, credential leakage, or provider/normalization errors. The output 
 advisory states and price levels only; broker execution is permanently prohibited. Static broker
 mode is the default and reads the local Activity Statement chain without connecting to IB.
 
-Historical report repair may run script 50 with `--skip-provider-capture`. This never fabricates or
-backdates provider observations: it evaluates only snapshots already available by the requested
-as-of date. An exact, lineage-verified Tier-0/1 provider-coverage failure is sealed as `DEFERRED` at
+Historical report repair may run script 50 with `--skip-provider-capture` and
+`--skip-event-cycle`. This never fabricates or backdates provider observations: it evaluates only
+snapshots already available by the requested as-of date. The entry point rejects still-open/future
+XNYS sessions and refuses current outcome endpoints for dates older than the latest completed
+session; the normal post-midnight ET nightly run remains valid for that completed session. An exact,
+lineage-verified Tier-0/1 provider-coverage failure is sealed as `DEFERRED` at
 the parent level because provider data is shadow-only; every other provider-diagnostic failure
 remains fatal.
 
@@ -309,9 +312,11 @@ Scripts 49, 49a, and 50 complete the operational shell around the provider found
 - `50_run_expectations_monitor_daily.py` validates the sealed universe and source hashes, runs or
   resumes deterministic provider batches, independently validates and reconciles every completed
   cycle, runs or reuses the earnings-event cycle, and seals all child manifests under one parent.
-  Parent idempotency verifies every output and child-manifest hash. Historical report repair may
-  use `--skip-provider-capture`; diagnostics still query the local store at the historical PIT
-  cutoff and no newly fetched observation is backdated.
+  Parent idempotency verifies every output and child-manifest hash. Historical report repair uses
+  `--skip-provider-capture --skip-event-cycle`; diagnostics still query the local store at the
+  historical PIT cutoff and no newly fetched observation is backdated. The script enforces this
+  independently of the global orchestrator by comparing the requested date with the latest
+  completed XNYS session.
 - Provider semantics, pending orders, and authoritative SEC/issuer events are explicit readiness
   dependencies. A deferred dependency produces `PASS_WITH_DEFERRED`, never action authorization.
 - Provider requests remain limited to endpoint, ticker, and authentication fields. The orchestrator

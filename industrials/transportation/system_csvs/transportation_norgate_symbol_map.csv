@@ -111,6 +111,14 @@ PAMT,PAMT,PAMT,US Equities,PAMT CORP,PAMT Corp Common,1990-01-02,,,verified_exac
 TOPP,TOPP,TOPP,US Equities,Toppoint Holdings Inc.,Toppoint Holdings Inc Common,2025-01-22,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
 KNX,KNX,KNX,US Equities,Knight-Swift Transportation Holdings Inc.,Knight-Swift Transportation Holdings Inc Class A Common,2010-12-16,,,verified_exact_active,exact_active_symbol_and_name_match,0.870968,,1,auto_verified,
 R,R,R,US Equities,"Ryder System, Inc.",Ryder System Inc Common,1990-01-02,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+FRO,FRO,FRO,US Equities,Frontline plc,Frontline Plc Common,2001-08-06,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+DHT,DHT,DHT,US Equities,"DHT Holdings, Inc.",DHT Holdings Inc Common,2005-10-13,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+TNK,TNK,TNK,US Equities,TEEKAY TANKERS LTD.,Teekay Tankers Ltd Class A Common,2007-12-13,,,verified_exact_active,exact_active_symbol_and_name_match,0.777778,,1,auto_verified,
+STNG,STNG,STNG,US Equities,Scorpio Tankers Inc.,Scorpio Tankers Inc Common,2010-03-31,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+INSW,INSW,INSW,US Equities,"International Seaways, Inc.",International Seaways Inc Common,2016-11-16,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+TEN,TEN,TEN,US Equities,TSAKOS ENERGY NAVIGATION LTD,Tsakos Energy Navigation Ltd Common,2002-03-05,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+NAT,NAT,NAT,US Equities,NORDIC AMERICAN TANKERS Ltd,Nordic American Tankers Ltd Common,1997-09-30,,,verified_exact_active,exact_active_symbol_and_name_match,1.000000,,1,auto_verified,
+TRMD,TRMD,TRMD,US Equities,TORM plc,TORM PLC Class A Common,2018-02-23,,,verified_exact_active,exact_active_symbol_and_name_match,0.500000,,1,auto_verified,
 LCC,LCC,LCC-201312,US Equities Delisted,US Airways Group,US Airways Group Inc Common,1994-08-26,2013-12-06,2013-12-06,verified_auto,symbol_name_exit_year_match,1.000000,2013,1,auto_verified,composite_match_score=1.000000
 NWA,NWA,NWA-200810,US Equities Delisted,Northwest Airlines Corp,Northwest Airlines Corp Common,2007-05-18,2008-10-29,2008-10-29,verified_auto,symbol_name_exit_year_match,1.000000,2008,1,auto_verified,composite_match_score=1.000000
 CAL,CAL,CAL-201009,US Equities Delisted,Continental Airlines,Continental Airlines Inc Class B Common,1993-07-14,2010-09-30,2010-09-30,verified_auto,symbol_name_exit_year_match,0.833333,2010,1,auto_verified,composite_match_score=0.891667

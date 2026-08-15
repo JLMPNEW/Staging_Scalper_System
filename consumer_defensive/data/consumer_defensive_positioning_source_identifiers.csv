@@ -1,0 +1,6 @@
+ticker,cusip,finra_symbol,review_status,review_reason
+BF-B,,BFB,reviewed,FINRA Equity Short Interest source symbol
+CCU,204429104,CCU,reviewed,SEC 13F sponsored ADR CUSIP
+EL,518439104,EL,reviewed,SEC 13F Class A CUSIP
+FDP,G36738105,FDP,reviewed,SEC 13F ordinary-share CUSIP
+FMX,344419106,FMX,reviewed,SEC 13F sponsored ADR unit CUSIP

@@ -265,8 +265,11 @@ def validate_current_rows(rows: list[dict[str, str]], policy: UniversePolicy) ->
         raise ValueError(f"Duplicate live tickers: {duplicates}")
     if "CENT" in tickers or "CENTA" not in tickers:
         raise ValueError("The reviewed liquid class decision requires CENTA and excludes CENT.")
-    if "DMC" not in tickers or "BOOM" in tickers:
-        raise ValueError("DMC must identify Del Monte Corporation; DMC Global/BOOM is out of scope.")
+    if "FDP" not in tickers or "DMC" in tickers or "BOOM" in tickers:
+        raise ValueError(
+            "Fresh Del Monte Produce must use its reviewed NYSE ticker FDP; "
+            "DMC/DMC Global/BOOM are out of scope."
+        )
     allowed_types = set(policy.payload["allowed_security_types"])
     allowed_statuses = {str(x).casefold() for x in policy.payload["active_listing_statuses"]}
     cohort_policy = policy.payload["cohorts"]

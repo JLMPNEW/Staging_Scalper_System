@@ -11,7 +11,7 @@ import math
 import re
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,7 @@ FILING_FORMS = {
     "424B3",
     "424B5",
 }
-FACT_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F"}
+FACT_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "6-K", "6-K/A"}
 ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A", "40-F"}
 QUARTERLY_FORMS = {"10-Q", "10-Q/A"}
 CORE_OPERATING_METRICS = {"revenue", "assets"}
@@ -107,6 +107,11 @@ CSV_FIELDS = [
     "inline_fallback_status",
     "inline_fallback_mapped_facts",
     "latest_financial_filing_date",
+    "submissions_payload_source",
+    "companyfacts_payload_source",
+    "submissions_cache_age_hours_before_refresh",
+    "companyfacts_cache_age_hours_before_refresh",
+    "sec_refresh_mode",
     "review_reason",
 ]
 
@@ -119,6 +124,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--force-refresh", action="store_true")
+    parser.add_argument(
+        "--refresh-if-stale-hours",
+        type=float,
+        default=None,
+        help="Refresh root SEC submissions/companyfacts caches older than this many hours; omitted preserves cache-only reuse.",
+    )
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument(
@@ -158,6 +169,29 @@ def to_float(raw: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def cache_age_hours(cache_path: Path, *, now: datetime | None = None) -> float | None:
+    """Return cache age in UTC hours, or None when the cache is unavailable."""
+    if not cache_path.exists():
+        return None
+    try:
+        modified = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+    reference = now or datetime.now(timezone.utc)
+    return max(0.0, (reference - modified).total_seconds() / 3600.0)
+
+
+def cache_age_text(age_hours: float | None) -> str:
+    return "" if age_hours is None else f"{age_hours:.2f}"
+
+
+def cache_is_stale(cache_path: Path, refresh_if_stale_hours: float | None) -> bool:
+    if refresh_if_stale_hours is None or refresh_if_stale_hours <= 0:
+        return False
+    age_hours = cache_age_hours(cache_path)
+    return age_hours is not None and age_hours >= refresh_if_stale_hours
 
 
 def cik10(raw: str) -> str:
@@ -236,17 +270,24 @@ def cached_json(
     retries: int,
     sleep_sec: float,
     force_refresh: bool,
+    refresh_if_stale_hours: float | None = None,
 ) -> tuple[int, str, Any, str]:
-    if cache_path.exists() and not force_refresh:
-        text = cache_path.read_text(encoding="utf-8")
-        return 200, text, json.loads(text), "cache"
+    stale_cache = cache_is_stale(cache_path, refresh_if_stale_hours)
+    if cache_path.exists() and not force_refresh and not stale_cache:
+        try:
+            text = cache_path.read_text(encoding="utf-8")
+            return 200, text, json.loads(text), "cache"
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            LOGGER.warning("Ignoring unreadable SEC JSON cache %s: %s", cache_path, exc)
+            stale_cache = True
     status, text, payload = request_json(url, headers=headers, timeout_sec=timeout_sec, retries=retries, sleep_sec=sleep_sec)
     # Only cache successful responses; a cached error body would replay as 200 forever.
     if status == 200:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(text, encoding="utf-8")
     time.sleep(sleep_sec)
-    return status, text, payload, "live"
+    source = "live_stale" if stale_cache and not force_refresh else "live"
+    return status, text, payload, source
 
 
 def request_text(url: str, *, headers: dict[str, str], timeout_sec: float, retries: int, sleep_sec: float) -> tuple[int, str]:
@@ -275,15 +316,22 @@ def cached_text(
     retries: int,
     sleep_sec: float,
     force_refresh: bool,
+    refresh_if_stale_hours: float | None = None,
 ) -> tuple[int, str, str]:
-    if cache_path.exists() and not force_refresh:
-        return 200, cache_path.read_text(encoding="utf-8", errors="replace"), "cache"
+    stale_cache = cache_is_stale(cache_path, refresh_if_stale_hours)
+    if cache_path.exists() and not force_refresh and not stale_cache:
+        try:
+            return 200, cache_path.read_text(encoding="utf-8", errors="replace"), "cache"
+        except OSError as exc:
+            LOGGER.warning("Ignoring unreadable SEC text cache %s: %s", cache_path, exc)
+            stale_cache = True
     status, text = request_text(url, headers=headers, timeout_sec=timeout_sec, retries=retries, sleep_sec=sleep_sec)
     if status == 200:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(text, encoding="utf-8")
     time.sleep(sleep_sec)
-    return status, text, "live"
+    source = "live_stale" if stale_cache and not force_refresh else "live"
+    return status, text, source
 
 
 def record_raw_response(
@@ -1219,6 +1267,16 @@ def main() -> None:
     include_archives = str(cfg_get(config, "sec_fundamentals.include_submission_archives", True)).lower() in {"1", "true", "yes", "y"}
     inline_fallback_enabled = str(cfg_get(config, "sec_fundamentals.inline_xbrl_fallback_enabled", True)).lower() in {"1", "true", "yes", "y"}
     inline_source_detail = str(cfg_get(config, "sec_fundamentals.inline_xbrl_source_detail", "inline_xbrl_fallback"))
+    refresh_if_stale_hours = args.refresh_if_stale_hours
+    if refresh_if_stale_hours is not None and refresh_if_stale_hours < 0:
+        raise ValueError("--refresh-if-stale-hours must be non-negative")
+    sec_refresh_mode = (
+        "force"
+        if args.force_refresh
+        else f"stale_if_older_than_{refresh_if_stale_hours:g}_hours"
+        if refresh_if_stale_hours and refresh_if_stale_hours > 0
+        else "cache_reuse"
+    )
     inline_fallback_forms = {str(x).strip().upper() for x in cfg_get(config, "sec_fundamentals.inline_xbrl_fallback_forms", ["20-F", "20-F/A", "40-F"]) if str(x).strip()}
     archive_headers = {"User-Agent": user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
     max_tickers = args.max_tickers or int(cfg_get(config, "sec_fundamentals.max_tickers_per_run", 0) or 0)
@@ -1264,6 +1322,11 @@ def main() -> None:
                             "inline_fallback_status": "not_needed",
                             "inline_fallback_mapped_facts": 0,
                             "latest_financial_filing_date": "",
+                            "submissions_payload_source": "not_requested",
+                            "companyfacts_payload_source": "not_requested",
+                            "submissions_cache_age_hours_before_refresh": "",
+                            "companyfacts_cache_age_hours_before_refresh": "",
+                            "sec_refresh_mode": sec_refresh_mode,
                             "review_reason": "missing_cik",
                         }
                     )
@@ -1279,16 +1342,23 @@ def main() -> None:
                 sub_status = "success"
                 facts_status = "success"
                 latest_financial = ""
+                submissions_payload_source = "not_requested"
+                companyfacts_payload_source = "not_requested"
+                submissions_cache_age_before_refresh = ""
+                companyfacts_cache_age_before_refresh = ""
                 try:
                     sub_url = str(cfg_get(config, "sec_fundamentals.submissions_url_template")).format(cik=cik)
-                    status, text, payload, _ = cached_json(
+                    sub_cache_path = cache_dir / "submissions" / f"CIK{cik}.json"
+                    submissions_cache_age_before_refresh = cache_age_text(cache_age_hours(sub_cache_path))
+                    status, text, payload, submissions_payload_source = cached_json(
                         sub_url,
-                        cache_dir / "submissions" / f"CIK{cik}.json",
+                        sub_cache_path,
                         headers=headers,
                         timeout_sec=timeout_sec,
                         retries=retries,
                         sleep_sec=sleep_sec,
                         force_refresh=args.force_refresh,
+                        refresh_if_stale_hours=refresh_if_stale_hours,
                     )
                     with conn:
                         record_raw_response(conn, source_id=submissions_source, endpoint=sub_url, status=status, text=text, ingestion_run_id=None, asof=date.today().isoformat())
@@ -1375,6 +1445,11 @@ def main() -> None:
                             "inline_fallback_status": inline_fallback_status,
                             "inline_fallback_mapped_facts": 0,
                             "latest_financial_filing_date": latest_financial,
+                            "submissions_payload_source": submissions_payload_source,
+                            "companyfacts_payload_source": companyfacts_payload_source,
+                            "submissions_cache_age_hours_before_refresh": submissions_cache_age_before_refresh,
+                            "companyfacts_cache_age_hours_before_refresh": companyfacts_cache_age_before_refresh,
+                            "sec_refresh_mode": sec_refresh_mode,
                             "review_reason": ";".join(reasons),
                         }
                     )
@@ -1390,14 +1465,17 @@ def main() -> None:
 
                 try:
                     facts_url = str(cfg_get(config, "sec_fundamentals.companyfacts_url_template")).format(cik=cik)
-                    status, text, payload, _ = cached_json(
+                    facts_cache_path = cache_dir / "companyfacts" / f"CIK{cik}.json"
+                    companyfacts_cache_age_before_refresh = cache_age_text(cache_age_hours(facts_cache_path))
+                    status, text, payload, companyfacts_payload_source = cached_json(
                         facts_url,
-                        cache_dir / "companyfacts" / f"CIK{cik}.json",
+                        facts_cache_path,
                         headers=headers,
                         timeout_sec=timeout_sec,
                         retries=retries,
                         sleep_sec=sleep_sec,
                         force_refresh=args.force_refresh,
+                        refresh_if_stale_hours=refresh_if_stale_hours,
                     )
                     with conn:
                         record_raw_response(conn, source_id=companyfacts_source, endpoint=facts_url, status=status, text=text, ingestion_run_id=None, asof=date.today().isoformat())
@@ -1496,6 +1574,11 @@ def main() -> None:
                         "inline_fallback_status": inline_fallback_status,
                         "inline_fallback_mapped_facts": inline_fallback_mapped,
                         "latest_financial_filing_date": latest_financial,
+                        "submissions_payload_source": submissions_payload_source,
+                        "companyfacts_payload_source": companyfacts_payload_source,
+                        "submissions_cache_age_hours_before_refresh": submissions_cache_age_before_refresh,
+                        "companyfacts_cache_age_hours_before_refresh": companyfacts_cache_age_before_refresh,
+                        "sec_refresh_mode": sec_refresh_mode,
                         "review_reason": ";".join(reasons),
                     }
                 )

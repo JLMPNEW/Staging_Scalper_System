@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-ibkr-borrow", action="store_true", help="Pass through to the upstream positioning sync.")
     parser.add_argument("--allow-stale-ibkr-borrow-on-error", action="store_true")
     parser.add_argument("--force-refresh", action="store_true", help="Force refresh for loaders that support it.")
+    parser.add_argument("--refresh-sec-if-stale-hours", type=float, default=None, help="For current/as-of-today runs, refresh SEC submissions/companyfacts caches older than this many hours.")
     return parser.parse_args()
 
 
@@ -84,6 +85,7 @@ def build_steps(
     force_refresh: bool,
     financial_batch_size: int,
     financial_batch_timeout_sec: float,
+    refresh_sec_if_stale_hours: float | None = None,
     allow_stale_ibkr_borrow_on_error: bool = False,
 ) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
@@ -98,6 +100,9 @@ def build_steps(
     if force_refresh:
         yahoo_args.append("--force-refresh")
     sec_args = ["--force-refresh"] if force_refresh else []
+    current_asof = not asof or asof == date.today().isoformat()
+    if current_asof and refresh_sec_if_stale_hours and refresh_sec_if_stale_hours > 0:
+        sec_args.extend(["--refresh-if-stale-hours", str(refresh_sec_if_stale_hours)])
     fx_args = ["--force-refresh"] if force_refresh else []
     ownership_args = ["--force-refresh"] if force_refresh else []
     wsts_args = list(asof_args)
@@ -119,6 +124,7 @@ def build_steps(
         Step("05_build_market_features", "stage_3", "Build market technical features", py_script("technology/scripts/05_build_technology_market_features.py"), [*semiconductor_market_args, *asof_args]),
         Step("06_validate_market", "stage_3", "Validate market stage", py_script("technology/scripts/06_validate_technology_market_stage.py"), [*semiconductor_market_validate_args, *asof_args]),
         Step("07_sync_sec_fundamentals", "stage_4", "Sync SEC submissions/companyfacts", py_script("technology/scripts/07_sync_technology_sec_fundamentals.py"), sec_args, network=True),
+        Step("07b_recover_6k_financials", "stage_4", "Recover cached foreign-filer 6-K financial facts", py_script("technology/scripts/07b_recover_technology_6k_financials.py"), ["--family", "semiconductors", *asof_args]),
         Step("11_sync_fx_rates", "stage_4", "Sync FX rates for non-USD reporters", py_script("technology/scripts/11_sync_technology_fx_rates.py"), fx_args, network=True),
         Step(
             "08_build_financial_features",
@@ -158,7 +164,7 @@ def build_steps(
         Step("13_walk_forward_calibration", "stage_8", "Run walk-forward calibration research", py_script("technology/semiconductors/scripts/13_run_semiconductor_walk_forward_calibration.py"), optuna=True),
         Step("15_norgate_backfill", "stage_15", "Import Norgate delisted prices", py_script("technology/semiconductors/scripts/15_import_semiconductor_norgate_delisted_prices.py"), norgate_backfill=True),
         Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/semiconductors/scripts/10b_publish_semiconductor_dashboard_reports.py")),
-        Step("10c_financial_lineage_shadow", "stage_10_shadow", "Build candidate-only financial-lineage shadow report", py_script("technology/semiconductors/scripts/10c_build_semiconductor_financial_lineage_shadow.py"), asof_args, blocking=False),
+        Step("10c_financial_lineage_shadow", "stage_10_shadow", "Build candidate-only financial-lineage shadow report", py_script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"), ["--family", "semiconductors", *asof_args], blocking=False),
         Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/semiconductors/scripts/10b_validate_semiconductor_dashboard_reports.py"), pass_db=False),
         Step("16_publish_governance", "stage_10b", "Publish lockbox ledger and signal registry", py_script("technology/semiconductors/scripts/16_publish_semiconductor_lockbox_ledger.py")),
         Step("08_audit_pipeline", "audit", "Run full semiconductor pipeline audit", py_script("technology/semiconductors/scripts/08_audit_semiconductor_pipeline_state.py")),
@@ -257,12 +263,19 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("semiconductor_refresh_%Y%m%dT%H%M%SZ")
 
+    if args.refresh_sec_if_stale_hours is not None and args.refresh_sec_if_stale_hours < 0:
+        raise SystemExit("--refresh-sec-if-stale-hours must be non-negative")
     steps = build_steps(
         asof=str(args.asof or "").strip(),
         manual_wsts_xlsx=args.manual_wsts_xlsx,
         skip_ibkr_borrow=bool(args.skip_ibkr_borrow),
         allow_stale_ibkr_borrow_on_error=bool(args.allow_stale_ibkr_borrow_on_error),
         force_refresh=bool(args.force_refresh),
+        refresh_sec_if_stale_hours=(
+            args.refresh_sec_if_stale_hours
+            if args.refresh_sec_if_stale_hours is not None
+            else float(cfg_get(config, "sec_fundamentals.refresh_if_stale_hours", 24.0))
+        ),
         financial_batch_size=int(cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_size", 8)),
         financial_batch_timeout_sec=float(
             cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_timeout_sec", 1800.0)

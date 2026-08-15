@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,7 @@ class Step:
     research: bool = False
     optuna: bool = False
     norgate_backfill: bool = False
+    blocking: bool = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-ibkr-borrow", action="store_true", help="Pass through to the upstream positioning sync.")
     parser.add_argument("--allow-stale-ibkr-borrow-on-error", action="store_true")
     parser.add_argument("--force-refresh", action="store_true", help="Force refresh for loaders that support it.")
+    parser.add_argument("--refresh-sec-if-stale-hours", type=float, default=None, help="For current/as-of-today runs, refresh SEC submissions/companyfacts caches older than this many hours.")
     return parser.parse_args()
 
 
@@ -82,11 +84,16 @@ def build_steps(
     force_refresh: bool,
     financial_batch_size: int,
     financial_batch_timeout_sec: float,
+    refresh_sec_if_stale_hours: float | None = None,
     allow_stale_ibkr_borrow_on_error: bool = False,
 ) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
     end_date_args = ["--end-date", asof] if asof else []
     refresh_args = ["--force-refresh"] if force_refresh else []
+    sec_args = list(refresh_args)
+    current_asof = not asof or asof == date.today().isoformat()
+    if current_asof and refresh_sec_if_stale_hours and refresh_sec_if_stale_hours > 0:
+        sec_args.extend(["--refresh-if-stale-hours", str(refresh_sec_if_stale_hours)])
     positioning_args = [*end_date_args]
     if skip_ibkr_borrow:
         positioning_args.append("--skip-ibkr-borrow")
@@ -103,7 +110,8 @@ def build_steps(
         Step("15_norgate_backfill", "stage_15", "Import Norgate delisted prices", py_script("technology/software_infrastructure/scripts/15_import_software_infrastructure_norgate_delisted_prices.py"), norgate_backfill=True),
         Step("05_build_market_features", "stage_3", "Build market technical features", py_script("technology/software_infrastructure/scripts/05_build_software_infrastructure_market_features.py"), asof_args),
         Step("06_validate_market", "stage_3", "Validate market stage", py_script("technology/software_infrastructure/scripts/06_validate_software_infrastructure_market_stage.py"), asof_args),
-        Step("07_sync_sec_fundamentals", "stage_4", "Sync SEC submissions/companyfacts", py_script("technology/software_infrastructure/scripts/07_sync_software_infrastructure_sec_fundamentals.py"), refresh_args, network=True),
+        Step("07_sync_sec_fundamentals", "stage_4", "Sync SEC submissions/companyfacts", py_script("technology/software_infrastructure/scripts/07_sync_software_infrastructure_sec_fundamentals.py"), sec_args, network=True),
+        Step("07b_recover_6k_financials", "stage_4", "Recover cached foreign-filer 6-K financial facts", py_script("technology/scripts/07b_recover_technology_6k_financials.py"), ["--family", "software_infrastructure", *asof_args]),
         Step("11_sync_fx_rates", "stage_4", "Sync FX rates for non-USD reporters", py_script("technology/software_infrastructure/scripts/11_sync_software_infrastructure_fx_rates.py"), refresh_args, network=True),
         Step(
             "08_build_financial_features",
@@ -138,6 +146,7 @@ def build_steps(
         Step("09_portfolio_backtest", "stage_9", "Run portfolio backtest reports", py_script("technology/software_infrastructure/scripts/09_run_software_infrastructure_portfolio_backtest.py"), research=True),
         Step("09_validate_portfolio_backtest", "stage_9", "Validate portfolio backtest reports", py_script("technology/software_infrastructure/scripts/09_validate_software_infrastructure_portfolio_backtest.py"), pass_db=False, research=True),
         Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/software_infrastructure/scripts/10b_publish_software_infrastructure_dashboard_reports.py")),
+        Step("10c_financial_lineage_shadow", "stage_10_shadow", "Build candidate-only financial-lineage shadow report", py_script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"), ["--family", "software_infrastructure", *asof_args], blocking=False),
         Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/software_infrastructure/scripts/10b_validate_software_infrastructure_dashboard_reports.py"), pass_db=False),
         Step("16_publish_governance", "stage_10b", "Publish lockbox ledger and signal registry", py_script("technology/software_infrastructure/scripts/16_publish_software_infrastructure_lockbox_ledger.py")),
         Step("16_validate_governance", "stage_10b", "Validate lockbox ledger and signal registry", py_script("technology/software_infrastructure/scripts/16_validate_software_infrastructure_lockbox_ledger.py"), pass_db=False),
@@ -256,11 +265,18 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("software_infrastructure_refresh_%Y%m%dT%H%M%SZ")
 
+    if args.refresh_sec_if_stale_hours is not None and args.refresh_sec_if_stale_hours < 0:
+        raise SystemExit("--refresh-sec-if-stale-hours must be non-negative")
     steps = build_steps(
         asof=str(args.asof or "").strip(),
         skip_ibkr_borrow=bool(args.skip_ibkr_borrow),
         allow_stale_ibkr_borrow_on_error=bool(args.allow_stale_ibkr_borrow_on_error),
         force_refresh=bool(args.force_refresh),
+        refresh_sec_if_stale_hours=(
+            args.refresh_sec_if_stale_hours
+            if args.refresh_sec_if_stale_hours is not None
+            else float(cfg_get(config, "sec_fundamentals.refresh_if_stale_hours", 24.0))
+        ),
         financial_batch_size=int(cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_size", 8)),
         financial_batch_timeout_sec=float(
             cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_timeout_sec", 1800.0)
@@ -287,6 +303,7 @@ def main() -> int:
         raise SystemExit(governance_conflict)
     rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    shadow_failures: list[dict[str, Any]] = []
     started = datetime.now(timezone.utc)
 
     for idx, step in enumerate(planned, start=1):
@@ -304,6 +321,7 @@ def main() -> int:
             "optuna_flag": int(step.optuna),
             "norgate_backfill_flag": int(step.norgate_backfill),
             "pass_db_flag": int(step.pass_db),
+            "blocking_flag": int(step.blocking),
             "command": " ".join(cmd),
             "log_path": str(log_path),
         }
@@ -319,13 +337,20 @@ def main() -> int:
             log.write(f"command={' '.join(cmd)}\n\n")
             result = subprocess.run(cmd, cwd=PROJECT_ROOT, stdout=log, stderr=subprocess.STDOUT, text=True, check=False)
         elapsed = time.perf_counter() - start
-        row.update({"status": "PASS" if result.returncode == 0 else "FAIL", "return_code": result.returncode, "elapsed_sec": round(elapsed, 3)})
+        status = "PASS" if result.returncode == 0 else (
+            "FAIL" if step.blocking else "SHADOW_FAIL"
+        )
+        row.update({"status": status, "return_code": result.returncode, "elapsed_sec": round(elapsed, 3)})
         rows.append(row)
         if result.returncode != 0:
-            failures.append(row)
-            print(f"FAILED {step.step_id}; see {log_path}")
-            if not args.continue_on_error:
-                break
+            if step.blocking:
+                failures.append(row)
+                print(f"FAILED {step.step_id}; see {log_path}")
+                if not args.continue_on_error:
+                    break
+            else:
+                shadow_failures.append(row)
+                print(f"SHADOW FAILED {step.step_id}; production continues; see {log_path}")
 
     ended = datetime.now(timezone.utc)
     summary = {
@@ -339,6 +364,7 @@ def main() -> int:
         "step_count": len(rows),
         "planned_step_count": len(planned),
         "failed_step_count": len(failures),
+        "shadow_failed_step_count": len(shadow_failures),
         "status": "PASS" if not failures else "FAIL",
         "output_dir": str(output_dir),
         "manifest_json": str(output_dir / "software_infrastructure_refresh_manifest.json"),
@@ -349,7 +375,22 @@ def main() -> int:
     manifest_csv = output_dir / "software_infrastructure_refresh_steps.csv"
     manifest_json.write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
     write_csv(manifest_csv, rows)
-    print(json.dumps({key: summary[key] for key in ("run_id", "status", "dry_run", "step_count", "failed_step_count", "output_dir")}, indent=2, sort_keys=True))
+    summary_fields = (
+        "run_id",
+        "status",
+        "dry_run",
+        "step_count",
+        "failed_step_count",
+        "shadow_failed_step_count",
+        "output_dir",
+    )
+    print(
+        json.dumps(
+            {key: summary[key] for key in summary_fields},
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 1 if failures else 0
 
 

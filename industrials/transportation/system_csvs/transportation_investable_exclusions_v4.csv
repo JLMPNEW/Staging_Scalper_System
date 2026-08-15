@@ -1,0 +1,91 @@
+ticker,effective_from,disposition,exclusion_group,reason,reentry_rule
+AAL,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+AER,2026-08-14,research_only,air_nonpassenger,aircraft lessor rather than passenger airline,separate lessor cohort with sufficient breadth
+ALGT,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+ALK,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+ASLE,2026-08-14,research_only,air_nonpassenger,aviation services rather than passenger airline,separate services cohort with sufficient breadth
+ASR,2026-08-14,research_only,air_nonpassenger,airport operator rather than passenger airline,separate airport cohort with sufficient breadth
+ATXG,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+AZUL,2026-08-14,research_only,air_nonpassenger,post-bankruptcy structural break,post-break minimum history and all production gates
+CAAP,2026-08-14,research_only,air_nonpassenger,airport operator rather than passenger airline,separate airport cohort with sufficient breadth
+CCEC,2026-08-14,research_only,marine_non_tanker,gas carrier model outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+CIIT,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+CISS,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+CMDB,2026-08-14,research_only,marine_non_tanker,dry-bulk operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+CMRE,2026-08-14,research_only,marine_non_tanker,vessel lessor and container model outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+CPA,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+CRGO,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+CTNT,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+CTRM,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+CVLG,2026-08-14,watchlist,surface_noncore,current financial-policy failure or incomplete solvency evidence,two consecutive complete reporting periods plus all production gates
+CYRX,2026-08-14,research_only,surface_noncore,orphan cold-chain business model with insufficient comparable breadth,coherent peer group and all production gates
+DAC,2026-08-14,research_only,marine_non_tanker,container vessel owner outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+DAL,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+DSX,2026-08-14,research_only,marine_non_tanker,dry-bulk operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+EDRY,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+EHLD,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+ELOG,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+ESEA,2026-08-14,research_only,marine_non_tanker,container and dry-bulk exposure outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+FDXF,2026-08-14,watchlist,surface_noncore,insufficient standalone public history,minimum history and all production gates
+FSTR,2026-08-14,research_only,surface_noncore,rail supplier rather than freight operator,coherent operating peer group and all production gates
+FTAI,2026-08-14,research_only,air_nonpassenger,aviation asset and engine model rather than passenger airline,separate asset cohort with sufficient breadth
+FWRD,2026-08-14,watchlist,surface_noncore,incomplete leverage and cash-flow evidence,two consecutive complete reporting periods plus all production gates
+GASS,2026-08-14,research_only,marine_non_tanker,LPG carrier outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+GATX,2026-08-14,research_only,surface_noncore,equipment lessor economics not comparable with freight operators,coherent operating peer group and all production gates
+GBX,2026-08-14,research_only,surface_noncore,rail equipment manufacturer rather than freight operator,coherent operating peer group and all production gates
+GLBS,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+GNK,2026-08-14,research_only,marine_non_tanker,dry-bulk operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+GSL,2026-08-14,research_only,marine_non_tanker,container vessel lessor outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+GXO,2026-08-14,watchlist,surface_noncore,orphan contract-warehousing peer group,sufficient comparable breadth and all production gates
+HMR,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+HSHP,2026-08-14,research_only,marine_non_tanker,dry-bulk Newcastlemax operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+HTCO,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+HTLD,2026-08-14,watchlist,surface_noncore,metric completion required,complete required metrics and all production gates
+ICON,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+JBLU,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+JOBY,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+JYD,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+KEX,2026-08-14,research_only,marine_non_tanker,inland tank-barge economics outside ocean oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+LTM,2026-08-14,research_only,air_nonpassenger,post-bankruptcy relisting structural break,post-break minimum history and all production gates
+LUV,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+MATX,2026-08-14,research_only,marine_non_tanker,container and logistics model outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+MRTN,2026-08-14,watchlist,surface_noncore,metric completion required,complete required metrics and all production gates
+NCEW,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+NCT,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+OMAB,2026-08-14,research_only,air_nonpassenger,airport operator rather than passenger airline,separate airport cohort with sufficient breadth
+PAC,2026-08-14,research_only,air_nonpassenger,airport operator rather than passenger airline,separate airport cohort with sufficient breadth
+PAL,2026-08-14,watchlist,surface_noncore,short public history and specialized auto-haul model,minimum history and all production gates
+PAMT,2026-08-14,research_only,surface_noncore,insufficient scale or liquidity,minimum liquidity and all production gates
+PANL,2026-08-14,research_only,marine_non_tanker,dry-bulk and logistics model outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+PBI,2026-08-14,research_only,surface_noncore,mail technology and presort model under universe review,approved transportation classification and all production gates
+PSHG,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+PSIG,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+R,2026-08-14,research_only,surface_noncore,fleet leasing and dedicated model not directly comparable,coherent operating peer group and all production gates
+RAIL,2026-08-14,research_only,surface_noncore,rail equipment manufacturer rather than freight operator,coherent operating peer group and all production gates
+RLGT,2026-08-14,watchlist,surface_noncore,below five million dollar ADV floor,minimum liquidity and all production gates
+RUBI,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+RVSN,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+RXO,2026-08-14,watchlist,surface_noncore,metric completion and standalone history required,complete required metrics and all production gates
+RYAAY,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+SB,2026-08-14,research_only,marine_non_tanker,dry-bulk operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+SBLK,2026-08-14,research_only,marine_non_tanker,dry-bulk operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+SFWL,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+SHIP,2026-08-14,research_only,marine_non_tanker,dry-bulk operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+SKYW,2026-08-14,research_only,air_nonpassenger,capacity-purchase contract model differs from passenger airline economics,separate regional contract cohort with sufficient breadth
+SMHI,2026-08-14,research_only,marine_non_tanker,offshore support operator outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+SOAR,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+SWVL,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+TOPP,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+TRN,2026-08-14,research_only,surface_noncore,rail equipment lessor and manufacturer rather than freight operator,coherent operating peer group and all production gates
+UAL,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+UFG,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+ULCC,2026-08-14,research_only,passenger_airlines_monitor_only,airline economics and specialized metrics require an independent model and must not enter pooled production calibration,independent airline cohort contract with minimum issuer breadth and fresh untouched out-of-sample promotion gates
+ULH,2026-08-14,watchlist,surface_noncore,insufficient scale or coverage,minimum liquidity coverage and all production gates
+UP,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+USEA,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+VLRS,2026-08-14,watchlist,air_nonpassenger,borderline liquidity or reporting coverage,complete reporting and all production gates
+VNTG,2026-08-14,research_only,development_speculative,development-stage or speculative transport,operating status liquidity history and all production gates
+WERN,2026-08-14,watchlist,surface_noncore,current financial-policy failure or incomplete leverage evidence,two consecutive complete reporting periods plus all production gates
+WLFC,2026-08-14,research_only,air_nonpassenger,engine lessor rather than passenger airline,separate lessor cohort with sufficient breadth
+ZIM,2026-08-14,research_only,marine_non_tanker,container liner outside oil-tanker cohort,separate coherent marine cohort with sufficient breadth
+ZTO,2026-08-14,research_only,surface_noncore,noncomparable geography accounting and economic drivers,separate coherent regional cohort and all production gates

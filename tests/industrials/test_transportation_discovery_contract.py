@@ -39,7 +39,7 @@ def contract_paths() -> dict[str, Path | str]:
     parser_cfg = family["dedicated_parser"]
     universe = family["universe"]
     return {
-        "active": resolve_path(universe["seed_csv"], base_dir=INDUSTRIALS_ROOT),
+        "active": resolve_path(parser_cfg.get("dp0_active_seed_csv", universe["seed_csv"]), base_dir=INDUSTRIALS_ROOT),
         "delisted": resolve_path(universe["delisted_seed_csv"], base_dir=INDUSTRIALS_ROOT),
         "metrics": resolve_path(parser_cfg["discovery_registry_csv"], base_dir=INDUSTRIALS_ROOT),
         "supporting_metrics": resolve_path(parser_cfg["supporting_registry_csv"], base_dir=INDUSTRIALS_ROOT),

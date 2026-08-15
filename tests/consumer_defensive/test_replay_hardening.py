@@ -221,7 +221,7 @@ def test_yahoo_cache_only_missing_key_never_calls_network(
     assert called is False
 
 
-def test_sec_cache_only_without_exact_seal_fails_before_network(
+def test_empty_sec_cache_only_reports_missing_aliases_without_network(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bundle = _sec_bundle(tmp_path)
@@ -236,12 +236,18 @@ def test_sec_cache_only_without_exact_seal_fails_before_network(
     with connect(tmp_path / "sec_missing.sqlite") as conn:
         bootstrap_stage4(conn, bundle)
         load_current_universe(conn, load_policy(UNIVERSE_POLICY))
-        with pytest.raises(RuntimeError, match='immutable snapshot and reconciliation'):
-            sync_sec_fundamentals(
-                conn,bundle,tickers=['KO','PEP'],as_of='2024-12-31',
-                fetch=forbidden_fetch,
-            )
+        result = sync_sec_fundamentals(
+            conn,bundle,tickers=['KO','PEP'],as_of='2024-12-31',
+            fetch=forbidden_fetch,
+        )
         assert called is False
+        assert len(result['failures']) == 2
+        assert {failure['ticker'] for failure in result['failures']} == {'KO', 'PEP'}
+        assert all(
+            'cache entry missing' in failure['error']
+            for failure in result['failures']
+        )
+        assert result['full_scope_reconciled'] is False
         assert conn.execute(
             'SELECT COUNT(*) FROM fact_sec_xbrl_fact_raw'
         ).fetchone()[0] == 0
@@ -553,3 +559,34 @@ def test_corrupt_fx_cache_repairs_online_but_fails_in_cache_only_mode(
             fetch=lambda _: (_ for _ in ()).throw(AssertionError('no network')),
         )
         assert 'JSONDecodeError' in replay['failures'][0]['error']
+
+
+def test_fx_cache_only_accepts_valid_legacy_alias_without_network_or_new_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _fx_bundle(tmp_path)
+    bundle.payload['fx_rates']['start_date'] = '2024-01-01'
+    legacy_path = tmp_path / 'fx_cache' / 'CLPUSD=X.json'
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _fx_payload(['2024-01-03'], [0.001], symbol='CLPUSD=X')
+    legacy_path.write_text(json.dumps(payload), encoding='utf-8')
+    current_path = (
+        tmp_path / 'fx_cache' / 'CLPUSD_X_2024-01-01_2024-01-07.json'
+    )
+    monkeypatch.setenv('CONSUMER_DEFENSIVE_CACHE_ONLY', '1')
+
+    with connect(tmp_path / 'fx-legacy-cache.sqlite') as conn:
+        bootstrap_stage4(conn, bundle)
+        _insert_clp_requirement(conn)
+        result = sync_fx_rates(
+            conn, bundle, start='2024-01-01', end='2024-01-07',
+            fetch=lambda _: (_ for _ in ()).throw(AssertionError('no network')),
+        )
+
+        assert result['failures'] == []
+        assert result['rows_written'] == 1
+        assert result['cache_manifest']['entries'][0]['path'] == 'CLPUSD=X.json'
+        assert current_path.exists() is False
+        assert conn.execute(
+            "SELECT rate FROM fact_fx_rate WHERE base_currency='CLP'"
+        ).fetchone()[0] == pytest.approx(0.001)

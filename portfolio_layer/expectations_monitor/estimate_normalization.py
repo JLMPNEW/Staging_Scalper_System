@@ -19,6 +19,14 @@ def _clean(value: Any) -> Any:
     return None if text.casefold() in {"", "none", "null", "n/a", "na", "-"} else value
 
 
+def _first_clean(row: Mapping[str, Any], *fields: str) -> Any:
+    for field in fields:
+        value = _clean(row.get(field))
+        if value is not None:
+            return value
+    return None
+
+
 def _period_slug(value: Any, *, default: str) -> str:
     text = str(value if value is not None else default).strip().casefold()
     cleaned = "".join(char if char.isalnum() else "_" for char in text).strip("_")
@@ -122,16 +130,33 @@ def normalize_estimates(
             normalized.extend((eps, revenue))
     elif result.provider == "fmp":
         source_rows = result.payload if isinstance(result.payload, list) else []
-        fiscal_period = (
-            "quarterly" if result.capability == "analyst_estimates_quarterly" else "annual"
-        )
+        fiscal_period = "quarterly" if result.capability == "analyst_estimates_quarterly" else "annual"
+        field_aliases = {
+            "eps": {
+                "average": ("epsAvg", "estimatedEpsAvg"),
+                "high": ("epsHigh", "estimatedEpsHigh"),
+                "low": ("epsLow", "estimatedEpsLow"),
+                "analysts": (
+                    "numAnalystsEps",
+                    "numberAnalystEstimatedEps",
+                    "numberAnalystsEstimatedEps",
+                ),
+            },
+            "revenue": {
+                "average": ("revenueAvg", "estimatedRevenueAvg"),
+                "high": ("revenueHigh", "estimatedRevenueHigh"),
+                "low": ("revenueLow", "estimatedRevenueLow"),
+                "analysts": (
+                    "numAnalystsRevenue",
+                    "numberAnalystEstimatedRevenue",
+                    "numberAnalystsEstimatedRevenue",
+                ),
+            },
+        }
         for source in source_rows:
             if not isinstance(source, dict):
                 continue
-            for estimate_type, prefix, analyst_field in (
-                ("eps", "eps", "numAnalystsEps"),
-                ("revenue", "revenue", "numAnalystsRevenue"),
-            ):
+            for estimate_type, aliases in field_aliases.items():
                 row = _base_snapshot(
                     result,
                     source,
@@ -143,10 +168,10 @@ def normalize_estimates(
                 )
                 row.update(
                     {
-                        "estimate_average": _clean(source.get(f"{prefix}Avg")),
-                        "estimate_high": _clean(source.get(f"{prefix}High")),
-                        "estimate_low": _clean(source.get(f"{prefix}Low")),
-                        "analyst_count": _clean(source.get(analyst_field)),
+                        "estimate_average": _first_clean(source, *aliases["average"]),
+                        "estimate_high": _first_clean(source, *aliases["high"]),
+                        "estimate_low": _first_clean(source, *aliases["low"]),
+                        "analyst_count": _first_clean(source, *aliases["analysts"]),
                     }
                 )
                 normalized.append(row)
@@ -168,4 +193,3 @@ def capture_plan(provider: str) -> tuple[str, ...]:
     if provider == "fmp":
         return ("analyst_estimates", "analyst_estimates_quarterly")
     raise ValueError(f"Unsupported estimate provider: {provider}")
-

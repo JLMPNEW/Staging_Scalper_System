@@ -222,7 +222,7 @@ sectors:
       date_flag: "--asof"
       selection_flag: "--only"
       steps: ["13_sync_positioning_upstream", "09_import_positioning"]
-      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10b_validate_dashboard"]
+      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10c_financial_lineage_shadow", "10b_validate_dashboard"]
       extra_args: []
 
   # ------------------------------------------------- software_infrastructure
@@ -254,7 +254,7 @@ sectors:
       date_flag: "--asof"
       selection_flag: "--only"
       steps: ["13_sync_positioning_upstream", "09_import_positioning"]
-      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10b_validate_dashboard"]
+      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10c_financial_lineage_shadow", "10b_validate_dashboard"]
       extra_args: []
 
   # ---------------------------------------------------- technology_hardware
@@ -286,7 +286,7 @@ sectors:
       date_flag: "--asof"
       selection_flag: "--only"
       steps: ["13_sync_positioning_upstream", "09_import_positioning"]
-      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10b_validate_dashboard"]
+      rebuild_steps: ["06a_build_scoring_contract", "06a_validate_scoring_contract", "10_build_stage7_scores", "10_validate_stage7_scores", "10b_publish_dashboard", "10c_financial_lineage_shadow", "10b_validate_dashboard"]
       extra_args: []
 
   # ---------------------------------------------------------------- defense

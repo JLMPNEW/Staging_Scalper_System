@@ -39,6 +39,10 @@ from consumer_defensive.core.financial_semantics import (
     RedenominationExemption,
     classify_fx_daily_rates,
 )
+from consumer_defensive.core.inline_xbrl import (
+    PARSER_VERSION as INLINE_PARSER_VERSION,
+    parse_inline_xbrl,
+)
 from consumer_defensive.core.metric_registry import load_metric_registry, upsert_metric_registry
 from consumer_defensive.core.universe import active_universe_tickers, upsert_stage2_sources
 from consumer_defensive.core.source_registry import load_source_registry, upsert_source_registry
@@ -109,6 +113,11 @@ INLINE_XBRL_NAMESPACE = re.compile(
 )
 INLINE_XBRL_ELEMENT = re.compile(
     br"<[A-Za-z_][A-Za-z0-9_.-]*:(?:header|hidden|nonfraction|nonnumeric|fraction|continuation)\b",
+    re.IGNORECASE,
+)
+INLINE_XBRL_NUMERIC_FACT = re.compile(
+    br"<[A-Za-z_][A-Za-z0-9_.-]*:nonfraction\b[^>]*\bname\s*=\s*"
+    br"(?:\"(?!dei:)[^\"]+\"|'(?!dei:)[^']+')",
     re.IGNORECASE,
 )
 
@@ -377,7 +386,7 @@ class HttpPolicy:
 
 Fetcher = Callable[[str], bytes]
 
-STAGE4_SCHEMA_VERSION = 9
+STAGE4_SCHEMA_VERSION = 10
 SEC_INGESTION_CONFIG_VERSION = 8
 STAGE4_MIGRATION_MANIFESTS = {
     2: b'''v2|create:reporting_profile,filing_document,document_company,reconciliation,census,summary,indexes|alter:filing.metadata_quality_flags_json|backfill:v2_legacy_filing_association_v1,v2_legacy_document_association_v1''',
@@ -388,6 +397,7 @@ STAGE4_MIGRATION_MANIFESTS = {
     7: b'''v7|create:document_bridge_reconciliation_invalidation_insert_delete_material_update,association_event_reconciliation_invalidation_insert|contract:updated_at_nonmaterial,pre_v7_reconciliation_fail_closed_v1|invalidate:all_existing_reconciliation_preserve_cache_snapshots''',
     8: b'''v8|alter:reconciliation.scope_contract_version,trust_state,quarantine_reason,snapshot.scope_contract_version,trust_state,quarantine_reason|create:fact_filing_and_company_currency_invalidation,non_destructive_reconciliation_invalidation|identity:issuer_scope_ticker_company_cik_reporting_currency_v3,ingestion_config_v7|quarantine:pre_v8_scope_v2_pointers_in_place|contract:current_watermark_live_rebuild_only_v1''',
     9: b'''v9|create:index.raw_accession_fact,index.canonical_accession,index.census_accession|contract:shared_accession_reconciliation_indexed_v1''',
+    10: b'''v10|alter:reporting_profile.latest_fallback_accepted_at,reporting_profile.fallback_document_sha256,reporting_profile.fallback_parser_version|create:inline_xbrl_fallback_run|contract:sealed_numeric_context_parser_v1,model_mapped_coverage_v1''',
 }
 STAGE4_MIGRATION_HISTORY = (
     (
@@ -429,6 +439,11 @@ STAGE4_MIGRATION_HISTORY = (
         9,
         'shared_accession_reconciliation_indexes_v9',
         hashlib.sha256(STAGE4_MIGRATION_MANIFESTS[9]).hexdigest(),
+    ),
+    (
+        10,
+        'sealed_inline_xbrl_fallback_v10',
+        hashlib.sha256(STAGE4_MIGRATION_MANIFESTS[10]).hexdigest(),
     ),
 )
 # One short-lived pre-release build stamped the whole mutable schema as v2.
@@ -1474,6 +1489,49 @@ def _stage4_migration_v9(conn: sqlite3.Connection) -> None:
     ''')
 
 
+def _stage4_migration_v10(conn: sqlite3.Connection) -> None:
+    """Add sealed inline-XBRL fallback provenance without changing SEC seals."""
+    _stage4_add_column(
+        conn, 'dim_issuer_reporting_profile', 'latest_fallback_accepted_at', 'TEXT'
+    )
+    _stage4_add_column(
+        conn, 'dim_issuer_reporting_profile', 'fallback_document_sha256', 'TEXT'
+    )
+    _stage4_add_column(
+        conn, 'dim_issuer_reporting_profile', 'fallback_parser_version', 'TEXT'
+    )
+    _stage4_execute_sql(conn, '''
+    CREATE TABLE IF NOT EXISTS fact_sec_inline_xbrl_fallback_run (
+        asof_date TEXT NOT NULL,
+        ticker TEXT NOT NULL,
+        accession_number TEXT NOT NULL,
+        accepted_at TEXT NOT NULL,
+        document_sha256 TEXT NOT NULL,
+        parser_version TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN (
+            'covered','nonfinancial_inline_xbrl','insufficient_mapped_facts'
+        )),
+        numeric_fact_count INTEGER NOT NULL,
+        consolidated_fact_count INTEGER NOT NULL,
+        mapped_fact_count INTEGER NOT NULL,
+        context_count INTEGER NOT NULL,
+        unit_count INTEGER NOT NULL,
+        skipped_fact_count INTEGER NOT NULL,
+        unsupported_transformations_json TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(asof_date,ticker,accession_number,parser_version),
+        FOREIGN KEY(accession_number) REFERENCES fact_sec_filing(accession_number)
+            ON DELETE CASCADE,
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+            ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_stage4_inline_fallback_ticker_accepted
+        ON fact_sec_inline_xbrl_fallback_run(ticker,accepted_at,status);
+    ''')
+
+
 _STAGE4_MIGRATION_UNITS = {
     2: _stage4_migration_v2,
     3: _stage4_migration_v3,
@@ -1483,6 +1541,7 @@ _STAGE4_MIGRATION_UNITS = {
     7: _stage4_migration_v7,
     8: _stage4_migration_v8,
     9: _stage4_migration_v9,
+    10: _stage4_migration_v10,
 }
 
 
@@ -1750,14 +1809,8 @@ def _reconcile_reporting_profiles_for_accession(
                WHERE ticker=? AND accession_number=? LIMIT 1''',
             (ticker, accession),
         ).fetchone())
-        has_inline = bool(conn.execute(
-            '''SELECT 1 FROM bridge_sec_filing_document_company
-               WHERE issuer_ticker=? AND accession_number=?
-                 AND inline_xbrl_verified=1 LIMIT 1''',
-            (ticker, accession),
-        ).fetchone())
         eligible = form in PROFILE_FINANCIAL_FORMS or (
-            form in PROFILE_CONDITIONAL_XBRL_FORMS and (has_facts or has_inline)
+            form in PROFILE_CONDITIONAL_XBRL_FORMS and has_facts
         )
         if not eligible:
             continue
@@ -2634,6 +2687,29 @@ def _cache_only_sec_preflight(
         )
 
 
+def _sec_ingestion_state_is_empty(conn: sqlite3.Connection) -> bool:
+    tables = (
+        'fact_sec_filing',
+        'bridge_sec_filing_company',
+        'fact_sec_filing_document',
+        'bridge_sec_filing_document_company',
+        'fact_sec_xbrl_fact_raw',
+        'fact_financial_statement_canonical',
+        'feature_financial_statement',
+        'dim_issuer_reporting_profile',
+        'fact_sec_inline_xbrl_fallback_run',
+        'fact_specialized_metric_disclosure_census',
+        'fact_specialized_metric_disclosure_summary',
+        'consumer_defensive_sec_reconciliation_state',
+        'consumer_defensive_sec_cache_snapshot',
+        'consumer_defensive_sec_ingestion_watermark',
+    )
+    return not any(
+        conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone()
+        for table in tables
+    )
+
+
 def _validate_companyfacts_payload(payload: object, *, expected_cik: str) -> None:
     if not isinstance(payload, dict):
         raise ValueError('SEC Companyfacts payload must be an object')
@@ -2848,6 +2924,14 @@ def _contains_inline_xbrl_markup(raw: bytes) -> bool:
     return bool(INLINE_XBRL_NAMESPACE.search(raw) and INLINE_XBRL_ELEMENT.search(raw))
 
 
+def _contains_financial_inline_xbrl_markup(raw: bytes) -> bool:
+    """Require a non-DEI numeric inline fact before treating a 6-K as financial."""
+
+    return bool(
+        INLINE_XBRL_NAMESPACE.search(raw) and INLINE_XBRL_NUMERIC_FACT.search(raw)
+    )
+
+
 def _reporting_profile_anchor(
     filing_rows: Iterable[dict[str, Any]],
     *,
@@ -2914,12 +2998,6 @@ def _pit_inline_fallback_required(
                 '''SELECT 1 FROM fact_sec_xbrl_fact_raw
                    WHERE ticker=? AND accession_number=? AND accepted_at<=?
                    LIMIT 1''',
-                (ticker, accession, cutoff),
-            ).fetchone()
-            or conn.execute(
-                '''SELECT 1 FROM bridge_sec_filing_document_company
-                   WHERE issuer_ticker=? AND accession_number=?
-                     AND inline_xbrl_verified=1 AND accepted_at<=? LIMIT 1''',
                 (ticker, accession, cutoff),
             ).fetchone()
         )
@@ -3134,7 +3212,14 @@ def sync_sec_fundamentals(
         rehabilitation_lookup = _sealed_cache_lookup(
             conn, cache, cutoff[:10], allow_quarantined=True
         )
-    if cache_only and rehabilitation_lookup is None:
+    empty_cache_only_bootstrap = (
+        cache_only
+        and rehabilitation_lookup is None
+        and not snapshot_exists
+        and not quarantined_snapshot_exists
+        and _sec_ingestion_state_is_empty(conn)
+    )
+    if cache_only and rehabilitation_lookup is None and not empty_cache_only_bootstrap:
         _cache_only_sec_preflight(
             conn,asof_date=cutoff[:10],
             ingestion_config_sha256=ingestion_config_sha256,
@@ -3546,8 +3631,9 @@ def sync_sec_fundamentals(
                             cache_records.append(_cache_manifest_record(cache, doc_path, raw))
                             digest, status = hashlib.sha256(raw).hexdigest(), "hydrated"
                             if _contains_inline_xbrl_markup(raw):
-                                inline_xbrl_accessions.add(accession)
                                 inline_verified = 1
+                            if _contains_financial_inline_xbrl_markup(raw):
+                                inline_xbrl_accessions.add(accession)
                             issuer_document_count += 1
                         except Exception as exc:  # retain explicit coverage failure
                             status = f"fetch_failed:{type(exc).__name__}"
@@ -3789,6 +3875,325 @@ def sync_sec_fundamentals(
     }
 
 
+def _refresh_reporting_profile_from_database(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    cutoff: str,
+    companyfacts_lag_days: int,
+) -> None:
+    rows = conn.execute(
+        '''SELECT b.accession_number,b.form_type,f.accepted_at
+           FROM bridge_sec_filing_company b
+           JOIN fact_sec_filing f ON f.accession_number=b.accession_number
+           WHERE b.issuer_ticker=? AND f.accepted_at<=?
+             AND COALESCE((SELECT e.event_type
+                 FROM sec_filing_company_association_event e
+                 WHERE e.accession_number=b.accession_number
+                   AND e.issuer_company_id=b.issuer_company_id
+                   AND e.effective_asof<=?
+                 ORDER BY e.effective_asof DESC,e.event_id DESC LIMIT 1),
+                 CASE WHEN b.association_status='active' THEN 'observed' ELSE 'retired' END)
+                 IN ('observed','reactivated')''',
+        (ticker, cutoff, cutoff),
+    ).fetchall()
+    eligible: list[tuple[str, str]] = []
+    for row in rows:
+        accession = str(row['accession_number'])
+        form = str(row['form_type'] or '').upper()
+        accepted = str(row['accepted_at'] or '')
+        has_facts = bool(conn.execute(
+            '''SELECT 1 FROM fact_sec_xbrl_fact_raw
+               WHERE ticker=? AND accession_number=? AND accepted_at<=? LIMIT 1''',
+            (ticker, accession, cutoff),
+        ).fetchone())
+        if form in PROFILE_FINANCIAL_FORMS or (
+            form in PROFILE_CONDITIONAL_XBRL_FORMS and has_facts
+        ):
+            eligible.append((accepted, form))
+    eligible.sort(reverse=True)
+    latest_filing = eligible[0][0] if eligible else ''
+    annual = next((
+        _canonical_financial_form(form) for _, form in eligible
+        if _canonical_financial_form(form) in PROFILE_ANNUAL_FORMS
+    ), '')
+    companyfacts = str(conn.execute(
+        '''SELECT MAX(accepted_at) FROM fact_sec_xbrl_fact_raw
+           WHERE ticker=? AND source_id=? AND accepted_at<=?''',
+        (ticker, SEC_COMPANYFACTS, cutoff),
+    ).fetchone()[0] or '')
+    fallback_row = conn.execute(
+        '''SELECT accepted_at,document_sha256,parser_version
+           FROM fact_sec_inline_xbrl_fallback_run
+           WHERE ticker=? AND asof_date=? AND status='covered'
+           ORDER BY accepted_at DESC,accession_number DESC LIMIT 1''',
+        (ticker, cutoff[:10]),
+    ).fetchone()
+    fallback_accepted = str(fallback_row[0] or '') if fallback_row else ''
+    latest_fact = max(companyfacts, fallback_accepted)
+    companyfacts_lag = None
+    if latest_filing and companyfacts:
+        companyfacts_lag = (
+            date.fromisoformat(latest_filing[:10])
+            - date.fromisoformat(companyfacts[:10])
+        ).days
+    effective_lag = None
+    if latest_filing and latest_fact:
+        effective_lag = (
+            date.fromisoformat(latest_filing[:10])
+            - date.fromisoformat(latest_fact[:10])
+        ).days
+    required = int(
+        annual in {'20-F','40-F'}
+        and (effective_lag is None or effective_lag > companyfacts_lag_days)
+    )
+    covered_by_fallback = bool(
+        fallback_row and fallback_accepted and fallback_accepted >= latest_filing
+    )
+    conn.execute(
+        '''UPDATE dim_issuer_reporting_profile SET
+               primary_annual_form=?,latest_filing_accepted_at=?,
+               latest_companyfacts_accepted_at=?,companyfacts_lag_days=?,
+               latest_fallback_accepted_at=?,fallback_document_sha256=?,
+               fallback_parser_version=?,inline_xbrl_fallback_required=?,
+               coverage_status=?,review_reason=?,updated_at=? WHERE ticker=?''',
+        (
+            annual or None,latest_filing or None,companyfacts or None,
+            companyfacts_lag,fallback_accepted or None,
+            str(fallback_row[1]) if fallback_row else None,
+            str(fallback_row[2]) if fallback_row else None,required,
+            'inline_fallback_required' if required else (
+                'covered' if latest_fact else 'filings_only'
+            ),
+            'inline_xbrl_required' if required else (
+                'inline_xbrl_fallback_covered' if covered_by_fallback else None
+            ),
+            utc_now(),ticker,
+        ),
+    )
+
+
+def sync_inline_xbrl_fallback(
+    conn: sqlite3.Connection,
+    bundle: ConfigBundle,
+    *,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Extract model-mapped numeric facts from exact sealed Stage 4 documents."""
+    asof_date = (as_of or date.today().isoformat())[:10]
+    cutoff = asof_date + 'T23:59:59Z'
+    settings = cfg_get(bundle.payload, 'sec_fundamentals')
+    cache_root = resolve_path(settings['cache_dir'], base_dir=bundle.base_dir)
+    all_issuers = _issuer_rows(conn, None)
+    _cache_only_sec_preflight(
+        conn, asof_date=asof_date,
+        ingestion_config_sha256=_sec_ingestion_config_sha256(settings),
+        issuer_scope_sha256=_issuer_scope_sha256(all_issuers),
+        scope_issuer_count=len(all_issuers),
+    )
+    sealed_lookup = _sealed_cache_lookup(conn, cache_root, asof_date)
+    concept_map = _read_yaml(resolve_path(
+        cfg_get(bundle.payload, 'financial_features.concept_map'),
+        base_dir=bundle.base_dir,
+    ))
+    mapped_concepts = set(_concept_index(concept_map))
+    supported_currencies = {
+        'USD', *(str(value).upper() for value in cfg_get(
+            bundle.payload, 'fx_rates.supported_currencies', []
+        )),
+    }
+    targets = conn.execute(
+        '''SELECT p.ticker,p.latest_filing_accepted_at,b.issuer_company_id,
+                  b.issuer_cik,b.accession_number,b.form_type,b.filing_date,
+                  d.primary_document,d.content_sha256,d.hydration_status
+           FROM dim_issuer_reporting_profile p
+           JOIN bridge_sec_filing_company b ON b.issuer_ticker=p.ticker
+           JOIN fact_sec_filing f ON f.accession_number=b.accession_number
+           JOIN bridge_sec_filing_document_company d
+             ON d.accession_number=b.accession_number
+            AND d.issuer_company_id=b.issuer_company_id
+            AND d.source_id=?
+           WHERE (p.inline_xbrl_fallback_required=1 OR EXISTS(
+                 SELECT 1 FROM fact_sec_inline_xbrl_fallback_run r
+                 WHERE r.ticker=p.ticker AND r.asof_date=?))
+             AND f.accepted_at=p.latest_filing_accepted_at
+             AND f.accepted_at<=? ORDER BY p.ticker,b.accession_number''',
+        (SEC_INLINE, asof_date, cutoff),
+    ).fetchall()
+    by_ticker: dict[str, sqlite3.Row] = {}
+    for row in targets:
+        ticker = str(row['ticker'])
+        if ticker in by_ticker:
+            raise RuntimeError(f'Ambiguous inline-XBRL fallback document for {ticker}')
+        by_ticker[ticker] = row
+    staged: list[dict[str, Any]] = []
+    for ticker, row in sorted(by_ticker.items()):
+        if str(row['hydration_status']) != 'hydrated':
+            raise RuntimeError(f'Inline-XBRL fallback document is not hydrated: {ticker}')
+        primary = validate_sec_relative_document_path(
+            row['primary_document'], allowed_suffixes=SEC_DOCUMENT_SUFFIXES,
+            context=f'inline-XBRL fallback document for {ticker}',
+        )
+        logical = (
+            f"filings/{str(row['issuer_cik']).zfill(10)}/"
+            f"{str(row['accession_number'])}/{primary}"
+        )
+        sealed_path = sealed_lookup.get(logical)
+        if sealed_path is None:
+            raise RuntimeError(f'Exact sealed fallback document is missing: {logical}')
+        raw = read_bytes(sealed_path)
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != str(row['content_sha256'] or ''):
+            raise RuntimeError(f'Fallback document hash mismatch: {ticker}')
+        parsed = parse_inline_xbrl(raw)
+        consolidated = [fact for fact in parsed.facts if fact.dimensions_json == '[]']
+        mapped = [
+            fact for fact in consolidated
+            if fact.concept in mapped_concepts
+            and str(fact.unit or '').upper() in supported_currencies
+        ]
+        status = (
+            'covered' if mapped else (
+                'nonfinancial_inline_xbrl' if not parsed.facts
+                else 'insufficient_mapped_facts'
+            )
+        )
+        staged.append({
+            'row': row, 'digest': digest, 'parsed': parsed,
+            'facts': consolidated, 'mapped_count': len(mapped), 'status': status,
+        })
+    changed_tickers: set[str] = set()
+    with conn:
+        for item in staged:
+            row = item['row']
+            ticker = str(row['ticker'])
+            accession = str(row['accession_number'])
+            accepted = str(row['latest_filing_accepted_at'])
+            created_at = utc_now()
+            fact_rows = []
+            for fact in item['facts']:
+                semantic = (
+                    ticker, str(row['issuer_cik']), accession, fact.taxonomy,
+                    fact.concept, fact.value_text, fact.numeric_value, fact.unit,
+                    fact.period_start, fact.period_end, str(row['filing_date'] or ''),
+                    accepted, str(row['form_type'] or ''),
+                    f'inline:{fact.context_id}', fact.dimensions_json, SEC_INLINE,
+                    f'inline_xbrl:{INLINE_PARSER_VERSION}:{item["digest"]}:{fact.context_id}',
+                )
+                fact_rows.append((*semantic, _source_observation_id(semantic), created_at))
+            existing = conn.execute(
+                '''SELECT ticker,cik,accession_number,taxonomy,concept,value_text,
+                          numeric_value,unit,period_start,period_end,filed_date,
+                          accepted_at,form_type,frame,dimensions_json,source_id,
+                          source_detail,source_observation_id
+                   FROM fact_sec_xbrl_fact_raw
+                   WHERE ticker=? AND accession_number=? AND source_id=?''',
+                (ticker, accession, SEC_INLINE),
+            ).fetchall()
+            semantics = [values[:-1] for values in fact_rows]
+            if _raw_fact_semantics(existing) != _raw_fact_semantics(semantics):
+                conn.execute(
+                    '''DELETE FROM fact_financial_statement_canonical
+                       WHERE accession_number=? AND source_raw_fact_id IN (
+                           SELECT raw_fact_id FROM fact_sec_xbrl_fact_raw
+                           WHERE ticker=? AND accession_number=? AND source_id=?)''',
+                    (accession, ticker, accession, SEC_INLINE),
+                )
+                conn.execute(
+                    '''DELETE FROM fact_sec_xbrl_fact_raw
+                       WHERE ticker=? AND accession_number=? AND source_id=?''',
+                    (ticker, accession, SEC_INLINE),
+                )
+                if fact_rows:
+                    conn.executemany(
+                        '''INSERT INTO fact_sec_xbrl_fact_raw(
+                               ticker,cik,accession_number,taxonomy,concept,value_text,
+                               numeric_value,unit,period_start,period_end,filed_date,
+                               accepted_at,form_type,frame,dimensions_json,source_id,
+                               source_detail,source_observation_id,created_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        fact_rows,
+                    )
+                conn.execute(
+                    '''DELETE FROM feature_financial_statement
+                       WHERE model_family=? AND ticker=? AND asof_date>=?''',
+                    (MODEL_FAMILY, ticker, accepted[:10]),
+                )
+                changed_tickers.add(ticker)
+            parsed = item['parsed']
+            conn.execute(
+                '''INSERT INTO fact_sec_inline_xbrl_fallback_run(
+                       asof_date,ticker,accession_number,accepted_at,
+                       document_sha256,parser_version,status,numeric_fact_count,
+                       consolidated_fact_count,mapped_fact_count,context_count,
+                       unit_count,skipped_fact_count,
+                       unsupported_transformations_json,source_id,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(asof_date,ticker,accession_number,parser_version)
+                   DO UPDATE SET document_sha256=excluded.document_sha256,
+                       accepted_at=excluded.accepted_at,status=excluded.status,
+                       numeric_fact_count=excluded.numeric_fact_count,
+                       consolidated_fact_count=excluded.consolidated_fact_count,
+                       mapped_fact_count=excluded.mapped_fact_count,
+                       context_count=excluded.context_count,unit_count=excluded.unit_count,
+                       skipped_fact_count=excluded.skipped_fact_count,
+                       unsupported_transformations_json=excluded.unsupported_transformations_json,
+                       updated_at=excluded.updated_at''',
+                (
+                    asof_date, ticker, accession, accepted, item['digest'],
+                    INLINE_PARSER_VERSION, item['status'], len(parsed.facts),
+                    len(item['facts']), item['mapped_count'], parsed.contexts,
+                    parsed.units, parsed.skipped_facts,
+                    json.dumps(parsed.unsupported_transformations), SEC_INLINE,
+                    created_at, created_at,
+                ),
+            )
+        for ticker in sorted(by_ticker):
+            _refresh_reporting_profile_from_database(
+                conn, ticker=ticker, cutoff=cutoff,
+                companyfacts_lag_days=int(settings.get('companyfacts_lag_days', 120)),
+            )
+    audit_rows = conn.execute(
+        '''SELECT ticker,accession_number,status,numeric_fact_count,
+                  consolidated_fact_count,mapped_fact_count,document_sha256
+           FROM fact_sec_inline_xbrl_fallback_run
+           WHERE asof_date=? AND parser_version=?
+           ORDER BY ticker,accession_number''',
+        (asof_date, INLINE_PARSER_VERSION),
+    ).fetchall()
+    return {
+        'as_of': asof_date,
+        'parser_version': INLINE_PARSER_VERSION,
+        'targets': len(audit_rows),
+        'replayed_targets': len(staged),
+        'covered': sum(str(row['status']) == 'covered' for row in audit_rows),
+        'nonfinancial_inline_xbrl': sum(
+            str(row['status']) == 'nonfinancial_inline_xbrl' for row in audit_rows
+        ),
+        'insufficient_mapped_facts': sum(
+            str(row['status']) == 'insufficient_mapped_facts' for row in audit_rows
+        ),
+        'numeric_facts': sum(int(row['numeric_fact_count']) for row in audit_rows),
+        'consolidated_facts': sum(
+            int(row['consolidated_fact_count']) for row in audit_rows
+        ),
+        'mapped_facts': sum(int(row['mapped_fact_count']) for row in audit_rows),
+        'changed_tickers': sorted(changed_tickers),
+        'results': [
+            {
+                'ticker': str(row['ticker']),
+                'accession_number': str(row['accession_number']),
+                'status': str(row['status']),
+                'numeric_facts': int(row['numeric_fact_count']),
+                'consolidated_facts': int(row['consolidated_fact_count']),
+                'mapped_facts': int(row['mapped_fact_count']),
+                'document_sha256': str(row['document_sha256']),
+            }
+            for row in audit_rows
+        ],
+    }
+
+
 def sync_fx_rates(conn: sqlite3.Connection, bundle: ConfigBundle, *, start: str | None = None, end: str | None = None, force_refresh: bool = False, fetch: Fetcher | None = None) -> dict[str, Any]:
     settings = cfg_get(bundle.payload, "fx_rates")
     fetch = fetch or http_fetcher(_http_policy(bundle.payload, "fx_rates"))
@@ -3837,6 +4242,9 @@ def sync_fx_rates(conn: sqlite3.Connection, bundle: ConfigBundle, *, start: str 
         )
         for row in settings.get("redenomination_exemptions", [])
     )
+    cache_only = os.environ.get(
+        'CONSUMER_DEFENSIVE_CACHE_ONLY', ''
+    ).strip().casefold() in {'1', 'true', 'yes', 'on'}
     for currency in currencies:
         symbol = f"{currency}USD=X"
         p1 = int(datetime.combine(fetch_start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
@@ -3847,14 +4255,38 @@ def sync_fx_rates(conn: sqlite3.Connection, bundle: ConfigBundle, *, start: str 
                 symbol.replace('=', '_') + '_' + fetch_start.isoformat()
                 + '_' + end_date.isoformat() + '.json'
             )
-            payload_raw, payload = _validated_mutable_json(
-                fetch, url, payload_path,
-                validate=lambda candidate: _validate_fx_chart_payload(
-                    candidate, expected_symbol=symbol,
-                    start_date=fetch_start, end_date=end_date,
-                ),
-                force=force_refresh, reuse_valid_cache=True,
+            legacy_path = _safe_cache_write_target(
+                cache, cache / f'{symbol}.json', context='FX legacy cache alias'
             )
+            legacy_payload: tuple[bytes, dict[str, Any]] | None = None
+            if (
+                not force_refresh
+                and not path_exists(payload_path)
+                and path_exists(legacy_path)
+            ):
+                try:
+                    legacy_raw = read_bytes(legacy_path)
+                    legacy_json = json.loads(legacy_raw)
+                    _validate_fx_chart_payload(
+                        legacy_json, expected_symbol=symbol,
+                        start_date=fetch_start, end_date=end_date,
+                    )
+                    legacy_payload = (legacy_raw, legacy_json)
+                    payload_path = legacy_path
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    if cache_only:
+                        raise
+            if legacy_payload is None:
+                payload_raw, payload = _validated_mutable_json(
+                    fetch, url, payload_path,
+                    validate=lambda candidate: _validate_fx_chart_payload(
+                        candidate, expected_symbol=symbol,
+                        start_date=fetch_start, end_date=end_date,
+                    ),
+                    force=force_refresh, reuse_valid_cache=True,
+                )
+            else:
+                payload_raw, payload = legacy_payload
             cache_records.append(_cache_manifest_record(cache, payload_path, payload_raw))
             observations = _validate_fx_chart_payload(
                 payload, expected_symbol=symbol,
@@ -4334,6 +4766,31 @@ def run_disclosure_census(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_
     }
 
 
+def _count_stale_lifecycle_disclosure_summaries(
+    conn: sqlite3.Connection,
+    *,
+    asof_date: str,
+    parser_version: str,
+) -> int:
+    """Count stale summaries for the active parser contract, retaining old audits."""
+
+    return int(conn.execute(
+        '''SELECT COUNT(*) FROM (
+             SELECT s.ticker,s.metric_id,s.parser_version,s.asof_date
+             FROM sec_filing_company_association_event e
+             CROSS JOIN fact_specialized_metric_disclosure_summary s
+             WHERE e.event_type IN ('retired','reactivated')
+               AND s.ticker=e.issuer_ticker
+               AND s.parser_version=? AND s.source_id=?
+               AND s.asof_date<=?
+               AND substr(e.effective_asof,1,10)<=s.asof_date
+               AND e.created_at>s.updated_at
+             GROUP BY s.ticker,s.metric_id,s.parser_version,s.asof_date
+           )''',
+        (parser_version, DISCLOSURE_SOURCE, asof_date),
+    ).fetchone()[0])
+
+
 def validate_stage4(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: str | None = None) -> dict[str, Any]:
     asof_date = (as_of or date.today().isoformat())[:10]
     cutoff = asof_date + "T23:59:59Z"
@@ -4507,6 +4964,21 @@ def validate_stage4(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: st
             (MODEL_FAMILY,),
         ).fetchone()[0]
     )
+    fallback_provenance_mismatches = int(conn.execute(
+        '''SELECT COUNT(*) FROM dim_issuer_reporting_profile p
+           WHERE p.latest_fallback_accepted_at IS NOT NULL AND NOT EXISTS(
+               SELECT 1 FROM fact_sec_inline_xbrl_fallback_run r
+               WHERE r.ticker=p.ticker AND r.asof_date=? AND r.status='covered'
+                 AND r.accepted_at=p.latest_fallback_accepted_at
+                 AND r.document_sha256=p.fallback_document_sha256
+                 AND r.parser_version=p.fallback_parser_version
+                 AND r.mapped_fact_count>0
+                 AND EXISTS(SELECT 1 FROM fact_sec_xbrl_fact_raw f
+                    WHERE f.ticker=r.ticker
+                      AND f.accession_number=r.accession_number
+                      AND f.source_id=?))''',
+        (asof_date, SEC_INLINE),
+    ).fetchone()[0])
     document_tickers = int(
         conn.execute(
             """SELECT COUNT(DISTINCT d.issuer_ticker)
@@ -4711,13 +5183,11 @@ def validate_stage4(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: st
               AND e.event_type IN ('retired','reactivated')
               AND substr(e.effective_asof,1,10)<=f.asof_date
               AND e.created_at>f.created_at)''',(asof_date,)).fetchone()[0])
-    stale_lifecycle_disclosure_summaries = int(conn.execute('''SELECT COUNT(*)
-        FROM fact_specialized_metric_disclosure_summary s WHERE s.asof_date<=?
-          AND EXISTS(SELECT 1 FROM sec_filing_company_association_event e
-            WHERE e.issuer_ticker=s.ticker
-              AND e.event_type IN ('retired','reactivated')
-              AND substr(e.effective_asof,1,10)<=s.asof_date
-              AND e.created_at>s.updated_at)''',(asof_date,)).fetchone()[0])
+    stale_lifecycle_disclosure_summaries = (
+        _count_stale_lifecycle_disclosure_summaries(
+            conn, asof_date=asof_date, parser_version=parser_version
+        )
+    )
     stage4_rows['global_foreign_key_violations'] = foreign_key_violations
     checks = {
         'canonical_acceptance_matches_raw_lineage': canonical_acceptance_mismatches == 0,
@@ -4726,6 +5196,9 @@ def validate_stage4(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: st
         "historical_and_current_ciks_complete": missing_ciks == 0,
         "reporting_profiles_complete": profiles == taxonomy_count,
         "companyfacts_coverage_complete": covered_profiles == taxonomy_count,
+        "inline_xbrl_fallback_provenance_complete": (
+            fallback_provenance_mismatches == 0
+        ),
         "filing_document_coverage_complete": document_tickers == taxonomy_count,
         "active_universe_count": active == expected_active,
         "applicability_subtypes_complete": blank_subtypes == 0,
@@ -4770,7 +5243,7 @@ def validate_stage4(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: st
         "census_source_provenance_current": bool(census_source_status and str(census_source_status[0]) == "active"),
         "specialized_metrics_remain_nonproduction": float(cfg_get(bundle.payload, "specialized_metrics.production_default_weight")) == 0.0,
     }
-    return {"status": "PASS" if all(checks.values()) else "FAIL", "checks": checks, "counts": {"active": active, "taxonomy": taxonomy_count, "expected_taxonomy": expected_taxonomy, "missing_ciks": missing_ciks, "profiles": profiles, "covered_profiles": covered_profiles, "fallback_required_profiles": fallback_required_profiles, "document_tickers": document_tickers, "features": features, "metrics": metric_count, "census_summary": summary, "filing_acceptance_missing": filing_acceptance_missing, "raw_observation_id_missing": raw_observation_id_missing, "canonical_observation_id_mismatch": canonical_observation_id_mismatch, "association_event_missing": association_event_missing, "association_event_hash_mismatch": association_event_hash_mismatch, "stale_lifecycle_features": stale_lifecycle_features, "stale_lifecycle_disclosure_summaries": stale_lifecycle_disclosure_summaries, "canonical_current_version": canonical_current_version, "canonical_fx_missing": fx_missing, "required_fx_currencies": len(required_fx), "covered_fx_currencies": len(required_fx & covered_fx), **semantic_validation, **stage4_rows}, "coverage": {"financial_quality_status": feature_quality, "disclosure_status": disclosure_status, "primary_annual_forms": annual_forms}}
+    return {"status": "PASS" if all(checks.values()) else "FAIL", "checks": checks, "counts": {"active": active, "taxonomy": taxonomy_count, "expected_taxonomy": expected_taxonomy, "missing_ciks": missing_ciks, "profiles": profiles, "covered_profiles": covered_profiles, "fallback_required_profiles": fallback_required_profiles, "fallback_provenance_mismatches": fallback_provenance_mismatches, "document_tickers": document_tickers, "features": features, "metrics": metric_count, "census_summary": summary, "filing_acceptance_missing": filing_acceptance_missing, "raw_observation_id_missing": raw_observation_id_missing, "canonical_observation_id_mismatch": canonical_observation_id_mismatch, "association_event_missing": association_event_missing, "association_event_hash_mismatch": association_event_hash_mismatch, "stale_lifecycle_features": stale_lifecycle_features, "stale_lifecycle_disclosure_summaries": stale_lifecycle_disclosure_summaries, "canonical_current_version": canonical_current_version, "canonical_fx_missing": fx_missing, "required_fx_currencies": len(required_fx), "covered_fx_currencies": len(required_fx & covered_fx), **semantic_validation, **stage4_rows}, "coverage": {"financial_quality_status": feature_quality, "disclosure_status": disclosure_status, "primary_annual_forms": annual_forms}}
 
 
 def _validate_financial_semantics(

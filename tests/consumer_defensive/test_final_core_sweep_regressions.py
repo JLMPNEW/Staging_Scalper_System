@@ -185,6 +185,64 @@ def test_yahoo_atomic_cache_publish_does_not_clobber_legacy_temp_hardlink(
     assert (cache / 'ticker_KO_2019-01-02_2019-01-02.json').is_file()
 
 
+def test_yahoo_cache_only_accepts_valid_pre_hardening_cache_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _market_policy_with_cache(tmp_path)
+    cache = tmp_path / 'cache'
+    cache.mkdir()
+    legacy = cache / 'KO_2019-01-02_2019-01-02.json'
+    legacy.write_text(_yahoo_payload('KO'), encoding='utf-8')
+    monkeypatch.setenv('CONSUMER_DEFENSIVE_CACHE_ONLY', 'true')
+    called = False
+
+    def forbidden_fetch(*_args: object, **_kwargs: object) -> tuple[int, str]:
+        nonlocal called
+        called = True
+        raise AssertionError('network callback must not run')
+
+    result = fetch_yahoo_job(
+        'KO', policy=policy, start=date(2019, 1, 2),
+        end=date(2019, 1, 2), force_refresh=False, fetcher=forbidden_fetch,
+    )
+    assert result.error == ''
+    assert result.cache_status == 'legacy_cache'
+    assert called is False
+    assert not (cache / 'ticker_KO_2019-01-02_2019-01-02.json').exists()
+
+
+def test_yahoo_filters_small_action_boundary_spillover_but_rejects_material_drift(
+    tmp_path: Path,
+) -> None:
+    policy = _market_policy_with_cache(tmp_path)
+
+    def payload_with_dividend(action_date: str) -> str:
+        payload = json.loads(_yahoo_payload('KO'))
+        payload['chart']['result'][0]['events'] = {
+            'dividends': {
+                str(_epoch(action_date)): {
+                    'date': _epoch(action_date), 'amount': 0.1,
+                }
+            }
+        }
+        return json.dumps(payload)
+
+    adjacent = fetch_yahoo_job(
+        'KO', policy=policy, start=date(2019, 1, 2),
+        end=date(2019, 1, 2), force_refresh=True,
+        fetcher=lambda *_args, **_kwargs: (200, payload_with_dividend('2019-01-01')),
+    )
+    assert adjacent.error == ''
+    assert adjacent.actions == ()
+
+    material = fetch_yahoo_job(
+        'KO', policy=policy, start=date(2019, 1, 2),
+        end=date(2019, 1, 2), force_refresh=True,
+        fetcher=lambda *_args, **_kwargs: (200, payload_with_dividend('2018-12-20')),
+    )
+    assert material.error == 'yahoo_action_outside_requested_window'
+
+
 def test_current_universe_rejects_unsafe_ticker_syntax_before_load() -> None:
     policy = load_policy(
         ROOT / 'consumer_defensive' / 'data'

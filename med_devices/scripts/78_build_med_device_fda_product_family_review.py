@@ -30,6 +30,7 @@ from med_devices.core.fda_product_family_review import (  # noqa: E402
     as_float,
     as_int,
     build_product_family_shadow_score,
+    canonical_mdr_family_key,
     earliest_date,
     load_product_family_exposures,
     load_product_family_mappings,
@@ -54,6 +55,9 @@ MDR_FIELDS = [
     "report_number",
     "mdr_report_key",
     "event_key",
+    "canonical_event_family_key",
+    "canonical_family_member_count",
+    "canonical_family_member_ids",
     "event_date",
     "report_date",
     "source_available_date",
@@ -155,6 +159,9 @@ SUMMARY_FIELDS = [
     "mdr_window_start",
     "recall_window_start",
     "mdr_record_count",
+    "source_mdr_record_count",
+    "canonical_mdr_family_count",
+    "collapsed_mdr_duplicate_count",
     "death_designated_mdr_count",
     "reported_events_summarized_by_death_mdrs",
     "injury_mdr_count",
@@ -256,6 +263,58 @@ def mapping_fields(mapping: ProductFamilyMapping | None) -> dict[str, Any]:
     }
 
 
+def canonicalize_mdr_review_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        family_key = canonical_mdr_family_key(
+            {
+                "report_number": row.get("report_number"),
+                "mdr_report_key": row.get("mdr_report_key"),
+                "event_key": row.get("event_key"),
+            },
+            row.get("adverse_event_id"),
+        )
+        key = (
+            family_key,
+            normalized_text(row.get("fda_manufacturer_id")),
+            normalized_text(row.get("product_code")).upper(),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    output: list[dict[str, Any]] = []
+    for (family_key, _manufacturer_id, _product_code), members in grouped.items():
+        representative = max(
+            members,
+            key=lambda row: (
+                as_int(row.get("death_designated_flag")),
+                as_int(row.get("injury_flag")),
+                as_int(row.get("malfunction_flag")),
+                normalized_text(row.get("source_available_date")),
+                normalized_text(row.get("adverse_event_id")),
+            ),
+        ).copy()
+        member_ids = sorted(
+            {
+                normalized_text(member.get("adverse_event_id"))
+                for member in members
+                if normalized_text(member.get("adverse_event_id"))
+            }
+        )
+        representative["canonical_event_family_key"] = family_key
+        representative["canonical_family_member_count"] = len(members)
+        representative["canonical_family_member_ids"] = "|".join(member_ids)
+        output.append(representative)
+    return sorted(
+        output,
+        key=lambda row: (
+            normalized_text(row.get("source_available_date")),
+            normalized_text(row.get("canonical_event_family_key")),
+            normalized_text(row.get("fda_manufacturer_id")),
+            normalized_text(row.get("product_code")),
+        ),
+    )
+
+
 def mdr_rows(
     conn: sqlite3.Connection,
     *,
@@ -281,10 +340,11 @@ def mdr_rows(
           ON p.product_code = e.product_code
         WHERE e.company_id = ?
           AND COALESCE(e.report_date, e.event_date, '') != ''
-          AND COALESCE(e.report_date, e.event_date) BETWEEN ? AND ?
-        ORDER BY COALESCE(e.report_date, e.event_date), e.adverse_event_id
+          AND COALESCE(e.report_date, e.event_date) <= ?
+          AND COALESCE(e.event_date, e.report_date) BETWEEN ? AND ?
+        ORDER BY COALESCE(e.event_date, e.report_date), e.adverse_event_id
         """,
-        (company_id, window_start.isoformat(), asof.isoformat()),
+        (company_id, asof.isoformat(), window_start.isoformat(), asof.isoformat()),
     ).fetchall()
     output: list[dict[str, Any]] = []
     for raw in raw_rows:
@@ -350,7 +410,7 @@ def mdr_rows(
                 "exception_reasons": ";".join(dict.fromkeys(reasons)),
             }
         )
-    return output
+    return canonicalize_mdr_review_rows(output)
 
 
 def recall_rows(
@@ -486,6 +546,20 @@ def build_qa_rows(
     class_i_coverage_min: float,
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
+    source_mdr_count = sum(max(1, as_int(row.get("canonical_family_member_count"), 1)) for row in mdr)
+    output.append(
+        qa_row(
+            asof=asof,
+            ticker=ticker,
+            name="canonical_mdr_family_reconciliation",
+            status="PASS",
+            observed=len(mdr),
+            required=f"source_rows={source_mdr_count}",
+            total=source_mdr_count,
+            covered=len(mdr),
+            detail=f"collapsed_duplicate_rows={max(0, source_mdr_count - len(mdr))}",
+        )
+    )
     for name, field, required in (
         ("death_product_family_coverage", "death_designated_flag", death_coverage_min),
         ("injury_product_family_coverage", "injury_flag", injury_coverage_min),
@@ -1093,6 +1167,9 @@ def main() -> int:
                             asof, recall_months
                         ).isoformat(),
                         "mdr_record_count": 0,
+                        "source_mdr_record_count": 0,
+                        "canonical_mdr_family_count": 0,
+                        "collapsed_mdr_duplicate_count": 0,
                         "death_designated_mdr_count": 0,
                         "reported_events_summarized_by_death_mdrs": 0,
                         "injury_mdr_count": 0,
@@ -1273,6 +1350,16 @@ def main() -> int:
                         asof, recall_months
                     ).isoformat(),
                     "mdr_record_count": len(ticker_mdr),
+                    "source_mdr_record_count": sum(
+                        max(1, as_int(row.get("canonical_family_member_count"), 1))
+                        for row in ticker_mdr
+                    ),
+                    "canonical_mdr_family_count": len(ticker_mdr),
+                    "collapsed_mdr_duplicate_count": sum(
+                        max(1, as_int(row.get("canonical_family_member_count"), 1))
+                        for row in ticker_mdr
+                    )
+                    - len(ticker_mdr),
                     "death_designated_mdr_count": sum(
                         as_int(row["death_designated_flag"]) for row in ticker_mdr
                     ),

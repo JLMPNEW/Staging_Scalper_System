@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -115,12 +116,13 @@ def select_filings(
     forms: tuple[str, ...],
     asof_date: str,
     start_date: str,
+    model_family: str = "software_infrastructure",
     tickers: tuple[str, ...] = (),
     accessions: tuple[str, ...] = (),
     max_filings_per_ticker: int = 8,
     max_tickers: int = 0,
 ) -> list[HydrationFiling]:
-    params: list[Any] = ["software_infrastructure", asof_date, start_date]
+    params: list[Any] = [model_family, asof_date, start_date]
     ticker_filter = ""
     if tickers:
         ticker_filter = f"AND f.ticker IN ({','.join('?' for _ in tickers)})"
@@ -334,11 +336,16 @@ def hydrate_filings(
     request_spacing_sec: float,
     execute: bool,
     max_documents_per_filing: int = 0,
+    model_family: str = "software_infrastructure",
+    artifact_stem: str = "software_parser",
+    hydration_version: str = HYDRATION_VERSION,
 ) -> dict[str, Any]:
     if not filings:
-        raise ValueError("No filings selected for software parser hydration")
+        raise ValueError(f"No filings selected for {model_family} parser hydration")
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", artifact_stem):
+        raise ValueError(f"Invalid hydration artifact stem: {artifact_stem!r}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = output_dir / ".software_parser_hydration.lock"
+    lock_path = output_dir / f".{artifact_stem}_hydration.lock"
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
@@ -363,7 +370,7 @@ def hydrate_filings(
             )
             results.append(
                 {
-                    "hydration_version": HYDRATION_VERSION,
+                    "hydration_version": hydration_version,
                     "ticker": filing.ticker,
                     "cik": filing.cik,
                     "accession_number": filing.accession_number,
@@ -411,7 +418,7 @@ def hydrate_filings(
                 }
                 results.append(
                     {
-                        "hydration_version": HYDRATION_VERSION,
+                        "hydration_version": hydration_version,
                         "ticker": filing.ticker,
                         "cik": filing.cik,
                         "accession_number": filing.accession_number,
@@ -427,7 +434,7 @@ def hydrate_filings(
             filing_status[(filing.ticker, filing.accession_number)] = (
                 "COMPLETE" if complete else "DOCUMENT_INCOMPLETE"
             )
-            atomic_csv(output_dir / "software_parser_hydration_results.csv", results)
+            atomic_csv(output_dir / f"{artifact_stem}_hydration_results.csv", results)
         keywords = (
             "annual recurring revenue",
             "arr",
@@ -463,19 +470,19 @@ def hydrate_filings(
                         "source_path": str(path.resolve()),
                     }
                 )
-        results_path = output_dir / "software_parser_hydration_results.csv"
+        results_path = output_dir / f"{artifact_stem}_hydration_results.csv"
         if results and not results_path.exists():
             atomic_csv(results_path, results)
-        sealed_path = output_dir / "software_parser_hydrated_source_manifest.csv"
+        sealed_path = output_dir / f"{artifact_stem}_hydrated_source_manifest.csv"
         if sealed:
             atomic_csv(sealed_path, sealed)
         complete_count = sum(status == "COMPLETE" for status in filing_status.values())
         manifest = {
-            "manifest_version": "software_parser_hydration_manifest_v1",
-            "hydration_version": HYDRATION_VERSION,
+            "manifest_version": f"{artifact_stem}_hydration_manifest_v1",
+            "hydration_version": hydration_version,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "execution_mode": "execute" if execute else "dry_run",
-            "model_family": "software_infrastructure",
+            "model_family": model_family,
             "selected_filing_count": len(filings),
             "complete_filing_count": complete_count,
             "incomplete_filing_count": len(filings) - complete_count,
@@ -491,7 +498,7 @@ def hydrate_filings(
             "production_facts_modified_flag": 0,
             "production_scores_modified_flag": 0,
         }
-        atomic_json(output_dir / "software_parser_hydration_manifest.json", manifest)
+        atomic_json(output_dir / f"{artifact_stem}_hydration_manifest.json", manifest)
         return manifest
     finally:
         lock_path.unlink(missing_ok=True)

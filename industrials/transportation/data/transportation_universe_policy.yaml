@@ -1,6 +1,6 @@
 model_family: transportation
 source_of_truth: true
-expected_ticker_count: 112
+expected_ticker_count: 120
 expected_delisted_count: 48
 history_start_date: "2019-01-02"
 default_sector: Industrials

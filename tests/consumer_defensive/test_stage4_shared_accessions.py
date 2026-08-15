@@ -229,6 +229,62 @@ def test_reverse_cache_snapshot_replay_after_s2_is_zero_mutation(
         conn.close()
 
 
+def test_empty_database_bootstraps_from_validated_cache_only_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = Provider({
+        'KO': _submissions(
+            form='10-Q', accepted='2024-04-30T12:00:00Z', document='ko.htm'
+        ),
+        'PEP': _submissions(
+            form='10-Q', accepted='2024-04-30T13:00:00Z', document='pep.htm'
+        ),
+    })
+    source_bundle, source_conn = _prepared_db(tmp_path, 'cache-source')
+    replay_conn: sqlite3.Connection | None = None
+    try:
+        source_conn.execute(
+            "DELETE FROM dim_consumer_defensive_taxonomy WHERE ticker NOT IN ('KO','PEP')"
+        )
+        source_conn.commit()
+        live = sync_sec_fundamentals(
+            source_conn, source_bundle, as_of='2025-12-31',
+            force_refresh=True, fetch=provider,
+        )
+        assert live['failures'] == []
+
+        replay_bundle, replay_conn = _prepared_db(tmp_path, 'cache-replay')
+        replay_conn.execute(
+            "DELETE FROM dim_consumer_defensive_taxonomy WHERE ticker NOT IN ('KO','PEP')"
+        )
+        replay_conn.commit()
+        replay_payload = copy.deepcopy(replay_bundle.payload)
+        replay_payload['sec_fundamentals']['cache_dir'] = str(
+            source_bundle.payload['sec_fundamentals']['cache_dir']
+        )
+        replay_bundle = ConfigBundle(
+            replay_bundle.path, replay_bundle.base_dir, replay_payload
+        )
+        monkeypatch.setenv('CONSUMER_DEFENSIVE_CACHE_ONLY', '1')
+
+        def no_network(_url: str) -> bytes:
+            raise AssertionError('fresh cache-only bootstrap attempted network access')
+
+        replay = sync_sec_fundamentals(
+            replay_conn, replay_bundle, as_of='2025-12-31', fetch=no_network,
+        )
+        assert replay['failures'] == []
+        assert replay['full_scope_reconciled'] is True
+        assert replay['association_manifest'] == live['association_manifest']
+        assert replay_conn.execute(
+            'SELECT COUNT(*) FROM consumer_defensive_sec_cache_snapshot'
+        ).fetchone()[0] == 1
+    finally:
+        source_conn.close()
+        if replay_conn is not None:
+            replay_conn.close()
+
+
 def test_full_scope_reconciliation_retires_and_reactivates_associations(
     tmp_path: Path,
 ) -> None:
@@ -2336,6 +2392,61 @@ def test_stage4_validator_does_not_mask_actual_foreign_key_violations(
         result = validate_stage4(conn,bundle,as_of='2025-12-31')
         assert result['counts']['global_foreign_key_violations'] == 1
         assert result['checks']['foreign_keys_valid'] is False
+    finally:
+        conn.close()
+
+
+def test_lifecycle_summary_gate_uses_only_current_parser_contract() -> None:
+    conn = sqlite3.connect(':memory:')
+    try:
+        conn.executescript('''
+            CREATE TABLE sec_filing_company_association_event(
+                issuer_ticker TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                effective_asof TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE fact_specialized_metric_disclosure_summary(
+                ticker TEXT NOT NULL,
+                metric_id TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                asof_date TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(ticker,metric_id,parser_version,asof_date)
+            );
+        ''')
+        conn.execute(
+            '''INSERT INTO sec_filing_company_association_event
+               VALUES('KO','retired','2026-08-11','2026-08-14T12:00:00Z')'''
+        )
+        conn.executemany(
+            '''INSERT INTO fact_specialized_metric_disclosure_summary
+               VALUES('KO','case_volume_growth_pct',?,'2026-08-11',?,?)''',
+            [
+                ('consumer_defensive_disclosure_census_v2',
+                 stage4_module.DISCLOSURE_SOURCE,
+                 '2026-08-12T12:00:00Z'),
+                ('consumer_defensive_disclosure_census_v3',
+                 stage4_module.DISCLOSURE_SOURCE,
+                 '2026-08-13T12:00:00Z'),
+            ],
+        )
+        assert stage4_module._count_stale_lifecycle_disclosure_summaries(
+            conn,
+            asof_date='2026-08-11',
+            parser_version='consumer_defensive_disclosure_census_v3',
+        ) == 1
+        conn.execute(
+            '''UPDATE fact_specialized_metric_disclosure_summary
+               SET updated_at='2026-08-15T12:00:00Z'
+               WHERE parser_version='consumer_defensive_disclosure_census_v3' '''
+        )
+        assert stage4_module._count_stale_lifecycle_disclosure_summaries(
+            conn,
+            asof_date='2026-08-11',
+            parser_version='consumer_defensive_disclosure_census_v3',
+        ) == 0
     finally:
         conn.close()
 

@@ -52,6 +52,7 @@ portfolio_layer/expectations_monitor/provider_entitlements.local.yaml
 *.bin
 *.txt
 _tmp*
+.codex_*
 tmppytest*
 tests\*
 # --- Large data / generated files ---
@@ -89,9 +90,18 @@ tmpomvpuh6h/
 !consumer_defensive/data/*.csv
 !consumer_defensive/system_csvs/*.csv
 !industrials/**/system_csvs/*.csv
+!industrials/transportation/system_csvs/dp0_v1/
+!industrials/transportation/system_csvs/dp0_v1/transportation_tickers.csv
 !industrials/transportation/data/transportation_v3_peer_groups.csv
 !industrials/transportation/data/transportation_specialized_metric_discovery_registry.csv
 !industrials/transportation/data/transportation_parser_supporting_metric_registry.csv
+!industrials/transportation/data/transportation_tanker_metric_source_map_v1.csv
+!industrials/transportation/data/transportation_tanker_exact_xbrl_concepts_v1.csv
+!industrials/transportation/data/transportation_tanker_filing_profiles_v1.csv
+!industrials/transportation/data/transportation_surface_metric_source_map_v1.csv
+!industrials/transportation/data/transportation_surface_xbrl_operand_map_v1.csv
+!industrials/transportation/data/transportation_surface_filing_profiles_v1.csv
+!industrials/transportation/data/transportation_surface_metric_comparison_domains_v1.csv
 !industrials/transportation/data/transportation_operating_archetypes.csv
 !industrials/transportation/data/transportation_dedicated_parser_scope.csv
 !industrials/transportation/data/transportation_dedicated_parser_support_scope.csv

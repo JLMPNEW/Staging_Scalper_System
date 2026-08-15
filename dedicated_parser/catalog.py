@@ -593,6 +593,12 @@ def relevant_document_names(
             raw_name, allowed_suffixes=SEC_ARCHIVE_ENTRY_SUFFIXES,
             context="selected SEC filing document",
         )
+        # SEC index metadata often labels earnings-related image assets with the
+        # same words as the actual release. They are valid archive entries, but
+        # they are not parser documents. Keep broad validation above so unsafe
+        # archive names still fail closed; only enqueue parseable formats.
+        if Path(name).suffix.casefold() not in SEC_DOCUMENT_SUFFIXES:
+            continue
         if name.casefold() in selected_casefold:
             raise ValueError(
                 f'Duplicate case-insensitive selected SEC document: {name!r}'

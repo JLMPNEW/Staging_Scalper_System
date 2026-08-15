@@ -1,1 +1,2 @@
 contract_ticker,active_ticker,predecessor_ticker,effective_date,price_history_csv,issuer_id,reason,source,verified_flag,notes
+TEN,TEN,TNP,2024-07-01,,0001166663,ticker_symbol_change_continuous_issuer,https://www.sec.gov/Archives/edgar/data/1166663/000119312524161669/d805052d6k.htm,1,Preserve TNP history before TEN; no corporate-entity break.

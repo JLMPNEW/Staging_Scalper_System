@@ -25,15 +25,30 @@ from industrials.transportation.content_text_cache import (
     ExtractionOptions,
     extract_document_once,
 )
+from industrials.transportation.tanker_metric_derivations import (
+    derive_tanker_table_evidence,
+)
+from industrials.transportation.surface_metric_parser import (
+    derive_surface_table_evidence,
+    derive_surface_xbrl_evidence,
+    surface_fact_rule,
+)
 
 
-ADAPTER_VERSION = "transportation_specialized_metrics_v3.discovery3"
+ADAPTER_VERSION = "transportation_specialized_metrics_v3.discovery8"
 _ROOT = Path(__file__).resolve().parent
 _DATA = _ROOT / "data"
 _FINAL_REGISTRY = _DATA / "transportation_specialized_metric_discovery_registry.csv"
 _SUPPORT_REGISTRY = _DATA / "transportation_parser_supporting_metric_registry.csv"
 _FINAL_SCOPE = _DATA / "transportation_dedicated_parser_scope.csv"
 _SUPPORT_SCOPE = _DATA / "transportation_dedicated_parser_support_scope.csv"
+_TANKER_SOURCE_MAP = _DATA / "transportation_tanker_metric_source_map_v1.csv"
+_TANKER_XBRL_MAP = _DATA / "transportation_tanker_exact_xbrl_concepts_v1.csv"
+_TANKER_FILING_PROFILES = _DATA / "transportation_tanker_filing_profiles_v1.csv"
+_SURFACE_SOURCE_MAP = _DATA / "transportation_surface_metric_source_map_v1.csv"
+_SURFACE_XBRL_OPERAND_MAP = _DATA / "transportation_surface_xbrl_operand_map_v1.csv"
+_SURFACE_FILING_PROFILES = _DATA / "transportation_surface_filing_profiles_v1.csv"
+_INVESTABLE_V3_POLICY = _DATA / "transportation_investable_universe_v3.yaml"
 _REVIEW_POLICY = _ROOT / "review_policies" / "dedicated_parser_review_policy.csv"
 _REVIEW_POLICY_GOLDEN = _DATA / "transportation_dedicated_parser_review_policy_golden.json"
 
@@ -338,14 +353,94 @@ def _supporting_metrics() -> tuple[dict[str, str], ...]:
 
 
 @lru_cache(maxsize=1)
+def _tanker_source_map() -> dict[str, dict[str, str]]:
+    return {row["metric_id"]: row for row in _read_csv(_TANKER_SOURCE_MAP)}
+
+
+@lru_cache(maxsize=1)
+def _tanker_xbrl_map() -> dict[tuple[str, str, str], dict[str, str]]:
+    return {
+        (
+            row["ticker"].upper(),
+            row["metric_id"],
+            row["concept_name"].casefold(),
+        ): row
+        for row in _read_csv(_TANKER_XBRL_MAP)
+    }
+
+
+@lru_cache(maxsize=1)
+def _tanker_xbrl_concepts_by_metric() -> dict[str, tuple[str, ...]]:
+    concepts: defaultdict[str, set[str]] = defaultdict(set)
+    for row in _tanker_xbrl_map().values():
+        concepts[row["metric_id"]].add(row["concept_name"])
+    return {
+        metric_id: tuple(sorted(values))
+        for metric_id, values in concepts.items()
+    }
+
+
+@lru_cache(maxsize=1)
+def _tanker_filing_profiles() -> dict[str, dict[str, str]]:
+    return {row["ticker"].upper(): row for row in _read_csv(_TANKER_FILING_PROFILES)}
+
+
+@lru_cache(maxsize=1)
+def _surface_source_map() -> dict[str, dict[str, str]]:
+    return {row["metric_id"]: row for row in _read_csv(_SURFACE_SOURCE_MAP)}
+
+
+@lru_cache(maxsize=1)
+def _surface_xbrl_rules() -> dict[str, tuple[dict[str, str], ...]]:
+    output: defaultdict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in _read_csv(_SURFACE_XBRL_OPERAND_MAP):
+        output[row["metric_id"]].append(row)
+    return {
+        metric_id: tuple(
+            sorted(
+                rows,
+                key=lambda row: (
+                    int(row.get("priority") or 99),
+                    row.get("operand_role") or "",
+                    row.get("concept_pattern") or "",
+                ),
+            )
+        )
+        for metric_id, rows in output.items()
+    }
+
+
+@lru_cache(maxsize=1)
+def _surface_filing_profiles() -> dict[str, dict[str, str]]:
+    return {row["ticker"].upper(): row for row in _read_csv(_SURFACE_FILING_PROFILES)}
+
+
+@lru_cache(maxsize=1)
 def _metric_contracts() -> dict[str, dict[str, str]]:
     output: dict[str, dict[str, str]] = {}
+    tanker_source_map = _tanker_source_map()
+    surface_source_map = _surface_source_map()
     for row in _final_metrics():
         if row["source_lane"] == "DP":
-            output[row["metric_id"]] = {
+            metric_id = row["metric_id"]
+            source_aliases = _pipe(
+                tanker_source_map.get(metric_id, {}).get("parser_aliases", "")
+            )
+            surface_aliases = _pipe(
+                surface_source_map.get(metric_id, {}).get("parser_aliases", "")
+            )
+            aliases = tuple(
+                dict.fromkeys(
+                    (metric_id.replace("_", " "),)
+                    + _ALIASES.get(metric_id, ())
+                    + source_aliases
+                    + surface_aliases
+                )
+            )
+            output[metric_id] = {
                 **row,
                 "source_lane": "DP",
-                "search_aliases": "|".join((row["metric_id"].replace("_", " "),) + _ALIASES.get(row["metric_id"], ())),
+                "search_aliases": "|".join(aliases),
             }
     for row in _supporting_metrics():
         output[row["support_metric_id"]] = {
@@ -370,12 +465,51 @@ def _applicability() -> dict[tuple[str, str], dict[str, str]]:
     return output
 
 
+@lru_cache(maxsize=1)
+def _v3_tanker_applicability() -> dict[str, frozenset[str]]:
+    from industrials.transportation.investable_universe import (
+        load_investable_universe_policy,
+    )
+
+    policy = load_investable_universe_policy(_INVESTABLE_V3_POLICY)
+    metrics = frozenset(policy.direct_tanker_metrics)
+    return {ticker.upper(): metrics for ticker in policy.tanker_tickers}
+
+
+@lru_cache(maxsize=1)
+def _v3_surface_applicability() -> dict[str, frozenset[str]]:
+    output: defaultdict[str, set[str]] = defaultdict(set)
+    parser_metrics = set(_metric_contracts())
+    for metric_id, row in _surface_source_map().items():
+        # surface_volume_growth is a DP-D downstream derivation, not a
+        # direct parser target, so it is absent from parser_metrics.
+        if metric_id not in parser_metrics:
+            continue
+        for ticker in _pipe(row.get("applicable_tickers", "")):
+            output[ticker.upper()].add(metric_id)
+    return {
+        ticker: frozenset(sorted(metrics))
+        for ticker, metrics in output.items()
+    }
+
+
 def applicable_parser_metrics(ticker: str) -> frozenset[str]:
     symbol = ticker.strip().upper()
-    return frozenset(
+    baseline = {
         metric_id
         for (row_ticker, metric_id), row in _applicability().items()
         if row_ticker == symbol and row["applicability_status"] == "APPLICABLE"
+    }
+    if symbol in _surface_filing_profiles():
+        # The v3 source map is authoritative for the redesigned 19-name
+        # surface cohort. Legacy scope remains available for historical
+        # issuers, but cannot leak obsolete archetype applicability into
+        # current investable names.
+        baseline -= set(_surface_source_map())
+    return frozenset(
+        baseline
+        | set(_v3_tanker_applicability().get(symbol, ()))
+        | set(_v3_surface_applicability().get(symbol, ()))
     )
 
 
@@ -416,6 +550,21 @@ def _concept_patterns(metric_id: str) -> tuple[str, ...]:
         if not tokens:
             continue
         output.append("(?i)" + ".*".join(re.escape(token) for token in tokens))
+    for concept_name in _tanker_xbrl_concepts_by_metric().get(metric_id, ()):
+        output.append(
+            r"(?i)(?:^|[^A-Za-z0-9])"
+            + re.escape(concept_name)
+            + r"(?=$|[^A-Za-z0-9])"
+        )
+    for rule in _surface_xbrl_rules().get(metric_id, ()):
+        pattern = str(rule.get("concept_pattern") or "").strip()
+        if pattern:
+            output.append(pattern)
+            if pattern.startswith("(?i)^"):
+                # Provider qnames may be returned as us-gaap:Concept or
+                # {namespace}Concept even though persisted concept_name is
+                # normalized to the local name. Request both forms.
+                output.append("(?i)(?:^|[:}])" + pattern[len("(?i)^"):])
     return tuple(dict.fromkeys(output))
 
 
@@ -448,21 +597,40 @@ def get_registry() -> AdapterRegistry:
             "aircraft",
             "airport",
             "capacity",
+            "carrying capacity",
             "carload",
+            "contracted services",
             "certification",
             "charter",
+            "commitments",
+            "deadweight",
+            "dry-docking",
+            "driver turnover",
+            "earning days",
+            "empty miles",
             "fleet",
             "fuel",
             "going concern",
+            "gross ton miles",
+            "intermodal units",
             "lease",
             "load factor",
+            "non-GAAP",
+            "off-hire",
+            "operating days",
             "operating ratio",
             "orders",
             "passenger",
+            "purchased transportation",
             "rail",
+            "railroad performance",
+            "revenue per",
             "revenue days",
             "shipment",
+            "terminal dwell",
+            "TCE",
             "traffic",
+            "train velocity",
             "utilization",
             "vessel",
         ),
@@ -596,6 +764,52 @@ def _normalized_number(
     )
 
 
+def _metric_source_context(
+    item: WorkItem,
+    metric_id: str,
+    *,
+    text: str = "",
+) -> dict[str, Any]:
+    surface_source = _surface_source_map().get(metric_id)
+    is_surface = surface_source is not None
+    source = surface_source or _tanker_source_map().get(metric_id, {})
+    form_type = item.filing.form_type.upper()
+    if form_type.startswith("10-K"):
+        section_field = "source_sections_10k"
+    elif form_type.startswith(("20-F", "40-F")):
+        section_field = "source_sections_foreign" if is_surface else "source_sections_20f"
+    elif is_surface:
+        section_field = "source_sections_event"
+    else:
+        section_field = ""
+    preferred_sections = _pipe(source.get(section_field, "")) if section_field else ()
+    normalized_text = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+    section_match = any(
+        re.sub(r"[^a-z0-9]+", " ", section.casefold()).strip()
+        in normalized_text
+        for section in preferred_sections
+    )
+    profiles = _surface_filing_profiles() if is_surface else _tanker_filing_profiles()
+    profile = profiles.get(item.filing.ticker.upper(), {})
+    expected_form = profile.get("annual_form", "")
+    is_annual = form_type in {
+        "10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"
+    }
+    return {
+        "metric_source_profile": "surface_freight_v1" if is_surface else "tanker_v1",
+        "accounting_framework": profile.get("accounting_framework", ""),
+        "expected_annual_form": expected_form,
+        "filing_form_type": item.filing.form_type,
+        "form_profile_match": bool(
+            is_annual and expected_form and form_type.startswith(expected_form)
+        ),
+        "preferred_sections": list(preferred_sections),
+        "preferred_section_match": section_match,
+        "expected_tables": list(_pipe(source.get("expected_tables", ""))),
+        "source_posture": source.get("source_posture", ""),
+    }
+
+
 def _block_evidence(
     item: WorkItem,
     block: SemanticBlock,
@@ -616,6 +830,7 @@ def _block_evidence(
         )
         if label is None:
             continue
+        source_context = _metric_source_context(item, metric_id, text=text)
         target_date = _date_value(text) if metric_id == "milestone_target_date" else ""
         number = _numeric_match(text, label=label)
         if metric_id == "going_concern_flag":
@@ -652,7 +867,14 @@ def _block_evidence(
                 period_start="",
                 period_end=item.filing.report_date[:10],
                 scope=scope,
-                confidence=0.65 if value is not None or target_date else 0.45,
+                confidence=(
+                    0.72
+                    if source_context["preferred_section_match"]
+                    and (value is not None or target_date)
+                    else 0.65
+                    if value is not None or target_date
+                    else 0.45
+                ),
                 status=("REJECTED_POLICY" if scope == "nonissuer" else "REVIEW_REQUIRED"),
                 reason=(
                     "nonissuer_or_proforma_scope"
@@ -673,6 +895,8 @@ def _block_evidence(
                     "semantic_block_kind": block.kind,
                     "semantic_table_id": block.table_id,
                     "semantic_row_index": block.row_index,
+                    "semantic_section_path": list(block.section_path),
+                    **source_context,
                     **numeric_provenance,
                 },
             )
@@ -758,11 +982,20 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
             source_document=document.name,
         )
         per_metric_count: defaultdict[str, int] = defaultdict(int)
+        generic_metric_ids = set(metric_ids)
         for block in semantic.blocks:
+            # Preserve broad prose discovery (the established DP contract)
+            # while assigning semantic table rows exclusively to the
+            # strict surface extractor to avoid duplicate/conflicting rows.
+            block_metric_ids = (
+                generic_metric_ids - set(_surface_source_map())
+                if block.kind == "table_row"
+                else generic_metric_ids
+            )
             for evidence in _block_evidence(
                 item,
                 block,
-                metric_ids=metric_ids,
+                metric_ids=sorted(block_metric_ids),
                 source_document=document.name,
                 document_sha256=document.content_sha256,
                 extraction_method=extracted.extraction_method,
@@ -773,6 +1006,30 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
                     continue
                 per_metric_count[evidence.metric_name] += 1
                 output.append(evidence)
+        output.extend(
+            derive_tanker_table_evidence(
+                item,
+                semantic.blocks,
+                requested_metrics=set(metric_ids),
+                source_document=document.name,
+                document_sha256=document.content_sha256,
+            )
+        )
+        output.extend(
+            derive_surface_table_evidence(
+                item,
+                semantic.blocks,
+                requested_metrics=set(metric_ids),
+                source_document=document.name,
+                document_sha256=document.content_sha256,
+                source_kind=document.source_kind,
+                source_contracts=_surface_source_map(),
+                filing_profiles=_surface_filing_profiles(),
+                document_extraction_method=extracted.extraction_method,
+                document_extraction_warning=extracted.warning,
+                document_extraction_cache_status=extraction_cache_status,
+            )
+        )
     return postprocess_metric_evidence(item, tuple(output))
 
 
@@ -791,6 +1048,79 @@ def _fact_search_text(fact: NormalizedFact) -> str:
     return " ".join(values)
 
 
+def _currency_from_xbrl_unit(raw_unit: str, company_currency: str) -> str:
+    match = re.search(r"\b([A-Z]{3})\b", raw_unit.upper())
+    return match.group(1) if match is not None else company_currency.upper() or "USD"
+
+
+def _normalized_xbrl_value_and_unit(
+    item: WorkItem,
+    metric_id: str,
+    fact: NormalizedFact,
+    exact_rule: Mapping[str, str] | None,
+) -> tuple[float, str, dict[str, Any]]:
+    value = float(fact.numeric_value)
+    raw_unit = str(fact.unit or "").strip()
+    unit_lower = raw_unit.casefold()
+    contract = _metric_contracts()[metric_id]["unit_contract"]
+    configured = str((exact_rule or {}).get("normalized_unit") or "")
+    recognized = False
+    unit = raw_unit
+
+    if configured == "count" or (
+        contract == "count"
+        and unit_lower in {"item", "items", "number", "pure", "ship", "ships", "vessel", "vessels"}
+    ):
+        unit, recognized = "count", True
+    elif configured == "segment_native_capacity" or (
+        contract == "segment_native_capacity"
+        and unit_lower in {"dwt", "t", "ton", "tons", "tonne", "tonnes", "mt", "teu", "cbm"}
+    ):
+        unit, recognized = "segment_native_capacity", True
+    elif configured in {"years", "days", "ratio"}:
+        unit, recognized = configured, True
+    elif configured == "currency":
+        unit, recognized = _currency_from_xbrl_unit(raw_unit, item.filing.company_currency), True
+    elif contract == "years" and (
+        unit_lower in {"year", "years", "yr", "yrs", "pure"}
+        or "age" in fact.concept_name.casefold()
+        or "term" in fact.concept_name.casefold()
+    ):
+        unit, recognized = "years", True
+    elif contract == "days" and (
+        unit_lower in {"day", "days", "item", "items", "pure"}
+        or "day" in fact.concept_name.casefold()
+    ):
+        unit, recognized = "days", True
+    elif contract == "ratio" and unit_lower in {"pure", "ratio", "%", "percent"}:
+        if unit_lower in {"%", "percent"} and abs(value) > 1.0:
+            value /= 100.0
+        unit, recognized = "ratio", True
+    elif contract == "currency" and re.search(r"[A-Z]{3}", raw_unit.upper()):
+        unit, recognized = _currency_from_xbrl_unit(raw_unit, item.filing.company_currency), True
+    elif contract == "currency_per_day" and (
+        "day" in unit_lower
+        or "daily" in fact.concept_name.casefold()
+        or "perday" in fact.concept_name.casefold()
+        or "rate" in fact.concept_name.casefold()
+    ):
+        currency = _currency_from_xbrl_unit(raw_unit, item.filing.company_currency)
+        unit, recognized = f"{currency}_per_day", True
+    elif contract == "count_and_segment_native_capacity":
+        if unit_lower in {"item", "items", "number", "pure", "ship", "ships", "vessel", "vessels"}:
+            unit, recognized = "count", True
+        elif unit_lower in {"dwt", "t", "ton", "tons", "tonne", "tonnes", "mt", "teu", "cbm"}:
+            unit, recognized = "segment_native_capacity", True
+
+    provenance: dict[str, Any] = {
+        "raw_xbrl_unit": raw_unit,
+        "xbrl_unit_normalized": recognized,
+    }
+    if recognized:
+        provenance["unit_contract"] = contract
+    return value, unit, provenance
+
+
 def map_normalized_facts(
     item: WorkItem,
     facts: tuple[NormalizedFact, ...],
@@ -801,48 +1131,100 @@ def map_normalized_facts(
     patterns: dict[str, tuple[re.Pattern[str], ...]] = {}
     for metric_id in applicable:
         request = registry.request(metric_id)
-        concept_patterns = (
-            request.concept_patterns if request is not None else ()
-        )
-        patterns[metric_id] = tuple(
-            re.compile(pattern) for pattern in concept_patterns
-        )
+        concept_patterns = request.concept_patterns if request is not None else ()
+        patterns[metric_id] = tuple(re.compile(pattern) for pattern in concept_patterns)
     output: list[MetricEvidence] = []
+    annual_form = item.filing.form_type.upper() in {
+        "10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"
+    }
+    ticker = item.filing.ticker.upper()
     for fact in facts:
         if fact.numeric_value is None:
             continue
         search_text = _fact_search_text(fact)
+        concept_key = fact.concept_name.casefold()
         for metric_id, metric_patterns in patterns.items():
             if not any(pattern.search(search_text) for pattern in metric_patterns):
                 continue
-            status = "REJECTED_POLICY" if fact.scope != "consolidated" else "REVIEW_REQUIRED"
+            exact_rule = _tanker_xbrl_map().get((ticker, metric_id, concept_key))
+            surface_rule = surface_fact_rule(
+                metric_id, fact.concept_name, _surface_xbrl_rules()
+            )
+            if surface_rule and surface_rule.get("operand_role") != "direct_value":
+                # Operands are inputs to a same-period derivation; emitting
+                # them as the requested ratio would be semantically wrong.
+                continue
+            unit_rule = exact_rule or surface_rule
+            value, unit, unit_provenance = _normalized_xbrl_value_and_unit(
+                item,
+                metric_id,
+                fact,
+                unit_rule,
+            )
+            exact_accept = bool(
+                exact_rule
+                and exact_rule["acceptance_posture"] == "ACCEPT_IF_CONSOLIDATED_ANNUAL"
+                and fact.scope == "consolidated"
+                and annual_form
+            )
+            if fact.scope != "consolidated":
+                status = "REJECTED_POLICY"
+                reason = "dimensional_or_segment_fact_not_consolidated"
+                confidence = 0.99
+            elif exact_accept:
+                status = "ACCEPTED"
+                reason = "audited_ixbrl_exact_tanker_concept"
+                confidence = 0.98
+            elif surface_rule:
+                status = "REVIEW_REQUIRED"
+                reason = "surface_direct_xbrl_value_requires_definition_review"
+                confidence = 0.90
+            else:
+                status = "REVIEW_REQUIRED"
+                reason = "normalized_fact_requires_transportation_semantic_review"
+                confidence = 0.72
+            source_context = _metric_source_context(item, metric_id)
             output.append(
                 MetricEvidence(
                     metric_name=metric_id,
                     concept_name=fact.concept_name,
-                    value=float(fact.numeric_value),
-                    unit=fact.unit,
+                    value=value,
+                    unit=unit,
                     period_start=fact.period_start,
                     period_end=fact.period_end,
                     scope=fact.scope,
-                    confidence=0.99 if status == "REJECTED_POLICY" else 0.72,
+                    confidence=confidence,
                     status=status,
-                    reason=(
-                        "dimensional_or_segment_fact_not_consolidated"
-                        if status == "REJECTED_POLICY"
-                        else "normalized_fact_requires_transportation_semantic_review"
+                    reason=reason,
+                    evidence_text=(
+                        f"{fact.taxonomy}:{fact.concept_name}={fact.numeric_value:g} "
+                        f"{fact.unit}"
                     ),
-                    evidence_text=(f"{fact.taxonomy}:{fact.concept_name}={fact.numeric_value:g} {fact.unit}"),
                     source_document=fact.source_document,
-                    extraction_method=(f"dedicated_parser:{fact.provider}:normalized_fact"),
+                    extraction_method=f"dedicated_parser:{fact.provider}:normalized_fact",
                     provenance={
                         "adapter_version": ADAPTER_VERSION,
                         "source_lane": _metric_contracts()[metric_id]["source_lane"],
                         "context_id": fact.context_id,
                         "dimensions_json": fact.dimensions_json,
+                        "exact_tanker_concept_rule": bool(exact_rule),
+                        "surface_xbrl_rule": bool(surface_rule),
+                        "surface_xbrl_operand_role": (
+                            surface_rule.get("operand_role", "") if surface_rule else ""
+                        ),
+                        **source_context,
+                        **unit_provenance,
                     },
                 )
             )
+    output.extend(
+        derive_surface_xbrl_evidence(
+            item,
+            facts,
+            requested_metrics=set(applicable),
+            rules_by_metric=_surface_xbrl_rules(),
+        )
+    )
     return postprocess_metric_evidence(item, tuple(output))
 
 
@@ -890,11 +1272,16 @@ def _unit_error(row: MetricEvidence) -> str:
         actual,
     ):
         return ""
-    if expected in {
+    if expected in {"count", "count_and_currency"} and (
+        actual == "count" or re.fullmatch(r"[a-z]{3}(?:_.+)?", actual)
+    ):
+        return ""
+    if expected == "segment_native_capacity" and actual == "segment_native_capacity":
+        return ""
+    if expected == "count_and_segment_native_capacity" and actual in {
         "count",
-        "count_and_currency",
-        "count_and_segment_native_capacity",
-    } and (actual == "count" or re.fullmatch(r"[a-z]{3}(?:_.+)?", actual)):
+        "segment_native_capacity",
+    }:
         return ""
     if expected == "ratio_or_count" and actual in {"ratio", "count"}:
         return ""

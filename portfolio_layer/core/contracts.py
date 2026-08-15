@@ -135,19 +135,33 @@ class AdapterResult:
 
 
 # ---------------------------------------------------------------------------
+ATOMIC_REPLACE_TIMEOUT_SECONDS = 30.0
+ATOMIC_REPLACE_INITIAL_BACKOFF_SECONDS = 0.05
+ATOMIC_REPLACE_MAX_BACKOFF_SECONDS = 1.0
+_WINDOWS_SHARING_WINERRORS = frozenset({5, 32, 33})
+
 # IO helpers (atomic writes so consumers never read a half-written file)
 # ---------------------------------------------------------------------------
 def _replace_atomic(source: str | Path, target: str | Path) -> None:
     """Publish a sibling temp file despite brief Windows/OneDrive sharing locks."""
-    attempts = 8
-    for attempt in range(attempts):
+    deadline = time.monotonic() + ATOMIC_REPLACE_TIMEOUT_SECONDS
+    delay = ATOMIC_REPLACE_INITIAL_BACKOFF_SECONDS
+    while True:
         try:
             os.replace(source, target)
             return
-        except PermissionError:
-            if attempt == attempts - 1:
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            transient = isinstance(exc, PermissionError) or (
+                winerror in _WINDOWS_SHARING_WINERRORS
+            )
+            if not transient or time.monotonic() >= deadline:
                 raise
-            time.sleep(min(0.05 * (2**attempt), 1.0))
+            time.sleep(delay)
+            delay = min(
+                delay * 2.0,
+                ATOMIC_REPLACE_MAX_BACKOFF_SECONDS,
+            )
 
 
 def replace_atomic(source: str | Path, target: str | Path) -> None:

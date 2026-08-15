@@ -214,12 +214,14 @@ def test_existing_v8_database_upgrades_to_v9_once_and_preserves_history(
                    WHERE migration_version<=8 ORDER BY migration_version"""
             )
         )
-        version, name, checksum = STAGE4_MIGRATION_HISTORY[-1]
+        version, name, checksum = next(
+            row for row in STAGE4_MIGRATION_HISTORY if row[0] == 9
+        )
         assert version == 9
         with conn:
             conn.execute(
                 """DELETE FROM consumer_defensive_stage4_schema_migration
-                   WHERE migration_version=9"""
+                   WHERE migration_version>=9"""
             )
             conn.execute("DROP INDEX idx_stage4_raw_accession_fact")
             conn.execute("DROP INDEX idx_stage4_canonical_accession")

@@ -4,9 +4,11 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import html
 import json
 import logging
 import math
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -33,6 +35,7 @@ LOGGER = logging.getLogger("sync_med_device_sec_fundamentals")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_SEC_SUBMISSIONS_SOURCE = "sec_submissions"
 DEFAULT_SEC_COMPANYFACTS_SOURCE = "sec_companyfacts"
+DEFAULT_SEC_INLINE_XBRL_SOURCE = "sec_inline_xbrl_filing"
 DEFAULT_SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 DEFAULT_SEC_SUBMISSIONS_FILE_URL = "https://data.sec.gov/submissions/{file_name}"
 DEFAULT_SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
@@ -47,8 +50,11 @@ FIELDNAMES = [
     "companyfacts_status",
     "filing_rows",
     "financial_statement_rows",
+    "inline_xbrl_fallback_rows",
     "first_period_end",
     "latest_period_end",
+    "latest_financial_filing_date",
+    "latest_parsed_filed_date",
     "review_reason",
 ]
 
@@ -237,11 +243,14 @@ class FactObservation:
 class SecIngestionPolicy:
     submissions_source_id: str
     companyfacts_source_id: str
+    inline_xbrl_source_id: str
     sec_archives_base: str
     submissions_url_template: str
     companyfacts_url_template: str
     submissions_file_url_template: str
     fetch_paginated_submissions: bool
+    inline_xbrl_fallback_enabled: bool
+    inline_xbrl_max_filings_per_company: int
     forms: set[str]
     financial_forms: set[str]
     metric_concepts: dict[str, list[str]]
@@ -352,6 +361,10 @@ def sec_ingestion_policy(config: dict[str, Any]) -> SecIngestionPolicy:
             cfg_get(config, "sec_ingestion.companyfacts_source_id", DEFAULT_SEC_COMPANYFACTS_SOURCE)
             or DEFAULT_SEC_COMPANYFACTS_SOURCE
         ),
+        inline_xbrl_source_id=str(
+            cfg_get(config, "sec_ingestion.inline_xbrl_source_id", DEFAULT_SEC_INLINE_XBRL_SOURCE)
+            or DEFAULT_SEC_INLINE_XBRL_SOURCE
+        ),
         sec_archives_base=str(
             cfg_get(config, "sec_ingestion.sec_archives_base", DEFAULT_SEC_ARCHIVES_BASE) or DEFAULT_SEC_ARCHIVES_BASE
         ).rstrip("/"),
@@ -370,6 +383,14 @@ def sec_ingestion_policy(config: dict[str, Any]) -> SecIngestionPolicy:
         fetch_paginated_submissions=as_bool(
             cfg_get(config, "sec_ingestion.fetch_paginated_submissions", True),
             default=True,
+        ),
+        inline_xbrl_fallback_enabled=as_bool(
+            cfg_get(config, "sec_ingestion.inline_xbrl_fallback_enabled", True),
+            default=True,
+        ),
+        inline_xbrl_max_filings_per_company=max(
+            1,
+            int(cfg_get(config, "sec_ingestion.inline_xbrl_max_filings_per_company", 1)),
         ),
         forms=form_set(cfg_get(config, "sec_ingestion.forms", list(DEFAULT_FILING_FORMS)), DEFAULT_FILING_FORMS),
         financial_forms=form_set(
@@ -460,8 +481,324 @@ def fetch_json(
     raise RuntimeError(f"SEC fetch failed status={last_status} url={url} body={last_text[:200]}")
 
 
+def fetch_text(
+    session: requests.Session,
+    url: str,
+    *,
+    cache_path: Path,
+    refresh_cache: bool,
+    cache_ttl_hours: float,
+    timeout_sec: float,
+    max_retries: int,
+    sleep_sec: float,
+    user_agent: str,
+) -> tuple[str, str, int]:
+    if not refresh_cache and cache_is_fresh(cache_path, cache_ttl_hours):
+        return cache_path.read_text(encoding="utf-8"), "primary_cache", 200
+
+    headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip, deflate"}
+    last_status = 0
+    last_text = ""
+    for attempt in range(max(1, max_retries)):
+        response = session.get(url, headers=headers, timeout=timeout_sec)
+        last_status = int(response.status_code)
+        last_text = response.text
+        if response.status_code == 200:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(last_text, encoding="utf-8")
+            return last_text, "fetched", last_status
+        if response.status_code in {429, 500, 502, 503, 504} and attempt < max_retries - 1:
+            time.sleep(max(0.1, sleep_sec) * (attempt + 1) * 2)
+            continue
+        break
+    raise RuntimeError(f"SEC filing fetch failed status={last_status} url={url} body={last_text[:200]}")
+
+
+INLINE_ATTR_RE = re.compile(r"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)")
+INLINE_CONTEXT_RE = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?context\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?:[A-Za-z0-9_]+:)?context>",
+    re.IGNORECASE | re.DOTALL,
+)
+INLINE_UNIT_RE = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?unit\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?:[A-Za-z0-9_]+:)?unit>",
+    re.IGNORECASE | re.DOTALL,
+)
+INLINE_NON_FRACTION_RE = re.compile(
+    r"<ix:nonfraction\b(?P<attrs>[^>]*)>(?P<body>.*?)</ix:nonfraction>",
+    re.IGNORECASE | re.DOTALL,
+)
+INLINE_NON_NUMERIC_RE = re.compile(
+    r"<ix:nonnumeric\b(?P<attrs>[^>]*)>(?P<body>.*?)</ix:nonnumeric>",
+    re.IGNORECASE | re.DOTALL,
+)
+INLINE_TAG_RE = re.compile(r"<[^>]+>")
+INLINE_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def parse_inline_attrs(raw: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for match in INLINE_ATTR_RE.finditer(raw or ""):
+        key = match.group(1).lower()
+        value = match.group(2).strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        attrs[key] = html.unescape(value)
+    return attrs
+
+
+def clean_inline_text(raw_html: str) -> str:
+    without_exclusions = re.sub(
+        r"<ix:exclude\b.*?</ix:exclude>",
+        "",
+        raw_html or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return html.unescape(INLINE_TAG_RE.sub("", without_exclusions)).replace("\xa0", " ").strip()
+
+
+def normalized_inline_date(raw: object) -> str:
+    text = str(raw or "").strip()[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return ""
+
+
+def parse_inline_contexts(document_text: str) -> dict[str, dict[str, Any]]:
+    contexts: dict[str, dict[str, Any]] = {}
+    for match in INLINE_CONTEXT_RE.finditer(document_text):
+        attrs = parse_inline_attrs(match.group("attrs"))
+        context_id = attrs.get("id", "").strip()
+        if not context_id:
+            continue
+        body = match.group("body")
+        start_match = re.search(
+            r"<(?:[A-Za-z0-9_]+:)?startdate[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?startdate>",
+            body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        end_match = re.search(
+            r"<(?:[A-Za-z0-9_]+:)?enddate[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?enddate>",
+            body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        instant_match = re.search(
+            r"<(?:[A-Za-z0-9_]+:)?instant[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?instant>",
+            body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        has_dimensions = bool(re.search(r"<(?:[A-Za-z0-9_]+:)?(?:explicitmember|typedmember)\b", body, re.IGNORECASE))
+        start = normalized_inline_date(clean_inline_text(start_match.group(1))) if start_match else ""
+        end_raw = clean_inline_text(end_match.group(1)) if end_match else ""
+        instant_raw = clean_inline_text(instant_match.group(1)) if instant_match else ""
+        contexts[context_id] = {
+            "start_date": start,
+            "end_date": normalized_inline_date(end_raw or instant_raw),
+            "has_dimensions": has_dimensions,
+        }
+    return contexts
+
+
+def parse_inline_units(document_text: str) -> dict[str, str]:
+    units: dict[str, str] = {}
+    for match in INLINE_UNIT_RE.finditer(document_text):
+        attrs = parse_inline_attrs(match.group("attrs"))
+        unit_id = attrs.get("id", "").strip()
+        if not unit_id:
+            continue
+        measures = re.findall(
+            r"<(?:[A-Za-z0-9_]+:)?measure[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?measure>",
+            match.group("body"),
+            re.IGNORECASE | re.DOTALL,
+        )
+        measure = clean_inline_text(measures[0]) if measures else unit_id
+        measure_upper = measure.upper()
+        if measure_upper.startswith("ISO4217:"):
+            units[unit_id] = measure_upper.split(":", 1)[1]
+        elif measure_upper.endswith(":SHARES") or measure_upper == "SHARES":
+            units[unit_id] = "SHARES"
+        elif measure_upper.endswith(":PURE") or measure_upper == "PURE":
+            units[unit_id] = "PURE"
+        else:
+            units[unit_id] = measure_upper
+    return units
+
+
+def parse_inline_number(raw_html: str, attrs: dict[str, str]) -> float | None:
+    if attrs.get("xsi:nil", "").lower() in {"1", "true"}:
+        return None
+    text = clean_inline_text(raw_html)
+    if not text or text.upper() in {"-", "--", "N/A", "NA"}:
+        return None
+    negative = "(" in text and ")" in text
+    normalized = (
+        text.replace(",", "").replace("$", "").replace("%", "").replace("(", "").replace(")", "").replace(" ", "")
+    )
+    match = INLINE_NUMBER_RE.search(normalized)
+    if not match:
+        return None
+    try:
+        value = float(match.group(0))
+    except ValueError:
+        return None
+    if negative or attrs.get("sign", "").strip().startswith("-"):
+        value = -abs(value)
+    try:
+        scale = int(attrs.get("scale", "0"))
+    except ValueError:
+        scale = 0
+    if scale:
+        value *= 10**scale
+    return value if math.isfinite(value) else None
+
+
+def inline_document_focus(document_text: str, *, form: str, report_date: str) -> tuple[int | None, str]:
+    fiscal_year: int | None = None
+    fiscal_period = ""
+    for match in INLINE_NON_NUMERIC_RE.finditer(document_text):
+        attrs = parse_inline_attrs(match.group("attrs"))
+        concept = attrs.get("name", "").split(":")[-1].lower()
+        value = clean_inline_text(match.group("body")).strip().upper()
+        if concept == "documentfiscalperiodfocus" and value in {"FY", "Q1", "Q2", "Q3"}:
+            fiscal_period = value
+        elif concept == "documentfiscalyearfocus" and value.isdigit():
+            fiscal_year = int(value)
+    if not fiscal_period and normalize_form(form).startswith(("10-K", "20-F", "40-F")):
+        fiscal_period = "FY"
+    if fiscal_year is None:
+        parsed_report_date = normalized_inline_date(report_date)
+        fiscal_year = int(parsed_report_date[:4]) if parsed_report_date else None
+    return fiscal_year, fiscal_period
+
+
+def inline_xbrl_companyfacts(document_text: str, *, filing: dict[str, Any]) -> dict[str, Any]:
+    report_date = normalized_inline_date(filing.get("report_date"))
+    filing_date = normalized_inline_date(filing.get("filing_date"))
+    form = normalize_form(filing.get("form"))
+    accession = accession_nodash(filing.get("accession_nodash"))
+    if not report_date or not filing_date or not form or not accession:
+        raise ValueError("Inline XBRL fallback requires report date, filing date, form, and accession.")
+    fiscal_year, fiscal_period = inline_document_focus(document_text, form=form, report_date=report_date)
+    if form.startswith("10-Q") and fiscal_period not in {"Q1", "Q2", "Q3"}:
+        raise ValueError(f"Could not determine fiscal-period focus for {accession}.")
+
+    contexts = parse_inline_contexts(document_text)
+    units = parse_inline_units(document_text)
+    facts: dict[str, dict[str, Any]] = {}
+    accepted = 0
+    for match in INLINE_NON_FRACTION_RE.finditer(document_text):
+        attrs = parse_inline_attrs(match.group("attrs"))
+        name = attrs.get("name", "").strip()
+        context_ref = attrs.get("contextref", "").strip()
+        if ":" not in name or context_ref not in contexts:
+            continue
+        context = contexts[context_ref]
+        if context.get("has_dimensions") or context.get("end_date") != report_date:
+            continue
+        value = parse_inline_number(match.group("body"), attrs)
+        if value is None:
+            continue
+        taxonomy, concept = name.split(":", 1)
+        taxonomy = taxonomy.lower()
+        if taxonomy not in {"us-gaap", "ifrs-full", "dei"}:
+            continue
+        unit_ref = attrs.get("unitref", "").strip()
+        unit = units.get(unit_ref, unit_ref.upper())
+        observation = {
+            "start": str(context.get("start_date") or ""),
+            "end": report_date,
+            "fy": fiscal_year,
+            "fp": fiscal_period,
+            "form": form,
+            "filed": filing_date,
+            "accn": accession,
+            "val": value,
+            "frame": f"inline_context:{context_ref}",
+        }
+        concept_payload = facts.setdefault(taxonomy, {}).setdefault(concept, {"units": {}})
+        concept_payload["units"].setdefault(unit, []).append(observation)
+        accepted += 1
+    if not accepted:
+        raise ValueError(f"No dimension-free inline XBRL facts matched report date {report_date} for {accession}.")
+    return {"facts": facts}
+
+
+def unrepresented_financial_filings(
+    filing_rows: list[dict[str, Any]],
+    financial_rows: list[dict[str, Any]],
+    policy: SecIngestionPolicy,
+) -> list[dict[str, Any]]:
+    represented_accessions = {
+        accession_nodash(row.get("accession_nodash")) for row in financial_rows if row.get("accession_nodash")
+    }
+    represented_periods = {
+        (str(row.get("period_end") or ""), normalize_form(row.get("form"))): str(row.get("filed_date") or "")
+        for row in financial_rows
+    }
+    candidates: list[dict[str, Any]] = []
+    for filing in filing_rows:
+        form = normalize_form(filing.get("form"))
+        accession = accession_nodash(filing.get("accession_nodash"))
+        report_date = normalized_inline_date(filing.get("report_date"))
+        filing_date = normalized_inline_date(filing.get("filing_date"))
+        primary_document = str(filing.get("primary_document") or "").strip()
+        if (
+            form not in policy.financial_forms
+            or not accession
+            or not report_date
+            or not filing_date
+            or not primary_document
+        ):
+            continue
+        if accession in represented_accessions:
+            continue
+        if represented_periods.get((report_date, form), "") >= filing_date:
+            continue
+        candidates.append(filing)
+    candidates.sort(
+        key=lambda row: (str(row.get("filing_date") or ""), accession_nodash(row.get("accession_nodash"))),
+        reverse=True,
+    )
+    return candidates[: policy.inline_xbrl_max_filings_per_company]
+
+
+def build_inline_fallback_rows(
+    company: Company,
+    filing: dict[str, Any],
+    document_text: str,
+    policy: SecIngestionPolicy,
+) -> list[dict[str, Any]]:
+    report_date = normalized_inline_date(filing.get("report_date"))
+    payload = inline_xbrl_companyfacts(document_text, filing=filing)
+    rows = [
+        row
+        for row in build_financial_statement_rows(company, payload, policy)
+        if row.get("period_end") == report_date
+        and accession_nodash(row.get("accession_nodash")) == accession_nodash(filing.get("accession_nodash"))
+    ]
+    if not rows:
+        raise ValueError(
+            f"Inline XBRL facts did not produce a current statement row for {company.ticker} "
+            f"{filing.get('accession_nodash')} report_date={report_date}."
+        )
+    source_url = str(filing.get("archive_url") or "")
+    for row in rows:
+        row["source_id"] = policy.inline_xbrl_source_id
+        metric_payload = json.loads(str(row.get("payload_json") or "{}"))
+        metric_payload["_filing_fallback"] = {
+            "source": "sec_inline_xbrl_primary_document",
+            "source_url": source_url,
+            "report_date": report_date,
+            "comparative_contexts_excluded": True,
+        }
+        row["payload_json"] = json.dumps(metric_payload, ensure_ascii=True, sort_keys=True)
+    return rows
+
+
 def ensure_source_registry(conn: Any, config: dict[str, Any], base_dir: Path, policy: SecIngestionPolicy) -> None:
     needed = {policy.submissions_source_id, policy.companyfacts_source_id}
+    if policy.inline_xbrl_fallback_enabled:
+        needed.add(policy.inline_xbrl_source_id)
     placeholders = ",".join("?" for _ in needed)
     existing = {
         str(row["source_id"])
@@ -1318,8 +1655,10 @@ def main() -> None:
     coverage_rows: list[dict[str, Any]] = []
     submissions_request_count = 0
     companyfacts_request_count = 0
+    inline_xbrl_request_count = 0
     total_filings = 0
     total_financial_rows = 0
+    total_inline_xbrl_rows = 0
     failed: list[str] = []
 
     LOGGER.info("SEC ingestion starting: db=%s output=%s", db_path, output_csv)
@@ -1332,16 +1671,23 @@ def main() -> None:
         run_id = start_run(conn, run_type="sync_med_device_sec_fundamentals", input_path=config_path)
         submissions_ingestion_id = start_ingestion_run(conn, policy.submissions_source_id)
         companyfacts_ingestion_id = start_ingestion_run(conn, policy.companyfacts_source_id)
+        inline_xbrl_ingestion_id = (
+            start_ingestion_run(conn, policy.inline_xbrl_source_id) if policy.inline_xbrl_fallback_enabled else None
+        )
         session = requests.Session()
         try:
             for idx, company in enumerate(companies, start=1):
                 reasons: list[str] = []
                 filing_count = 0
                 financial_count = 0
+                inline_xbrl_count = 0
                 submissions_status = "success"
                 companyfacts_status = "success"
                 first_period = ""
                 latest_period = ""
+                latest_financial_filing_date = ""
+                latest_parsed_filed_date = ""
+                filing_rows: list[dict[str, Any]] = []
                 try:
                     submissions_url = submissions_url_template.format(cik=company.cik)
                     submissions, submissions_text, submissions_source, submissions_status_code = fetch_json(
@@ -1438,6 +1784,60 @@ def main() -> None:
                     )
                     financial_rows = build_financial_statement_rows(company, companyfacts, policy)
                     financial_count = upsert_financial_rows(conn, financial_rows)
+                    financial_filing_dates = [
+                        normalized_inline_date(row.get("filing_date"))
+                        for row in filing_rows
+                        if normalize_form(row.get("form")) in policy.financial_forms
+                    ]
+                    latest_financial_filing_date = max(
+                        (value for value in financial_filing_dates if value),
+                        default="",
+                    )
+
+                    if policy.inline_xbrl_fallback_enabled:
+                        for filing in unrepresented_financial_filings(filing_rows, financial_rows, policy):
+                            filing_url = str(filing.get("archive_url") or "").strip()
+                            document_name = Path(str(filing.get("primary_document") or "")).name
+                            accession = accession_nodash(filing.get("accession_nodash"))
+                            if not filing_url or not document_name or not accession:
+                                raise ValueError(f"Incomplete SEC filing fallback metadata for {company.ticker}.")
+                            document_text, document_source, document_status = fetch_text(
+                                session,
+                                filing_url,
+                                cache_path=(
+                                    cache_dir / "sec_inline_xbrl" / f"CIK{company.cik}" / accession / document_name
+                                ),
+                                refresh_cache=args.refresh_cache,
+                                cache_ttl_hours=cache_ttl_hours,
+                                timeout_sec=timeout_sec,
+                                max_retries=max_retries,
+                                sleep_sec=sleep_sec,
+                                user_agent=user_agent,
+                            )
+                            if document_source == "fetched":
+                                inline_xbrl_request_count += 1
+                                time.sleep(max(0.0, sleep_sec))
+                            if inline_xbrl_ingestion_id is None:
+                                raise RuntimeError("Inline XBRL ingestion run was not initialized.")
+                            store_raw_response(
+                                conn,
+                                source_id=policy.inline_xbrl_source_id,
+                                endpoint=filing_url,
+                                payload_text=document_text,
+                                response_status=document_status,
+                                ingestion_run_id=inline_xbrl_ingestion_id,
+                            )
+                            fallback_rows = build_inline_fallback_rows(
+                                company,
+                                filing,
+                                document_text,
+                                policy,
+                            )
+                            inline_xbrl_count += upsert_financial_rows(conn, fallback_rows)
+                            financial_rows.extend(fallback_rows)
+
+                    financial_count += inline_xbrl_count
+                    total_inline_xbrl_rows += inline_xbrl_count
                     total_financial_rows += financial_count
                     if financial_rows:
                         periods = sorted(
@@ -1445,6 +1845,15 @@ def main() -> None:
                         )
                         first_period = periods[0] if periods else ""
                         latest_period = periods[-1] if periods else ""
+                        latest_parsed_filed_date = max(
+                            (str(row.get("filed_date") or "") for row in financial_rows),
+                            default="",
+                        )
+                        if latest_financial_filing_date > latest_parsed_filed_date:
+                            raise ValueError(
+                                f"Latest periodic filing remains unparsed for {company.ticker}: "
+                                f"filing={latest_financial_filing_date} parsed={latest_parsed_filed_date}."
+                            )
                     else:
                         companyfacts_status = "failed"
                         reasons.append("companyfacts:no_financial_rows")
@@ -1464,18 +1873,22 @@ def main() -> None:
                         "companyfacts_status": companyfacts_status,
                         "filing_rows": filing_count,
                         "financial_statement_rows": financial_count,
+                        "inline_xbrl_fallback_rows": inline_xbrl_count,
                         "first_period_end": first_period,
                         "latest_period_end": latest_period,
+                        "latest_financial_filing_date": latest_financial_filing_date,
+                        "latest_parsed_filed_date": latest_parsed_filed_date,
                         "review_reason": ";".join(reasons),
                     }
                 )
                 LOGGER.info(
-                    "[%d/%d] %s filings=%d financial_rows=%d status=%s/%s",
+                    "[%d/%d] %s filings=%d financial_rows=%d inline_xbrl_rows=%d status=%s/%s",
                     idx,
                     len(companies),
                     company.ticker,
                     filing_count,
                     financial_count,
+                    inline_xbrl_count,
                     submissions_status,
                     companyfacts_status,
                 )
@@ -1484,7 +1897,11 @@ def main() -> None:
                     LOGGER.info("Committed SEC ingestion progress: %d/%d", idx, len(companies))
 
             status = "partial" if failed else "success"
-            message = f"companies={len(companies)} filings={total_filings} financial_rows={total_financial_rows} output={output_csv}"
+            message = (
+                f"companies={len(companies)} filings={total_filings} "
+                f"financial_rows={total_financial_rows} inline_xbrl_rows={total_inline_xbrl_rows} "
+                f"output={output_csv}"
+            )
             if failed:
                 message += " failed_tickers=" + ",".join(failed)
             finish_ingestion_run(
@@ -1503,6 +1920,15 @@ def main() -> None:
                 row_count=total_financial_rows,
                 message=message,
             )
+            if inline_xbrl_ingestion_id is not None:
+                finish_ingestion_run(
+                    conn,
+                    ingestion_run_id=inline_xbrl_ingestion_id,
+                    status=status,
+                    request_count=inline_xbrl_request_count,
+                    row_count=total_inline_xbrl_rows,
+                    message=message,
+                )
             finish_run(conn, run_id=run_id, status=status, row_count=total_financial_rows, message=message)
         except BaseException as exc:
             message = f"{type(exc).__name__}: {exc}"
@@ -1522,15 +1948,25 @@ def main() -> None:
                 row_count=total_financial_rows,
                 message=message,
             )
+            if inline_xbrl_ingestion_id is not None:
+                finish_ingestion_run(
+                    conn,
+                    ingestion_run_id=inline_xbrl_ingestion_id,
+                    status="failed",
+                    request_count=inline_xbrl_request_count,
+                    row_count=total_inline_xbrl_rows,
+                    message=message,
+                )
             finish_run(conn, run_id=run_id, status="failed", row_count=total_financial_rows, message=message)
             raise
 
     write_csv(output_csv, coverage_rows)
     LOGGER.info(
-        "SEC ingestion complete: companies=%d filings=%d financial_rows=%d output=%s failed=%d",
+        "SEC ingestion complete: companies=%d filings=%d financial_rows=%d inline_xbrl_rows=%d output=%s failed=%d",
         len(coverage_rows),
         total_filings,
         total_financial_rows,
+        total_inline_xbrl_rows,
         output_csv,
         len(failed),
     )

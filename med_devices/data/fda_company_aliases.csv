@@ -1,4 +1,10 @@
 ticker,alias_raw,source,note,valid_from,reviewed_at,valid_to
+XRAY,"Dentsply Sirona, Inc.",owner_operator,Verified owner/operator 2511302 legal parent,2026-08-10,2026-08-10,
+XRAY,DENTSPLY IH INC.,operating_unit,Verified Dentsply Sirona owner/operator 2511302 manufacturer,2026-08-10,2026-08-10,
+XRAY,DENTSPLY IMPLANTS MANUFACTURING GMBH,operating_unit,Verified Dentsply implant manufacturing entity,2026-08-10,2026-08-10,
+XRAY,DENTSPLY IMPLANTS (A DIVISION OF DENTSPLY IH AB),operating_unit,Verified Dentsply implant operating entity,2026-08-10,2026-08-10,
+XRAY,DENTSPLY SIRONA ORTHODONTICS INC.,operating_unit,Verified owner/operator 2511302 orthodontics entity,2026-08-10,2026-08-10,
+XRAY,SIRONA DENTAL SYSTEMS GMBH,operating_unit,Verified Sirona dental equipment operating entity,2026-08-10,2026-08-10,
 ABT,Abbott Diabetes Care,operating_unit,High-volume FDA labeler under Abbott,2026-06-26,2026-06-25,
 ABT,Abbott Medical,operating_unit,Abbott cardiovascular/medical device operating unit,2026-06-26,2026-06-25,
 ABT,Abbott Molecular,operating_unit,Abbott diagnostics operating unit,2026-06-26,2026-06-25,

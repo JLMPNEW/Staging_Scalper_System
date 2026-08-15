@@ -49,7 +49,10 @@ EVENT_FORMS = frozenset({"8-K", "8-K/A", "6-K", "6-K/A"})
 EVENT_METADATA_PATTERN = re.compile(
     r"\b(?:earnings|financial\s+results|operating\s+results|"
     r"quarterly\s+results|annual\s+results|results\s+release|"
-    r"earnings\s+release|press\s+release|investor\s+presentation)\b",
+    r"earnings\s+release|press\s+release|investor\s+presentation|"
+    r"traffic\s+release|operating\s+statistics|railroad\s+performance|"
+    r"network\s+velocity|terminal\s+dwell|service\s+reliability|"
+    r"sustainability|ESG|driver\s+turnover|empty\s+miles)\b",
     re.IGNORECASE,
 )
 VALID_GAP_DISPOSITIONS = frozenset(
@@ -586,6 +589,7 @@ def build_source_census(
     asof_date: str,
     expected_identity_count: int,
     expected_base_accession_count: int,
+    event_metric_anchor_accessions: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[
     list[dict[str, object]],
     list[dict[str, object]],
@@ -708,6 +712,10 @@ def build_source_census(
                 decision = "INCLUDE"
                 selected_rule = "supplemental_event_index_metadata"
                 reason = "cached SEC index identifies results/release/presentation"
+            elif key in event_metric_anchor_accessions:
+                decision = "INCLUDE"
+                selected_rule = "supplemental_event_metric_anchor_audit"
+                reason = "read-only cached-document audit found a target specialized-metric anchor"
             elif index_status in {"MISSING", "INVALID"}:
                 decision = "EXCLUDE_NO_METADATA_SIGNAL"
                 selected_rule = "supplemental_event_positive_metadata_only"

@@ -127,10 +127,12 @@ Implemented run order:
 
 ```powershell
 python consumer_defensive\scripts\07_sync_consumer_defensive_sec_fundamentals.py
+python consumer_defensive\scripts\07a_sync_consumer_defensive_inline_xbrl_fallback.py
 python consumer_defensive\scripts\11_sync_consumer_defensive_fx_rates.py
 python consumer_defensive\scripts\08_build_consumer_defensive_financial_features.py
 python consumer_defensive\scripts\08a_run_consumer_defensive_specialized_disclosure_census.py
 python consumer_defensive\scripts\08b_validate_consumer_defensive_financial_and_disclosure_stage.py
+python consumer_defensive\scripts\08c_build_consumer_defensive_census_review_pack.py
 ```
 
 Acceptance tests:
@@ -148,7 +150,7 @@ Acceptance tests:
 - FX anomaly classification uses strictly prior observations. Raw rates and reasons remain stored, quarantined rates are excluded from conversion, and reviewed redenomination exemptions remain auditable.
 - Yahoo FX chart arrays remain positional: `null` closes are missing observations, while every non-null close must be numeric, finite, and positive. No more than two rows within seven calendar days outside the requested boundary may be filtered; symbol/shape/order defects, material range mismatch, and zero usable in-window rows fail closed.
 - Financial features carry the current definition version, basis period end, accepted-time lineage, rejected-input reasons, and explicit complete/partial/missing/stale quality state.
-- Stage 4 schema migrations are immutable ordered units with registered checksums. They run atomically through migration v9, use bounded backfills, verify parity and foreign keys, and reject ledger gaps, future versions, or checksum drift. SEC ingestion-config v8 and issuer-scope contract v3 bind normalized reporting currency and explicit financial-form families. Companyfacts base forms may match only recognized submissions amendment or transitional variants in the same family; unrelated form conflicts fail closed. Schema migration v8 quarantines earlier-scope pointers non-destructively and invalidates trust when filing-company or reporting-currency inputs change. Schema migration v9 adds accession-keyed indexes for shared-filing raw-fact refresh, canonical invalidation, and disclosure-census invalidation so reconciliation cannot regress to full-table scans.
+- Stage 4 schema migrations are immutable ordered units with registered checksums. They run atomically through migration v10, use bounded backfills, verify parity and foreign keys, and reject ledger gaps, future versions, or checksum drift. SEC ingestion-config v8 and issuer-scope contract v3 bind normalized reporting currency and explicit financial-form families. Companyfacts base forms may match only recognized submissions amendment or transitional variants in the same family; unrelated form conflicts fail closed. Migration v9 adds accession-keyed indexes for bounded shared-filing reconciliation; migration v10 adds sealed inline-XBRL fallback provenance and reporting-profile lineage without changing the SEC seal.
 - The SEC ingestion as-of watermark advances in the same transaction as every full, targeted, partial, and reconciliation mutation. An older request fails before configuration/cache/provider access or database writes. Historical reconstruction begins at the earliest required date in a fresh scratch database and runs chronologically.
 - Every complete reconciliation and immutable cache snapshot matches the current ingestion-config hash and exact issuer-scope hash. Legacy rows may be retired or quarantined but cannot masquerade as current reconciled evidence.
 - Shared accessions and documents use explicit issuer bridges. Association lifecycle events are append-only, effective-dated, and deterministically hashed; raw/canonical observations have exact deterministic source identities.
@@ -166,11 +168,11 @@ Acceptance tests:
 
 The `2026-08-11` report is retained only as a legacy pre-hardening baseline. The fresh isolated chronological v5 replay completed under schema migration v9, SEC ingestion-config v8, and issuer-scope v3 without writing the production database. SEC reconciliation covered all 119 issuers with zero failures: 209,111 associations, 208,705 unique accessions, 406 shared accessions, 2,149,695 raw facts, and 952 selected sealed documents. The 1,287-file SEC cache manifest is 947,150,199 bytes with SHA-256 `caf6d962f05485aa46a123bc488d32f53b851dc3b7f0e338e7adea3af6fd669c`; the association SHA-256 is `d1300f5fd1eb15b3dd1431b2f9312c4f5658df9689c5c2a9f8c6fd31437fa540`.
 
-The current validator passes 38/39 checks. Only `companyfacts_coverage_complete` is false: 113/119 profiles are covered, while BTI, BUD, FMX, JBS, KOF, and UL require explicit foreign-private-issuer/inline-XBRL fallback. Current outputs contain 230,913 canonical facts, zero missing canonical FX conversions, 119 feature rows, 4,522 census-summary rows, 781 census-evidence rows, 38 metrics, and zero census document-parse failures. The census parsed 952 exact-seal documents; the database contains 956 hydrated document records.
+A fresh chronological migration-v10 replay began from an empty database and consumed only the retained `2026-08-10` caches through the Consumer Defensive Stage 0-4 entry points. It reproduced the exact SEC cache and association manifests. BTI and BUD were proven nonfinancial metadata-only 6-K anchors. FMX, JBS, KOF, and UL produced 13,176 numeric, 3,111 consolidated, and 130 mapped facts. After canonical rebuild the current validator passes 40/40 checks: 119/119 profiles are covered, fallback-provenance mismatches are zero, 2,152,806 raw facts and 231,024 canonical facts are present, canonical FX missing is zero, and all 119 feature rows retain the prior quality distribution. Streamed raw, canonical, feature, and current census-v3 semantic hashes exactly match the retained migration-v10 continuation. The production database and preserved v5 evidence database remain untouched.
 
 The official `2010-01-01` through `2026-08-10` FX cache-only replay accepted 12 currencies and published 49,867 rates, including 49,815 usable and 52 quarantined. Its exact 12-file, 5,694,168-byte range manifest has SHA-256 `99deee8510b8e10b4ed581930fe1ad7f06fa01c67f9532563809126f19e486f6`. CLF is the sole source gap: its preserved payload has only an observation after the cutoff, so the sync correctly exits nonzero with partial status. CLF is not required by any selected canonical fact; all five required currencies are covered and `canonical_fx_missing` is zero. This upstream gap is disclosed but does not add a validator failure.
 
-Stage 4 remains open on the six-name Companyfacts fallback gate and the separate census terminology review. The fallback gap is not classified as a canonicalization or shared-parser-kernel defect and may not be waived implicitly. Production migration/rebuild must wait for final acceptance. Current-date seal completeness also does not satisfy Stage 6B's separate historical filing/document inventory requirement.
+The Companyfacts/inline-XBRL code gate and generated 10-row stratified terminology adjudication are resolved. Census parser v3 removes standalone `sales leaders`, retains the representative-specific triggers, and the accepted `2026-08-10` sample remains bound to its exact seal. The explicitly approved production rollout completed at the existing `2026-08-11` watermark after a verified pre-change backup and backup-only rehearsal. Migrations v2-v10 are complete; production has 2,153,234 raw facts, 231,066 canonical facts, 49,879 FX rows, 119 features, 4,522 current census-v3 summaries, and 778 census-v3 evidence rows. Its exact reconciliation covers 119 issuers, 209,031 active associations, 208,625 active accessions, and 406 shared accessions, with 131 associations retired non-destructively. The live Stage 4 validator passes 40/40, `integrity_check=ok`, and the full code suite is 402 passed with 6 platform-specific skips. Stage 4 is closed for production; current-date seal completeness still does not satisfy Stage 6B's separate historical filing/document inventory requirement.
 
 The pre-fix production rerun was aborted after more than 18 minutes because issuer replacement lacked an index on the canonical foreign-key child, used a raw index that did not exactly match the ticker/source/accepted-time delete, and inserted raw facts row by row. The implemented `idx_stage4_canonical_raw_fact_id`, exact `idx_stage4_raw_ticker_source_accepted`, and per-issuer bulk insert fix that query shape. The historical 48.2-second isolated result predates the current full reconciliation/sealing contract and is not a current end-to-end performance claim. Query-plan regression tests must continue to prove both delete paths use their intended indexes.
 
@@ -181,7 +183,7 @@ Stage 4 introduced a reviewed historical SEC CIK registry. Physical XBRL units s
 
 Goal: load Consumer Defensive-owned normalized ownership and positioning history.
 
-Planned run order:
+Implemented run order:
 
 ```powershell
 python consumer_defensive\scripts\09_sync_consumer_defensive_sec_ownership.py
@@ -194,12 +196,22 @@ python consumer_defensive\scripts\10b_audit_consumer_defensive_foundation_covera
 Acceptance tests:
 
 - External upstream databases are read-only.
+- The Consumer Defensive package owns every sector-specific schema, import, feature, validation, and audit step; it does not import Technology or Industrials scripts.
+- Cache-only upstream rematching is performed only by the sector-neutral `market_positioning` owner utility against an explicitly selected target database.
 - Direct SEC ownership facts are written only to Consumer Defensive-owned tables.
 - 13F, FINRA short-interest, and borrow source birthdates are explicit.
 - Missing-era observations are null and unavailable, not zero.
 - The foundation-coverage audit reports daily cohort breadth, warm-up sufficiency, SEC/FX coverage, positioning availability, and terminal-event gaps from `2019-01-02`.
 - It estimates the earliest potential common-feature date but does not certify the final historical scoring panel.
 - The continuation review chooses full Stage 6 work, a limited shadow candidate, or defer.
+
+Disposable acceptance at `2026-08-10`:
+
+- Stage 5 validation passes with 14,239 Form 4 observations across 104 taxonomy tickers, 1,652 PIT 13F observations across 114 tickers, and 12,335 FINRA short-interest observations across 114 tickers.
+- Current PIT numeric coverage is 104/108 (`96.296%`) for 13F and 104/108 (`96.296%`) for short interest. Required 13F-plus-short positioning features are complete for 100/108 (`92.593%`) current names, above the configured `80%` gate.
+- Borrow coverage is zero and remains optional with a zero minimum; missing borrow data are null, not neutral or zero observations.
+- The foundation audit passes for 1,911 SPY dates and 7,644 date/cohort rows, estimates `2026-02-27` as the earliest potential common positioning-feature date, and records `proceed_stage6a`.
+- This evidence comes from disposable databases. Production Stage 5 mutation requires a separate approved rollout; the shared production positioning store and production Consumer Defensive database were not changed by the rehearsal.
 
 ## Stage 6A - Core Scoring Feature Contract
 

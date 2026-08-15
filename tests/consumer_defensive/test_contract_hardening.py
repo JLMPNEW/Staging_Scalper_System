@@ -105,7 +105,7 @@ def test_authoritative_input_manifest_verifies_current_inventory() -> None:
     )
 
     expected_rows = yaml.safe_load(MANIFEST_PATH.read_text(encoding="utf-8"))["inputs"]
-    assert result["verified_inputs"] == len(expected_rows) == 7
+    assert result["verified_inputs"] == len(expected_rows) == 8
     assert len(result["manifest_sha256"]) == 64
     assert result["manifest_sha256"] == hashlib.sha256(MANIFEST_PATH.read_bytes()).hexdigest()
     assert {row["path"] for row in result["inputs"]} == {

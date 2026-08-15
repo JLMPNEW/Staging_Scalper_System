@@ -279,25 +279,58 @@ def resolve_benchmark_mapping(
     *,
     benchmark_override: object,
     primary_override: object,
+    model_family: str | None = None,
 ) -> tuple[list[str], str, list[str]]:
+    family = str(model_family or "").strip()
+    family_market = f"model_families.{family}.market" if family else ""
+    family_universe = f"model_families.{family}.universe" if family else ""
+    family_benchmark_configured = bool(
+        family
+        and (
+            cfg_get(config, f"{family_market}.benchmark_tickers", None) is not None
+            or cfg_get(config, f"{family_market}.primary_benchmark", None) is not None
+            or cfg_get(config, f"{family_universe}.benchmark_tickers", None) is not None
+            or cfg_get(config, f"{family_universe}.benchmark_ticker", None) is not None
+        )
+    )
     explicit = parse_ticker_list(benchmark_override)
-    benchmarks = explicit or parse_ticker_list(
+    family_benchmarks = parse_ticker_list(
+        cfg_get(
+            config,
+            f"{family_market}.benchmark_tickers",
+            cfg_get(config, f"{family_universe}.benchmark_tickers", []),
+        )
+    ) if family else []
+    benchmarks = explicit or family_benchmarks or parse_ticker_list(
         cfg_get(config, "industrials_universe.benchmark_tickers", [])
     )
     primary = normalize_ticker(
         primary_override
+        or (
+            cfg_get(
+                config,
+                f"{family_market}.primary_benchmark",
+                cfg_get(config, f"{family_universe}.benchmark_ticker", None),
+            )
+            if family
+            else None
+        )
         or cfg_get(config, "industrials_universe.benchmark_ticker", "XAR")
         or "XAR"
     )
     if primary and primary not in benchmarks:
         benchmarks.insert(0, primary)
-    secondary = (
-        [ticker for ticker in benchmarks if ticker != primary]
-        if explicit
-        else parse_ticker_list(
+    if explicit or family_benchmark_configured:
+        configured_secondary = parse_ticker_list(
+            cfg_get(config, f"{family_market}.secondary_benchmarks", [])
+        ) if family else []
+        secondary = configured_secondary or [
+            ticker for ticker in benchmarks if ticker != primary
+        ]
+    else:
+        secondary = parse_ticker_list(
             cfg_get(config, "market_feature_build.secondary_benchmarks", [])
         )
-    )
     if not secondary:
         secondary = [ticker for ticker in benchmarks if ticker != primary]
     return benchmarks, primary, secondary
@@ -700,6 +733,7 @@ def main() -> None:
             config,
             benchmark_override=args.benchmark_tickers,
             primary_override=args.primary_benchmark,
+            model_family=model_family,
         )
     )
     if len(secondary_benchmarks) > MAX_SECONDARY_BENCHMARKS:

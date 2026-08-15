@@ -46,11 +46,13 @@ from portfolio_layer.provider_ingestion.health import (  # noqa: E402
     capture_continuity_rows,
     continuity_gaps,
     expected_capture_slots,
+    validate_provider_ingestion_policy,
 )
 from portfolio_layer.provider_ingestion.store import (  # noqa: E402
     artifact_dependency_errors as provider_artifact_dependency_errors,
     connect_store,
     record_artifact_dependencies as record_provider_artifact_dependencies,
+    supersede_artifact_dependencies as supersede_provider_artifact_dependencies,
     writer_lock as provider_writer_lock,
 )
 
@@ -202,10 +204,21 @@ def _parse_timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _cutoff_utc(as_of: date, timezone_name: str) -> datetime:
+def _cutoff_utc(
+    as_of: date,
+    timezone_name: str,
+    *,
+    now_utc: datetime | None = None,
+) -> datetime:
     local_zone = ZoneInfo(timezone_name)
+    current_utc = now_utc or datetime.now(timezone.utc)
+    if current_utc.tzinfo is None:
+        raise ValueError("Provider diagnostics clock must include a timezone")
+    current_utc = current_utc.astimezone(timezone.utc)
+    if as_of > current_utc.astimezone(local_zone).date():
+        raise ValueError("Provider diagnostics as-of date cannot be in the future")
     next_midnight = datetime.combine(as_of + timedelta(days=1), time.min, local_zone)
-    return next_midnight.astimezone(timezone.utc)
+    return min(next_midnight.astimezone(timezone.utc), current_utc)
 
 
 def _iso_utc(value: datetime) -> str:
@@ -340,14 +353,15 @@ def _latest_snapshot_rows(
     minimum_period_end: str,
     effective_as_of: str | None = None,
 ) -> list[sqlite3.Row]:
-    effective_clause = " AND s.effective_trading_date<=?" if effective_as_of else ""
+    effective_clause = " AND s.effective_trading_date<=? AND s.effective_from_utc<=?" if effective_as_of else ""
     params: tuple[str, ...] = (universe_as_of, cutoff_utc, minimum_period_end)
     if effective_as_of:
-        params = (*params, effective_as_of)
+        params = (*params, effective_as_of, cutoff_utc)
     return conn.execute(
         "WITH ranked AS ("
         " SELECT s.*,ROW_NUMBER() OVER ("
-        "  PARTITION BY s.provider,s.ticker,s.estimate_type,s.fiscal_period_end"
+        "  PARTITION BY s.provider,s.ticker,s.endpoint_id,s.fiscal_period,"
+        "s.estimate_type,s.fiscal_period_end"
         "  ORDER BY s.available_at_utc DESC,s.snapshot_id DESC"
         " ) AS row_rank"
         f" FROM {snapshot_table} s"
@@ -356,7 +370,7 @@ def _latest_snapshot_rows(
         "   AND s.coverage_status='available'"
         f"{effective_clause}"
         ") SELECT * FROM ranked WHERE row_rank=1"
-        " ORDER BY provider,ticker,estimate_type,fiscal_period_end",
+        " ORDER BY provider,ticker,endpoint_id,fiscal_period,estimate_type,fiscal_period_end,snapshot_id",
         params,
     ).fetchall()
 
@@ -805,7 +819,16 @@ def run_selftest() -> None:
         == "WARN"
     )
     assert _percentile([0, 1, 2, 3], 0.50) == 1.5
-    assert _cutoff_utc(date(2026, 7, 31), "America/Chicago") == datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
+    assert _cutoff_utc(
+        date(2026, 7, 31),
+        "America/Chicago",
+        now_utc=datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
+    ) == datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
+    assert _cutoff_utc(
+        date(2026, 8, 3),
+        "America/Chicago",
+        now_utc=datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
+    ) == datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
     print("provider diagnostics selftest: PASS")
 
 
@@ -828,6 +851,7 @@ def main() -> int:
     ingestion_cfg = cfg_get(config, "provider_ingestion", {})
     if not isinstance(ingestion_cfg, dict):
         raise ValueError("provider_ingestion config must be a mapping")
+    validate_provider_ingestion_policy(ingestion_cfg)
     external_provider_store = (
         ingestion_cfg.get("enabled") is True
         and ingestion_cfg.get("network_owner") == "independent_service"
@@ -905,9 +929,7 @@ def main() -> int:
         label="provider observation database",
     )
     snapshot_table = (
-        "provider_store.provider_estimate_snapshots"
-        if external_provider_store
-        else "provider_estimate_snapshots"
+        "provider_store.provider_estimate_snapshots" if external_provider_store else "provider_estimate_snapshots"
     )
     earnings_history = (
         args.earnings_history.resolve()
@@ -921,11 +943,10 @@ def main() -> int:
     try:
         if external_provider_store:
             if not provider_store_path.is_file():
-                raise FileNotFoundError(
-                    f"Independent provider observation store is missing: {provider_store_path}"
-                )
+                raise FileNotFoundError(f"Independent provider observation store is missing: {provider_store_path}")
             provider_store_uri = provider_store_path.resolve().as_uri() + "?mode=ro"
             conn.execute("ATTACH DATABASE ? AS provider_store", (provider_store_uri,))
+        conn.execute("BEGIN")
         universe_rows = conn.execute(
             "SELECT ticker,tier,sector,source_pipeline FROM monitor_universe WHERE run_as_of=? ORDER BY ticker",
             (args.universe_as_of.isoformat(),),
@@ -1002,22 +1023,12 @@ def main() -> int:
             if not isinstance(schedules, dict):
                 raise ValueError("provider_ingestion.schedules must be a mapping")
             continuity_start = max(
-                date.fromisoformat(
-                    str(recovery_cfg.get("service_started_on", args.as_of.isoformat()))
-                ),
-                args.as_of
-                - timedelta(
-                    days=int(recovery_cfg.get("continuity_lookback_calendar_days", 8))
-                ),
+                date.fromisoformat(str(recovery_cfg.get("service_started_on", args.as_of.isoformat()))),
+                args.as_of - timedelta(days=int(recovery_cfg.get("continuity_lookback_calendar_days", 8))),
             )
-            provider_timezone = str(
-                ingestion_cfg.get("timezone", "America/New_York")
-            )
+            provider_timezone = str(ingestion_cfg.get("timezone", "America/New_York"))
             cutoff_hour, cutoff_minute = (
-                int(value)
-                for value in str(
-                    ingestion_cfg.get("decision_cutoff_local", "09:25")
-                ).split(":")
+                int(value) for value in str(ingestion_cfg.get("decision_cutoff_local", "09:25")).split(":")
             )
             continuity_cutoff = datetime.combine(
                 args.as_of,
@@ -1031,7 +1042,10 @@ def main() -> int:
                 schedules=schedules,
                 timezone_name=provider_timezone,
                 calendar_name=str(ingestion_cfg.get("exchange_calendar", "XNYS")),
-                grace_minutes=int(ingestion_cfg.get("schedule_grace_minutes", 20)),
+                grace_minutes=ingestion_cfg.get(
+                    "phase_grace_minutes",
+                    int(ingestion_cfg.get("schedule_grace_minutes", 20)),
+                ),
                 service_started_on=date.fromisoformat(
                     str(recovery_cfg.get("service_started_on", args.as_of.isoformat()))
                 ),
@@ -1042,6 +1056,8 @@ def main() -> int:
                 table_prefix="provider_store.",
             )
     finally:
+        if conn.in_transaction:
+            conn.rollback()
         conn.close()
 
     earnings_rows = _build_earnings_drift_rows(
@@ -1055,13 +1071,7 @@ def main() -> int:
     capture_gaps = continuity_gaps(continuity_rows)
     failure_reasons = ["tier0_1_provider_coverage"] if hard_failures else []
     warning_reasons = ["scheduled_provider_capture_gap"] if capture_gaps else []
-    acceptance = (
-        "FAIL"
-        if hard_failures
-        else "PASS_WITH_WARNINGS"
-        if warnings or capture_gaps
-        else "PASS"
-    )
+    acceptance = "FAIL" if hard_failures else "PASS_WITH_WARNINGS" if warnings or capture_gaps else "PASS"
 
     output_dir = (
         args.output_dir.resolve()
@@ -1173,14 +1183,10 @@ def main() -> int:
         ),
         "dependency_lineage_verified": True,
         "inputs_sha256": {str(path): sha256_file(path) for path in inputs},
-        "outputs_sha256": {
-            path.name: sha256_file(path) for path in outputs if path != manifest_path
-        },
+        "outputs_sha256": {path.name: sha256_file(path) for path in outputs if path != manifest_path},
     }
 
-    dependency_paths = [
-        path for path in outputs if path != manifest_path and path.is_file()
-    ]
+    dependency_paths = [path for path in outputs if path != manifest_path and path.is_file()]
     if snapshot_ids and external_provider_store:
         lock_path = provider_store_path.with_suffix(provider_store_path.suffix + ".writer.lock")
         with provider_writer_lock(lock_path, timeout_sec=timeout):
@@ -1200,9 +1206,7 @@ def main() -> int:
                         artifact_sha256=artifact_sha,
                     )
                     if errors:
-                        raise RuntimeError(
-                            f"Invalid provider-diagnostics observation lineage for {path}: {errors}"
-                        )
+                        raise RuntimeError(f"Invalid provider-diagnostics observation lineage for {path}: {errors}")
             finally:
                 provider_conn.close()
     elif snapshot_ids:
@@ -1229,9 +1233,33 @@ def main() -> int:
                         artifact_sha256=artifact_sha,
                     )
                     if errors:
-                        raise RuntimeError(
-                            f"Invalid provider-diagnostics snapshot lineage for {path}: {errors}"
-                        )
+                        raise RuntimeError(f"Invalid provider-diagnostics snapshot lineage for {path}: {errors}")
+            finally:
+                conn.close()
+    elif external_provider_store:
+        lock_path = provider_store_path.with_suffix(provider_store_path.suffix + ".writer.lock")
+        with provider_writer_lock(lock_path, timeout_sec=timeout):
+            provider_conn = connect_store(provider_store_path, timeout_sec=timeout)
+            try:
+                for path in dependency_paths:
+                    supersede_provider_artifact_dependencies(
+                        provider_conn,
+                        artifact_path=str(path),
+                    )
+            finally:
+                provider_conn.close()
+    else:
+        lock_path = db_path.with_suffix(db_path.suffix + ".writer.lock")
+        with writer_lock(lock_path, timeout_sec=timeout):
+            conn = connect_monitor_db(db_path, timeout_sec=timeout)
+            try:
+                for path in dependency_paths:
+                    supersede_artifact_dependencies(
+                        conn,
+                        artifact_path=str(path),
+                        current_artifact_sha256=sha256_file(path),
+                        reason="empty_provider_diagnostics_publication",
+                    )
             finally:
                 conn.close()
     # Publish acceptance only after every data artifact has verified snapshot lineage.

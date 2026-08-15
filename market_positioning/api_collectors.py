@@ -130,6 +130,31 @@ def load_universe_tickers(path: Path | None) -> list[str]:
     return tickers
 
 
+def load_universe_source_ticker_map(
+    path: Path | None,
+    *,
+    source_column: str,
+) -> dict[str, str]:
+    """Map a provider symbol to the reviewed internal ticker without guessing."""
+
+    if path is None or not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for row in read_csv_rows(path):
+        ticker = normalize_ticker(row.get("ticker") or row.get("symbol"))
+        source_ticker = normalize_ticker(row.get(source_column)) or ticker
+        if not ticker or not source_ticker:
+            continue
+        prior = out.get(source_ticker)
+        if prior is not None and prior != ticker:
+            raise RuntimeError(
+                f"Provider symbol {source_ticker!r} maps to multiple universe tickers: "
+                f"{prior!r}, {ticker!r}"
+            )
+        out[source_ticker] = ticker
+    return out
+
+
 def load_universe_name_map(path: Path | None) -> dict[str, str]:
     if path is None or not path.exists():
         return {}
@@ -557,14 +582,21 @@ def download_finra_equity_short_interest_file(
     cache_dir: Path,
     user_agent: str,
     timeout_sec: float,
+    cache_only: bool = False,
 ) -> Path | None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / Path(urllib.parse.urlparse(url).path).name
     if path.exists() and path.stat().st_size > 0:
         if delimited_file_is_intact(path):
             return path
+        if cache_only:
+            raise RuntimeError(
+                f"Cached FINRA short-interest file failed integrity verification: {path}"
+            )
         # Corrupt cache (e.g. truncated earlier download): delete and refetch once.
         path.unlink()
+    if cache_only:
+        return None
     try:
         raw = http_request(url, user_agent=user_agent, timeout_sec=timeout_sec)
     except urllib.error.HTTPError as exc:
@@ -603,9 +635,13 @@ def sync_finra_equity_short_interest_files(
     user_agent: str = DEFAULT_USER_AGENT,
     timeout_sec: float = 60.0,
     max_files: int = 0,
+    cache_only: bool = False,
 ) -> SyncResult:
-    tickers = set(load_universe_tickers(tickers_csv))
-    if not tickers:
+    source_tickers = load_universe_source_ticker_map(
+        tickers_csv,
+        source_column="finra_symbol",
+    )
+    if not source_tickers:
         raise RuntimeError("FINRA Equity Short Interest file sync requires a non-empty ticker universe CSV")
     now = utc_now()
     records: list[tuple[Any, ...]] = []
@@ -622,6 +658,7 @@ def sync_finra_equity_short_interest_files(
             cache_dir=cache_dir,
             user_agent=user_agent,
             timeout_sec=timeout_sec,
+            cache_only=cache_only,
         )
         if path is None:
             files_missing += 1
@@ -629,8 +666,9 @@ def sync_finra_equity_short_interest_files(
         files_found += 1
         files_downloaded += 1
         for row in read_finra_equity_short_interest_file(path):
-            ticker = normalize_ticker(row.get("symbolCode"))
-            if ticker not in tickers:
+            source_ticker = normalize_ticker(row.get("symbolCode"))
+            ticker = source_tickers.get(source_ticker)
+            if not ticker:
                 continue
             row_settlement = parse_date(row.get("settlementDate")) or settlement
             if row_settlement < history_start_date or row_settlement > end_date:
@@ -870,18 +908,24 @@ def sync_sec_13f_data_sets(
     sleep_sec: float = 0.2,
     max_archives: int = 0,
     force_reprocess_archives: bool = False,
+    cache_only: bool = False,
 ) -> SyncResult:
     name_map = load_universe_name_map(tickers_csv)
     cusip_map = load_cusip_ticker_map(cusip_ticker_map_csv)
     if not name_map and not cusip_map:
         raise RuntimeError("SEC 13F sync requires ticker/company-name or ticker/CUSIP mapping")
-    archives = discover_sec_13f_archives(
-        index_url=index_url,
-        start_year=history_start_date.year,
-        end_year=end_date.year,
-        user_agent=user_agent,
-        timeout_sec=timeout_sec,
-    )
+    if cache_only:
+        archives: list[str | Path] = sorted(cache_dir.glob("*_form13f.zip"))
+        if not archives:
+            raise RuntimeError(f"No cached SEC 13F archives found under {cache_dir}")
+    else:
+        archives = discover_sec_13f_archives(
+            index_url=index_url,
+            start_year=history_start_date.year,
+            end_year=end_date.year,
+            user_agent=user_agent,
+            timeout_sec=timeout_sec,
+        )
     if max_archives and max_archives > 0:
         archives = archives[:max_archives]
     total_holdings = 0
@@ -891,8 +935,17 @@ def sync_sec_13f_data_sets(
     dropped_rows_missing_submission = 0
     dropped_rows_unparsable_filing_date = 0
     matched_rows_unparsable_period = 0
-    for url in archives:
-        archive_path = download_cached(url, cache_dir=cache_dir, user_agent=user_agent, timeout_sec=timeout_sec)
+    for archive in archives:
+        archive_path = (
+            archive
+            if isinstance(archive, Path)
+            else download_cached(
+                archive,
+                cache_dir=cache_dir,
+                user_agent=user_agent,
+                timeout_sec=timeout_sec,
+            )
+        )
         if not force_reprocess_archives and archive_already_processed(conn, archive_path):
             skipped_archives += 1
             continue
@@ -914,6 +967,9 @@ def sync_sec_13f_data_sets(
             for row in submissions
         }
         for row in infotable:
+            ticker = match_13f_ticker(row, cusip_map=cusip_map, name_map=name_map)
+            if not ticker:
+                continue
             accession = str(row.get("ACCESSION_NUMBER") or row.get("accession_number") or "").strip()
             if not accession:
                 dropped_rows_missing_accession += 1
@@ -938,9 +994,6 @@ def sync_sec_13f_data_sets(
                 dropped_rows_unparsable_filing_date += 1
                 continue
             if filing_date < history_start_date or filing_date > end_date:
-                continue
-            ticker = match_13f_ticker(row, cusip_map=cusip_map, name_map=name_map)
-            if not ticker:
                 continue
             if period is None:
                 # Stored with period_of_report = '' and permanently invisible to the

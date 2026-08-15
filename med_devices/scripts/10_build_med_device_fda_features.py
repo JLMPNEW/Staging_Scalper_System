@@ -25,6 +25,7 @@ from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES, normalize_fda_state  # noqa: E402
+from med_devices.core.fda_product_family_review import canonical_mdr_family_key  # noqa: E402
 from med_devices.core.point_in_time import row_is_effective_asof, warn_pit_invariant_violations  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -1510,20 +1511,61 @@ def count_adverse_events(
         f"""
         SELECT e.adverse_event_id, e.report_date, e.event_date, e.death_count,
                e.injury_count, e.malfunction_count, e.payload_json,
-               m.mapping_confidence, e.fda_manufacturer_id
+               m.mapping_confidence, e.fda_manufacturer_id, e.product_code
         FROM fact_fda_adverse_event e
         LEFT JOIN dim_fda_manufacturer m
           ON m.fda_manufacturer_id = e.fda_manufacturer_id
         WHERE e.company_id = ?
           AND COALESCE(e.report_date, e.event_date, '') != ''
           AND COALESCE(e.report_date, e.event_date) <= ?
-          AND COALESCE(e.report_date, e.event_date) >= ?
+          AND COALESCE(e.event_date, e.report_date) >= ?
           {exclusion_sql}
         """,
         (row.company_id, event_asof.isoformat(), previous_start.isoformat(), *exclusion_params),
     ).fetchall()
+    canonical_rows: dict[tuple[str, int, str], Any] = {}
     for item in rows:
-        event_day = parse_date(item["report_date"]) or parse_date(item["event_date"])
+        event_id = str(item["adverse_event_id"] or "").strip()
+        family_key = canonical_mdr_family_key(item["payload_json"], event_id)
+        compound_key = (
+            family_key,
+            int(item["fda_manufacturer_id"] or 0),
+            str(item["product_code"] or "").strip().upper(),
+        )
+        existing = canonical_rows.get(compound_key)
+        if existing is None:
+            canonical_rows[compound_key] = item
+            continue
+        item_rank = (
+            int((row.ticker, event_id) in adjudications),
+            int(item["death_count"] or 0),
+            int(item["injury_count"] or 0),
+            int(item["malfunction_count"] or 0),
+            str(item["report_date"] or item["event_date"] or ""),
+            event_id,
+        )
+        existing_id = str(existing["adverse_event_id"] or "").strip()
+        existing_rank = (
+            int((row.ticker, existing_id) in adjudications),
+            int(existing["death_count"] or 0),
+            int(existing["injury_count"] or 0),
+            int(existing["malfunction_count"] or 0),
+            str(existing["report_date"] or existing["event_date"] or ""),
+            existing_id,
+        )
+        if item_rank > existing_rank:
+            canonical_rows[compound_key] = item
+    for item in sorted(
+        canonical_rows.values(),
+        key=lambda value: (
+            str(value["report_date"] or value["event_date"] or ""),
+            str(value["adverse_event_id"] or ""),
+        ),
+    ):
+        # report_date is the PIT availability boundary; event_date is the
+        # clinical-recency boundary. Late FDA submissions must not turn legacy
+        # events into current-window safety events.
+        event_day = parse_date(item["event_date"]) or parse_date(item["report_date"])
         if event_day is None:
             continue
         event_id = str(item["adverse_event_id"] or "").strip()

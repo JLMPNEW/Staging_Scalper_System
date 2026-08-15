@@ -85,8 +85,13 @@ def _applicable_ticker_by_metric() -> dict[str, str]:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
                 metric_id = str(row[metric_field])
-                if row["applicability_status"] == "APPLICABLE" and metric_id in _metric_contracts():
-                    output.setdefault(metric_id, str(row["ticker"]))
+                ticker = str(row["ticker"])
+                if (
+                    row["applicability_status"] == "APPLICABLE"
+                    and metric_id in _metric_contracts()
+                    and metric_id in applicable_parser_metrics(ticker)
+                ):
+                    output.setdefault(metric_id, ticker)
     return output
 
 

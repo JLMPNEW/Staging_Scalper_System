@@ -57,11 +57,11 @@ def _csv_text(fieldnames: Iterable[str], rows: Iterable[Mapping[str, Any]]) -> s
     return handle.getvalue()
 
 
-def read_rank_rows(path: Path) -> list[dict[str, str]]:
+def read_rank_rows(path: Path, *, model_family: str) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = [dict(row) for row in csv.DictReader(handle)]
     if not rows:
-        raise ValueError(f"Semiconductor rank table is empty: {path}")
+        raise ValueError(f"{model_family} rank table is empty: {path}")
     required = {
         "ticker",
         "asof_date",
@@ -70,12 +70,12 @@ def read_rank_rows(path: Path) -> list[dict[str, str]]:
     }
     missing = sorted(required.difference(rows[0]))
     if missing:
-        raise ValueError(f"Semiconductor rank table lacks shadow lineage fields={missing}: {path}")
+        raise ValueError(f"{model_family} rank table lacks shadow lineage fields={missing}: {path}")
     tickers = [str(row.get("ticker") or "").strip().upper() for row in rows]
     if any(not ticker for ticker in tickers):
-        raise ValueError(f"Semiconductor rank table contains a blank ticker: {path}")
+        raise ValueError(f"{model_family} rank table contains a blank ticker: {path}")
     if len(tickers) != len(set(tickers)):
-        raise ValueError(f"Semiconductor rank table contains duplicate tickers: {path}")
+        raise ValueError(f"{model_family} rank table contains duplicate tickers: {path}")
     return rows
 
 
@@ -87,13 +87,15 @@ def build_financial_lineage_shadow(
     model_family: str = "semiconductors",
     expected_asof: str = "",
 ) -> dict[str, Any]:
-    rank_rows = read_rank_rows(rank_table_path)
+    rank_rows = read_rank_rows(rank_table_path, model_family=model_family)
     row_dates = {str(row.get("asof_date") or "").strip() for row in rank_rows}
     if len(row_dates) != 1:
-        raise ValueError(f"Semiconductor rank table must contain one as-of date; found={sorted(row_dates)}")
+        raise ValueError(f"{model_family} rank table must contain one as-of date; found={sorted(row_dates)}")
     asof = next(iter(row_dates))
     if expected_asof and asof != expected_asof:
-        raise ValueError(f"Semiconductor shadow as-of mismatch rank={asof} expected={expected_asof}")
+        raise ValueError(
+            f"{model_family} shadow as-of mismatch rank={asof} expected={expected_asof}"
+        )
     tickers = [str(row["ticker"]).strip().upper() for row in rank_rows]
     with _readonly_connect(db_path) as conn:
         lineage = build_financial_filing_lineage(
@@ -108,7 +110,9 @@ def build_financial_lineage_shadow(
         ticker = str(source["ticker"]).strip().upper()
         evidence = lineage.get(ticker)
         if evidence is None:
-            raise ValueError(f"Shared lineage producer omitted semiconductor ticker={ticker}")
+            raise ValueError(
+                f"Shared lineage producer omitted {model_family} ticker={ticker}"
+            )
         item = dict(source)
         item.update({field: str(evidence.get(field) or "") for field in LINEAGE_FIELDS})
         shadow_rows.append(item)
@@ -125,14 +129,15 @@ def build_financial_lineage_shadow(
     fields = list(rank_rows[0])
     fields.extend(field for field in LINEAGE_FIELDS if field not in fields)
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "semiconductor_financial_lineage_shadow.csv"
-    manifest_path = output_dir / "semiconductor_financial_lineage_shadow.json"
+    artifact_stem = "semiconductor" if model_family == "semiconductors" else model_family
+    csv_path = output_dir / f"{artifact_stem}_financial_lineage_shadow.csv"
+    manifest_path = output_dir / f"{artifact_stem}_financial_lineage_shadow.json"
     _write_atomic(csv_path, _csv_text(fields, shadow_rows))
     candidate_rows = [
         row for row in shadow_rows if any(str(row.get(field) or "").strip() == "1" for field in candidate_fields)
     ]
     manifest = {
-        "schema_version": "semiconductor_financial_lineage_shadow_v1",
+        "schema_version": f"{artifact_stem}_financial_lineage_shadow_v1",
         "generated_at_utc": _utc_now(),
         "model_family": model_family,
         "asof_date": asof,

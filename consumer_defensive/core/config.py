@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ ENV_DEFAULT_RE = re.compile(
 )
 ALLOWED_ROOT_KEYS = frozenset(
     {
+        'positioning',
         "paths",
         "runtime",
         "source_registry",
@@ -33,6 +35,13 @@ ALLOWED_ROOT_KEYS = frozenset(
 )
 REQUIRED_ROOT_KEYS = ALLOWED_ROOT_KEYS
 ALLOWED_SECTION_KEYS = {
+    'positioning': {
+        'ownership_source_id', 'market_positioning_source_id', 'feature_source_id',
+        'form4_upstream_db', 'market_positioning_upstream_db', 'upstream_universe_csv',
+        'source_identifier_map',
+        'start_date', 'source_birthdates', 'maximum_age_days',
+        'minimum_current_coverage', 'lookback_days', 'upstream_source_names',
+    },
     "paths": {"database_path", "output_dir", "authoritative_input_manifest"},
     "runtime": {"sqlite_timeout_sec", "model_family", "internal_sector", "portfolio_sector", "timezone"},
     "source_registry": {"path", "stage2_path"},
@@ -191,6 +200,38 @@ def _validate_nested_keys(config: dict[str, Any]) -> None:
             )
 
 
+def _validate_positioning_contract(config: dict[str, Any]) -> None:
+    expected_maps = {
+        'source_birthdates': {'sec_form4', 'institutional_13f', 'short_interest', 'borrow'},
+        'maximum_age_days': {'sec_form4', 'institutional_13f', 'short_interest', 'borrow'},
+        'minimum_current_coverage': {'institutional_13f', 'short_interest', 'borrow'},
+        'lookback_days': {'insider'},
+        'upstream_source_names': {'institutional_13f', 'short_interest', 'borrow'},
+    }
+    for key, expected in expected_maps.items():
+        value = cfg_get(config, f'positioning.{key}')
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError(f'positioning.{key} must contain exactly {sorted(expected)}.')
+    try:
+        start = date.fromisoformat(str(cfg_get(config, 'positioning.start_date')))
+        births = [date.fromisoformat(str(value)) for value in cfg_get(config, 'positioning.source_birthdates').values()]
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Stage 5 positioning start/source birthdates must be ISO dates.') from exc
+    contract_start = date(2019, 1, 2)
+    if start < contract_start or any(value < contract_start for value in births):
+        raise ValueError('Stage 5 positioning dates cannot predate 2019-01-02.')
+    for key, raw in cfg_get(config, 'positioning.minimum_current_coverage').items():
+        value = float(raw)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f'positioning.minimum_current_coverage.{key} must be in [0,1].')
+    for key, raw in cfg_get(config, 'positioning.upstream_source_names').items():
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f'positioning.upstream_source_names.{key} must be nonblank.')
+    identifier_map = cfg_get(config, 'positioning.source_identifier_map')
+    if not isinstance(identifier_map, str) or not identifier_map.strip():
+        raise ValueError('positioning.source_identifier_map must be a nonblank path.')
+
+
 def _assert_contract_equal(label: str, left: Any, right: Any) -> None:
     if left != right:
         raise ValueError(f"Consumer Defensive contract drift for {label}: config={left!r}, policy={right!r}")
@@ -249,6 +290,7 @@ def validate_config(config: dict[str, Any]) -> None:
     if missing:
         raise ValueError(f"Missing Consumer Defensive config root keys: {', '.join(missing)}")
     _validate_nested_keys(config)
+    _validate_positioning_contract(config)
 
     expected_values = {
         "runtime.model_family": "consumer_defensive",

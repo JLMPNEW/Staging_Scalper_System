@@ -30,9 +30,10 @@ from portfolio_layer.provider_ingestion.health import (  # noqa: E402
     previous_or_same_session,
     session_dates,
     universe_freshness,
+    validate_provider_ingestion_policy,
 )
 from portfolio_layer.provider_ingestion.store import (  # noqa: E402
-    connect_store,
+    connect_store_readonly,
     digest,
     verify_store,
 )
@@ -82,17 +83,12 @@ def _accepted_run_dates(runs_root: Path) -> set[str]:
         except (OSError, json.JSONDecodeError):
             continue
         acceptance = str(manifest.get("acceptance", ""))
-        if (
-            str(manifest.get("run_as_of", "")) == run_dir.name
-            and acceptance.startswith("PASS")
-        ):
+        if str(manifest.get("run_as_of", "")) == run_dir.name and acceptance.startswith("PASS"):
             accepted.add(run_dir.name)
     return accepted
 
 
-def _default_from_date(
-    *, calendar_name: str, through: date, accepted: set[str], lookback_sessions: int
-) -> date:
+def _default_from_date(*, calendar_name: str, through: date, accepted: set[str], lookback_sessions: int) -> date:
     calendar_start = through - timedelta(days=max(lookback_sessions * 3, 30))
     sessions = session_dates(calendar_name, calendar_start, through)
     recent = sessions[-max(lookback_sessions, 1) :]
@@ -117,7 +113,8 @@ def _orchestration_acceptance(path: Path, expected_date: str) -> str:
 def _latest_universe_date(db_path: Path, timeout_sec: float) -> str:
     if not db_path.is_file():
         return ""
-    conn = sqlite3.connect(str(db_path), timeout=timeout_sec)
+    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout_sec)
+    conn.execute("PRAGMA query_only=ON")
     try:
         row = conn.execute("SELECT MAX(run_as_of) FROM monitor_universe").fetchone()
         return "" if row is None or row[0] is None else str(row[0])
@@ -154,12 +151,15 @@ def main() -> int:
     monitor = cfg_get(config, "expectations_monitor", {})
     if not isinstance(ingestion, dict) or not isinstance(monitor, dict):
         raise ValueError("provider_ingestion and expectations_monitor must be mappings")
+    validate_provider_ingestion_policy(ingestion)
     recovery = ingestion.get("recovery", {})
     if not isinstance(recovery, dict):
         raise ValueError("provider_ingestion.recovery must be a mapping")
     now_utc = args.now_utc or datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         raise ValueError("--now-utc must include a timezone")
+    if args.now_utc is not None and args.execute:
+        raise ValueError("--now-utc is diagnostic-only and cannot be combined with --execute")
     timezone_name = str(ingestion.get("timezone", "America/New_York"))
     calendar_name = str(ingestion.get("exchange_calendar", "XNYS"))
     local_today = now_utc.astimezone(ZoneInfo(timezone_name)).date()
@@ -187,7 +187,8 @@ def main() -> int:
         label="provider observation database",
     )
     timeout = float(ingestion.get("writer_lock_timeout_sec", 30.0))
-    conn = connect_store(store_path, timeout_sec=timeout)
+    conn = connect_store_readonly(store_path, timeout_sec=timeout)
+    conn.execute("BEGIN")
     try:
         store_errors = verify_store(conn)
         slots = expected_capture_slots(
@@ -197,13 +198,15 @@ def main() -> int:
             schedules=dict(ingestion.get("schedules", {})),
             timezone_name=timezone_name,
             calendar_name=calendar_name,
-            grace_minutes=int(ingestion.get("schedule_grace_minutes", 20)),
-            service_started_on=date.fromisoformat(
-                str(recovery.get("service_started_on", local_today.isoformat()))
+            grace_minutes=ingestion.get(
+                "phase_grace_minutes",
+                int(ingestion.get("schedule_grace_minutes", 20)),
             ),
+            service_started_on=date.fromisoformat(str(recovery.get("service_started_on", local_today.isoformat()))),
         )
         continuity_rows = capture_continuity_rows(conn, slots=slots)
     finally:
+        conn.rollback()
         conn.close()
     gaps = continuity_gaps(continuity_rows)
 
@@ -296,13 +299,13 @@ def main() -> int:
     else:
         acceptance = "PASS"
     cycle = now_utc.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    output_dir = (
-        args.output_dir.resolve()
-        if args.output_dir
-        else paths.output_dir
-        / str(ingestion.get("output_subdir", "provider_ingestion"))
-        / "recovery"
-        / cycle
+    output_dir = ensure_not_prod_path(
+        (
+            args.output_dir
+            if args.output_dir
+            else paths.output_dir / str(ingestion.get("output_subdir", "provider_ingestion")) / "recovery" / cycle
+        ),
+        label="provider recovery output path",
     )
     continuity_path = output_dir / "provider_capture_continuity.csv"
     steps_path = output_dir / "portfolio_catchup_steps.csv"
@@ -332,12 +335,8 @@ def main() -> int:
             "inputs_sha256": {
                 str(config_path): sha256_file(config_path),
                 str(Path(__file__).resolve()): sha256_file(Path(__file__).resolve()),
-                str(Path(__file__).with_name("health.py")): sha256_file(
-                    Path(__file__).with_name("health.py")
-                ),
-                str(Path(__file__).with_name("store.py")): sha256_file(
-                    Path(__file__).with_name("store.py")
-                ),
+                str(Path(__file__).with_name("health.py")): sha256_file(Path(__file__).with_name("health.py")),
+                str(Path(__file__).with_name("store.py")): sha256_file(Path(__file__).with_name("store.py")),
             },
             "outputs_sha256": {
                 continuity_path.name: sha256_file(continuity_path),

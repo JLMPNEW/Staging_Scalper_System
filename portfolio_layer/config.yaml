@@ -12,7 +12,7 @@ runtime:
 # Independent provider network owner. Scheduled invocations are short-lived;
 # portfolio/report reruns never call current-snapshot endpoints for past dates.
 provider_ingestion:
-  policy_version: provider_observation_store_v1
+  policy_version: provider_observation_store_v2
   enabled: true
   network_owner: independent_service
   managed_capabilities: [estimates]
@@ -28,7 +28,20 @@ provider_ingestion:
   missed_run_policy: current_only_no_backfill
   scheduler_poll_minutes: 10
   schedule_grace_minutes: 20
+  phase_grace_minutes:
+    default: 20
+    sunday_baseline: 240
+    premarket: 105
+    priority_refresh: 60
+    postclose: 240
   max_scheduled_attempts: 2
+  capture_timeout_minutes: 100
+  dispatch_stale_minutes: 110
+  provider_acceptance:
+    minimum_clean_request_fraction: 0.90
+    minimum_available_request_fraction:
+      alpha_vantage: 0.50
+      fmp: 0.90
   recovery:
     policy_version: provider_delayed_run_recovery_v1
     service_started_on: "2026-08-02"
