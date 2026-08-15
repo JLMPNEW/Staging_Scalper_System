@@ -83,10 +83,14 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
         rank_table_path=rank_path,
         output_dir=output_dir,
         model_family="software_infrastructure",
+        expected_asof=ASOF,
+        policy_context="production",
     )
 
     assert manifest["acceptance"] == "PASS"
+    assert manifest["policy_context"] == "production"
     assert manifest["policy_mode"] == "candidate_only"
+    assert manifest["production_valid_from"] == ASOF
     assert manifest["model_family"] == "software_infrastructure"
     assert (output_dir / "software_infrastructure_financial_lineage_shadow.csv").is_file()
     assert (output_dir / "software_infrastructure_financial_lineage_shadow.json").is_file()

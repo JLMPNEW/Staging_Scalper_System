@@ -1,4 +1,4 @@
-policy_version: financial_lineage_policy_v1
+policy_version: financial_lineage_policy_v2
 
 defaults:
   enabled: false
@@ -22,18 +22,21 @@ sectors:
 
   semiconductors:
     enabled: true
-    production_policy: disabled
+    production_policy: candidate_only
+    production_valid_from: "2026-08-14"
     research_policy: candidate_only
     historical_policy: disabled
 
   software_infrastructure:
     enabled: true
-    production_policy: disabled
+    production_policy: candidate_only
+    production_valid_from: "2026-08-14"
     research_policy: candidate_only
     historical_policy: disabled
 
   technology_hardware:
     enabled: true
-    production_policy: disabled
+    production_policy: candidate_only
+    production_valid_from: "2026-08-14"
     research_policy: candidate_only
     historical_policy: disabled

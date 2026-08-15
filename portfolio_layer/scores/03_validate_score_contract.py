@@ -567,17 +567,31 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
             lineage_rows.setdefault(pipeline, []).append(row)
     for pipeline, pipeline_rows in sorted(lineage_rows.items()):
         policy = lineage_policies[pipeline]
-        evaluation = evaluate_financial_lineage_rows(
-            pipeline_rows,
-            policy_mode=policy.mode_for("production"),
-            expected_asof_field="source_asof_date",
-            min_core_metric_count=policy.min_core_metric_count,
-        )
-        lineage_errors.extend(f"{pipeline}:{error}" for error in evaluation.errors)
+        rows_by_mode: dict[str, list[dict[str, str]]] = {}
+        for row in pipeline_rows:
+            source_asof = str(row.get("source_asof_date") or "").strip()
+            try:
+                policy_mode = policy.mode_for_asof("production", source_asof)
+            except ValueError as exc:
+                lineage_errors.append(
+                    f"{pipeline}:{row.get('ticker', '')}:invalid_lineage_policy_date:{exc}"
+                )
+                continue
+            rows_by_mode.setdefault(policy_mode, []).append(row)
+        for policy_mode, mode_rows in sorted(rows_by_mode.items()):
+            evaluation = evaluate_financial_lineage_rows(
+                mode_rows,
+                policy_mode=policy_mode,
+                expected_asof_field="source_asof_date",
+                min_core_metric_count=policy.min_core_metric_count,
+            )
+            lineage_errors.extend(
+                f"{pipeline}:{error}" for error in evaluation.errors
+            )
     record(
         "financial_filing_lineage_safe",
         "PASS" if not lineage_errors else "FAIL",
-        "required industrial filings reconciled and unresolved rows fail closed"
+        "production-gated filings reconciled and unresolved rows fail closed"
         if not lineage_errors
         else f"{len(lineage_errors)} lineage errors; first={lineage_errors[:10]}",
     )

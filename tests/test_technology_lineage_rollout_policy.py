@@ -20,11 +20,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
     "model_family",
     ["semiconductors", "software_infrastructure", "technology_hardware"],
 )
-def test_all_technology_families_are_candidate_only_shadows(model_family: str) -> None:
+def test_all_technology_families_have_activation_bounded_production_lineage(
+    model_family: str,
+) -> None:
     policy = policy_for_model_family(model_family)
 
     assert policy.enabled is True
-    assert policy.mode_for("production") == POLICY_DISABLED
+    assert policy.mode_for("production") == POLICY_CANDIDATE_ONLY
+    assert policy.production_valid_from == "2026-08-14"
+    assert policy.mode_for_asof("production", "2026-08-13") == POLICY_DISABLED
+    assert policy.mode_for_asof("production", "2026-08-14") == POLICY_CANDIDATE_ONLY
     assert policy.mode_for("research") == POLICY_CANDIDATE_ONLY
     assert policy.mode_for("historical") == POLICY_DISABLED
 
@@ -70,8 +75,15 @@ def test_local_technology_runners_recover_then_publish_then_shadow(
     assert ids.index("10b_publish_dashboard") < ids.index("10c_financial_lineage_shadow")
     assert ids.index("10c_financial_lineage_shadow") < ids.index("10b_validate_dashboard")
     assert recovery.args[:2] == ["--family", model_family]
-    assert shadow.args[:2] == ["--family", model_family]
-    assert shadow.blocking is False
+    assert shadow.args == [
+        "--family",
+        model_family,
+        "--policy-context",
+        "production",
+        "--asof",
+        "2026-08-14",
+    ]
+    assert shadow.blocking is True
 
 
 def test_global_repair_rebuilds_lineage_shadow_for_all_technology_families() -> None:
@@ -84,6 +96,10 @@ def test_global_repair_rebuilds_lineage_shadow_for_all_technology_families() -> 
         "technology_hardware",
     ):
         sector = registry.by_name(model_family)
+        assert sector.financial_lineage_required is True
+        assert sector.financial_lineage_policy == POLICY_CANDIDATE_ONLY
+        assert sector.financial_lineage_artifact
+        assert "{date}" in sector.financial_lineage_artifact
         assert sector.repair is not None
         steps = list(sector.repair.rebuild_steps)
         assert steps.index("10b_publish_dashboard") < steps.index(

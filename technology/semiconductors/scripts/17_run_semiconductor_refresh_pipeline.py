@@ -164,7 +164,7 @@ def build_steps(
         Step("13_walk_forward_calibration", "stage_8", "Run walk-forward calibration research", py_script("technology/semiconductors/scripts/13_run_semiconductor_walk_forward_calibration.py"), optuna=True),
         Step("15_norgate_backfill", "stage_15", "Import Norgate delisted prices", py_script("technology/semiconductors/scripts/15_import_semiconductor_norgate_delisted_prices.py"), norgate_backfill=True),
         Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/semiconductors/scripts/10b_publish_semiconductor_dashboard_reports.py")),
-        Step("10c_financial_lineage_shadow", "stage_10_shadow", "Build candidate-only financial-lineage shadow report", py_script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"), ["--family", "semiconductors", *asof_args], blocking=False),
+        Step("10c_financial_lineage_shadow", "stage_10_lineage", "Build blocking production financial-lineage sidecar", py_script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"), ["--family", "semiconductors", "--policy-context", "production", *asof_args]),
         Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/semiconductors/scripts/10b_validate_semiconductor_dashboard_reports.py"), pass_db=False),
         Step("16_publish_governance", "stage_10b", "Publish lockbox ledger and signal registry", py_script("technology/semiconductors/scripts/16_publish_semiconductor_lockbox_ledger.py")),
         Step("08_audit_pipeline", "audit", "Run full semiconductor pipeline audit", py_script("technology/semiconductors/scripts/08_audit_semiconductor_pipeline_state.py")),

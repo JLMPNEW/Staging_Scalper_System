@@ -86,6 +86,7 @@ def build_financial_lineage_shadow(
     output_dir: Path,
     model_family: str = "semiconductors",
     expected_asof: str = "",
+    policy_context: str = "research",
 ) -> dict[str, Any]:
     rank_rows = read_rank_rows(rank_table_path, model_family=model_family)
     row_dates = {str(row.get("asof_date") or "").strip() for row in rank_rows}
@@ -121,7 +122,7 @@ def build_financial_lineage_shadow(
     candidate_fields = ("portfolio_candidate_gate", "rank_ready_flag")
     evaluation = evaluate_financial_lineage_rows(
         shadow_rows,
-        policy_mode=policy.mode_for("research"),
+        policy_mode=policy.mode_for_asof(policy_context, asof),
         expected_asof=asof,
         min_core_metric_count=policy.min_core_metric_count,
         candidate_fields=candidate_fields,
@@ -152,7 +153,7 @@ def build_financial_lineage_shadow(
         "candidate_incorporated_count": sum(
             str(row.get("financial_lineage_gate") or "") == "1" for row in candidate_rows
         ),
-        **evaluation_manifest(evaluation, policy=policy, context="research"),
+        **evaluation_manifest(evaluation, policy=policy, context=policy_context),
     }
     _write_atomic(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest

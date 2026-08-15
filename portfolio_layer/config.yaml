@@ -448,6 +448,7 @@ score_contract:
       industry_aggregate: "Semiconductors & Semiconductor Equipment"
       file_mode: dated
       file_path: "technology_reports/semi_dashboard/{yyyy-mm-dd}/semiconductor_final_rank_table.csv"
+      financial_lineage_file_path: "technology_reports/semiconductors/financial_lineage_shadow/{yyyy-mm-dd}/semiconductor_financial_lineage_shadow.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
     - model_family: software_infrastructure
@@ -460,6 +461,7 @@ score_contract:
       industry_aggregate: "Software & Services"
       file_mode: dated
       file_path: "technology_reports/software_infrastructure/dashboard/{yyyy-mm-dd}/software_infrastructure_final_rank_table.csv"
+      financial_lineage_file_path: "technology_reports/software_infrastructure/financial_lineage_shadow/{yyyy-mm-dd}/software_infrastructure_financial_lineage_shadow.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
     - model_family: technology_hardware
@@ -472,6 +474,7 @@ score_contract:
       industry_aggregate: "Technology Hardware & Equipment"
       file_mode: dated
       file_path: "technology_reports/technology_hardware/dashboard/{yyyy-mm-dd}/technology_hardware_final_rank_table.csv"
+      financial_lineage_file_path: "technology_reports/technology_hardware/financial_lineage_shadow/{yyyy-mm-dd}/technology_hardware_financial_lineage_shadow.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
     - model_family: biotech

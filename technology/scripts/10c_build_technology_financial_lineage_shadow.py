@@ -40,12 +40,17 @@ FAMILY_CONFIG = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build a non-production technology-family financial-lineage shadow report."
+        description="Build a dated technology-family financial-lineage evidence report."
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--family", required=True, choices=sorted(FAMILY_CONFIG))
     parser.add_argument("--asof", default="")
+    parser.add_argument(
+        "--policy-context",
+        choices=("production", "research", "historical"),
+        default="research",
+    )
     parser.add_argument("--rank-table", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     return parser.parse_args()
@@ -88,6 +93,7 @@ def main() -> int:
         output_dir=output_dir,
         model_family=args.family,
         expected_asof=str(args.asof or ""),
+        policy_context=str(args.policy_context),
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0 if manifest["acceptance"] == "PASS" else 1

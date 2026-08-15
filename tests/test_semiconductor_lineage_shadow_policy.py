@@ -13,25 +13,29 @@ from orchestration_contracts.financial_lineage import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_semiconductor_lineage_is_shadow_only_in_central_policy() -> None:
+def test_semiconductor_lineage_is_activation_bounded_in_central_policy() -> None:
     policy = policy_for_model_family("semiconductors")
 
     assert policy.enabled is True
-    assert policy.mode_for("production") == POLICY_DISABLED
+    assert policy.mode_for("production") == POLICY_CANDIDATE_ONLY
+    assert policy.production_valid_from == "2026-08-14"
+    assert policy.mode_for_asof("production", "2026-08-13") == POLICY_DISABLED
+    assert policy.mode_for_asof("production", "2026-08-14") == POLICY_CANDIDATE_ONLY
     assert policy.mode_for("research") == POLICY_CANDIDATE_ONLY
     assert policy.mode_for("historical") == POLICY_DISABLED
 
 
-def test_global_orchestrator_does_not_require_semiconductor_shadow_in_production() -> None:
+def test_global_orchestrator_requires_semiconductor_sidecar_in_production() -> None:
     namespace = runpy.run_path(str(PROJECT_ROOT / "orchestration" / "run_all.py"))
     registry = namespace["load_registry"](PROJECT_ROOT / "orchestration" / "registry.yaml")
     semiconductors = registry.by_name("semiconductors")
 
-    assert semiconductors.financial_lineage_required is False
-    assert semiconductors.financial_lineage_policy == POLICY_DISABLED
+    assert semiconductors.financial_lineage_required is True
+    assert semiconductors.financial_lineage_policy == POLICY_CANDIDATE_ONLY
+    assert semiconductors.financial_lineage_artifact
 
 
-def test_local_semiconductor_shadow_runs_after_publish_and_is_nonblocking() -> None:
+def test_local_semiconductor_lineage_runs_after_publish_and_is_blocking() -> None:
     namespace = runpy.run_path(
         str(PROJECT_ROOT / "technology" / "semiconductors" / "scripts" / "17_run_semiconductor_refresh_pipeline.py")
     )
@@ -48,5 +52,12 @@ def test_local_semiconductor_shadow_runs_after_publish_and_is_nonblocking() -> N
 
     assert step_ids.index("10b_publish_dashboard") < step_ids.index("10c_financial_lineage_shadow")
     assert step_ids.index("10c_financial_lineage_shadow") < step_ids.index("10b_validate_dashboard")
-    assert shadow.blocking is False
-    assert shadow.args == ["--family", "semiconductors", "--asof", "2026-08-14"]
+    assert shadow.blocking is True
+    assert shadow.args == [
+        "--family",
+        "semiconductors",
+        "--policy-context",
+        "production",
+        "--asof",
+        "2026-08-14",
+    ]

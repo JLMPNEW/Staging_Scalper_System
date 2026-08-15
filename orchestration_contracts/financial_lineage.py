@@ -50,6 +50,7 @@ class SectorLineagePolicy:
     historical_policy: str
     min_core_metric_count: int
     policy_version: str
+    production_valid_from: str = ""
 
     def mode_for(self, context: str) -> str:
         normalized = context.strip().lower()
@@ -62,6 +63,22 @@ class SectorLineagePolicy:
         if normalized in {"history", "historical", "pit"}:
             return self.historical_policy
         raise ValueError(f"Unknown financial-lineage context: {context!r}")
+
+    def mode_for_asof(self, context: str, asof: str) -> str:
+        """Resolve policy without applying a new production gate retroactively."""
+        mode = self.mode_for(context)
+        normalized = context.strip().lower()
+        if normalized != "production" or not self.production_valid_from:
+            return mode
+        try:
+            asof_date = date.fromisoformat(str(asof).strip())
+            valid_from = date.fromisoformat(self.production_valid_from)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid financial-lineage as-of/activation date for {self.model_family}: "
+                f"asof={asof!r}, production_valid_from={self.production_valid_from!r}"
+            ) from exc
+        return mode if asof_date >= valid_from else self.historical_policy
 
 
 @dataclass(frozen=True)
@@ -120,6 +137,17 @@ def _positive_int(raw: object, *, field: str) -> int:
     return value
 
 
+def _optional_iso_date(raw: object, *, field: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {field}={value!r}; expected YYYY-MM-DD") from exc
+    return value
+
+
 def load_policy_registry(path: Path = DEFAULT_POLICY_REGISTRY) -> dict[str, SectorLineagePolicy]:
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -162,6 +190,10 @@ def load_policy_registry(path: Path = DEFAULT_POLICY_REGISTRY) -> dict[str, Sect
                 field=f"{family}.min_core_metric_count",
             ),
             policy_version=policy_version,
+            production_valid_from=_optional_iso_date(
+                config.get("production_valid_from"),
+                field=f"{family}.production_valid_from",
+            ),
         )
     return output
 
@@ -186,6 +218,7 @@ def policy_for_model_family(
             (policy.policy_version for policy in policies.values()),
             "financial_lineage_policy_unconfigured",
         ),
+        production_valid_from="",
     )
 
 
@@ -203,6 +236,78 @@ def _valid_iso_date(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def financial_lineage_sidecar_alignment_errors(
+    rank_rows: Iterable[Mapping[str, Any]],
+    lineage_rows: Iterable[Mapping[str, Any]],
+    *,
+    expected_asof: str,
+    comparison_fields: Sequence[str] = (
+        "asof_date",
+        "portfolio_candidate_gate",
+        "rank_ready_flag",
+    ),
+) -> list[str]:
+    """Validate that lineage evidence is an exact projection of one rank artifact."""
+
+    def keyed(
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        label: str,
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        output: dict[str, dict[str, Any]] = {}
+        errors: list[str] = []
+        for row_number, source in enumerate(rows, start=2):
+            row = dict(source)
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if not ticker:
+                errors.append(f"{label}:row_{row_number}:blank_ticker")
+                continue
+            if ticker in output:
+                errors.append(f"{label}:{ticker}:duplicate_ticker")
+                continue
+            output[ticker] = row
+        return output, errors
+
+    rank_by_ticker, errors = keyed(rank_rows, label="rank")
+    lineage_by_ticker, lineage_errors = keyed(lineage_rows, label="lineage")
+    errors.extend(lineage_errors)
+    missing = sorted(set(rank_by_ticker) - set(lineage_by_ticker))
+    extra = sorted(set(lineage_by_ticker) - set(rank_by_ticker))
+    if missing:
+        errors.append(f"lineage:missing_tickers={','.join(missing[:25])}")
+    if extra:
+        errors.append(f"lineage:extra_tickers={','.join(extra[:25])}")
+
+    for ticker in sorted(set(rank_by_ticker) & set(lineage_by_ticker)):
+        rank_row = rank_by_ticker[ticker]
+        lineage_row = lineage_by_ticker[ticker]
+        missing_fields = [
+            field for field in LINEAGE_FIELDS if field not in lineage_row
+        ]
+        if missing_fields:
+            errors.append(
+                f"lineage:{ticker}:missing_fields={','.join(missing_fields)}"
+            )
+            continue
+        checked_asof = str(
+            lineage_row.get("financial_lineage_checked_asof_date") or ""
+        ).strip()
+        if checked_asof != expected_asof:
+            errors.append(
+                f"lineage:{ticker}:checked_asof={checked_asof!r},"
+                f"expected={expected_asof!r}"
+            )
+        for field in comparison_fields:
+            rank_value = str(rank_row.get(field) or "").strip()
+            lineage_value = str(lineage_row.get(field) or "").strip()
+            if rank_value != lineage_value:
+                errors.append(
+                    f"lineage:{ticker}:{field}:rank={rank_value!r},"
+                    f"lineage={lineage_value!r}"
+                )
+    return errors
 
 
 def lineage_row_is_safe(
@@ -388,6 +493,7 @@ def evaluation_manifest(
         "policy_version": policy.policy_version,
         "policy_context": context,
         "policy_mode": evaluation.policy_mode,
+        "production_valid_from": policy.production_valid_from,
         "row_count": evaluation.row_count,
         "incorporated_count": evaluation.incorporated_count,
         "unresolved_count": evaluation.unresolved_count,

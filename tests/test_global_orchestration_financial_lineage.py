@@ -55,3 +55,19 @@ def test_global_lineage_verifier_requires_complete_reconciliation(
 
     _write(path, candidate="1", gate="1", status="INCORPORATED")
     assert verify(path, "2026-08-13") == []
+
+
+def test_global_lineage_sidecar_must_match_published_rank_contract(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(str(PROJECT_ROOT / "orchestration" / "run_all.py"))
+    verify = namespace["_financial_lineage_sidecar_errors"]
+    rank_path = tmp_path / "rank.csv"
+    lineage_path = tmp_path / "lineage.csv"
+
+    _write(rank_path, candidate="1", gate="1", status="INCORPORATED")
+    _write(lineage_path, candidate="0", gate="1", status="INCORPORATED")
+
+    errors = verify(rank_path, lineage_path, "2026-08-13")
+
+    assert any("portfolio_candidate_gate" in error for error in errors)

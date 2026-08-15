@@ -37,7 +37,7 @@ def _row(*, gate: str, candidate: str) -> dict[str, str]:
     return row
 
 
-def test_central_registry_enables_only_pilot_industrial_families() -> None:
+def test_central_registry_preserves_strict_industrials_and_bounded_technology() -> None:
     defense = policy_for_model_family("defense")
     machinery = policy_for_model_family("machinery")
     transportation = policy_for_model_family("transportation")
@@ -46,6 +46,14 @@ def test_central_registry_enables_only_pilot_industrial_families() -> None:
     assert machinery.mode_for("production") == POLICY_STRICT_UNIVERSE
     assert defense.mode_for("research") == POLICY_CANDIDATE_ONLY
     assert transportation.mode_for("production") == POLICY_DISABLED
+
+    semiconductors = policy_for_model_family("semiconductors")
+    assert semiconductors.mode_for("production") == POLICY_CANDIDATE_ONLY
+    assert semiconductors.mode_for_asof("production", "2026-08-13") == POLICY_DISABLED
+    assert (
+        semiconductors.mode_for_asof("production", "2026-08-14")
+        == POLICY_CANDIDATE_ONLY
+    )
 
 
 def test_strict_universe_blocks_an_unresolved_noncandidate() -> None:

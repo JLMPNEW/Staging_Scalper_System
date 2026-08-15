@@ -17,8 +17,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from orchestration_contracts.financial_lineage import (
+    financial_lineage_sidecar_alignment_errors,
     lineage_row_is_safe,
+    POLICY_CANDIDATE_ONLY,
     POLICY_DISABLED,
+    POLICY_STRICT_UNIVERSE,
     policy_for_model_family,
 )
 from portfolio_layer.core.contracts import AdapterResult, CanonicalScore
@@ -281,9 +284,11 @@ def _adapt_final_rank_family(
     out: list[CanonicalScore] = []
     require_oos_score_valid = bool(cfg.get("require_oos_score_valid", False))
     lineage_policy = policy_for_model_family(str(cfg.get("model_family") or ""))
-    require_financial_lineage = (
-        lineage_policy.mode_for("production") != POLICY_DISABLED
+    lineage_policy_mode = str(
+        cfg.get("_financial_lineage_policy_mode")
+        or lineage_policy.mode_for("production")
     )
+    require_financial_lineage = lineage_policy_mode != POLICY_DISABLED
     skipped = 0
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
@@ -291,8 +296,19 @@ def _adapt_final_rank_family(
         if not ticker or native is None:
             skipped += 1
             continue
-        missing_lineage_fields = [field for field in FINANCIAL_LINEAGE_FIELDS if field not in r]
-        if require_financial_lineage and missing_lineage_fields:
+        rank_ready = _truthy(r.get("rank_ready_flag"))
+        production_candidate = _truthy(r.get("portfolio_candidate_gate")) or rank_ready
+        lineage_required_for_row = require_financial_lineage and (
+            lineage_policy_mode == POLICY_STRICT_UNIVERSE
+            or (
+                lineage_policy_mode == POLICY_CANDIDATE_ONLY
+                and production_candidate
+            )
+        )
+        missing_lineage_fields = [
+            field for field in FINANCIAL_LINEAGE_FIELDS if field not in r
+        ]
+        if lineage_required_for_row and missing_lineage_fields:
             raise ValueError(
                 f"{cfg.get('model_family')} row ticker={ticker} is missing financial lineage fields: "
                 f"{missing_lineage_fields}"
@@ -300,12 +316,11 @@ def _adapt_final_rank_family(
         lineage_status = str(r.get("financial_lineage_status") or "").strip()
         lineage_gate = _truthy(r.get("financial_lineage_gate"))
         lineage_checked = str(r.get("financial_lineage_checked_asof_date") or "").strip()
-        lineage_ok = not require_financial_lineage or lineage_row_is_safe(
+        lineage_ok = not lineage_required_for_row or lineage_row_is_safe(
             r,
             expected_asof=_source_asof(r),
             min_core_metric_count=lineage_policy.min_core_metric_count,
         )
-        rank_ready = _truthy(r.get("rank_ready_flag"))
         calib_ok = _truthy(r.get("calibration_eligible_flag"))
         complete = str(r.get("model_status", "")).strip().lower() == "complete"
         oos_score_valid = _oos_score_valid(r, cfg, default_requires_oos=require_oos_score_valid)
@@ -396,7 +411,7 @@ def _adapt_final_rank_family(
             if eligible:
                 research_eligible = True
                 research_reason = "ok"
-        if require_financial_lineage and not lineage_ok:
+        if lineage_required_for_row and not lineage_ok:
             research_eligible = False
             research_reason = f"financial_lineage:{lineage_status or 'missing'}"
             source_role = "excluded"
@@ -833,6 +848,78 @@ def _snapshot_iso_date(source_file: Path) -> str:
     return ""
 
 
+def _resolve_financial_lineage_sidecar(
+    cfg: dict[str, Any],
+    root: Path,
+    *,
+    source_asof: str,
+) -> Path:
+    template = str(cfg.get("financial_lineage_file_path") or "").strip()
+    if not template:
+        raise ValueError(
+            f"{cfg.get('model_family')} production lineage requires "
+            "financial_lineage_file_path"
+        )
+    if "{yyyy-mm-dd}" in template:
+        relative = template.replace("{yyyy-mm-dd}", source_asof)
+    elif "{yyyymmdd}" in template:
+        relative = template.replace("{yyyymmdd}", source_asof.replace("-", ""))
+    else:
+        raise ValueError(
+            "financial_lineage_file_path must contain {yyyy-mm-dd} or {yyyymmdd}: "
+            f"{template}"
+        )
+    root_resolved = root.resolve()
+    path = (root_resolved / relative).resolve()
+    try:
+        path.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"financial lineage sidecar escapes sector output root: {path}"
+        ) from exc
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing production financial lineage sidecar for "
+            f"{cfg.get('model_family')} asof={source_asof}: {path}"
+        )
+    return path
+
+
+def _merge_financial_lineage_sidecar(
+    rank_rows: list[dict[str, str]],
+    lineage_rows: list[dict[str, str]],
+    *,
+    model_family: str,
+    source_asof: str,
+) -> list[dict[str, str]]:
+    alignment_errors = financial_lineage_sidecar_alignment_errors(
+        rank_rows,
+        lineage_rows,
+        expected_asof=source_asof,
+    )
+    if alignment_errors:
+        raise ValueError(
+            f"{model_family} lineage/rank mismatch: {alignment_errors[:20]}"
+        )
+    lineage_by_ticker = {
+        str(row["ticker"]).strip().upper(): row for row in lineage_rows
+    }
+
+    merged: list[dict[str, str]] = []
+    for rank_row in rank_rows:
+        ticker = str(rank_row["ticker"]).strip().upper()
+        lineage_row = lineage_by_ticker[ticker]
+        output = dict(rank_row)
+        output.update(
+            {
+                field: str(lineage_row.get(field) or "")
+                for field in FINANCIAL_LINEAGE_FIELDS
+            }
+        )
+        merged.append(output)
+    return merged
+
+
 def stage11_sidecar_only_rows(source_file: Path, as_of_iso: str) -> tuple[list[dict[str, str]], Path | None]:
     """Survivorship-corrected Stage 11 panel rows for exactly `as_of_iso` from the best source.
 
@@ -875,7 +962,28 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
         raise ValueError(f"Unknown adapter '{adapter_name}' for {cfg.get('model_family')}")
     source_file = _resolve_file(cfg, sector_output_root, run_as_of)
     rows = read_csv(source_file)
-    consumed_sidecar: Path | None = None
+    effective_cfg = dict(cfg)
+    source_asof = _snapshot_iso_date(source_file) or _dominant(rows, "asof_date")
+    lineage_policy = policy_for_model_family(str(cfg.get("model_family") or ""))
+    lineage_policy_mode = lineage_policy.mode_for_asof("production", source_asof)
+    effective_cfg["_financial_lineage_policy_mode"] = lineage_policy_mode
+    consumed_lineage_sidecar: Path | None = None
+    if (
+        lineage_policy_mode != POLICY_DISABLED
+        and str(cfg.get("financial_lineage_file_path") or "").strip()
+    ):
+        consumed_lineage_sidecar = _resolve_financial_lineage_sidecar(
+            cfg,
+            sector_output_root,
+            source_asof=source_asof,
+        )
+        rows = _merge_financial_lineage_sidecar(
+            rows,
+            read_csv(consumed_lineage_sidecar),
+            model_family=str(cfg.get("model_family") or ""),
+            source_asof=source_asof,
+        )
+    consumed_stage11_sidecar: Path | None = None
     if adapter_name in {"tech_family", "industrial_family"}:
         # Final-rank tables may replay the CURRENT universe, so delisted members can exist only in
         # Stage 11 survivorship panels. Merge sidecar-only rows the sector itself certifies as
@@ -904,14 +1012,29 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
                     sidecar_source.name if sidecar_source else "",
                 )
                 rows = rows + list(merged.values())
-                consumed_sidecar = sidecar_source
-    canonical = _ADAPTERS[adapter_name](cfg, rows)
-    source_asof = _dominant([{"d": c.source_asof_date} for c in canonical], "d") if canonical else ""
+                consumed_stage11_sidecar = sidecar_source
+    canonical = _ADAPTERS[adapter_name](effective_cfg, rows)
+    canonical_asof = (
+        _dominant([{"d": c.source_asof_date} for c in canonical], "d")
+        if canonical
+        else ""
+    )
+    source_files = tuple(
+        dict.fromkeys(
+            path
+            for path in (
+                source_file,
+                consumed_lineage_sidecar,
+                consumed_stage11_sidecar,
+            )
+            if path is not None
+        )
+    )
     return AdapterResult(
         source_pipeline=str(cfg["model_family"]),
         adapter=adapter_name,
         source_file=source_file,
-        source_asof_date=source_asof,
+        source_asof_date=canonical_asof,
         rows=canonical,
-        source_files=tuple(path for path in (source_file, consumed_sidecar) if path is not None),
+        source_files=source_files,
     )

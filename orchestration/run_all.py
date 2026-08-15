@@ -112,6 +112,7 @@ from orchestration_contracts.financial_lineage import (  # noqa: E402
     POLICY_DISABLED,
     POLICY_STRICT_UNIVERSE,
     evaluate_financial_lineage_rows,
+    financial_lineage_sidecar_alignment_errors,
     policy_for_model_family,
 )
 DEFAULT_REGISTRY = ORCH_DIR / "registry.yaml"
@@ -233,6 +234,7 @@ class Sector:
     financial_lineage_required: bool = False
     financial_lineage_policy: str = POLICY_DISABLED
     financial_lineage_min_core_metric_count: int = DEFAULT_MIN_CORE_METRIC_COUNT
+    financial_lineage_artifact: str | None = None
 
 
 @dataclass(frozen=True)
@@ -414,6 +416,10 @@ def load_registry(path: Path) -> Registry:
                 financial_lineage_required=production_lineage_required,
                 financial_lineage_policy=lineage_policy.mode_for("production"),
                 financial_lineage_min_core_metric_count=lineage_policy.min_core_metric_count,
+                financial_lineage_artifact=(
+                    str(entry.get("financial_lineage_artifact") or "").strip()
+                    or None
+                ),
             )
         )
     names = [sector.name for sector in sectors]
@@ -1663,6 +1669,45 @@ def _financial_lineage_errors(
     return evaluation.errors
 
 
+def _financial_lineage_sidecar_errors(
+    rank_path: Path,
+    lineage_path: Path,
+    iso_date: str,
+) -> list[str]:
+    try:
+        with rank_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rank_rows = [dict(row) for row in csv.DictReader(handle)]
+        with lineage_path.open(
+            "r", encoding="utf-8-sig", newline=""
+        ) as handle:
+            lineage_rows = [dict(row) for row in csv.DictReader(handle)]
+    except OSError as exc:
+        return [f"financial lineage sidecar unreadable: {exc}"]
+    return financial_lineage_sidecar_alignment_errors(
+        rank_rows,
+        lineage_rows,
+        expected_asof=iso_date,
+    )
+
+
+def _financial_lineage_artifact_for_date(
+    sector: Sector,
+    iso_date: str,
+    *,
+    published_artifact: Path,
+) -> Path:
+    template = str(sector.financial_lineage_artifact or "").strip()
+    if not template:
+        return published_artifact
+    if "{date}" not in template:
+        raise ValueError(
+            f"sector {sector.name}: financial_lineage_artifact must contain {{date}}"
+        )
+    rendered = template.replace("{date}", _publish_folder_name(sector, iso_date))
+    path = Path(rendered)
+    return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
 def verify_published_artifact_for_date(
     sector: Sector,
     iso_date: str,
@@ -1711,15 +1756,38 @@ def verify_published_artifact_for_date(
         date_checked, date_ok, date_detail = _csv_date_column_matches(artifact, iso_date)
         if date_checked and not date_ok:
             reasons.append(f"internal as-of column mismatch: {date_detail}")
-        if sector.financial_lineage_required:
-            reasons.extend(
-                _financial_lineage_errors(
-                    artifact,
-                    iso_date,
-                    policy_mode=sector.financial_lineage_policy,
-                    min_core_metric_count=sector.financial_lineage_min_core_metric_count,
-                )
+        lineage_policy_mode = policy_for_model_family(
+            sector.name
+        ).mode_for_asof("production", iso_date)
+        if lineage_policy_mode != POLICY_DISABLED:
+            lineage_artifact = _financial_lineage_artifact_for_date(
+                sector,
+                iso_date,
+                published_artifact=artifact,
             )
+            if not lineage_artifact.is_file():
+                reasons.append(
+                    f"financial lineage artifact missing: {lineage_artifact}"
+                )
+            else:
+                if lineage_artifact != artifact:
+                    reasons.extend(
+                        _financial_lineage_sidecar_errors(
+                            artifact,
+                            lineage_artifact,
+                            iso_date,
+                        )
+                    )
+                reasons.extend(
+                    _financial_lineage_errors(
+                        lineage_artifact,
+                        iso_date,
+                        policy_mode=lineage_policy_mode,
+                        min_core_metric_count=(
+                            sector.financial_lineage_min_core_metric_count
+                        ),
+                    )
+                )
     if verify_manifest and sector.health.manifest:
         status, asof = read_manifest(sector, iso_date)
         if status != "PASS":
@@ -1774,6 +1842,28 @@ def health_check(reg: Registry, sectors: list[Sector], target: str) -> dict[str,
                 status = "ARTIFACT_FAIL"
             else:
                 status = "PASS"
+        lineage_policy_mode = (
+            policy_for_model_family(sector.name).mode_for_asof(
+                "production", last
+            )
+            if last
+            else POLICY_DISABLED
+        )
+        lineage_artifact_path = (
+            str(
+                _financial_lineage_artifact_for_date(
+                    sector,
+                    last,
+                    published_artifact=artifact,
+                )
+            )
+            if (
+                last
+                and artifact is not None
+                and lineage_policy_mode != POLICY_DISABLED
+            )
+            else ""
+        )
         rows.append(
             {
                 "sector": sector.name,
@@ -1787,6 +1877,8 @@ def health_check(reg: Registry, sectors: list[Sector], target: str) -> dict[str,
                 "manifest_status": man_status,
                 "manifest_asof": man_asof,
                 "artifact_reasons": artifact_reasons if last else [],
+                "financial_lineage_policy": lineage_policy_mode,
+                "financial_lineage_artifact": lineage_artifact_path,
                 "status": status,
             }
         )
