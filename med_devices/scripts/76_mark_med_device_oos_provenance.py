@@ -13,8 +13,10 @@ that already exists on disk before promoting anything:
 3. every promoted row certifies the survivorship-corrected panel; and
 4. no row in the snapshot carries publisher-defaulted Stage 11 metadata.
 
-Only rows meeting the full row-level Stage 11 eligibility contract are
+Rows meeting the full row-level Stage 11 eligibility contract are
 promoted; everything else keeps the fail-closed default written by script 13.
+A ticker-only exception may also promote a clean portfolio candidate when a dated, reviewed
+approval explicitly accepts a cohort-level calibration concentration hold.
 The script is idempotent (re-runs promote zero additional rows) and supports
 --dry-run. Promotions and pre-lock demotions are mirrored into the dated
 review-pack snapshot CSV and, when it holds the same as-of date, script 13's
@@ -23,6 +25,7 @@ the same provenance as the database. After every non-dry run the script
 reconciles the summary ledger against the database and exits non-zero if any
 as-of carrying oos_score_valid_flag=1 has no summary row.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -397,6 +400,106 @@ def evaluate_asof(
     return result
 
 
+def approved_ticker_promotion_exceptions(
+    config: dict[str, Any],
+    *,
+    asof: str,
+) -> dict[str, str]:
+    """Return reviewed ticker-only OOS approvals effective for the as-of date."""
+    raw = cfg_get(config, "historical_backfill.ticker_oos_promotion_exceptions", {})
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RuntimeError("historical_backfill.ticker_oos_promotion_exceptions must be a mapping")
+    asof_date = parse_date(asof)
+    if asof_date is None:
+        raise RuntimeError(f"Invalid OOS promotion as-of date: {asof!r}")
+    approved: dict[str, str] = {}
+    for raw_ticker, raw_spec in raw.items():
+        ticker = str(raw_ticker or "").strip().upper()
+        if not ticker or not isinstance(raw_spec, dict):
+            raise RuntimeError("Every ticker OOS promotion exception requires a mapping policy")
+        decision = str(raw_spec.get("decision") or "").strip().lower()
+        valid_from = parse_date(raw_spec.get("valid_from"))
+        reviewed_at = parse_date(raw_spec.get("reviewed_at"))
+        reason = str(raw_spec.get("reason") or "").strip()
+        if decision != "approve" or valid_from is None or reviewed_at is None or not reason:
+            raise RuntimeError(
+                f"Ticker OOS promotion exception {ticker} requires decision=approve, "
+                "valid_from, reviewed_at, and reason"
+            )
+        if valid_from <= asof_date:
+            approved[ticker] = reason
+    return approved
+
+
+def promote_approved_ticker_exceptions(
+    conn: Any,
+    *,
+    asof: str,
+    approvals: dict[str, str],
+    dry_run: bool,
+) -> int:
+    """Promote reviewed candidate rows blocked only by a cohort-level calibration hold."""
+    promoted = 0
+    for ticker, reason in sorted(approvals.items()):
+        criteria = """
+            asof_date = ?
+              AND company_id IN (
+                  SELECT company_id FROM dim_company WHERE UPPER(TRIM(ticker)) = ?
+              )
+              AND portfolio_candidate_gate = 1
+              AND stage11_calibration_panel_source = ?
+              AND survivorship_corrected_panel_flag = 1
+              AND COALESCE(calibration_only, 0) = 0
+              AND COALESCE(score_zero_is_missing_flag, 0) = 0
+              AND COALESCE(native_score_value, 0.0) > 0.0
+              AND COALESCE(composite_score, 0.0) > 0.0
+              AND TRIM(COALESCE(source_snapshot_asof_date, '')) = asof_date
+              AND LOWER(TRIM(COALESCE(ic_tilted_composite_mode, ''))) <> 'replace_raw'
+              AND COALESCE(ic_tilt_applied_to_production_flag, 0) = 0
+              AND LOWER(TRIM(COALESCE(production_score_source, '')))
+                  NOT IN ('ic_tilted_composite', 'ic_tilted_composite_score')
+              AND (
+                  oos_score_valid_flag <> 1
+                  OR calibration_sample_role <> 'strict_oos'
+                  OR calibration_eligible_flag <> 1
+                  OR portfolio_candidate_status <> 'calibrated_baseline'
+              )
+        """
+        params = (asof, ticker, STAGE11_CALIBRATION_PANEL_SOURCE)
+        if dry_run:
+            promoted += count_rows(conn, f"SELECT COUNT(*) FROM med_device_daily_scores WHERE {criteria}", params)
+            continue
+        cursor = conn.execute(
+            f"""
+            UPDATE med_device_daily_scores
+            SET calibration_eligible_flag = 1,
+                calibration_status = 'production_eligible',
+                calibration_status_reason = ?,
+                portfolio_candidate_status = 'calibrated_baseline',
+                portfolio_candidate_reason = ?,
+                research_calibration_input_eligible_flag = 1,
+                research_calibration_status = 'eligible',
+                research_calibration_reason = 'valid_research_calibration_input',
+                stage11_calibration_input_eligible_flag = 1,
+                stage11_calibration_input_reason = 'ok',
+                oos_score_valid_flag = 1,
+                calibration_sample_role = 'strict_oos',
+                updated_at = ?
+            WHERE {criteria}
+            """,
+            (
+                f"ticker_oos_promotion_exception:{reason}",
+                f"sources=calibrated_baseline;ticker_oos_promotion_exception={reason}",
+                utc_now(),
+                *params,
+            ),
+        )
+        promoted += int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
+    return promoted
+
+
 def promote_asof(conn: Any, *, asof: str, dry_run: bool) -> int:
     pending_sql = f"""
         asof_date = ?
@@ -593,6 +696,42 @@ def promoted_tickers(conn: Any, *, asof: str) -> set[str]:
     return {str(row["ticker"] or "").strip() for row in rows if str(row["ticker"] or "").strip()}
 
 
+def promoted_metadata(conn: Any, *, asof: str) -> dict[str, dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT UPPER(TRIM(c.ticker)) AS ticker,
+               s.calibration_eligible_flag, s.calibration_status, s.calibration_status_reason,
+               s.portfolio_candidate_status, s.portfolio_candidate_reason,
+               s.research_calibration_input_eligible_flag, s.research_calibration_status,
+               s.research_calibration_reason, s.stage11_calibration_input_eligible_flag,
+               s.stage11_calibration_input_reason, s.oos_score_valid_flag, s.calibration_sample_role
+        FROM med_device_daily_scores s
+        JOIN dim_company c ON c.company_id = s.company_id
+        WHERE s.asof_date = ? AND s.oos_score_valid_flag = 1 AND s.calibration_sample_role = 'strict_oos'
+        """,
+        (asof,),
+    ).fetchall()
+    fields = (
+        "calibration_eligible_flag",
+        "calibration_status",
+        "calibration_status_reason",
+        "portfolio_candidate_status",
+        "portfolio_candidate_reason",
+        "research_calibration_input_eligible_flag",
+        "research_calibration_status",
+        "research_calibration_reason",
+        "stage11_calibration_input_eligible_flag",
+        "stage11_calibration_input_reason",
+        "oos_score_valid_flag",
+        "calibration_sample_role",
+    )
+    return {
+        str(row["ticker"] or "").strip(): {field: str(row[field] if row[field] is not None else "") for field in fields}
+        for row in rows
+        if str(row["ticker"] or "").strip()
+    }
+
+
 def candidate_tickers(conn: Any, *, asof: str) -> set[str]:
     rows = conn.execute(
         f"""
@@ -606,12 +745,18 @@ def candidate_tickers(conn: Any, *, asof: str) -> set[str]:
     return {str(row["ticker"] or "").strip() for row in rows if str(row["ticker"] or "").strip()}
 
 
-def sync_snapshot_csv(path: Path, *, tickers: set[str], dry_run: bool, only_asof: str = "") -> tuple[int, str]:
+def sync_snapshot_csv(
+    path: Path,
+    *,
+    tickers: set[str],
+    dry_run: bool,
+    only_asof: str = "",
+    metadata_by_ticker: dict[str, dict[str, str]] | None = None,
+) -> tuple[int, str]:
     """Mirror database promotions into a snapshot CSV.
 
     The portfolio-layer adapters read the CSV projections, not the database, so
-    every projection must agree with the database. Only the two provenance
-    columns are touched and only for tickers the database certifies as
+    promotion metadata is synchronized only for tickers the database certifies as
     strict_oos. With only_asof set (script 13's rolling composite CSV holds
     whichever as-of was last published), rows for other as-of dates are left
     untouched and a file that does not contain the as-of at all is skipped.
@@ -635,13 +780,19 @@ def sync_snapshot_csv(path: Path, *, tickers: set[str], dry_run: bool, only_asof
         ticker = str(row.get("ticker") or "").strip().upper()
         if ticker not in tickers:
             continue
-        if str(row.get("oos_score_valid_flag") or "").strip() == "1" and str(
-            row.get("calibration_sample_role") or ""
-        ).strip() == "strict_oos":
-            continue
-        row["oos_score_valid_flag"] = "1"
-        row["calibration_sample_role"] = "strict_oos"
-        updated += 1
+        desired = {
+            "oos_score_valid_flag": "1",
+            "calibration_sample_role": "strict_oos",
+        }
+        if metadata_by_ticker and ticker in metadata_by_ticker:
+            desired.update(metadata_by_ticker[ticker])
+        changed = False
+        for field, value in desired.items():
+            if field in fieldnames and str(row.get(field) or "") != value:
+                row[field] = value
+                changed = True
+        if changed:
+            updated += 1
     if updated and not dry_run:
         write_csv_atomic(path, fieldnames, rows)
     return updated, "ok"
@@ -782,10 +933,18 @@ def main() -> int:
                 rolling_note = "skipped"
                 if not result["skip_reason"]:
                     result["newly_promoted_rows"] = promote_asof(conn, asof=asof, dry_run=dry_run)
+                    exception_approvals = approved_ticker_promotion_exceptions(config, asof=asof)
+                    result["newly_promoted_rows"] += promote_approved_ticker_exceptions(
+                        conn,
+                        asof=asof,
+                        approvals=exception_approvals,
+                        dry_run=dry_run,
+                    )
                     promoted_asofs += 1
                     total_promoted += result["newly_promoted_rows"]
                     if not args.skip_snapshot_csv:
                         tickers = promoted_tickers(conn, asof=asof)
+                        metadata_by_ticker = promoted_metadata(conn, asof=asof)
                         if dry_run:
                             # The database was not updated; plan against the post-promotion set.
                             tickers |= candidate_tickers(conn, asof=asof)
@@ -793,12 +952,17 @@ def main() -> int:
                             reports_root / asof / DAILY_SNAPSHOT_FILENAME,
                             tickers=tickers,
                             dry_run=dry_run,
+                            metadata_by_ticker=metadata_by_ticker,
                         )
                         # Script 13's rolling composite CSV carries the same provenance
                         # columns for whichever as-of it currently holds; keep it in
                         # lockstep so no consumer reads stale flags for the latest as-of.
                         rolling_updated, rolling_note = sync_snapshot_csv(
-                            rolling_csv, tickers=tickers, dry_run=dry_run, only_asof=asof,
+                            rolling_csv,
+                            tickers=tickers,
+                            dry_run=dry_run,
+                            only_asof=asof,
+                            metadata_by_ticker=metadata_by_ticker,
                         )
                 elif "unsafe_production_score_provenance" in result["skip_reason"]:
                     result["demoted_unsafe_rows"] = demote_unsafe_asof(

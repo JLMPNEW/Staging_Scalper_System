@@ -31,9 +31,7 @@ def locked_policy() -> dict[str, object]:
     return {
         "phase1_safety_lock": True,
         "production_score_regime_effective_from": "2026-07-27",
-        "locked_production_score_regime_version": (
-            "med_devices_baseline_composite_shadow_locked_v2_20260727"
-        ),
+        "locked_production_score_regime_version": ("med_devices_baseline_composite_shadow_locked_v2_20260727"),
         "locked_scoring_model_version": (
             "med_device_score_v24_2026_07_hospital_supplies_promotion_shadow_lock_v2_20260727"
         ),
@@ -56,9 +54,7 @@ def test_score_builder_publishes_source_flag_and_cutover_model_version() -> None
 
     assert pre_cutover.production_score_source == "baseline_composite_score"
     assert pre_cutover.ic_tilt_applied_to_production_flag == 0
-    assert pre_cutover.production_score_regime_version == (
-        "med_devices_baseline_composite_v1_pre_20260727"
-    )
+    assert pre_cutover.production_score_regime_version == ("med_devices_baseline_composite_v1_pre_20260727")
     assert pre_cutover.scoring_model_version == "original"
 
     post_cutover = module.ScoreRow(
@@ -72,9 +68,7 @@ def test_score_builder_publishes_source_flag_and_cutover_model_version() -> None
 
     assert post_cutover.production_score_source == "baseline_composite_score"
     assert post_cutover.ic_tilt_applied_to_production_flag == 0
-    assert post_cutover.production_score_regime_version == (
-        "med_devices_baseline_composite_shadow_locked_v2_20260727"
-    )
+    assert post_cutover.production_score_regime_version == ("med_devices_baseline_composite_shadow_locked_v2_20260727")
     assert post_cutover.scoring_model_version.endswith("_shadow_lock_v2_20260727")
     assert post_cutover.score_model_version == post_cutover.scoring_model_version
     assert post_cutover.model_version == post_cutover.scoring_model_version
@@ -99,6 +93,142 @@ def test_score_builder_publishes_source_flag_and_cutover_model_version() -> None
     assert unsafe.research_calibration_input_eligible_flag == 0
     assert unsafe.stage11_calibration_input_eligible_flag == 0
     assert "unsafe_ic_tilt_applied_to_production" in unsafe.research_calibration_reason
+
+
+def test_score_builder_applies_reviewed_ticker_exception_only_when_effective() -> None:
+    module = load_script(
+        "13_build_med_device_daily_scores.py",
+        "med_device_ticker_oos_exception_builder_test",
+    )
+    config = {
+        "historical_backfill": {
+            "ticker_oos_promotion_exceptions": {
+                "ISRG": {
+                    "valid_from": "2026-08-14",
+                    "reviewed_at": "2026-08-15",
+                    "decision": "approve",
+                    "reason": "reviewed_concentration_acceptance",
+                    "portfolio_hard_exclusion_waivers": [
+                        "single_product_risk",
+                        "binary_event_risk",
+                    ],
+                }
+            }
+        }
+    }
+
+    assert module.ticker_oos_promotion_exception(config, ticker="ISRG", asof="2026-08-13") == ""
+    assert (
+        module.ticker_oos_promotion_exception(config, ticker="ISRG", asof="2026-08-14")
+        == "reviewed_concentration_acceptance"
+    )
+    assert module.ticker_oos_promotion_exception(config, ticker="OTHER", asof="2026-08-14") == ""
+    assert module.ticker_portfolio_hard_exclusion_waivers(config, ticker="ISRG", asof="2026-08-13") == set()
+    assert module.ticker_portfolio_hard_exclusion_waivers(config, ticker="ISRG", asof="2026-08-14") == {
+        "single_product_risk",
+        "binary_event_risk",
+    }
+
+
+def test_ticker_portfolio_waiver_is_narrow_and_preserves_objective_hard_gates() -> None:
+    module = load_script(
+        "13_build_med_device_daily_scores.py",
+        "med_device_ticker_portfolio_waiver_test",
+    )
+    row = module.ScoreRow(
+        ticker="TMDX",
+        tier1_safety_reason="single_product_risk;binary_event_risk",
+        passed_data_quality_gate=1,
+        passed_liquidity_gate=1,
+        passed_fda_manual_review_gate=1,
+        value_trap_score=0.0,
+    )
+    gates = {"value_trap_hard_max": 85.0}
+
+    assert module.portfolio_candidate_hard_exclusion(row, gates=gates) == "single_product_risk"
+    assert (
+        module.portfolio_candidate_hard_exclusion(
+            row,
+            gates=gates,
+            waived_exclusions={"single_product_risk", "binary_event_risk"},
+        )
+        is None
+    )
+
+    row.hard_red_flag = 1
+    assert (
+        module.portfolio_candidate_hard_exclusion(
+            row,
+            gates=gates,
+            waived_exclusions={"single_product_risk", "binary_event_risk"},
+        )
+        == "fda_manual_review_or_hard_red"
+    )
+
+
+def test_tmdx_governance_promotion_is_effective_only_on_or_after_august_17() -> None:
+    module = load_script(
+        "13_build_med_device_daily_scores.py",
+        "med_device_tmdx_governance_integration_test",
+    )
+    config = {
+        "calibration": {
+            "calibrated_baseline": {
+                "watchlist_seed_cohorts": "capital_equipment_procedure_platforms",
+            }
+        },
+        "historical_backfill": {
+            "ticker_oos_promotion_exceptions": {
+                "TMDX": {
+                    "valid_from": "2026-08-17",
+                    "reviewed_at": "2026-08-15",
+                    "decision": "approve",
+                    "reason": "reviewed_multi_organ_platform",
+                    "portfolio_hard_exclusion_waivers": [
+                        "single_product_risk",
+                        "binary_event_risk",
+                    ],
+                }
+            }
+        },
+    }
+    gates = {
+        "composite_min": 0.0,
+        "cohort_percentile_min": 0.0,
+        "fundamental_quality_min": 0.0,
+        "durable_growth_min": 0.0,
+        "fda_product_min": 0.0,
+        "reimbursement_min": 0.0,
+        "valuation_min": 0.0,
+        "technical_entry_min": 0.0,
+        "data_completeness_min": 0.0,
+        "value_trap_max": 100.0,
+        "value_trap_hard_max": 85.0,
+    }
+    row = module.ScoreRow(
+        asof_date="2026-08-16",
+        ticker="TMDX",
+        calibration_cohort="capital_equipment_procedure_platforms",
+        tier1_safety_reason="single_product_risk;binary_event_risk",
+        passed_data_quality_gate=1,
+        passed_liquidity_gate=1,
+        passed_fda_manual_review_gate=1,
+        value_trap_score=0.0,
+    )
+
+    module.apply_portfolio_candidate_policy(row, config=config, gates=gates)
+    assert row.portfolio_candidate_gate == 0
+    assert row.portfolio_candidate_reason.startswith("single_product_risk;")
+
+    row.asof_date = "2026-08-17"
+    module.apply_portfolio_candidate_policy(row, config=config, gates=gates)
+    assert row.portfolio_candidate_gate == 1
+    assert "ticker_governance_waivers=binary_event_risk,single_product_risk" in row.portfolio_candidate_reason
+
+    row.hard_red_flag = 1
+    module.apply_portfolio_candidate_policy(row, config=config, gates=gates)
+    assert row.portfolio_candidate_gate == 0
+    assert row.portfolio_candidate_reason.startswith("fda_manual_review_or_hard_red;")
 
 
 def insert_company(conn: sqlite3.Connection) -> None:
@@ -169,9 +299,7 @@ def test_score_builder_upsert_round_trips_provenance_fields(tmp_path: Path) -> N
         native_score_value=60.0,
         production_score_source="baseline_composite_score",
         ic_tilt_applied_to_production_flag=0,
-        production_score_regime_version=(
-            "med_devices_baseline_composite_shadow_locked_v2_20260727"
-        ),
+        production_score_regime_version=("med_devices_baseline_composite_shadow_locked_v2_20260727"),
     )
     with connect(db_path) as conn:
         init_db(conn)
@@ -188,9 +316,7 @@ def test_score_builder_upsert_round_trips_provenance_fields(tmp_path: Path) -> N
 
     assert persisted["production_score_source"] == "baseline_composite_score"
     assert persisted["ic_tilt_applied_to_production_flag"] == 0
-    assert persisted["production_score_regime_version"] == (
-        "med_devices_baseline_composite_shadow_locked_v2_20260727"
-    )
+    assert persisted["production_score_regime_version"] == ("med_devices_baseline_composite_shadow_locked_v2_20260727")
 
 
 def test_oos_promoter_accepts_clean_shadow_and_demotes_replace_raw(tmp_path: Path) -> None:
@@ -247,6 +373,78 @@ def test_oos_promoter_accepts_clean_shadow_and_demotes_replace_raw(tmp_path: Pat
     assert unsafe["research_calibration_input_eligible_flag"] == 0
     assert unsafe["stage11_calibration_input_eligible_flag"] == 0
     assert unsafe["research_calibration_reason"] == "unsafe_production_score_provenance"
+
+
+def test_reviewed_ticker_exception_promotes_only_clean_candidate(tmp_path: Path) -> None:
+    module = load_script(
+        "76_mark_med_device_oos_provenance.py",
+        "med_device_ticker_oos_exception_test",
+    )
+    config = {
+        "historical_backfill": {
+            "ticker_oos_promotion_exceptions": {
+                "AAA": {
+                    "valid_from": "2026-08-14",
+                    "reviewed_at": "2026-08-15",
+                    "decision": "approve",
+                    "reason": "reviewed_concentration_acceptance",
+                    "portfolio_hard_exclusion_waivers": [
+                        "single_product_risk",
+                        "binary_event_risk",
+                    ],
+                }
+            }
+        }
+    }
+    approvals = module.approved_ticker_promotion_exceptions(config, asof="2026-08-14")
+    assert approvals == {"AAA": "reviewed_concentration_acceptance"}
+
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        insert_company(conn)
+        insert_score_row(
+            conn,
+            asof="2026-08-14",
+            mode="shadow",
+            source="baseline_composite_score",
+            applied=0,
+            oos_valid=0,
+            sample_role="excluded_from_research_calibration",
+        )
+        conn.execute(
+            """
+            UPDATE med_device_daily_scores
+            SET portfolio_candidate_gate = 1, calibration_eligible_flag = 0,
+                calibration_status = 'restricted_research_only',
+                research_calibration_input_eligible_flag = 0,
+                research_calibration_status = 'excluded',
+                research_calibration_reason = 'calibration_status=restricted_research_only',
+                stage11_calibration_input_eligible_flag = 0,
+                stage11_calibration_input_reason = 'calibration_status=restricted_research_only'
+            WHERE asof_date = '2026-08-14'
+            """
+        )
+
+        assert (
+            module.promote_approved_ticker_exceptions(conn, asof="2026-08-14", approvals=approvals, dry_run=False) == 1
+        )
+        row = conn.execute(
+            """
+            SELECT calibration_eligible_flag, calibration_status, portfolio_candidate_status, oos_score_valid_flag,
+                   calibration_sample_role, research_calibration_input_eligible_flag,
+                   stage11_calibration_input_eligible_flag
+            FROM med_device_daily_scores WHERE asof_date = '2026-08-14'
+            """
+        ).fetchone()
+
+    assert row["calibration_eligible_flag"] == 1
+    assert row["calibration_status"] == "production_eligible"
+    assert row["portfolio_candidate_status"] == "calibrated_baseline"
+    assert row["oos_score_valid_flag"] == 1
+    assert row["calibration_sample_role"] == "strict_oos"
+    assert row["research_calibration_input_eligible_flag"] == 1
+    assert row["stage11_calibration_input_eligible_flag"] == 1
 
 
 def test_unsafe_snapshot_demotion_is_targeted_and_idempotent(tmp_path: Path) -> None:
@@ -312,22 +510,12 @@ def test_unsafe_snapshot_demotion_is_targeted_and_idempotent(tmp_path: Path) -> 
     assert by_ticker["CLEAN"]["oos_score_valid_flag"] == "1"
     assert by_ticker["CLEAN"]["calibration_sample_role"] == "strict_oos"
     assert by_ticker["UNSAFE"]["oos_score_valid_flag"] == "0"
-    assert (
-        by_ticker["UNSAFE"]["calibration_sample_role"]
-        == "excluded_from_research_calibration"
-    )
-    assert (
-        by_ticker["UNSAFE"]["research_calibration_reason"]
-        == "unsafe_production_score_provenance"
-    )
+    assert by_ticker["UNSAFE"]["calibration_sample_role"] == "excluded_from_research_calibration"
+    assert by_ticker["UNSAFE"]["research_calibration_reason"] == "unsafe_production_score_provenance"
 
 
 def validator_row(module: ModuleType, *, unsafe: bool) -> dict[str, str]:
-    fields = (
-        module.REQUIRED_DAILY_COLUMNS
-        | module.SCORE_PROVENANCE_DAILY_COLUMNS
-        | {"score_model_version"}
-    )
+    fields = module.REQUIRED_DAILY_COLUMNS | module.SCORE_PROVENANCE_DAILY_COLUMNS | {"score_model_version"}
     row = {field: "" for field in fields}
     row.update(
         {
@@ -353,9 +541,7 @@ def validator_row(module: ModuleType, *, unsafe: bool) -> dict[str, str]:
             "survivorship_corrected_panel_flag": "1",
             "source_snapshot_asof_date": "2026-08-11",
             "ic_tilted_composite_mode": "replace_raw" if unsafe else "shadow",
-            "production_score_source": (
-                "ic_tilted_composite_score" if unsafe else "baseline_composite_score"
-            ),
+            "production_score_source": ("ic_tilted_composite_score" if unsafe else "baseline_composite_score"),
             "ic_tilt_applied_to_production_flag": "1" if unsafe else "0",
             "production_score_regime_version": (
                 "med_devices_ic_tilt_replace_legacy_v1"
@@ -472,7 +658,6 @@ def test_portfolio_adapter_excludes_only_unsafe_med_device_rows() -> None:
         "ic_tilt_applied_to_production_flag": "0",
     }
 
-
     adapted = {
         row.ticker: row
         for row in _adapt_med_devices(
@@ -489,10 +674,7 @@ def test_portfolio_adapter_excludes_only_unsafe_med_device_rows() -> None:
         assert adapted[ticker].calibration_research_eligible == 0
         assert adapted[ticker].oos_score_valid_flag == 0
         assert adapted[ticker].eligibility_reason == "unsafe_production_score_provenance"
-        assert (
-            adapted[ticker].calibration_research_reason == "unsafe_production_score_provenance"
-        )
-
+        assert adapted[ticker].calibration_research_reason == "unsafe_production_score_provenance"
 
 
 def test_portfolio_adapter_requires_lineage_for_med_device_candidate() -> None:

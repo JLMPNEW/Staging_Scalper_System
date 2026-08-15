@@ -5,6 +5,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from types import ModuleType
@@ -1325,6 +1326,104 @@ def test_med_device_universe_loader_accepts_clean_keep_shape(tmp_path: Path) -> 
     assert security_row is not None
     assert security_row["security_type"] == "Ordinary Shares"
     assert company_row is not None
+
+
+def test_med_device_universe_loader_keeps_otc_issuer_active_but_non_investable(
+    tmp_path: Path,
+) -> None:
+    module = load_script_module("01_load_med_device_universe.py", "med_device_otc_universe_test")
+    universe_csv = tmp_path / "med_dev_tickers_clean_keep.csv"
+    universe_csv.write_text(
+        "\n".join(
+            [
+                "ticker,investability_status,company_name,cik,exchange,sector,industry,medtech_subsector,country,currency,security_type,listing_status,is_primary_listing",
+                'GCTK,investable,"GlucoTrack, Inc.",0001506983,Nasdaq,Healthcare,Healthcare,medical_instruments_and_supplies,United States,USD,Common Stock,active,1',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    company = module.parse_universe_rows(
+        universe_csv,
+        config={
+            "universe_validation": {
+                "non_investable_exchanges": ["otcqb"],
+                "ticker_listing_overrides": {
+                    "GCTK": {
+                        "exchange": "OTCQB",
+                        "listing_status": "active",
+                        "reviewed_at": "2026-08-15",
+                        "reason": "former_nasdaq_listing_delisted",
+                    }
+                },
+            }
+        },
+    )[0]
+
+    assert company.exchange == "OTCQB"
+    assert company.investability_status == "non_investable_exchange"
+    assert company.universe_status == "active_non_investable_otc"
+    assert company.is_active == 1
+
+    prior = replace(
+        company,
+        exchange="Nasdaq",
+        investability_status="investable",
+        universe_status="keep",
+    )
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        module.upsert_universe(conn, [prior])
+        module.upsert_universe(conn, [company])
+        securities = conn.execute(
+            """
+            SELECT exchange, listing_status, is_primary_listing
+            FROM dim_security WHERE ticker = 'GCTK' ORDER BY exchange
+            """
+        ).fetchall()
+
+    by_exchange = {row["exchange"]: row for row in securities}
+    assert by_exchange["Nasdaq"]["listing_status"] == "delisted"
+    assert by_exchange["Nasdaq"]["is_primary_listing"] == 0
+    assert by_exchange["OTCQB"]["listing_status"] == "active"
+    assert by_exchange["OTCQB"]["is_primary_listing"] == 1
+
+
+@pytest.mark.parametrize(
+    ("ticker", "expected_before", "expected_after"),
+    [
+        ("TMDX", "reject", "approve"),
+        ("PRCT", "reject", "watchlist"),
+        ("OWLT", "watchlist", "reject"),
+    ],
+)
+def test_august_15_capital_platform_governance_decisions_preserve_pit_history(
+    ticker: str,
+    expected_before: str,
+    expected_after: str,
+) -> None:
+    decisions, issues = load_analyst_review_decisions(
+        REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    )
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+
+    before = effective_decision(
+        decisions,
+        ticker=ticker,
+        cohort="capital_equipment_procedure_platforms",
+        asof=date(2026, 8, 14),
+    )
+    after = effective_decision(
+        decisions,
+        ticker=ticker,
+        cohort="capital_equipment_procedure_platforms",
+        asof=date(2026, 8, 17),
+    )
+
+    assert before is not None and before.decision == expected_before
+    assert after is not None and after.decision == expected_after
+    assert after.allow_portfolio_candidate_override is False
 
 
 def test_yahoo_adjusted_parser_builds_adjusted_price_rows() -> None:

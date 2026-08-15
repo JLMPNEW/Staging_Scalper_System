@@ -37,6 +37,14 @@ DEFAULT_INVESTABLE_SECURITY_TYPES = {
     "american_depositary_shares",
     "new_york_registry_shares",
 }
+DEFAULT_NON_INVESTABLE_EXCHANGES = {
+    "otc",
+    "otc_markets",
+    "otc_pink",
+    "otcqb",
+    "otcqx",
+    "pink_sheets",
+}
 
 
 @dataclass(frozen=True)
@@ -113,16 +121,23 @@ def normalized_set(raw: Any, default: set[str]) -> set[str]:
 def derive_investability_status(
     *,
     manual_status: str,
+    exchange: str,
     listing_status: str,
     security_type: str,
     active_listing_statuses: set[str],
+    non_investable_exchanges: set[str],
     non_investable_listing_statuses: set[str],
     investable_security_types: set[str],
 ) -> tuple[str, str, int]:
     if manual_status == "remove":
         return "manual_exclude", "remove", 0
+    exchange_key = normalize_subsector(exchange)
     listing_key = normalize_subsector(listing_status)
     security_key = normalize_subsector(security_type)
+    if exchange_key in non_investable_exchanges:
+        # Continue tracking active OTC issuers for research and event monitoring,
+        # but never represent the security as exchange-investable.
+        return "non_investable_exchange", "active_non_investable_otc", 1
     if listing_key in non_investable_listing_statuses:
         return "non_investable_listing_status", "non_investable_listing_status", 0
     if security_key and security_key not in investable_security_types:
@@ -179,6 +194,20 @@ def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> 
         cfg_get(config, "universe_validation.investable_security_types", list(DEFAULT_INVESTABLE_SECURITY_TYPES)),
         DEFAULT_INVESTABLE_SECURITY_TYPES,
     )
+    non_investable_exchanges = normalized_set(
+        cfg_get(
+            config,
+            "universe_validation.non_investable_exchanges",
+            list(DEFAULT_NON_INVESTABLE_EXCHANGES),
+        ),
+        DEFAULT_NON_INVESTABLE_EXCHANGES,
+    )
+    raw_listing_overrides = cfg_get(config, "universe_validation.ticker_listing_overrides", {})
+    if not isinstance(raw_listing_overrides, dict):
+        raise ValueError("universe_validation.ticker_listing_overrides must be a mapping")
+    ticker_listing_overrides = {
+        normalize_ticker(ticker): spec for ticker, spec in raw_listing_overrides.items()
+    }
     for raw in rows:
         ticker = normalize_ticker(row_get(raw, "ticker", "Ticker", "Name", "MatchedTicker"))
         matched_ticker = normalize_ticker(row_get(raw, "MatchedTicker", "ticker", "Ticker", "Name"))
@@ -196,13 +225,26 @@ def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> 
         industry = row_get(raw, "industry", "IndustryGroup", "Index")
         subsector = normalize_subsector(row_get(raw, "medtech_subsector", "Subsector", "Index"))
         security_type = row_get(raw, "security_type", "SecurityType")
+        exchange = row_get(raw, "exchange", "Exchange")
         listing_status = row_get(raw, "listing_status", "ListingStatus")
+        listing_override = ticker_listing_overrides.get(ticker)
+        if listing_override is not None:
+            if not isinstance(listing_override, dict):
+                raise ValueError(f"Ticker listing override for {ticker} must be a mapping")
+            reviewed_at = str(listing_override.get("reviewed_at") or "").strip()
+            reason = str(listing_override.get("reason") or "").strip()
+            if not reviewed_at or not reason:
+                raise ValueError(f"Ticker listing override for {ticker} requires reviewed_at and reason")
+            exchange = str(listing_override.get("exchange") or exchange).strip()
+            listing_status = str(listing_override.get("listing_status") or listing_status).strip()
         status = universe_status_from_flags(raw)
         investability_status, universe_status, is_active = derive_investability_status(
             manual_status=status,
+            exchange=exchange,
             listing_status=listing_status,
             security_type=security_type,
             active_listing_statuses=active_listing_statuses,
+            non_investable_exchanges=non_investable_exchanges,
             non_investable_listing_statuses=non_investable_listing_statuses,
             investable_security_types=investable_security_types,
         )
@@ -221,7 +263,7 @@ def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> 
             investability_status=investability_status,
             company_name=company_name,
             cik=normalize_cik(row_get(raw, "cik", "CIK")),
-            exchange=row_get(raw, "exchange", "Exchange"),
+            exchange=exchange,
             sector=sector,
             industry=industry,
             subsector=subsector,
@@ -296,6 +338,20 @@ def upsert_universe(conn: Any, companies: list[UniverseCompany], *, source_id: s
         if row is None:
             raise RuntimeError(f"Company upsert failed for {company.ticker}")
         company_id = int(row["company_id"])
+        if company.is_primary_listing:
+            conn.execute(
+                """
+                UPDATE dim_security
+                SET is_primary_listing = 0,
+                    listing_status = CASE
+                        WHEN LOWER(TRIM(COALESCE(listing_status, ''))) = 'active' THEN 'delisted'
+                        ELSE listing_status
+                    END,
+                    updated_at = ?
+                WHERE company_id = ? AND ticker = ? AND exchange <> ? AND is_primary_listing = 1
+                """,
+                (now, company_id, company.ticker, company.exchange),
+            )
         conn.execute(
             """
             INSERT INTO dim_security(

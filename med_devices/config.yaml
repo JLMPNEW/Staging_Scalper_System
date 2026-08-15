@@ -142,6 +142,19 @@ universe_validation:
   request_sleep_sec: 0.1
   active_listing_statuses:
     - active
+  non_investable_exchanges:
+    - otc
+    - otc markets
+    - otc pink
+    - otcqb
+    - otcqx
+    - pink sheets
+  ticker_listing_overrides:
+    GCTK:
+      exchange: otcqb
+      listing_status: active
+      reviewed_at: "2026-08-15"
+      reason: "former_nasdaq_listing_delisted_active_otc_security_is_research_only_and_non_investable"
   non_investable_listing_statuses:
     - active_financial_status_d
     - active_financial_status_e
@@ -1862,6 +1875,20 @@ historical_backfill:
   # a model locked 2026-07 cannot produce strict out-of-sample scores for earlier dates
   # (portfolio_layer/docs/score_eligibility_flags.md: pre-lock snapshots must be oos=0).
   strict_oos_start_date: "2026-07-01"
+  ticker_oos_promotion_exceptions:
+    ISRG:
+      valid_from: "2026-08-14"
+      reviewed_at: "2026-08-15"
+      decision: "approve"
+      reason: "ticker_specific_concentration_acceptance_after_complete_financial_lineage_data_quality_liquidity_and_fda_review"
+    TMDX:
+      valid_from: "2026-08-17"
+      reviewed_at: "2026-08-15"
+      decision: "approve"
+      reason: "ticker_specific_multi_organ_ocs_and_national_logistics_platform_governance_approval"
+      portfolio_hard_exclusion_waivers:
+        - "single_product_risk"
+        - "binary_event_risk"
   backtest_end_asof: "auto_complete_max_horizon"
   frequency: "daily"
   weekday: "friday"

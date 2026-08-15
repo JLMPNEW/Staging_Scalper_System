@@ -973,9 +973,7 @@ def load_ic_tilted_composite_policy(config: dict[str, Any], *, base_dir: Path) -
         or DEFAULT_PRODUCTION_SCORE_REGIME_EFFECTIVE_FROM
     ).strip()
     if parse_date(regime_effective_from) is None:
-        raise ValueError(
-            "scoring.ic_tilted_composite.production_score_regime_effective_from must be YYYY-MM-DD"
-        )
+        raise ValueError("scoring.ic_tilted_composite.production_score_regime_effective_from must be YYYY-MM-DD")
     return {
         "enabled": enabled,
         "mode": mode,
@@ -2368,6 +2366,8 @@ def normalize_universe_status(raw: object, *, company_is_active: bool) -> str:
     status = str(raw or "").strip().lower()
     if status in {"active", "current", "keep", "candidate", "watch", "review", "source_current"}:
         return "active" if company_is_active else "historical"
+    if status in {"active_non_investable_otc", "non_investable_exchange"}:
+        return "active_non_investable_otc" if company_is_active else "historical"
     if status in {
         "historical",
         "inactive",
@@ -2380,6 +2380,75 @@ def normalize_universe_status(raw: object, *, company_is_active: bool) -> str:
     }:
         return "historical"
     return "active" if company_is_active else "historical"
+
+
+def ticker_oos_promotion_exception(
+    config: dict[str, Any],
+    *,
+    ticker: str,
+    asof: str,
+) -> str:
+    """Return a reviewed ticker-only calibration promotion reason when effective."""
+    raw = cfg_get(config, "historical_backfill.ticker_oos_promotion_exceptions", {})
+    if raw is None:
+        return ""
+    if not isinstance(raw, dict):
+        raise ValueError("historical_backfill.ticker_oos_promotion_exceptions must be a mapping")
+    spec = raw.get(normalize_ticker(ticker))
+    if spec is None:
+        return ""
+    if not isinstance(spec, dict):
+        raise ValueError(f"Ticker OOS promotion exception for {ticker} must be a mapping")
+    decision = str(spec.get("decision") or "").strip().lower()
+    valid_from = parse_date(spec.get("valid_from"))
+    reviewed_at = parse_date(spec.get("reviewed_at"))
+    reason = str(spec.get("reason") or "").strip()
+    if decision != "approve" or valid_from is None or reviewed_at is None or not reason:
+        raise ValueError(
+            f"Ticker OOS promotion exception {ticker} requires decision=approve, valid_from, reviewed_at, and reason"
+        )
+    asof_date = parse_date(asof)
+    if asof_date is None:
+        raise ValueError(f"Invalid score as-of date: {asof!r}")
+    return reason if valid_from <= asof_date else ""
+
+
+TICKER_PROMOTION_WAIVABLE_HARD_EXCLUSIONS = frozenset(
+    {
+        "binary_event_risk",
+        "single_product_risk",
+    }
+)
+
+
+def ticker_portfolio_hard_exclusion_waivers(
+    config: dict[str, Any],
+    *,
+    ticker: str,
+    asof: str,
+) -> set[str]:
+    """Return effective, explicitly allowlisted ticker-level governance waivers."""
+    if not ticker_oos_promotion_exception(config, ticker=ticker, asof=asof):
+        return set()
+    raw = cfg_get(config, "historical_backfill.ticker_oos_promotion_exceptions", {})
+    if not isinstance(raw, dict):
+        raise ValueError("historical_backfill.ticker_oos_promotion_exceptions must be a mapping")
+    spec = raw.get(normalize_ticker(ticker))
+    if not isinstance(spec, dict):
+        raise ValueError(f"Ticker OOS promotion exception for {ticker} must be a mapping")
+    waiver_value = spec.get("portfolio_hard_exclusion_waivers", [])
+    if waiver_value is None:
+        return set()
+    if not isinstance(waiver_value, list):
+        raise ValueError(f"Ticker OOS promotion exception {ticker} portfolio_hard_exclusion_waivers must be a list")
+    waivers = {str(value or "").strip().lower() for value in waiver_value if str(value or "").strip()}
+    unsupported = waivers - TICKER_PROMOTION_WAIVABLE_HARD_EXCLUSIONS
+    if unsupported:
+        raise ValueError(
+            f"Ticker OOS promotion exception {ticker} contains unsupported portfolio waivers: "
+            f"{','.join(sorted(unsupported))}"
+        )
+    return waivers
 
 
 def apply_research_calibration_metadata(row: ScoreRow, *, oos_score_valid: bool) -> None:
@@ -4011,7 +4080,15 @@ def calibrated_baseline_candidate_status(
     return status, reason
 
 
-def portfolio_candidate_hard_exclusion(row: ScoreRow, *, gates: dict[str, float]) -> str | None:
+def portfolio_candidate_hard_exclusion(
+    row: ScoreRow,
+    *,
+    gates: dict[str, float],
+    waived_exclusions: set[str] | None = None,
+) -> str | None:
+    waivers = waived_exclusions or set()
+    if row.drop_otc_tape:
+        return "otc_security_non_investable"
     if row.classification in {
         "manual_review_regulatory_risk",
         "avoid_confirmed_regulatory_risk",
@@ -4030,9 +4107,9 @@ def portfolio_candidate_hard_exclusion(row: ScoreRow, *, gates: dict[str, float]
     if row.value_trap_score >= gates.get("value_trap_hard_max", 85.0):
         return "value_trap_hard_gate"
     safety_reasons = {part for part in row.tier1_safety_reason.split(";") if part}
-    if "single_product_risk" in safety_reasons:
+    if "single_product_risk" in safety_reasons and "single_product_risk" not in waivers:
         return "single_product_risk"
-    if "binary_event_risk" in safety_reasons:
+    if "binary_event_risk" in safety_reasons and "binary_event_risk" not in waivers:
         return "binary_event_risk"
     return None
 
@@ -4043,6 +4120,11 @@ def apply_portfolio_candidate_policy(
     config: dict[str, Any],
     gates: dict[str, float],
 ) -> None:
+    hard_exclusion_waivers = ticker_portfolio_hard_exclusion_waivers(
+        config,
+        ticker=row.ticker,
+        asof=row.asof_date,
+    )
     baseline_status = calibrated_baseline_candidate_status(row, config=config, gates=gates)
     sources: list[str] = []
     if row.final_investability_gate:
@@ -4052,7 +4134,11 @@ def apply_portfolio_candidate_policy(
     if baseline_status is not None:
         sources.append(baseline_status[0])
 
-    hard_exclusion = portfolio_candidate_hard_exclusion(row, gates=gates)
+    hard_exclusion = portfolio_candidate_hard_exclusion(
+        row,
+        gates=gates,
+        waived_exclusions=hard_exclusion_waivers,
+    )
     row.portfolio_candidate_score = round(clamp(row.composite_score), 2)
     if hard_exclusion is not None:
         row.portfolio_candidate_gate = 0
@@ -4078,6 +4164,8 @@ def apply_portfolio_candidate_policy(
     reason_parts = [f"sources={','.join(sources)}"]
     if baseline_status is not None:
         reason_parts.append(f"baseline_reason={baseline_status[1]}")
+    if hard_exclusion_waivers:
+        reason_parts.append(f"ticker_governance_waivers={','.join(sorted(hard_exclusion_waivers))}")
     row.portfolio_candidate_reason = ";".join(reason_parts)
 
 
@@ -4157,9 +4245,27 @@ def apply_analyst_review_decision(
         row.portfolio_candidate_reason = (
             f"analyst_review_{decision.decision};previous_status={previous_status};previous_reason={previous_reason}"
         )
-    # Shadow-only: approve decisions never widen the portfolio gate; the override pathway
-    # is unimplemented and load_analyst_review_decisions_for_scoring aborts if enabled.
+    # Generic approve decisions remain shadow-only. A separately configured, allowlisted
+    # ticker exception may waive only the two qualitative platform-concentration blocks.
     row.analyst_portfolio_override_applied = 0
+
+
+def mark_reviewed_ticker_portfolio_override(
+    row: ScoreRow,
+    *,
+    config: dict[str, Any],
+) -> None:
+    """Mark a narrow ticker waiver only after an effective analyst approval and candidate pass."""
+    waivers = ticker_portfolio_hard_exclusion_waivers(
+        config,
+        ticker=row.ticker,
+        asof=row.asof_date,
+    )
+    row.analyst_portfolio_override_applied = int(
+        bool(waivers)
+        and row.analyst_review_decision == analyst_review_core.DECISION_APPROVE
+        and row.portfolio_candidate_gate == 1
+    )
 
 
 def tier1_safety_reasons(row: ScoreRow, policy: Tier1SafetyPolicy) -> list[str]:
@@ -4740,6 +4846,10 @@ def build_rows(
         institutional_item = institutional_rows.get(company_id, {})
         insider_item = insider_rows.get(company_id, {})
         ticker = normalize_ticker(item.get("ticker"))
+        ticker_exception_reason = ticker_oos_promotion_exception(config, ticker=ticker, asof=asof)
+        if ticker_exception_reason:
+            calibration_status = CALIBRATION_STATUS_PRODUCTION_ELIGIBLE
+            calibration_status_reason = f"ticker_oos_promotion_exception:{ticker_exception_reason}"
         price_meta = price_provenance.get(ticker, {})
         universe_meta = universe_provenance.get(company_id, {})
         company_is_active = int_flag(item.get("company_is_active"))
@@ -5110,7 +5220,7 @@ def build_rows(
             feature_data_asof_date=feature_data_asof_date,
             recovery_type=recovery_type,
             equity_recovery=calibration_only,
-            drop_otc_tape=0,
+            drop_otc_tape=int(universe_status == "active_non_investable_otc"),
             financial_data_asof_date=financial_data_asof_date,
             short_interest_asof_date=short_interest_asof_date,
             institutional_data_asof_date=institutional_data_asof_date,
@@ -5524,6 +5634,7 @@ def build_rows(
             asof_date=analyst_review_asof_date,
             high_score_threshold=analyst_review_high_score_threshold,
         )
+        mark_reviewed_ticker_portfolio_override(row, config=config)
         apply_pullback_candidate_tag(
             row,
             profile_for_cohort(row.calibration_cohort, pullback_candidate_profiles, cohort_profile_alias_map),
