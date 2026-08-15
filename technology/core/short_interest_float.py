@@ -468,6 +468,8 @@ def enrich_short_interest_float(
     *,
     source_id: str,
     policy: FloatPolicy | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> FloatEnrichmentStats:
     normalized_tickers = sorted(
         {ticker for ticker in (normalize_ticker(value) for value in tickers) if ticker}
@@ -478,15 +480,24 @@ def enrich_short_interest_float(
     candidates = load_sec_float_candidates(conn, normalized_tickers, policy=policy)
     split_events = load_split_events(conn, normalized_tickers)
     ph = placeholders(normalized_tickers)
+    date_clause = ""
+    date_params: tuple[str, ...] = ()
+    if start_date is not None:
+        date_clause += " AND settlement_date >= ?"
+        date_params += (start_date.isoformat(),)
+    if end_date is not None:
+        date_clause += " AND settlement_date <= ?"
+        date_params += (end_date.isoformat(),)
     rows = conn.execute(
         f"""
         SELECT ticker, settlement_date, publication_date, short_interest_shares
         FROM fact_short_interest
         WHERE source_id = ?
           AND ticker IN ({ph})
+          {date_clause}
         ORDER BY ticker, settlement_date
         """,
-        (source_id, *normalized_tickers),
+        (source_id, *normalized_tickers, *date_params),
     ).fetchall()
     updates: list[tuple[Any, ...]] = []
     source_counts: Counter[str] = Counter()
@@ -627,6 +638,8 @@ def validate_float_enrichment(
     tickers: list[str],
     *,
     source_id: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> list[str]:
     normalized_tickers = sorted(
         {ticker for ticker in (normalize_ticker(value) for value in tickers) if ticker}
@@ -634,6 +647,14 @@ def validate_float_enrichment(
     if not normalized_tickers:
         return []
     ph = placeholders(normalized_tickers)
+    date_clause = ""
+    date_params: tuple[str, ...] = ()
+    if start_date is not None:
+        date_clause += " AND settlement_date >= ?"
+        date_params += (start_date.isoformat(),)
+    if end_date is not None:
+        date_clause += " AND settlement_date <= ?"
+        date_params += (end_date.isoformat(),)
     rows = conn.execute(
         f"""
         SELECT *
@@ -641,8 +662,9 @@ def validate_float_enrichment(
         WHERE source_id = ?
           AND ticker IN ({ph})
           AND short_interest_pct_float IS NOT NULL
+          {date_clause}
         """,
-        (source_id, *normalized_tickers),
+        (source_id, *normalized_tickers, *date_params),
     )
     errors: list[str] = []
     for row in rows:

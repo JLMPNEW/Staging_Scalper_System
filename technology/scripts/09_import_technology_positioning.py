@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.positioning_window import resolve_positioning_window  # noqa: E402
 from technology.core.short_interest_float import (  # noqa: E402
     FloatPolicy,
     enrich_short_interest_float,
@@ -51,6 +52,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--model-family", default="", help="Technology model family to import, e.g. semiconductors.")
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to today.")
+    window_group = parser.add_mutually_exclusive_group()
+    window_group.add_argument(
+        "--history-start",
+        default="",
+        help="Earliest raw fact date to refresh. Defaults to a bounded incremental window.",
+    )
+    window_group.add_argument(
+        "--full-history",
+        action="store_true",
+        help="Refresh raw facts from positioning_import.start_date. Use only for bootstrap/restatement.",
+    )
+    parser.add_argument(
+        "--features-only",
+        action="store_true",
+        help="Build PIT positioning features from existing facts without reading upstream databases.",
+    )
     parser.add_argument("--tickers", default="")
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument(
@@ -118,18 +135,39 @@ def cfg_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y"}
 
 
-def load_universe(conn: Any, ticker_filter: set[str], *, model_family: str, include_historical: bool = False) -> list[str]:
+def load_universe(
+    conn: Any,
+    ticker_filter: set[str],
+    *,
+    model_family: str,
+    include_historical: bool = False,
+    asof: date | None = None,
+) -> list[str]:
     if include_historical:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT ticker
-            FROM dim_universe_membership
-            WHERE model_family = ?
-              AND (is_current_member = 1 OR point_in_time_flag = 1)
-            ORDER BY ticker
-            """,
-            (model_family,),
-        ).fetchall()
+        if asof is None:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT ticker
+                FROM dim_universe_membership
+                WHERE model_family = ?
+                  AND (is_current_member = 1 OR point_in_time_flag = 1)
+                ORDER BY ticker
+                """,
+                (model_family,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT ticker
+                FROM dim_universe_membership
+                WHERE model_family = ?
+                  AND (is_current_member = 1 OR point_in_time_flag = 1)
+                  AND start_date <= ?
+                  AND (COALESCE(end_date, '') = '' OR end_date >= ?)
+                ORDER BY ticker
+                """,
+                (model_family, asof.isoformat(), asof.isoformat()),
+            ).fetchall()
     else:
         rows = conn.execute(
             """
@@ -213,6 +251,7 @@ def import_form4(
     source_to_internal: dict[str, str],
     source_id: str,
     start: date,
+    end: date,
 ) -> dict[str, dict[str, Any]]:
     stats = {ticker: {"form4_transactions": 0, "form4_latest_transaction_date": ""} for ticker in tickers}
     rows = source.execute(
@@ -243,8 +282,9 @@ def import_form4(
         LEFT JOIN sec_ownership_reporting_owner ro
           ON ro.accession_number = s.accession_number
         WHERE UPPER(s.issuer_trading_symbol) IN ({qmarks(query_tickers)})
+          AND s.filing_date BETWEEN ? AND ?
         """,
-        query_tickers,
+        (*query_tickers, start.isoformat(), end.isoformat()),
     )
     now = utc_now()
     for row in rows:
@@ -255,7 +295,13 @@ def import_form4(
         trans_date = parse_date(row["transaction_date"]) or parse_date(row["period_of_report"]) or parse_date(row["filing_date"])
         filing_date = parse_date(row["filing_date"])
         period_date = parse_date(row["period_of_report"])
-        if trans_date is None or trans_date < start:
+        availability_date = filing_date or trans_date
+        if (
+            trans_date is None
+            or availability_date is None
+            or availability_date < start
+            or availability_date > end
+        ):
             continue
         code = str(row["transaction_code"] or "").strip().upper()
         acq_disp = str(row["transaction_acquired_disposed_code"] or "").strip().upper()
@@ -339,21 +385,27 @@ def import_13f(
     source_to_internal: dict[str, str],
     source_id: str,
     start: date,
+    end: date,
 ) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
-    # Full replace: upstream snapshots are period-level aggregates, so any stale
-    # legacy filing-day-slice rows must not survive alongside them.
+    # Replace only the refreshed window. Older PIT history and later snapshots
+    # are immutable during an incremental or historical-as-of run.
     dest.execute(
-        f"DELETE FROM fact_13f_positioning WHERE source_id = ? AND ticker IN ({qmarks(tickers)})",
-        (source_id, *tickers),
+        f"""
+        DELETE FROM fact_13f_positioning
+        WHERE source_id = ? AND ticker IN ({qmarks(tickers)})
+          AND asof_date BETWEEN ? AND ?
+        """,
+        (source_id, *tickers, start.isoformat(), end.isoformat()),
     )
     rows = source.execute(
         f"""
         SELECT * FROM institutional_13f_ownership_snapshots
         WHERE UPPER(ticker) IN ({qmarks(query_tickers)})
+          AND asof_date BETWEEN ? AND ?
         """,
-        query_tickers,
+        (*query_tickers, start.isoformat(), end.isoformat()),
     )
     for row in rows:
         source_ticker = normalize_ticker(row["ticker"])
@@ -361,7 +413,7 @@ def import_13f(
         if ticker not in stats:
             continue
         asof = parse_date(row["asof_date"])
-        if asof is None or asof < start:
+        if asof is None or asof < start or asof > end:
             continue
         dest.execute(
             """
@@ -411,12 +463,18 @@ def import_short_interest(
     source_to_internal: dict[str, str],
     source_id: str,
     start: date,
+    end: date,
 ) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
     rows = source.execute(
-        f"SELECT * FROM short_interest_snapshots WHERE UPPER(ticker) IN ({qmarks(query_tickers)})",
-        query_tickers,
+        f"""
+        SELECT * FROM short_interest_snapshots
+        WHERE UPPER(ticker) IN ({qmarks(query_tickers)})
+          AND COALESCE(NULLIF(settlement_date, ''), asof_date) >= ?
+          AND COALESCE(NULLIF(publication_date, ''), asof_date, settlement_date) <= ?
+        """,
+        (*query_tickers, start.isoformat(), end.isoformat()),
     )
     for row in rows:
         source_ticker = normalize_ticker(row["ticker"])
@@ -426,7 +484,13 @@ def import_short_interest(
         settlement = parse_date(row["settlement_date"]) or parse_date(row["asof_date"])
         asof = parse_date(row["asof_date"])
         publication = parse_date(row["publication_date"])
-        if settlement is None or settlement < start:
+        availability_date = publication or asof or settlement
+        if (
+            settlement is None
+            or settlement < start
+            or availability_date is None
+            or availability_date > end
+        ):
             continue
         dest.execute(
             """
@@ -472,18 +536,26 @@ def import_borrow(
     source_to_internal: dict[str, str],
     source_id: str,
     start: date,
+    end: date,
 ) -> dict[str, int]:
     stats = {ticker: 0 for ticker in tickers}
     now = utc_now()
-    # Full replace for the scoped universe so upstream recycled-symbol cleanup
-    # cannot leave stale IBKR rows in the technology database.
+    # Replace only the refreshed window so historical PIT rows are preserved.
     dest.execute(
-        f"DELETE FROM fact_ibkr_borrow_snapshot WHERE source_id = ? AND ticker IN ({qmarks(tickers)})",
-        (source_id, *tickers),
+        f"""
+        DELETE FROM fact_ibkr_borrow_snapshot
+        WHERE source_id = ? AND ticker IN ({qmarks(tickers)})
+          AND asof_date BETWEEN ? AND ?
+        """,
+        (source_id, *tickers, start.isoformat(), end.isoformat()),
     )
     rows = source.execute(
-        f"SELECT * FROM ibkr_borrow_fee_rate_daily WHERE UPPER(ticker) IN ({qmarks(query_tickers)})",
-        query_tickers,
+        f"""
+        SELECT * FROM ibkr_borrow_fee_rate_daily
+        WHERE UPPER(ticker) IN ({qmarks(query_tickers)})
+          AND asof_date BETWEEN ? AND ?
+        """,
+        (*query_tickers, start.isoformat(), end.isoformat()),
     )
     for row in rows:
         source_ticker = normalize_ticker(row["ticker"])
@@ -491,7 +563,7 @@ def import_borrow(
         if ticker not in stats:
             continue
         asof = parse_date(row["asof_date"])
-        if asof is None or asof < start:
+        if asof is None or asof < start or asof > end:
             continue
         dest.execute(
             """
@@ -820,7 +892,16 @@ def main() -> None:
     form4_db = Path(expand_env_vars(cfg_get(config, "upstream_databases.form4.db_path"))).expanduser()
     mp_db = Path(expand_env_vars(cfg_get(config, "upstream_databases.market_positioning.db_path"))).expanduser()
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "positioning_import.output_csv"), base_dir=base_dir)
-    start = parse_date(cfg_get(config, "positioning_import.start_date", "2016-01-01")) or date(2016, 1, 1)
+    configured_start = cfg_get(config, "positioning_import.start_date", "2016-01-01")
+    start, feature_asof = resolve_positioning_window(
+        asof=args.asof,
+        configured_start=configured_start,
+        requested_start=args.history_start,
+        full_history=bool(args.full_history),
+        lookback_days=int(
+            cfg_get(config, "positioning_import.incremental_lookback_days", 550)
+        ),
+    )
     form4_source = str(cfg_get(config, "positioning_import.form4_source_id", "sec_insider_upstream"))
     direct_ownership_source = str(cfg_get(config, "positioning_import.direct_ownership_source_id", "sec_ownership_direct"))
     mp_source = str(cfg_get(config, "positioning_import.market_positioning_source_id", "market_positioning_upstream"))
@@ -857,19 +938,76 @@ def main() -> None:
     )
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
 
-    if not form4_db.exists():
+    if not args.features_only and not form4_db.exists():
         raise FileNotFoundError(f"Form 4 upstream DB not found: {form4_db}")
-    if not mp_db.exists() and not allow_stale_market_positioning:
+    if (
+        not args.features_only
+        and not mp_db.exists()
+        and not allow_stale_market_positioning
+    ):
         raise FileNotFoundError(f"Market positioning upstream DB not found: {mp_db}")
+    LOGGER.info(
+        "Positioning mode=%s window=%s..%s model_family=%s",
+        "features_only"
+        if args.features_only
+        else ("full_history" if args.full_history else "incremental"),
+        start.isoformat(),
+        feature_asof.isoformat(),
+        model_family,
+    )
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             fact_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=include_historical)
-            feature_tickers = load_universe(conn, ticker_filter, model_family=model_family, include_historical=False)
+            feature_tickers = load_universe(
+                conn,
+                ticker_filter,
+                model_family=model_family,
+                include_historical=bool(args.features_only and include_historical),
+                asof=feature_asof if args.features_only else None,
+            )
             if not fact_tickers or not feature_tickers:
                 raise ValueError(f"No positioning universe tickers found for model_family={model_family}.")
+            if args.features_only:
+                with conn:
+                    feature_status = build_positioning_features(
+                        conn,
+                        feature_tickers,
+                        asof=feature_asof,
+                        feature_source_id=feature_source,
+                        model_family=model_family,
+                        insider_days=int(
+                            cfg_get(config, "positioning_import.lookback_days.insider", 90)
+                        ),
+                        short_change_days=int(
+                            cfg_get(config, "positioning_import.lookback_days.short_change", 92)
+                        ),
+                        direct_source=direct_ownership_source,
+                        upstream_source=form4_source,
+                        require_13f=require_13f,
+                        require_short=require_short,
+                        require_borrow=require_borrow,
+                    )
+                review_count = sum(bool(reason) for reason in feature_status.values())
+                finish_run(
+                    conn,
+                    run_id=run_id,
+                    status="success",
+                    row_count=len(feature_tickers),
+                    message=(
+                        f"features_only=1 asof={feature_asof.isoformat()} "
+                        f"tickers={len(feature_tickers)} review={review_count}"
+                    ),
+                )
+                LOGGER.info(
+                    "Positioning feature-only rebuild complete: asof=%s tickers=%d review=%d",
+                    feature_asof,
+                    len(feature_tickers),
+                    review_count,
+                )
+                return
             feature_ticker_set = set(feature_tickers)
             query_tickers, source_to_internal = load_source_ticker_map(conn, fact_tickers)
             upstream_warning = ""
@@ -907,6 +1045,7 @@ def main() -> None:
                             source_to_internal=source_to_internal,
                             source_id=form4_source,
                             start=start,
+                            end=feature_asof,
                         )
                         direct_stats = direct_form4_stats(
                             conn,
@@ -924,6 +1063,7 @@ def main() -> None:
                                     source_to_internal=source_to_internal,
                                     source_id=mp_source,
                                     start=start,
+                                    end=feature_asof,
                                 )
                                 short_stats = import_short_interest(
                                     conn,
@@ -933,6 +1073,7 @@ def main() -> None:
                                     source_to_internal=source_to_internal,
                                     source_id=mp_source,
                                     start=start,
+                                    end=feature_asof,
                                 )
                                 borrow_stats = import_borrow(
                                     conn,
@@ -942,6 +1083,7 @@ def main() -> None:
                                     source_to_internal=source_to_internal,
                                     source_id=mp_source,
                                     start=start,
+                                    end=feature_asof,
                                 )
                             except (OSError, sqlite3.OperationalError) as exc:
                                 conn.execute("ROLLBACK TO market_positioning_import")
@@ -991,11 +1133,15 @@ def main() -> None:
                             fact_tickers,
                             source_id=mp_source,
                             policy=float_policy,
+                            start_date=start,
+                            end_date=feature_asof,
                         )
                         float_errors = validate_float_enrichment(
                             conn,
                             fact_tickers,
                             source_id=mp_source,
+                            start_date=start,
+                            end_date=feature_asof,
                         )
                         if float_errors:
                             sample = "; ".join(float_errors[:20])
@@ -1019,7 +1165,6 @@ def main() -> None:
                             float_enrichment.source_counts,
                         )
 
-                        feature_asof = parse_date(args.asof) or date.today()
                         feature_status = build_positioning_features(
                             conn,
                             feature_tickers,

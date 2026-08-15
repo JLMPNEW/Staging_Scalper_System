@@ -398,6 +398,9 @@ positioning_import:
   # let required coverage/staleness validators decide whether they remain usable.
   allow_stale_market_positioning_on_error: true
   start_date: "2013-01-01"
+  # Daily refreshes need at most annual foreign-filer float history plus six 13F quarters.
+  # Explicit --full-history remains available for bootstrap and reviewed restatements.
+  incremental_lookback_days: 550
   include_historical_members: true
   positioning_universe_csv: "../output/technology_cache/positioning/semiconductor_positioning_universe.csv"
   output_csv: "../output/technology_reports/positioning/positioning_import_coverage.csv"

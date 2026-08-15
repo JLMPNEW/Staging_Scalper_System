@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -215,6 +215,8 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
 def run_technology_import(
     config_path: Path,
     *,
+    history_start: date | None = None,
+    asof: date | None = None,
     allow_stale_market_positioning_on_error: bool = False,
 ) -> None:
     cmd = [
@@ -223,6 +225,10 @@ def run_technology_import(
         "--config",
         str(config_path),
     ]
+    if history_start is not None:
+        cmd.extend(["--history-start", history_start.isoformat()])
+    if asof is not None:
+        cmd.extend(["--asof", asof.isoformat()])
     if allow_stale_market_positioning_on_error:
         cmd.append("--allow-stale-market-positioning-on-error")
     LOGGER.info("Running technology positioning import: %s", " ".join(cmd))
@@ -244,7 +250,14 @@ def iter_zip_table_rows(zip_file: zipfile.ZipFile, name_hint: str) -> Any:
         yield from csv.DictReader(text, delimiter=delimiter)
 
 
-def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source: str = "sec_13f_data_sets") -> int:
+def aggregate_13f_ownership_for_tickers(
+    conn: Any,
+    tickers: list[str],
+    *,
+    source: str = "sec_13f_data_sets",
+    history_start_date: date | None = None,
+    end_date: date | None = None,
+) -> int:
     """Aggregate 13F holdings into one snapshot per (ticker, period_of_report).
 
     Managers file across a 45-day window, so bucketing must be per reporting
@@ -255,6 +268,16 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
     if not tickers:
         return 0
     qmarks = ",".join("?" for _ in tickers)
+    history_clause = ""
+    history_params: tuple[str, ...] = ()
+    if history_start_date is not None:
+        # Include one prior 13F period so the first refreshed delta remains valid.
+        prior_period_start = history_start_date - timedelta(days=150)
+        history_clause += " AND period_of_report >= ?"
+        history_params += (prior_period_start.isoformat(),)
+    if end_date is not None:
+        history_clause += " AND filing_date <= ?"
+        history_params += (end_date.isoformat(),)
     rows = conn.execute(
         f"""
         SELECT ticker, filing_date, period_of_report,
@@ -267,9 +290,10 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
           AND UPPER(COALESCE(share_type, '')) IN ('', 'SH')
           AND COALESCE(put_call, '') = ''
           AND COALESCE(period_of_report, '') <> ''
+          {history_clause}
         ORDER BY ticker, period_of_report, manager_key, filing_date
         """,
-        tickers,
+        (*tickers, *history_params),
     )
     now = utc_now()
     # per (ticker, period): manager -> (latest filing_date, latest accession, shares, value)
@@ -311,6 +335,13 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
             new_buyer_count = len(managers - prior_managers)
             exiting_holder_count = len(prior_managers - managers)
         prior_by_ticker[ticker] = (total_shares, managers)
+        snapshot_asof = parse_13f_date(latest_filing.get((ticker, period)) or period)
+        if history_start_date is not None and (
+            snapshot_asof is None or snapshot_asof < history_start_date
+        ):
+            continue
+        if end_date is not None and (snapshot_asof is None or snapshot_asof > end_date):
+            continue
         records.append(
             (
                 ticker,
@@ -328,11 +359,21 @@ def aggregate_13f_ownership_for_tickers(conn: Any, tickers: list[str], *, source
                 now,
             )
         )
-    # Replace any legacy filing-day-slice snapshots wholesale for these tickers.
-    conn.execute(
-        f"DELETE FROM institutional_13f_ownership_snapshots WHERE source = ? AND UPPER(ticker) IN ({qmarks})",
-        (source, *tickers),
-    )
+    if history_start_date is None or end_date is None:
+        # Explicit full-history restatements replace the complete ticker history.
+        conn.execute(
+            f"DELETE FROM institutional_13f_ownership_snapshots WHERE source = ? AND UPPER(ticker) IN ({qmarks})",
+            (source, *tickers),
+        )
+    else:
+        conn.execute(
+            f"""
+            DELETE FROM institutional_13f_ownership_snapshots
+            WHERE source = ? AND UPPER(ticker) IN ({qmarks})
+              AND asof_date BETWEEN ? AND ?
+            """,
+            (source, *tickers, history_start_date.isoformat(), end_date.isoformat()),
+        )
     conn.executemany(
         """
         INSERT INTO institutional_13f_ownership_snapshots(
@@ -495,7 +536,13 @@ def sync_sec_13f_data_sets_streaming(
         if sleep_sec > 0:
             time.sleep(sleep_sec)
 
-    snapshot_rows = aggregate_13f_ownership_for_tickers(conn, tickers, source="sec_13f_data_sets")
+    snapshot_rows = aggregate_13f_ownership_for_tickers(
+        conn,
+        tickers,
+        source="sec_13f_data_sets",
+        history_start_date=history_start_date,
+        end_date=end_date,
+    )
     total_table_holdings = int(conn.execute("SELECT COUNT(*) FROM institutional_13f_holdings").fetchone()[0])
     message = (
         f"SEC Form 13F data-set archives processed={processed_archives} "
@@ -579,6 +626,8 @@ def main() -> None:
                 if not args.skip_technology_import:
                     run_technology_import(
                         config_path,
+                        history_start=history_start,
+                        asof=end_date,
                         allow_stale_market_positioning_on_error=allow_stale_market_positioning,
                     )
                 return
@@ -647,6 +696,8 @@ def main() -> None:
     if not args.skip_technology_import:
         run_technology_import(
             config_path,
+            history_start=history_start,
+            asof=end_date,
             allow_stale_market_positioning_on_error=allow_stale_market_positioning,
         )
 

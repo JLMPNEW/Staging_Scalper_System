@@ -86,7 +86,7 @@ SEMICONDUCTOR_STEPS = (
         script("technology/scripts/05_build_technology_market_features.py"),
         ("--model-family", "semiconductors", "--benchmark-tickers", "SMH,SOXX,QQQ,SPY"),
     ),
-    StepSpec("09_import_positioning", script("technology/scripts/09_import_technology_positioning.py"), ("--model-family", "semiconductors")),
+    StepSpec("09_import_positioning", script("technology/scripts/09_import_technology_positioning.py"), ("--model-family", "semiconductors", "--features-only")),
     StepSpec("06a_build_scoring_contract", script("technology/semiconductors/scripts/06a_build_semiconductor_scoring_features.py")),
     StepSpec("06a_validate_scoring_contract", script("technology/semiconductors/scripts/06a_validate_semiconductor_scoring_features.py"), historical_mode=True),
     StepSpec("06b_build_sector_cycle", script("technology/semiconductors/scripts/06b_build_sector_cycle_features.py")),
@@ -116,7 +116,7 @@ SEMICONDUCTOR_RESTORE_STEPS = (
 
 HARDWARE_STEPS = (
     StepSpec("05_build_market_features", script("technology/technology_hardware/scripts/05_build_technology_hardware_market_features.py")),
-    StepSpec("09_import_positioning", script("technology/technology_hardware/scripts/09_import_technology_hardware_positioning.py")),
+    StepSpec("09_import_positioning", script("technology/technology_hardware/scripts/09_import_technology_hardware_positioning.py"), ("--features-only",)),
     StepSpec("06a_build_scoring_contract", script("technology/technology_hardware/scripts/06a_build_technology_hardware_scoring_features.py")),
     StepSpec("06a_validate_scoring_contract", script("technology/technology_hardware/scripts/06a_validate_technology_hardware_scoring_features.py"), historical_mode=True),
     StepSpec("06b_validate_overlay_closure", script("technology/technology_hardware/scripts/06b_validate_technology_hardware_overlay_closure.py")),
@@ -145,7 +145,7 @@ HARDWARE_RESTORE_STEPS = (
 
 SOFTWARE_STEPS = (
     StepSpec("05_build_market_features", script("technology/software_infrastructure/scripts/05_build_software_infrastructure_market_features.py")),
-    StepSpec("09_import_positioning", script("technology/software_infrastructure/scripts/09_import_software_infrastructure_positioning.py")),
+    StepSpec("09_import_positioning", script("technology/software_infrastructure/scripts/09_import_software_infrastructure_positioning.py"), ("--features-only",)),
     StepSpec("06a_build_scoring_contract", script("technology/software_infrastructure/scripts/06a_build_software_infrastructure_scoring_features.py")),
     StepSpec("06a_validate_scoring_contract", script("technology/software_infrastructure/scripts/06a_validate_software_infrastructure_scoring_features.py"), historical_mode=True),
     StepSpec("06b_validate_overlay_closure", script("technology/software_infrastructure/scripts/06b_validate_software_infrastructure_overlay_closure.py")),

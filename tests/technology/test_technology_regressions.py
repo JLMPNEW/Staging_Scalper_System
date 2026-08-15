@@ -22,6 +22,7 @@ from technology.core.portfolio_candidate_fields import (
     add_portfolio_candidate_fields,
     validate_portfolio_candidate_rows,
 )
+from technology.core.positioning_window import resolve_positioning_window
 from technology.core.refresh_orchestration import asof_governance_conflict
 from technology.core.signal_diagnostics import (
     financial_subfeatures as shared_financial_subfeatures,
@@ -552,6 +553,266 @@ def test_positioning_stale_fallback_only_accepts_availability_errors() -> None:
     )
 
 
+def test_positioning_incremental_window_is_bounded_and_respects_floor() -> None:
+    start, end = resolve_positioning_window(
+        asof="2026-08-14",
+        configured_start="2013-01-01",
+        lookback_days=550,
+    )
+    assert end == date(2026, 8, 14)
+    assert (end - start).days == 550
+
+    floor_start, _ = resolve_positioning_window(
+        asof="2013-03-01",
+        configured_start="2013-01-01",
+        lookback_days=550,
+    )
+    assert floor_start == date(2013, 1, 1)
+
+
+def test_historical_positioning_universe_is_scoped_to_asof_membership() -> None:
+    importer = load_script(
+        "technology/scripts/09_import_technology_positioning.py",
+        "technology_positioning_pit_universe",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    conn.executemany(
+        """
+        INSERT INTO dim_universe_membership(
+            ticker, model_family, membership_basis, start_date, end_date,
+            membership_status, is_current_member, point_in_time_flag,
+            confidence, created_at, updated_at
+        )
+        VALUES (?, 'semiconductors', 'historical_point_in_time',
+                ?, ?, 'historical', 0, 1, 1.0, '', '')
+        """,
+        [
+            ("OLD", "2019-01-01", "2020-12-31"),
+            ("ACTIVE", "2020-01-01", "2025-12-31"),
+            ("FUTURE", "2026-01-01", None),
+        ],
+    )
+
+    tickers = importer.load_universe(
+        conn,
+        set(),
+        model_family="semiconductors",
+        include_historical=True,
+        asof=date(2024, 6, 30),
+    )
+
+    assert tickers == ["ACTIVE"]
+
+
+def test_incremental_13f_import_preserves_rows_outside_window() -> None:
+    importer = load_script(
+        "technology/scripts/09_import_technology_positioning.py",
+        "technology_positioning_incremental_13f",
+    )
+    dest = sqlite3.connect(":memory:")
+    dest.row_factory = sqlite3.Row
+    dest.execute(
+        """
+        CREATE TABLE fact_13f_positioning(
+            ticker TEXT NOT NULL,
+            asof_date TEXT NOT NULL,
+            period_of_report TEXT,
+            source_id TEXT NOT NULL,
+            institutional_shares REAL,
+            institutional_value REAL,
+            manager_count INTEGER,
+            institutional_ownership_delta_pct REAL,
+            new_buyer_count INTEGER,
+            exiting_holder_count INTEGER,
+            net_buyer_count INTEGER,
+            created_at TEXT,
+            updated_at TEXT,
+            UNIQUE(ticker, asof_date, source_id)
+        )
+        """
+    )
+    dest.executemany(
+        """
+        INSERT INTO fact_13f_positioning(
+            ticker, asof_date, source_id, institutional_shares
+        ) VALUES ('TEST', ?, 'market_positioning_upstream', ?)
+        """,
+        [("2023-12-31", 10.0), ("2024-06-30", 20.0), ("2026-01-31", 30.0)],
+    )
+    source = sqlite3.connect(":memory:")
+    source.row_factory = sqlite3.Row
+    source.execute(
+        """
+        CREATE TABLE institutional_13f_ownership_snapshots(
+            ticker TEXT, asof_date TEXT, period_of_report TEXT,
+            institutional_shares REAL, institutional_value REAL,
+            manager_count INTEGER, institutional_ownership_delta_pct REAL,
+            new_buyer_count INTEGER, exiting_holder_count INTEGER,
+            net_buyer_count INTEGER
+        )
+        """
+    )
+    source.executemany(
+        """
+        INSERT INTO institutional_13f_ownership_snapshots
+        VALUES ('TEST', ?, ?, ?, 100.0, 2, 0.1, 1, 0, 1)
+        """,
+        [
+            ("2023-12-31", "2023-09-30", 11.0),
+            ("2024-06-30", "2024-03-31", 25.0),
+            ("2026-01-31", "2025-12-31", 35.0),
+        ],
+    )
+
+    stats = importer.import_13f(
+        dest,
+        source,
+        ["TEST"],
+        query_tickers=["TEST"],
+        source_to_internal={"TEST": "TEST"},
+        source_id="market_positioning_upstream",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+    )
+
+    rows = dest.execute(
+        "SELECT asof_date, institutional_shares FROM fact_13f_positioning ORDER BY asof_date"
+    ).fetchall()
+    assert stats == {"TEST": 1}
+    assert [(row[0], row[1]) for row in rows] == [
+        ("2023-12-31", 10.0),
+        ("2024-06-30", 25.0),
+        ("2026-01-31", 30.0),
+    ]
+
+
+def test_incremental_short_interest_excludes_unpublished_observations() -> None:
+    importer = load_script(
+        "technology/scripts/09_import_technology_positioning.py",
+        "technology_positioning_incremental_short_interest",
+    )
+    dest = sqlite3.connect(":memory:")
+    dest.row_factory = sqlite3.Row
+    dest.execute(
+        """
+        CREATE TABLE fact_short_interest(
+            ticker TEXT NOT NULL, settlement_date TEXT NOT NULL,
+            source_id TEXT NOT NULL, asof_date TEXT, publication_date TEXT,
+            short_interest_shares REAL, float_shares REAL,
+            short_interest_pct_float REAL, days_to_cover REAL,
+            created_at TEXT, updated_at TEXT,
+            UNIQUE(ticker, settlement_date, source_id)
+        )
+        """
+    )
+    source = sqlite3.connect(":memory:")
+    source.row_factory = sqlite3.Row
+    source.execute(
+        """
+        CREATE TABLE short_interest_snapshots(
+            ticker TEXT, settlement_date TEXT, asof_date TEXT,
+            publication_date TEXT, short_interest_shares REAL,
+            float_shares REAL, short_interest_pct_float REAL,
+            days_to_cover REAL
+        )
+        """
+    )
+    source.executemany(
+        """
+        INSERT INTO short_interest_snapshots
+        VALUES ('TEST', ?, ?, ?, 100.0, 1000.0, 0.1, 2.0)
+        """,
+        [
+            ("2024-11-30", "2024-12-10", "2024-12-10"),
+            ("2024-12-31", "2025-01-12", "2025-01-12"),
+        ],
+    )
+
+    stats = importer.import_short_interest(
+        dest,
+        source,
+        ["TEST"],
+        query_tickers=["TEST"],
+        source_to_internal={"TEST": "TEST"},
+        source_id="market_positioning_upstream",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+    )
+
+    assert stats == {"TEST": 1}
+    assert dest.execute(
+        "SELECT settlement_date FROM fact_short_interest"
+    ).fetchone()[0] == "2024-11-30"
+
+
+def test_incremental_13f_aggregation_preserves_outer_history_and_prior_delta() -> None:
+    upstream = load_script(
+        "technology/scripts/13_sync_technology_positioning_upstream.py",
+        "technology_positioning_incremental_13f_aggregation",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    upstream.init_market_positioning_db(conn)
+    conn.executemany(
+        """
+        INSERT INTO institutional_13f_holdings(
+            filing_key, manager_cik, manager_name, ticker, period_of_report,
+            filing_date, shares, market_value, share_type, put_call, source,
+            created_at, updated_at
+        )
+        VALUES (
+            ?, 'M1', 'Manager', 'TEST', ?, ?, ?, 1000.0, 'SH', '',
+            'sec_13f_data_sets', '', ''
+        )
+        """,
+        [
+            ("A1", "2023-09-30", "2023-11-14", 100.0),
+            ("A2", "2023-12-31", "2024-02-14", 110.0),
+            ("A3", "2024-03-31", "2024-05-14", 121.0),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO institutional_13f_ownership_snapshots(
+            ticker, asof_date, period_of_report, institutional_shares,
+            source, created_at, updated_at
+        )
+        VALUES ('TEST', ?, ?, ?, 'sec_13f_data_sets', '', '')
+        """,
+        [
+            ("2023-11-14", "2023-09-30", 100.0),
+            ("2026-02-14", "2025-12-31", 999.0),
+        ],
+    )
+
+    count = upstream.aggregate_13f_ownership_for_tickers(
+        conn,
+        ["TEST"],
+        history_start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+    )
+
+    rows = conn.execute(
+        """
+        SELECT asof_date, institutional_shares, institutional_ownership_delta_pct
+        FROM institutional_13f_ownership_snapshots
+        WHERE ticker = 'TEST'
+        ORDER BY asof_date
+        """
+    ).fetchall()
+    assert count == 2
+    assert [row["asof_date"] for row in rows] == [
+        "2023-11-14",
+        "2024-02-14",
+        "2024-05-14",
+        "2026-02-14",
+    ]
+    assert rows[1]["institutional_ownership_delta_pct"] == pytest.approx(0.1)
+    assert rows[2]["institutional_ownership_delta_pct"] == pytest.approx(0.1)
+
+
 def test_yahoo_parser_skips_malformed_corporate_action_dates(yahoo_prices: ModuleType) -> None:
     payload = {
         "chart": {
@@ -644,6 +905,14 @@ def test_refresh_orchestrators_use_recoverable_financial_batches(
     ]
     positioning = next(item for item in steps if item.step_id == "13_sync_positioning_upstream")
     assert "--allow-stale-ibkr-borrow-on-error" not in positioning.args
+    history_index = positioning.args.index("--history-start")
+    history_start = date.fromisoformat(positioning.args[history_index + 1])
+    assert (date(2026, 7, 8) - history_start).days == 550
+    positioning_import = next(item for item in steps if item.step_id == "09_import_positioning")
+    assert positioning_import.args[-2:] == [
+        "--history-start",
+        history_start.isoformat(),
+    ]
 
     kwargs["allow_stale_ibkr_borrow_on_error"] = True
     fallback_steps = module.build_steps(**kwargs)
@@ -651,6 +920,25 @@ def test_refresh_orchestrators_use_recoverable_financial_batches(
         item for item in fallback_steps if item.step_id == "13_sync_positioning_upstream"
     )
     assert "--allow-stale-ibkr-borrow-on-error" in fallback_positioning.args
+
+
+def test_historical_positioning_rebuild_is_features_only() -> None:
+    module = load_script(
+        "technology/scripts/18_backfill_technology_historical_dashboard_reports.py",
+        "technology_historical_positioning_features_only",
+    )
+    families = {
+        module.FAMILIES["semiconductors"].family: module.FAMILIES["semiconductors"],
+        module.FAMILIES["technology_hardware"].family: module.FAMILIES[
+            "technology_hardware"
+        ],
+        module.FAMILIES["software_infrastructure"].family: module.FAMILIES[
+            "software_infrastructure"
+        ],
+    }
+    for spec in families.values():
+        step = next(item for item in spec.steps if item.step_id == "09_import_positioning")
+        assert "--features-only" in step.extra_args
 
 
 def test_historical_refresh_rejects_latest_only_governance_steps() -> None:
