@@ -185,6 +185,14 @@ def _supplemental_financial_evidence(
     return False, "no_financial_disclosure_evidence"
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+        raise ValueError(f"Unsafe SQLite table identifier: {table!r}")
+    return {
+        str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")
+    }
+
+
 def _canonical_core_metrics(
     conn: sqlite3.Connection,
     *,
@@ -195,15 +203,27 @@ def _canonical_core_metrics(
     if not tickers:
         return {}
     placeholders = ",".join("?" for _ in tickers)
+    columns = _table_columns(conn, "fact_financial_statement_canonical")
+    family_clause = "AND model_family = ?" if "model_family" in columns else ""
+    if "accepted_at" in columns:
+        availability_expression = (
+            "COALESCE(NULLIF(SUBSTR(accepted_at, 1, 10), ''), filing_date)"
+        )
+    else:
+        availability_expression = "filing_date"
+    params: list[Any] = [*tickers]
+    if family_clause:
+        params.append(model_family)
+    params.append(asof)
     rows = conn.execute(
         f"""
         SELECT accession_number, canonical_metric
         FROM fact_financial_statement_canonical
-        WHERE model_family = ?
-          AND ticker IN ({placeholders})
-          AND COALESCE(NULLIF(SUBSTR(accepted_at, 1, 10), ''), filing_date) <= ?
+        WHERE ticker IN ({placeholders})
+          {family_clause}
+          AND {availability_expression} <= ?
         """,
-        (model_family, *tickers, asof),
+        params,
     ).fetchall()
     metrics: dict[str, set[str]] = {}
     for row in rows:
@@ -222,14 +242,24 @@ def _filings(
     if not tickers:
         return []
     placeholders = ",".join("?" for _ in tickers)
+    columns = _table_columns(conn, "fact_sec_filing")
+    if "accepted_at" in columns:
+        acceptance_column = "accepted_at"
+    elif "acceptance_datetime" in columns:
+        acceptance_column = "acceptance_datetime"
+    else:
+        acceptance_column = "filing_date"
+    filing_url_column = "filing_url" if "filing_url" in columns else "''"
     rows = conn.execute(
         f"""
-        SELECT ticker, accession_number, form_type, filing_date, accepted_at,
-               report_date, primary_document, filing_url
+        SELECT ticker, accession_number, form_type, filing_date,
+               {acceptance_column} AS accepted_at, report_date,
+               primary_document, {filing_url_column} AS filing_url
         FROM fact_sec_filing
         WHERE ticker IN ({placeholders})
           AND form_type IN ({','.join('?' for _ in PERIODIC_FINANCIAL_FORMS | SUPPLEMENTAL_FORMS)})
-        ORDER BY ticker, COALESCE(NULLIF(accepted_at, ''), filing_date), accession_number
+        ORDER BY ticker, COALESCE(NULLIF({acceptance_column}, ''), filing_date),
+                 accession_number
         """,
         (*tickers, *sorted(PERIODIC_FINANCIAL_FORMS | SUPPLEMENTAL_FORMS)),
     ).fetchall()

@@ -337,9 +337,12 @@ def load_registry(path: Path) -> Registry:
         sector_name = str(entry["name"])
         lineage_policy = policy_for_model_family(sector_name)
         legacy_lineage_required = entry.get("financial_lineage_required")
+        production_lineage_required = (
+            lineage_policy.mode_for("production") != POLICY_DISABLED
+        )
         if (
             legacy_lineage_required is not None
-            and bool(legacy_lineage_required) != lineage_policy.enabled
+            and bool(legacy_lineage_required) != production_lineage_required
         ):
             raise ValueError(
                 f"sector {sector_name}: registry financial_lineage_required conflicts "
@@ -408,7 +411,7 @@ def load_registry(path: Path) -> Registry:
                 retries=int(entry.get("retries", defaults.get("retries", 1))),
                 retry_args=[str(arg) for arg in _as_list(entry.get("retry_args", defaults.get("retry_args")))],
                 freshness_probes=_parse_freshness_probes(sector_name, entry.get("freshness_probes")),
-                financial_lineage_required=lineage_policy.enabled,
+                financial_lineage_required=production_lineage_required,
                 financial_lineage_policy=lineage_policy.mode_for("production"),
                 financial_lineage_min_core_metric_count=lineage_policy.min_core_metric_count,
             )

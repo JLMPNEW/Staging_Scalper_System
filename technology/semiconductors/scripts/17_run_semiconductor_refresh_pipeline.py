@@ -45,6 +45,7 @@ class Step:
     research: bool = False
     optuna: bool = False
     norgate_backfill: bool = False
+    blocking: bool = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -157,6 +158,7 @@ def build_steps(
         Step("13_walk_forward_calibration", "stage_8", "Run walk-forward calibration research", py_script("technology/semiconductors/scripts/13_run_semiconductor_walk_forward_calibration.py"), optuna=True),
         Step("15_norgate_backfill", "stage_15", "Import Norgate delisted prices", py_script("technology/semiconductors/scripts/15_import_semiconductor_norgate_delisted_prices.py"), norgate_backfill=True),
         Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/semiconductors/scripts/10b_publish_semiconductor_dashboard_reports.py")),
+        Step("10c_financial_lineage_shadow", "stage_10_shadow", "Build candidate-only financial-lineage shadow report", py_script("technology/semiconductors/scripts/10c_build_semiconductor_financial_lineage_shadow.py"), asof_args, blocking=False),
         Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/semiconductors/scripts/10b_validate_semiconductor_dashboard_reports.py"), pass_db=False),
         Step("16_publish_governance", "stage_10b", "Publish lockbox ledger and signal registry", py_script("technology/semiconductors/scripts/16_publish_semiconductor_lockbox_ledger.py")),
         Step("08_audit_pipeline", "audit", "Run full semiconductor pipeline audit", py_script("technology/semiconductors/scripts/08_audit_semiconductor_pipeline_state.py")),
@@ -287,6 +289,7 @@ def main() -> int:
         raise SystemExit(governance_conflict)
     rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    shadow_failures: list[dict[str, Any]] = []
     started = datetime.now(timezone.utc)
 
     for idx, step in enumerate(planned, start=1):
@@ -304,6 +307,7 @@ def main() -> int:
             "optuna_flag": int(step.optuna),
             "norgate_backfill_flag": int(step.norgate_backfill),
             "pass_db_flag": int(step.pass_db),
+            "blocking_flag": int(step.blocking),
             "command": " ".join(cmd),
             "log_path": str(log_path),
         }
@@ -319,13 +323,20 @@ def main() -> int:
             log.write(f"command={' '.join(cmd)}\n\n")
             result = subprocess.run(cmd, cwd=PROJECT_ROOT, stdout=log, stderr=subprocess.STDOUT, text=True, check=False)
         elapsed = time.perf_counter() - start
-        row.update({"status": "PASS" if result.returncode == 0 else "FAIL", "return_code": result.returncode, "elapsed_sec": round(elapsed, 3)})
+        status = "PASS" if result.returncode == 0 else (
+            "FAIL" if step.blocking else "SHADOW_FAIL"
+        )
+        row.update({"status": status, "return_code": result.returncode, "elapsed_sec": round(elapsed, 3)})
         rows.append(row)
         if result.returncode != 0:
-            failures.append(row)
-            print(f"FAILED {step.step_id}; see {log_path}")
-            if not args.continue_on_error:
-                break
+            if step.blocking:
+                failures.append(row)
+                print(f"FAILED {step.step_id}; see {log_path}")
+                if not args.continue_on_error:
+                    break
+            else:
+                shadow_failures.append(row)
+                print(f"SHADOW FAILED {step.step_id}; production continues; see {log_path}")
 
     ended = datetime.now(timezone.utc)
     summary = {
@@ -339,6 +350,7 @@ def main() -> int:
         "step_count": len(rows),
         "planned_step_count": len(planned),
         "failed_step_count": len(failures),
+        "shadow_failed_step_count": len(shadow_failures),
         "status": "PASS" if not failures else "FAIL",
         "output_dir": str(output_dir),
         "manifest_json": str(output_dir / "semiconductor_refresh_manifest.json"),
@@ -349,7 +361,22 @@ def main() -> int:
     manifest_csv = output_dir / "semiconductor_refresh_steps.csv"
     manifest_json.write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
     write_csv(manifest_csv, rows)
-    print(json.dumps({key: summary[key] for key in ("run_id", "status", "dry_run", "step_count", "failed_step_count", "output_dir")}, indent=2, sort_keys=True))
+    summary_fields = (
+        "run_id",
+        "status",
+        "dry_run",
+        "step_count",
+        "failed_step_count",
+        "shadow_failed_step_count",
+        "output_dir",
+    )
+    print(
+        json.dumps(
+            {key: summary[key] for key in summary_fields},
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 1 if failures else 0
 
 

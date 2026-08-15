@@ -19,3 +19,9 @@ sectors:
     production_policy: strict_universe
     research_policy: candidate_only
     historical_policy: strict_universe
+
+  semiconductors:
+    enabled: true
+    production_policy: disabled
+    research_policy: candidate_only
+    historical_policy: disabled

@@ -71,6 +71,19 @@ def machinery_row(ticker: str, rank: int, score: float, company_name: str) -> di
             "orders_backlog_score": "50",
             "capex_cycle_score": "50",
             "development_stage_risk_score": "50",
+            "financial_lineage_checked_asof_date": ASOF,
+            "financial_lineage_status": "INCORPORATED",
+            "financial_lineage_gate": "1",
+            "financial_lineage_classification": "INCORPORATED",
+            "latest_material_financial_filing_date": "2026-05-01",
+            "latest_material_financial_form": "10-Q",
+            "latest_material_financial_accession": f"{ticker.lower()}-latest",
+            "latest_material_financial_report_date": "2026-03-31",
+            "incorporated_financial_filing_date": "2026-05-01",
+            "incorporated_financial_accession": f"{ticker.lower()}-latest",
+            "incorporated_financial_report_date": "2026-03-31",
+            "incorporated_financial_core_metric_count": "3",
+            "financial_lineage_reason": "synthetic_fixture_incorporated",
         }
     )
     return row

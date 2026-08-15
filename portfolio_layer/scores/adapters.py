@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from orchestration_contracts.financial_lineage import (
     lineage_row_is_safe,
+    POLICY_DISABLED,
     policy_for_model_family,
 )
 from portfolio_layer.core.contracts import AdapterResult, CanonicalScore
@@ -280,7 +281,9 @@ def _adapt_final_rank_family(
     out: list[CanonicalScore] = []
     require_oos_score_valid = bool(cfg.get("require_oos_score_valid", False))
     lineage_policy = policy_for_model_family(str(cfg.get("model_family") or ""))
-    require_financial_lineage = lineage_policy.enabled
+    require_financial_lineage = (
+        lineage_policy.mode_for("production") != POLICY_DISABLED
+    )
     skipped = 0
     for r in rows:
         ticker = str(r.get("ticker", "")).strip().upper()
