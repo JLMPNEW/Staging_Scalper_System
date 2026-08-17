@@ -7,7 +7,7 @@ import math
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -22,7 +22,9 @@ from industrials.transportation.financial_contract import (  # noqa: E402
     load_metric_registry,
     registry_summary,
 )
-from industrials.transportation.disclosure_candidates import EXTRACTION_METHOD  # noqa: E402
+from industrials.transportation.disclosure_candidates import (  # noqa: E402
+    EXTRACTION_METHOD,
+)
 from industrials.transportation.reviewed_annual_metrics import (  # noqa: E402
     AnnualMetricResolution,
     load_reviewed_annual_resolutions,
@@ -30,6 +32,9 @@ from industrials.transportation.reviewed_annual_metrics import (  # noqa: E402
 )
 from industrials.transportation.reviewed_operand_repair import (  # noqa: E402
     SOURCE_ID as REVIEWED_OPERAND_SOURCE_ID,
+)
+from industrials.transportation.semantic_candidate_materialization import (  # noqa: E402
+    EXTRACTION_METHOD as REVIEWED_SEMANTIC_EXTRACTION_METHOD,
 )
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG, MODEL_FAMILY  # noqa: E402
 
@@ -65,6 +70,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", default="")
     parser.add_argument(
+        "--tickers",
+        default="",
+        help="Optional comma-separated ticker filter for a bounded feature rebuild.",
+    )
+    parser.add_argument(
         "--include-historical",
         action="store_true",
         help="Build the point-in-time active-plus-delisted membership at --asof.",
@@ -84,12 +94,26 @@ def parse_date(value: object) -> date | None:
         return None
 
 
+def parse_ticker_filter(raw: object) -> set[str]:
+    return {
+        item.strip().upper()
+        for item in str(raw or "").split(",")
+        if item.strip()
+    }
+
+
 def number(value: object) -> float | None:
     try:
         parsed = float(str(value).strip())
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def explicit_zero_debt_interest_na(financial: Mapping[str, object]) -> bool:
+    debt = number(financial.get("total_debt_usd"))
+    interest = number(financial.get("interest_expense_ttm_usd"))
+    return debt == 0.0 and interest in {None, 0.0}
 
 
 def latest_asof(conn: Any) -> str:
@@ -215,11 +239,12 @@ def candidate_row(
         """
         SELECT * FROM fact_sec_metric_disclosure_candidate
         WHERE ticker = ? AND model_family = ? AND metric_name = ?
-          AND extraction_method = ?
+          AND extraction_method IN (?, ?)
           AND COALESCE(NULLIF(filing_date, ''), NULLIF(SUBSTR(accepted_at, 1, 10), '')) <= ?
           AND COALESCE(NULLIF(filing_date, ''), NULLIF(SUBSTR(accepted_at, 1, 10), ''))
               >= DATE(?, ?)
         ORDER BY
+          CASE extraction_method WHEN ? THEN 0 ELSE 1 END,
           COALESCE(NULLIF(filing_date, ''), NULLIF(SUBSTR(accepted_at, 1, 10), '')) DESC,
           CASE UPPER(candidate_status) WHEN 'ACCEPTED' THEN 0 WHEN 'PARSER_FAILURE' THEN 1 ELSE 2 END,
           confidence DESC,
@@ -230,10 +255,12 @@ def candidate_row(
             ticker,
             MODEL_FAMILY,
             metric,
+            REVIEWED_SEMANTIC_EXTRACTION_METHOD,
             EXTRACTION_METHOD,
             asof,
             asof,
             staleness_modifier,
+            REVIEWED_SEMANTIC_EXTRACTION_METHOD,
         ),
     ).fetchone()
     return dict(row) if row is not None else {}
@@ -360,6 +387,17 @@ def classify_metric(
             "extraction_method": "conditional_applicability",
             "confidence": 1.0,
             "status_reason": "issuer_cash_generative_runway_not_meaningful",
+        }
+    if metric.metric_id == "interest_coverage" and explicit_zero_debt_interest_na(
+        financial
+    ):
+        return {
+            **base,
+            "availability_status": "NOT_APPLICABLE",
+            "source_id": str(financial.get("source_id") or ""),
+            "extraction_method": "conditional_applicability",
+            "confidence": 1.0,
+            "status_reason": "issuer_has_explicit_zero_debt_and_no_interest_expense",
         }
     if metric.metric_id == "fcf_conversion":
         net_income = number(financial.get("net_income_ttm_usd"))
@@ -529,6 +567,7 @@ def main() -> int:
         financial_config["metric_availability_output_csv"], base_dir=base_dir
     )
     registry_version, definitions = load_metric_registry(registry_path)
+    ticker_filter = parse_ticker_filter(args.tickers)
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 120.0))) as conn:
         init_db(conn)
         asof = str(args.asof or latest_asof(conn)).strip()
@@ -540,6 +579,12 @@ def main() -> int:
             active_source_id=str(universe["seed_source_id"]),
             include_historical=bool(args.include_historical),
         )
+        if ticker_filter:
+            members = [
+                member
+                for member in members
+                if str(member.get("ticker") or "").upper() in ticker_filter
+            ]
         if not members:
             raise ValueError(f"No active transportation members at {asof}")
         reviewed_overrides = load_reviewed_metric_overrides(
@@ -574,10 +619,20 @@ def main() -> int:
         if not args.dry_run:
             now = utc_now()
             with conn:
-                conn.execute(
-                    "DELETE FROM feature_financial_metric_availability WHERE model_family=? AND asof_date=?",
-                    (MODEL_FAMILY, asof),
-                )
+                if ticker_filter:
+                    selected = sorted(
+                        {str(member["ticker"]).upper() for member in members}
+                    )
+                    conn.execute(
+                        "DELETE FROM feature_financial_metric_availability "
+                        f"WHERE model_family=? AND asof_date=? AND ticker IN ({','.join('?' for _ in selected)})",
+                        (MODEL_FAMILY, asof, *selected),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM feature_financial_metric_availability WHERE model_family=? AND asof_date=?",
+                        (MODEL_FAMILY, asof),
+                    )
                 for row in report:
                     db_fields = [field for field in FIELDS if field not in {"calibration_cohort", "industry", "component"}]
                     conn.execute(
@@ -597,6 +652,7 @@ def main() -> int:
         "asof_date": asof,
         "dry_run": bool(args.dry_run),
         "member_count": len(members),
+        "ticker_filter_count": len(ticker_filter),
         "include_historical": bool(args.include_historical),
         "max_candidate_staleness_days": max_candidate_staleness_days,
         "registry_version": registry_version,

@@ -211,6 +211,40 @@ def test_yahoo_cache_only_accepts_valid_pre_hardening_cache_name(
     assert not (cache / 'ticker_KO_2019-01-02_2019-01-02.json').exists()
 
 
+def test_yahoo_manifest_hash_is_transport_status_independent(tmp_path: Path) -> None:
+    policy = _market_policy_with_cache(tmp_path)
+    conn = connect(tmp_path / 'manifest.sqlite')
+    try:
+        init_db(conn)
+        source = SourceRegistryRow(
+            source_id='yahoo_finance_adjusted', stage='stage3',
+            source_name='Yahoo', source_owner='Yahoo', source_type='api',
+            base_url='https://example.test',
+            subsector_scope='consumer_defensive', status='active',
+        )
+        upsert_source_registry(conn, [source])
+
+        def fetcher(endpoint: str, *_args: object, **_kwargs: object) -> tuple[int, str]:
+            return 200, _yahoo_payload(endpoint.rsplit('/', 1)[-1])
+
+        live = load_yahoo_prices(
+            conn, policy, start='2019-01-02', end='2019-01-02',
+            tickers=['KO'], fetcher=fetcher,
+        )
+        def forbidden_fetcher(*_args: object, **_kwargs: object) -> tuple[int, str]:
+            raise AssertionError('cache replay must not call provider')
+
+        cached = load_yahoo_prices(
+            conn, policy, start='2019-01-02', end='2019-01-02',
+            tickers=['KO'], fetcher=forbidden_fetcher,
+        )
+        assert {row['cache_status'] for row in live['payload_manifest']['entries']} == {'live'}
+        assert {row['cache_status'] for row in cached['payload_manifest']['entries']} == {'cache'}
+        assert live['payload_manifest']['sha256'] == cached['payload_manifest']['sha256']
+    finally:
+        conn.close()
+
+
 def test_yahoo_filters_small_action_boundary_spillover_but_rejects_material_drift(
     tmp_path: Path,
 ) -> None:

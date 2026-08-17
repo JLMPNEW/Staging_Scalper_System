@@ -68,6 +68,16 @@ inputs:
     sha256: d60afb5b469969692366c94dcaeffe002333355d5950b172ff63b4fe00b2b253
     review_status: reviewed
 
+  - input_id: consumer_defensive_current_provider_symbols
+    path: consumer_defensive/data/consumer_defensive_current_provider_symbols.csv
+    stage: stage2
+    role: authoritative_reviewed_current_norgate_symbol_and_asset_map
+    schema_version: consumer_defensive_current_provider_symbols_v1
+    record_count: 1
+    sha256: 1f61117d661c357e13a5233eacee04c23366a8a1bcfc42ded706fa2f9e3c3cec
+    review_status: reviewed
+    notes: Public ticker remains FDP; Norgate symbol DMC is accepted only while it resolves to reviewed asset 132283.
+
   - input_id: consumer_defensive_positioning_source_identifiers
     path: consumer_defensive/data/consumer_defensive_positioning_source_identifiers.csv
     stage: stage5

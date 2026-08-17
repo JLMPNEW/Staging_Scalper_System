@@ -21,6 +21,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from industrials.core.canonical_fact_overrides import (  # noqa: E402
+    CanonicalConceptOverride,
+    canonical_selection_priority,
+    load_canonical_concept_overrides,
+)
 from industrials.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
@@ -353,10 +358,23 @@ METRIC_SELECTION_ORDER = (
 # periods_are_one_year_apart.
 PERIOD_DURATION_TOLERANCE_DAYS = 20
 
+# Duration facts carried as comparative columns inside an annual filing retain
+# the filing's 10-K/20-F form and can also inherit fp=FY from CompanyFacts. A
+# form label is therefore not sufficient evidence that a duration fact is an
+# annual observation. These bounds admit 52/53-week and ordinary fiscal years
+# while excluding quarterly and year-to-date comparatives.
+ANNUAL_DURATION_MIN_DAYS = 300
+ANNUAL_DURATION_MAX_DAYS = 400
+
 # A larger one-year increase can occur after a listing or restructuring, but it
 # is not safe to score automatically. Values above this bound remain missing
 # and carry an explicit review flag instead of being clipped into the model.
 MAX_AUTOMATIC_DILUTED_SHARES_YOY_GROWTH = 5.0
+
+# Transportation has several genuine restructurings and acquisitions. A
+# greater-than-100% annual change may be real, but it is not safe to rank as
+# ordinary organic growth without a separately approved structural bridge.
+MAX_TRANSPORTATION_AUTOMATIC_ABS_YOY_GROWTH = 1.0
 
 # A selected fact whose period ended more than this many days before the anchor
 # filing's period is a stale carry-forward from an old accession (e.g. a
@@ -730,6 +748,9 @@ def refresh_canonical_facts(
     tickers: list[str],
     asof: date,
     supplemental_source_ids: tuple[str, ...] = (),
+    canonical_concept_overrides: Mapping[
+        tuple[str, str], CanonicalConceptOverride
+    ] | None = None,
 ) -> int:
     if not tickers:
         return 0
@@ -800,9 +821,17 @@ def refresh_canonical_facts(
             asof.isoformat(),
             asof.isoformat(),
         )
+    overrides = canonical_concept_overrides or {}
     if append_only:
-        missing_only_sql = """
-          AND NOT EXISTS (
+        override_tickers = sorted({override.ticker for override in overrides.values()})
+        override_sql = (
+            f" OR f.ticker IN ({placeholders(override_tickers)})"
+            if override_tickers
+            else ""
+        )
+        missing_only_sql = f"""
+          AND (
+            NOT EXISTS (
               SELECT 1
               FROM fact_financial_statement_canonical existing
               WHERE existing.ticker = f.ticker
@@ -812,9 +841,16 @@ def refresh_canonical_facts(
                 AND existing.period_end = f.period_end
                 AND existing.accession_number = COALESCE(f.accession_number, '')
                 AND existing.unit = COALESCE(f.unit, '')
+            )
+            {override_sql}
           )
         """
-        query_params = (*query_params, source_id, model_family)
+        query_params = (
+            *query_params,
+            source_id,
+            model_family,
+            *override_tickers,
+        )
     rows = conn.execute(
         f"""
         SELECT f.ticker, f.source_id, f.canonical_metric, f.period_end, f.period_start,
@@ -860,6 +896,24 @@ def refresh_canonical_facts(
             unit = str(row["unit"] or "")
             value = as_float(row["value"])
             value_usd = value if unit.upper() == "USD" else None
+            override = overrides.get(
+                (str(row["ticker"]), str(row["canonical_metric"]))
+            )
+            selection_priority = canonical_selection_priority(
+                int(row["source_priority"] or 100),
+                override=override,
+                taxonomy=str(row["taxonomy"] or ""),
+                concept_name=str(row["concept_name"] or ""),
+            )
+            canonical_quality = (
+                "mapped_xbrl_preferred_concept"
+                if override is not None
+                and override.matches(
+                    taxonomy=str(row["taxonomy"] or ""),
+                    concept_name=str(row["concept_name"] or ""),
+                )
+                else "mapped_xbrl"
+            )
             conn.execute(
                 """
                 INSERT INTO fact_financial_statement_canonical(
@@ -869,7 +923,7 @@ def refresh_canonical_facts(
                     unit, value, value_usd, source_priority, canonical_quality, created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'mapped_xbrl', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ticker, source_id, model_family, canonical_metric, period_end, accession_number, unit)
                 DO UPDATE SET
                     period_start = excluded.period_start,
@@ -911,7 +965,8 @@ def refresh_canonical_facts(
                     unit,
                     value,
                     value_usd,
-                    int(row["source_priority"] or 100),
+                    selection_priority,
+                    canonical_quality,
                     now,
                     now,
                 ),
@@ -1016,7 +1071,12 @@ def is_annual_fact(row: dict[str, Any]) -> bool:
     fiscal_period = str(row.get("fiscal_period") or "").upper()
     form_type = str(row.get("form_type") or "").upper()
     days = duration_days(row)
-    return fiscal_period == "FY" or form_type in {"10-K", "20-F", "40-F"} or (days is not None and days >= 300)
+    if days is not None:
+        return ANNUAL_DURATION_MIN_DAYS <= days <= ANNUAL_DURATION_MAX_DAYS
+    # Some older facts omit period_start. Keep them only when both independent
+    # annual markers agree; a 10-K comparative quarter with a known duration is
+    # rejected by the branch above.
+    return fiscal_period == "FY" and form_type in {"10-K", "20-F", "40-F"}
 
 
 def row_sort_key(row: dict[str, Any]) -> tuple[str, str, int]:
@@ -1095,10 +1155,38 @@ def select_previous_annual(rows: list[dict[str, Any]], metric: str, current: dic
             and is_annual_fact(row)
             and row_period_end is not None
             and row_period_end < current_end
+            and periods_are_one_year_apart(current, row)
         ):
             candidates.append(row)
     candidates.sort(key=row_sort_key, reverse=True)
     return candidates[offset - 1] if len(candidates) >= offset else None
+
+
+def validated_annual_growth(
+    current_value: float | None,
+    previous_value: float | None,
+    current_row: dict[str, Any] | None,
+    previous_row: dict[str, Any] | None,
+    *,
+    model_family: str,
+    metric: str,
+) -> tuple[float | None, str]:
+    """Calculate YoY growth only from comparable annual duration facts."""
+    if current_row is None or previous_row is None:
+        return None, f"{metric}_yoy_unavailable_missing_annual_pair"
+    if not is_annual_fact(current_row) or not is_annual_fact(previous_row):
+        return None, f"{metric}_yoy_unavailable_nonannual_pair"
+    if not periods_are_one_year_apart(current_row, previous_row):
+        return None, f"{metric}_yoy_unavailable_noncomparable_periods"
+    value = growth(current_value, previous_value)
+    if value is None:
+        return None, f"{metric}_yoy_unavailable_invalid_denominator"
+    if (
+        model_family == "transportation"
+        and abs(value) > MAX_TRANSPORTATION_AUTOMATIC_ABS_YOY_GROWTH
+    ):
+        return None, f"{metric}_yoy_structural_bridge_required"
+    return value, ""
 
 
 def select_previous_comparable(
@@ -1863,14 +1951,13 @@ def rows_for_reporting_profile(
     if reporting_profile == DESPAC_BRIDGE_PROFILE:
         allowed = {"us-gaap", DESPAC_BRIDGE_TAXONOMY}
         filtered = [row for row in rows if str(row.get("taxonomy") or "") in allowed]
-        if model_family in AVAILABILITY_MODEL_FAMILIES:
-            filtered.extend(
-                row
-                for row in rows
-                if str(row.get("taxonomy") or "") in SUPPLEMENTAL_TAXONOMIES
-                and str(row.get("canonical_metric") or "")
-                in SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
-            )
+        filtered.extend(
+            row
+            for row in rows
+            if str(row.get("taxonomy") or "") in SUPPLEMENTAL_TAXONOMIES
+            and str(row.get("canonical_metric") or "")
+            in SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
+        )
         return filtered, "us-gaap+audited-predecessor"
     if model_family in AVAILABILITY_MODEL_FAMILIES and reporting_profile in {
         "SEC_ARCHIVE_TEXT_TABLE",
@@ -1895,14 +1982,27 @@ def rows_for_reporting_profile(
     if target_taxonomy is None:
         return rows, None
     filtered = [row for row in rows if str(row.get("taxonomy") or "") == target_taxonomy]
-    if model_family in AVAILABILITY_MODEL_FAMILIES:
-        filtered.extend(
-            row
-            for row in rows
-            if str(row.get("taxonomy") or "") in SUPPLEMENTAL_TAXONOMIES
+    primary_metrics = {
+        str(row.get("canonical_metric") or "") for row in filtered
+    }
+    filtered.extend(
+        row
+        for row in rows
+        if str(row.get("taxonomy") or "") in SUPPLEMENTAL_TAXONOMIES
+        and str(row.get("canonical_metric") or "")
+        in SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
+        # A promoted XBRL profile must not let generic archive-text facts
+        # replace a core metric that the declared taxonomy already supplies.
+        # This rejects real false positives such as DHT's parsed "$3,000"
+        # Revenue row while retaining reviewed/IR/footnote supplements and the
+        # explicitly authorized machinery archive-core fallback.
+        and not (
+            str(row.get("taxonomy") or "") == "sec-text"
+            and str(row.get("canonical_metric") or "") in primary_metrics
             and str(row.get("canonical_metric") or "")
-            in SUPPLEMENTAL_METRICS | machinery_sec_text_core_metrics
+            not in machinery_sec_text_core_metrics
         )
+    )
     return filtered, target_taxonomy
 
 
@@ -2601,14 +2701,71 @@ def build_feature_from_facts(
             latest_price = proxy_price
     enterprise_value = market_cap + (debt_usd or 0.0) - (cash_usd or 0.0) if market_cap is not None else None
 
-    prev_revenue = metric_value({"revenue": select_previous_annual(currency_rows, "revenue", selected.get("revenue"))}, "revenue")
-    prev2_revenue_row = select_previous_annual(currency_rows, "revenue", select_previous_annual(currency_rows, "revenue", selected.get("revenue")), offset=1)
+    current_revenue_row = selected.get("revenue")
+    prev_revenue_row = select_previous_annual(
+        currency_rows, "revenue", current_revenue_row
+    )
+    prev_revenue = (
+        as_float(prev_revenue_row.get("value"))
+        if prev_revenue_row is not None
+        else None
+    )
+    prev2_revenue_row = select_previous_annual(
+        currency_rows, "revenue", prev_revenue_row
+    )
     prev2_revenue = as_float(prev2_revenue_row.get("value")) if prev2_revenue_row is not None else None
-    cur_revenue_growth = growth(revenue, prev_revenue)
-    prev_revenue_growth = growth(prev_revenue, prev2_revenue)
+    cur_revenue_growth, cur_revenue_growth_flag = validated_annual_growth(
+        revenue,
+        prev_revenue,
+        current_revenue_row,
+        prev_revenue_row,
+        model_family=model_family,
+        metric="revenue",
+    )
+    prev_revenue_growth, prev_revenue_growth_flag = validated_annual_growth(
+        prev_revenue,
+        prev2_revenue,
+        prev_revenue_row,
+        prev2_revenue_row,
+        model_family=model_family,
+        metric="prior_revenue",
+    )
 
-    prev_gross_profit = metric_value({"gross_profit": select_previous_annual(currency_rows, "gross_profit", selected.get("gross_profit"))}, "gross_profit")
-    prev_operating_income = metric_value({"operating_income": select_previous_annual(currency_rows, "operating_income", selected.get("operating_income"))}, "operating_income")
+    current_gross_profit_row = selected.get("gross_profit")
+    prev_gross_profit_row = select_previous_annual(
+        currency_rows, "gross_profit", current_gross_profit_row
+    )
+    prev_gross_profit = (
+        as_float(prev_gross_profit_row.get("value"))
+        if prev_gross_profit_row is not None
+        else None
+    )
+    gross_profit_growth, gross_profit_growth_flag = validated_annual_growth(
+        gross_profit,
+        prev_gross_profit,
+        current_gross_profit_row,
+        prev_gross_profit_row,
+        model_family=model_family,
+        metric="gross_profit",
+    )
+
+    current_operating_income_row = selected.get("operating_income")
+    prev_operating_income_row = select_previous_annual(
+        currency_rows, "operating_income", current_operating_income_row
+    )
+    prev_operating_income = (
+        as_float(prev_operating_income_row.get("value"))
+        if prev_operating_income_row is not None
+        else None
+    )
+    operating_income_growth, operating_income_growth_flag = validated_annual_growth(
+        operating_income,
+        prev_operating_income,
+        current_operating_income_row,
+        prev_operating_income_row,
+        model_family=model_family,
+        metric="operating_income",
+    )
     prev_fcf_row = select_previous_annual(currency_rows, "operating_cash_flow", selected.get("operating_cash_flow"))
     prev_capex_row = select_previous_annual(currency_rows, "capex", selected.get("capex"))
     prev_fcf = None
@@ -2619,6 +2776,25 @@ def build_feature_from_facts(
             prev_fcf = prev_ocf - prev_capex if prev_ocf is not None and prev_capex is not None else None
         else:
             period_flags.append("period_mismatch_free_cash_flow_yoy_growth")
+    free_cash_flow_growth, free_cash_flow_growth_flag = validated_annual_growth(
+        free_cash_flow,
+        prev_fcf,
+        selected.get("operating_cash_flow"),
+        prev_fcf_row,
+        model_family=model_family,
+        metric="free_cash_flow",
+    )
+    growth_quality_flags = [
+        flag
+        for flag in (
+            cur_revenue_growth_flag,
+            prev_revenue_growth_flag,
+            gross_profit_growth_flag,
+            operating_income_growth_flag,
+            free_cash_flow_growth_flag,
+        )
+        if flag
+    ]
 
     ttm_results = {
         metric: ttm_metric_result(currency_rows, metric)
@@ -2687,6 +2863,7 @@ def build_feature_from_facts(
 
     reasons: list[str] = []
     quality_flags: list[str] = []
+    quality_flags.extend(growth_quality_flags)
     if market_cap_proxy_method:
         quality_flags.append(market_cap_proxy_method)
     equity_issuance_proceeds_ttm_local, equity_proceeds_flag = sanitize_gross_proceeds_ttm(
@@ -3498,6 +3675,33 @@ def build_feature_from_facts(
         selected.get("capex"),
         selected.get("revenue"),
     )
+    # Transportation scoring should use the latest point-in-time trailing
+    # financial window when it is internally aligned. Annual values remain the
+    # fail-closed fallback, preserving other industrial-family behavior.
+    if model_family == "transportation":
+        if (
+            revenue_ttm_local is not None
+            and revenue_ttm_local != 0
+            and operating_income_ttm_local is not None
+            and ttm_windows_match(
+                ttm_results["operating_income"], ttm_results["revenue"]
+            )
+        ):
+            operating_margin = operating_income_ttm_local / revenue_ttm_local
+            quality_flags.append("operating_margin_uses_aligned_latest_ttm")
+        if (
+            revenue_ttm_local is not None
+            and revenue_ttm_local != 0
+            and free_cash_flow_ttm_local is not None
+            and ttm_windows_match(
+                ttm_results["operating_cash_flow"], ttm_results["capex"]
+            )
+            and ttm_windows_match(
+                ttm_results["operating_cash_flow"], ttm_results["revenue"]
+            )
+        ):
+            fcf_margin = free_cash_flow_ttm_local / revenue_ttm_local
+            quality_flags.append("fcf_margin_uses_aligned_latest_ttm")
     r_and_d_pct_revenue = guarded_ratio("r_and_d_pct_revenue", safe_div(r_and_d, revenue), selected.get("research_and_development"), selected.get("revenue"))
     sbc_pct_revenue = guarded_ratio("sbc_pct_revenue", safe_div(sbc, revenue), selected.get("stock_based_compensation"), selected.get("revenue"))
     fcf_to_net_income = guarded_ratio(
@@ -3662,9 +3866,9 @@ def build_feature_from_facts(
             "days_payables_outstanding": days_payables_outstanding,
             "cash_conversion_cycle": cash_conversion_cycle,
             "revenue_yoy_growth": cur_revenue_growth,
-            "gross_profit_yoy_growth": growth(gross_profit, prev_gross_profit),
-            "operating_income_yoy_growth": growth(operating_income, prev_operating_income),
-            "free_cash_flow_yoy_growth": growth(free_cash_flow, prev_fcf),
+            "gross_profit_yoy_growth": gross_profit_growth,
+            "operating_income_yoy_growth": operating_income_growth,
+            "free_cash_flow_yoy_growth": free_cash_flow_growth,
             "revenue_acceleration": cur_revenue_growth - prev_revenue_growth if cur_revenue_growth is not None and prev_revenue_growth is not None else None,
             "fcf_to_net_income": fcf_to_net_income,
             "fcf_yield": safe_div(free_cash_flow_usd, market_cap),
@@ -4422,6 +4626,21 @@ def main() -> None:
         raise FileNotFoundError(share_conversion_path)
     share_conversions = load_share_conversions(share_conversion_path)
     enable_statement_share_fallback = share_conversion_path is not None
+    canonical_override_raw = str(
+        cfg_get(
+            config,
+            f"model_families.{model_family}.financial.canonical_concept_overrides_csv",
+            "",
+        )
+        or ""
+    ).strip()
+    canonical_override_path = (
+        resolve_path(canonical_override_raw, base_dir=base_dir)
+        if canonical_override_raw
+        else None
+    )
+    if canonical_override_path is not None and not canonical_override_path.is_file():
+        raise FileNotFoundError(canonical_override_path)
 
     with closing(connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0)))) as conn:
         init_db(conn)
@@ -4432,6 +4651,11 @@ def main() -> None:
             # raise, never silently fall back to the latest panel asof.
             raise ValueError(f"Unparseable --asof value: {args.asof!r}; expected YYYY-MM-DD.")
         effective_asof = requested_asof or latest_panel_asof(conn, model_family=model_family, market_source_ids=market_source_ids, sec_source_id=source_id) or date.today()
+        canonical_concept_overrides = load_canonical_concept_overrides(
+            canonical_override_path,
+            model_family=model_family,
+            asof=effective_asof,
+        )
         universe = load_universe(
             conn,
             model_family=model_family,
@@ -4451,6 +4675,7 @@ def main() -> None:
                 tickers=tickers,
                 asof=effective_asof,
                 supplemental_source_ids=supplemental_disclosure_source_ids,
+                canonical_concept_overrides=canonical_concept_overrides,
             )
             report_rows: list[dict[str, Any]] = []
             availability_report_rows: list[dict[str, Any]] = []

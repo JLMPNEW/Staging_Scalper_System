@@ -85,6 +85,8 @@ Direct SEC ownership ingestion reads Forms 3/4/5 XML from EDGAR into technology-
 
 The positioning adapter never writes to `sec_insider.sqlite` or `market_positioning.sqlite`; it only normalizes available rows into `technology.sqlite`. The upstream positioning sync intentionally writes to `market_positioning.sqlite`, because that database owns FINRA short-interest, SEC 13F, and IBKR borrow history. Direct SEC ownership is the preferred diagnostic source when the upstream Form 4 database has gaps.
 
+Daily family refreshes use source-specific overlap windows: 120 days for Form 4 and FINRA short interest, 550 days for SEC 13F, and 45 days for IBKR borrow. SEC float denominators are independently re-evaluated over 550 days from already-canonicalized SEC facts. `--history-start` remains a common override, while `--full-history` is reserved for bootstrap and reviewed restatements.
+
 With `positioning_import.include_historical_members: true`, the upstream sync builds `output/technology_cache/positioning/semiconductor_positioning_universe.csv` from the 99 current tickers plus the historical semiconductor membership seed. This lets the free SEC 13F data sets and FINRA short-interest files backfill acquired/delisted tickers without mixing those rows into the current 99-ticker scoring feature output. The standard free-source historical refresh is:
 
 ```powershell

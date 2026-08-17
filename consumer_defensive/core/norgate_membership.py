@@ -44,6 +44,7 @@ class Candidate:
     security_type: str
     cik: str = ""
     explicit_price_symbol: str = ""
+    explicit_provider_asset_id: str = ""
     exit_year: str = ""
     calibration_eligible: int = 1
 
@@ -133,7 +134,51 @@ def load_historical_ciks(policy: UniversePolicy) -> dict[str, str]:
     return mapping
 
 
+def load_current_provider_symbols(
+    policy: UniversePolicy,
+) -> dict[str, tuple[str, str]]:
+    """Load reviewed public-ticker to Norgate-symbol/asset overrides."""
+
+    rows = read_csv(policy.resolve("current_provider_symbol_overrides_csv"))
+    expected = int(policy.payload["expected_current_provider_symbol_override_rows"])
+    if len(rows) != expected:
+        raise ValueError(
+            "Current provider-symbol override file must contain "
+            f"{expected} rows; found {len(rows)}."
+        )
+    required = {
+        "ticker",
+        "norgate_symbol",
+        "norgate_asset_id",
+        "review_status",
+        "review_reason",
+    }
+    if rows and set(rows[0]) != required:
+        raise ValueError(
+            "Current provider-symbol override columns must be exactly "
+            f"{sorted(required)}; got {sorted(rows[0])}."
+        )
+    mapping: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        ticker = normalize_ticker(row.get("ticker"))
+        symbol = str(row.get("norgate_symbol") or "").strip().upper()
+        asset_id = str(row.get("norgate_asset_id") or "").strip()
+        if not ticker or ticker in mapping:
+            raise ValueError(
+                f"Current provider-symbol override ticker is blank or duplicated: {ticker!r}."
+            )
+        if not symbol or not asset_id:
+            raise ValueError(f"Current provider-symbol override is incomplete for {ticker}.")
+        if str(row.get("review_status") or "").strip() != "reviewed":
+            raise ValueError(f"Current provider-symbol override is not reviewed for {ticker}.")
+        if not str(row.get("review_reason") or "").strip():
+            raise ValueError(f"Current provider-symbol override has no review reason for {ticker}.")
+        mapping[ticker] = (symbol, asset_id)
+    return mapping
+
+
 def load_candidates(conn: sqlite3.Connection, policy: UniversePolicy) -> tuple[list[Candidate], list[dict[str, str]]]:
+    current_overrides = load_current_provider_symbols(policy)
     current_rows = conn.execute(
         """
         SELECT s.ticker, c.company_name, c.cik, s.exchange, s.listing_country,
@@ -146,6 +191,13 @@ def load_candidates(conn: sqlite3.Connection, policy: UniversePolicy) -> tuple[l
         ORDER BY s.ticker
         """
     ).fetchall()
+    current_tickers = {str(row[0]) for row in current_rows}
+    unknown_overrides = sorted(set(current_overrides) - current_tickers)
+    if unknown_overrides:
+        raise ValueError(
+            "Current provider-symbol overrides reference out-of-scope tickers: "
+            f"{unknown_overrides}"
+        )
     candidates = [
         Candidate(
             ticker=str(row[0]),
@@ -158,6 +210,8 @@ def load_candidates(conn: sqlite3.Connection, policy: UniversePolicy) -> tuple[l
             cohort_id=str(row[7]),
             cohort_name=str(row[8]),
             source_set="current",
+            explicit_price_symbol=current_overrides.get(str(row[0]), ("", ""))[0],
+            explicit_provider_asset_id=current_overrides.get(str(row[0]), ("", ""))[1],
             calibration_eligible=1,
         )
         for row in current_rows
@@ -412,10 +466,44 @@ def _security_for_candidate(
         """,
         (provider_asset_id,),
     ).fetchall()
-    if existing_identifier and any(int(row[2] or 0) != security_id for row in existing_identifier):
-        raise ValueError(
-            f"Norgate asset {provider_asset_id} maps to multiple securities; candidate={candidate.ticker}."
+    mismatched_identifiers = [
+        row for row in existing_identifier if int(row[2] or 0) != security_id
+    ]
+    if mismatched_identifiers:
+        reviewed_reassignment = (
+            candidate.source_set == "current"
+            and candidate.explicit_provider_asset_id == provider_asset_id
         )
+        for identifier in mismatched_identifiers:
+            prior = conn.execute(
+                """
+                SELECT s.listing_status, c.is_active, COALESCE(c.cik, ''),
+                       EXISTS(
+                           SELECT 1 FROM dim_consumer_defensive_taxonomy t
+                           WHERE t.security_id=s.security_id AND t.model_family=?
+                       )
+                FROM dim_security s
+                JOIN dim_company c ON c.company_id=s.company_id
+                WHERE s.security_id=?
+                """,
+                (MODEL_FAMILY, int(identifier[2])),
+            ).fetchone()
+            same_issuer = bool(
+                prior
+                and candidate.cik
+                and str(prior[2]) == candidate.cik
+            )
+            safely_superseded = bool(
+                prior
+                and str(prior[0]) != "active"
+                and int(prior[1]) == 0
+                and int(prior[3]) == 0
+            )
+            if not (reviewed_reassignment and same_issuer and safely_superseded):
+                raise ValueError(
+                    f"Norgate asset {provider_asset_id} maps to multiple securities; "
+                    f"candidate={candidate.ticker}."
+                )
     if not existing_identifier:
         conn.execute(
             """
@@ -610,6 +698,51 @@ def _persist_pending_membership(
         )
 
 
+def _delete_stale_source_membership(
+    conn: sqlite3.Connection,
+    candidate_tickers: set[str],
+) -> int:
+    placeholders = ",".join("?" for _ in candidate_tickers)
+    stale_security_ids = [
+        int(row[0])
+        for row in conn.execute(
+            f"""SELECT DISTINCT s.security_id
+                FROM dim_security s
+                WHERE s.ticker NOT IN ({placeholders})
+                  AND (
+                      EXISTS(
+                          SELECT 1 FROM dim_universe_membership u
+                          WHERE u.security_id=s.security_id
+                            AND u.membership_source_id=?
+                      )
+                      OR EXISTS(
+                          SELECT 1 FROM fact_major_exchange_listing_daily x
+                          WHERE x.security_id=s.security_id AND x.source_id=?
+                      )
+                      OR EXISTS(
+                          SELECT 1 FROM fact_recognized_vehicle_membership_daily r
+                          WHERE r.security_id=s.security_id AND r.source_id=?
+                      )
+                  )""",
+            [*sorted(candidate_tickers), PIT_SOURCE_ID, PIT_SOURCE_ID, PIT_SOURCE_ID],
+        )
+    ]
+    for security_id in stale_security_ids:
+        conn.execute(
+            "DELETE FROM dim_universe_membership WHERE security_id=? AND membership_source_id=?",
+            (security_id, PIT_SOURCE_ID),
+        )
+        conn.execute(
+            "DELETE FROM fact_major_exchange_listing_daily WHERE security_id=? AND source_id=?",
+            (security_id, PIT_SOURCE_ID),
+        )
+        conn.execute(
+            "DELETE FROM fact_recognized_vehicle_membership_daily WHERE security_id=? AND source_id=?",
+            (security_id, PIT_SOURCE_ID),
+        )
+    return len(stale_security_ids)
+
+
 def load_norgate_membership(
     conn: sqlite3.Connection,
     policy: UniversePolicy,
@@ -674,6 +807,14 @@ def load_norgate_membership(
             continue
         symbol = resolution.symbol
         asset_id = str(provider.assetid(symbol))
+        if (
+            candidate.explicit_provider_asset_id
+            and asset_id != candidate.explicit_provider_asset_id
+        ):
+            raise RuntimeError(
+                f"{candidate.ticker}: reviewed Norgate asset mismatch for {symbol}; "
+                f"expected={candidate.explicit_provider_asset_id} actual={asset_id}"
+            )
         first_date = _iso(provider.first_quoted_date(symbol))
         last_date = _iso(provider.last_quoted_date(symbol))
         effective_start = max(start, first_date)
@@ -842,6 +983,10 @@ def load_norgate_membership(
         separators=(",", ":"),
     )
     with conn:
+        stale_source_securities_removed = _delete_stale_source_membership(
+            conn,
+            {candidate.ticker for candidate in candidates},
+        )
         for pending in pending_loads:
             _persist_pending_membership(
                 conn,
@@ -894,6 +1039,7 @@ def load_norgate_membership(
             "historical_out_of_window": len(out_of_window_historical),
             "daily_rows_written": daily_rows,
             "union_intervals_written": intervals_loaded,
+            "stale_source_securities_removed": stale_source_securities_removed,
             "report_path": str(output_dir / "norgate_membership_resolution.csv"),
             "breadth_path": str(output_dir / "daily_cohort_breadth.csv"),
         }
@@ -922,5 +1068,6 @@ def load_norgate_membership(
             "historical_out_of_window": len(out_of_window_historical),
             "daily_rows_written": daily_rows,
             "union_intervals_written": intervals_loaded,
+            "stale_source_securities_removed": stale_source_securities_removed,
         }
     return summary

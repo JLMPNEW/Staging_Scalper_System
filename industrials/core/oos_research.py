@@ -427,6 +427,85 @@ def max_drawdown(returns: Sequence[float]) -> float | None:
     return worst
 
 
+def summarize_candidate_period_rows(
+    period_rows: Sequence[Mapping[str, object]],
+    *,
+    eligible_row_count: int,
+    available_outcome_row_count: int,
+) -> dict[str, object]:
+    """Summarize already-ranked periods without resetting portfolio state."""
+    ordered = sorted(period_rows, key=lambda row: str(row.get("asof_date") or ""))
+    non_overlapping_rows: list[Mapping[str, object]] = []
+    last_exit: date | None = None
+    for item in ordered:
+        asof_date = parse_date(item["asof_date"])
+        exit_date = parse_date(item["exit_date"])
+        if last_exit is not None and asof_date <= last_exit:
+            continue
+        non_overlapping_rows.append(item)
+        last_exit = exit_date
+
+    def values(field: str, source: Sequence[Mapping[str, object]]) -> list[float]:
+        return [
+            value
+            for item in source
+            if (value := finite_float(item.get(field))) is not None
+        ]
+
+    net_returns = values("net_excess", ordered)
+    rank_vs_cohort = values("top_minus_cohort_net", ordered)
+    rank_top_bottom = values("top_minus_bottom_gross", ordered)
+    cohort_returns = values("cohort_excess", ordered)
+    non_overlapping_returns = values("net_excess", non_overlapping_rows)
+    non_overlapping_rank_vs_cohort = values(
+        "top_minus_cohort_net", non_overlapping_rows
+    )
+    ics = values("ic", ordered)
+    turnovers = values("turnover", ordered)
+
+    def mean(items: Sequence[float]) -> float | None:
+        return sum(items) / len(items) if items else None
+
+    def hit_rate(items: Sequence[float]) -> float | None:
+        return (
+            sum(value > 0 for value in items) / len(items)
+            if items
+            else None
+        )
+
+    return {
+        "eligible_row_count": eligible_row_count,
+        "available_outcome_row_count": available_outcome_row_count,
+        "outcome_coverage": (
+            available_outcome_row_count / eligible_row_count
+            if eligible_row_count
+            else 0.0
+        ),
+        "snapshot_count": len(ordered),
+        "mean_ic": mean(ics),
+        "mean_top_excess_net": mean(net_returns),
+        "top_excess_hit_rate": hit_rate(net_returns),
+        "mean_cohort_excess": mean(cohort_returns),
+        "mean_top_minus_cohort_net": mean(rank_vs_cohort),
+        "top_minus_cohort_hit_rate": hit_rate(rank_vs_cohort),
+        "mean_top_minus_bottom_gross": mean(rank_top_bottom),
+        "top_minus_bottom_hit_rate": hit_rate(rank_top_bottom),
+        "non_overlapping_snapshot_count": len(non_overlapping_rows),
+        "mean_non_overlapping_top_excess_net": mean(non_overlapping_returns),
+        "non_overlapping_top_excess_hit_rate": hit_rate(
+            non_overlapping_returns
+        ),
+        "mean_non_overlapping_top_minus_cohort_net": mean(
+            non_overlapping_rank_vs_cohort
+        ),
+        "non_overlapping_top_minus_cohort_hit_rate": hit_rate(
+            non_overlapping_rank_vs_cohort
+        ),
+        "max_drawdown": max_drawdown(non_overlapping_returns),
+        "average_turnover": mean(turnovers),
+    }
+
+
 def evaluate_candidate(
     rows: Sequence[Mapping[str, object]],
     *,
@@ -476,10 +555,12 @@ def evaluate_candidate(
         if len(values) < minimum_cross_section:
             continue
         count = max(1, math.ceil(len(values) * top_fraction))
-        selected = sorted(
+        ranked = sorted(
             values,
             key=lambda item: (-item[1], item[0]),
-        )[:count]
+        )
+        selected = ranked[:count]
+        bottom = ranked[-count:]
         selected_tickers = {item[0] for item in selected}
         turnover = (
             0.0
@@ -489,7 +570,12 @@ def evaluate_candidate(
             / max(len(previous), len(selected_tickers))
         )
         gross = sum(item[2] for item in selected) / len(selected)
+        cohort_excess = sum(item[2] for item in values) / len(values)
+        bottom_excess = sum(item[2] for item in bottom) / len(bottom)
         net = gross - turnover * transaction_cost_bps / 10000.0
+        top_minus_cohort_net = (
+            gross - cohort_excess - turnover * transaction_cost_bps / 10000.0
+        )
         ic = spearman(
             [item[1] for item in values],
             [item[2] for item in values],
@@ -504,69 +590,23 @@ def evaluate_candidate(
                 "turnover": turnover,
                 "gross_excess": gross,
                 "net_excess": net,
+                "cohort_excess": cohort_excess,
+                "bottom_excess": bottom_excess,
+                "top_minus_cohort_gross": gross - cohort_excess,
+                "top_minus_cohort_net": top_minus_cohort_net,
+                "top_minus_bottom_gross": gross - bottom_excess,
             }
         )
         previous = selected_tickers
-    net_returns = [
-        float(item["net_excess"])
-        for item in period_rows
-    ]
-    non_overlapping_returns: list[float] = []
-    last_exit: date | None = None
-    for item in period_rows:
-        asof_date = parse_date(item["asof_date"])
-        exit_date = parse_date(item["exit_date"])
-        if last_exit is not None and asof_date <= last_exit:
-            continue
-        non_overlapping_returns.append(float(item["net_excess"]))
-        last_exit = exit_date
-    ics = [
-        float(item["ic"])
-        for item in period_rows
-        if item["ic"] is not None
-    ]
-    turnovers = [
-        float(item["turnover"])
-        for item in period_rows
-    ]
+    summary = summarize_candidate_period_rows(
+        period_rows,
+        eligible_row_count=eligible_rows,
+        available_outcome_row_count=available_rows,
+    )
     return {
         "split": split,
         "horizon_sessions": horizon_sessions,
-        "eligible_row_count": eligible_rows,
-        "available_outcome_row_count": available_rows,
-        "outcome_coverage": (
-            available_rows / eligible_rows
-            if eligible_rows
-            else 0.0
-        ),
-        "snapshot_count": len(period_rows),
-        "mean_ic": sum(ics) / len(ics) if ics else None,
-        "mean_top_excess_net": (
-            sum(net_returns) / len(net_returns)
-            if net_returns
-            else None
-        ),
-        "top_excess_hit_rate": (
-            sum(value > 0 for value in net_returns) / len(net_returns)
-            if net_returns
-            else None
-        ),
-        "non_overlapping_snapshot_count": len(non_overlapping_returns),
-        "mean_non_overlapping_top_excess_net": (
-            sum(non_overlapping_returns) / len(non_overlapping_returns)
-            if non_overlapping_returns else None
-        ),
-        "non_overlapping_top_excess_hit_rate": (
-            sum(value > 0 for value in non_overlapping_returns)
-            / len(non_overlapping_returns)
-            if non_overlapping_returns else None
-        ),
-        "max_drawdown": max_drawdown(non_overlapping_returns),
-        "average_turnover": (
-            sum(turnovers) / len(turnovers)
-            if turnovers
-            else None
-        ),
+        **summary,
         "period_rows": period_rows,
     }
 

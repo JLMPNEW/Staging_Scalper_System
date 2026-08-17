@@ -37,8 +37,12 @@ from industrials.transportation.surface_freight_research import (
 )
 from industrials.transportation.surface_freight_score_engine import (
     build_surface_component_scores,
+    cohort_score_eligible,
     candidate_registry_from_policy,
+    load_cohort_score_policy,
     load_surface_freight_score_policy,
+    metric_comparison_group,
+    metric_comparison_group_for_metric,
     score_surface_metric_percentiles,
 )
 from industrials.transportation.valuation_source_audit import (
@@ -516,6 +520,117 @@ def test_v2_fixed_denominator_neutralizes_missing_optional_metric() -> None:
     assert coverage["quality"] == {"observed": 2, "applicable": 3}
     assert components["operating_efficiency_score"] == pytest.approx(50.0)
     assert coverage["operating_efficiency"] == {"observed": 0, "applicable": 2}
+
+
+def test_v5_cohort_policies_are_disjoint_and_metric_domain_isolated() -> None:
+    root = Path(__file__).resolve().parents[2]
+    surface = load_cohort_score_policy(
+        root
+        / "industrials"
+        / "transportation"
+        / "data"
+        / "transportation_surface_freight_score_policy_v3.yaml"
+    )
+    tanker = load_cohort_score_policy(
+        root
+        / "industrials"
+        / "transportation"
+        / "data"
+        / "transportation_tanker_score_policy_v1.yaml"
+    )
+    surface_tickers = set(surface["eligible_tickers"])
+    tanker_tickers = set(tanker["eligible_tickers"])
+    assert len(surface_tickers) == 24
+    assert len(tanker_tickers) == 11
+    assert not surface_tickers & tanker_tickers
+    assert set(surface["score_construction"]["retained_specialized_metrics"]) == {
+        "operating_ratio",
+        "purchased_transportation_ratio",
+        "freight_weight_per_shipment",
+        "shipment_or_load_growth",
+        "pricing_or_yield_growth",
+    }
+    arcb = {
+        "ticker": "ARCB",
+        "calibration_pool": "surface_freight_and_logistics",
+        "risk_tier": "operating",
+        "portfolio_role": "core_candidate",
+        "economic_peer_group": "trucking",
+    }
+    assert cohort_score_eligible(arcb, surface)
+    assert not cohort_score_eligible(arcb, tanker)
+    assert metric_comparison_group_for_metric(
+        arcb, surface, "operating_ratio"
+    ) == "ltl_carriers"
+    assert metric_comparison_group_for_metric(
+        arcb, surface, "purchased_transportation_ratio"
+    ) is None
+
+
+def test_v5_historical_calibration_membership_is_pit_only() -> None:
+    root = Path(__file__).resolve().parents[2]
+    surface = load_cohort_score_policy(
+        root
+        / "industrials"
+        / "transportation"
+        / "data"
+        / "transportation_surface_freight_score_policy_v3.yaml"
+    )
+    tanker = load_cohort_score_policy(
+        root
+        / "industrials"
+        / "transportation"
+        / "data"
+        / "transportation_tanker_score_policy_v1.yaml"
+    )
+    ksu = {
+        "ticker": "KSU",
+        "asof_date": "2021-06-30",
+        "calibration_cohort": "surface_freight_and_logistics",
+        "calibration_use": "historical_research",
+        "_score_membership_mode": "pit",
+    }
+    assert cohort_score_eligible(ksu, surface)
+    assert metric_comparison_group(ksu, surface) == "rail_networks"
+    assert not cohort_score_eligible({**ksu, "_score_membership_mode": "current"}, surface)
+    assert not cohort_score_eligible({**ksu, "asof_date": "2022-01-31"}, surface)
+
+    osg = {
+        "ticker": "OSG",
+        "asof_date": "2023-06-30",
+        "calibration_cohort": "marine_shipping_and_maritime",
+        "calibration_use": "historical_research",
+        "_score_membership_mode": "pit",
+    }
+    assert cohort_score_eligible(osg, tanker)
+    assert metric_comparison_group(osg, tanker) == "oil_tankers"
+    assert "NNA" not in tanker["historical_calibration_only"]
+    assert tanker["excluded_tickers"]["NNA"].startswith(
+        "insufficient_required_metric_history"
+    )
+
+
+def test_scoring_context_propagates_asof_to_historical_policy_gate() -> None:
+    from industrials.transportation.scoring import _member_scoring_context
+
+    root = Path(__file__).resolve().parents[2]
+    surface = load_cohort_score_policy(
+        root
+        / "industrials"
+        / "transportation"
+        / "data"
+        / "transportation_surface_freight_score_policy_v3.yaml"
+    )
+    member = {
+        "ticker": "KSU",
+        "calibration_cohort": "surface_freight_and_logistics",
+        "calibration_use": "historical_research",
+    }
+    context = _member_scoring_context(
+        member, asof="2021-06-30", membership_mode="pit"
+    )
+    assert context["asof_date"] == "2021-06-30"
+    assert cohort_score_eligible(context, surface)
 
 
 def test_v2_research_and_production_metric_entrypoints_are_identical() -> None:

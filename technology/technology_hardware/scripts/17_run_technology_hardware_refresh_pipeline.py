@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
-from technology.core.positioning_window import resolve_positioning_window  # noqa: E402
+from technology.core.positioning_window import resolve_positioning_windows  # noqa: E402
 from technology.core.refresh_orchestration import asof_governance_conflict  # noqa: E402
 
 
@@ -87,7 +87,11 @@ def build_steps(
     financial_batch_timeout_sec: float,
     refresh_sec_if_stale_hours: float | None = None,
     allow_stale_ibkr_borrow_on_error: bool = False,
-    positioning_lookback_days: int = 550,
+    positioning_form4_lookback_days: int = 120,
+    positioning_short_interest_lookback_days: int = 120,
+    positioning_13f_lookback_days: int = 550,
+    positioning_borrow_lookback_days: int = 45,
+    positioning_float_denominator_lookback_days: int = 550,
     positioning_history_floor: str = "2013-01-01",
 ) -> list[Step]:
     asof_args = ["--asof", asof] if asof else []
@@ -102,13 +106,36 @@ def build_steps(
     current_asof = not asof or asof == date.today().isoformat()
     if current_asof and refresh_sec_if_stale_hours and refresh_sec_if_stale_hours > 0:
         sec_args.extend(["--refresh-if-stale-hours", str(refresh_sec_if_stale_hours)])
-    positioning_start, _ = resolve_positioning_window(
+    positioning_windows = resolve_positioning_windows(
         asof=asof,
         configured_start=positioning_history_floor,
-        lookback_days=positioning_lookback_days,
+        form4_lookback_days=positioning_form4_lookback_days,
+        short_interest_lookback_days=positioning_short_interest_lookback_days,
+        institutional_13f_lookback_days=positioning_13f_lookback_days,
+        borrow_lookback_days=positioning_borrow_lookback_days,
+        float_denominator_lookback_days=positioning_float_denominator_lookback_days,
     )
-    positioning_window_args = ["--history-start", positioning_start.isoformat()]
-    positioning_args = [*positioning_window_args, *end_date_args]
+    positioning_sync_args = [
+        "--finra-history-start",
+        positioning_windows.short_interest_start.isoformat(),
+        "--sec-13f-history-start",
+        positioning_windows.institutional_13f_start.isoformat(),
+        "--ibkr-history-start",
+        positioning_windows.borrow_start.isoformat(),
+    ]
+    positioning_import_args = [
+        "--form4-history-start",
+        positioning_windows.form4_start.isoformat(),
+        "--short-interest-history-start",
+        positioning_windows.short_interest_start.isoformat(),
+        "--sec-13f-history-start",
+        positioning_windows.institutional_13f_start.isoformat(),
+        "--ibkr-history-start",
+        positioning_windows.borrow_start.isoformat(),
+        "--float-denominator-history-start",
+        positioning_windows.float_denominator_start.isoformat(),
+    ]
+    positioning_args = [*positioning_sync_args, *end_date_args]
     if skip_ibkr_borrow:
         positioning_args.append("--skip-ibkr-borrow")
     if allow_stale_ibkr_borrow_on_error:
@@ -144,7 +171,7 @@ def build_steps(
         ),
         Step("12_sync_sec_ownership", "stage_5", "Sync direct SEC ownership filings", py_script("technology/technology_hardware/scripts/12_sync_technology_hardware_sec_ownership.py"), refresh_args, network=True),
         Step("13_sync_positioning_upstream", "stage_5", "Sync upstream 13F/FINRA/IBKR positioning feeds", py_script("technology/technology_hardware/scripts/13_sync_technology_hardware_positioning_upstream.py"), positioning_args, pass_db=False, network=True),
-        Step("09_import_positioning", "stage_5", "Import positioning into technology.sqlite", py_script("technology/technology_hardware/scripts/09_import_technology_hardware_positioning.py"), [*asof_args, *positioning_window_args]),
+        Step("09_import_positioning", "stage_5", "Import positioning into technology.sqlite", py_script("technology/technology_hardware/scripts/09_import_technology_hardware_positioning.py"), [*asof_args, *positioning_import_args]),
         Step("10_validate_positioning", "stage_5", "Validate SEC/positioning stage", py_script("technology/technology_hardware/scripts/10_validate_technology_hardware_sec_positioning_stages.py")),
         Step("14_audit_form4_reconciliation", "stage_5", "Audit Form 4/direct ownership reconciliation", py_script("technology/technology_hardware/scripts/14_audit_technology_hardware_form4_reconciliation.py"), asof_args),
         Step("06a_build_scoring_contract", "stage_6a", "Build technology-hardware scoring feature contract", py_script("technology/technology_hardware/scripts/06a_build_technology_hardware_scoring_features.py"), asof_args),
@@ -296,8 +323,20 @@ def main() -> int:
         financial_batch_timeout_sec=float(
             cfg_get(config, f"{CONFIG_KEY}.financial_feature_batch_timeout_sec", 1800.0)
         ),
-        positioning_lookback_days=int(
-            cfg_get(config, "positioning_import.incremental_lookback_days", 550)
+        positioning_form4_lookback_days=int(
+            cfg_get(config, "positioning_import.incremental_lookback_days.form4", 120)
+        ),
+        positioning_short_interest_lookback_days=int(
+            cfg_get(config, "positioning_import.incremental_lookback_days.short_interest", 120)
+        ),
+        positioning_13f_lookback_days=int(
+            cfg_get(config, "positioning_import.incremental_lookback_days.institutional_13f", 550)
+        ),
+        positioning_borrow_lookback_days=int(
+            cfg_get(config, "positioning_import.incremental_lookback_days.ibkr_borrow", 45)
+        ),
+        positioning_float_denominator_lookback_days=int(
+            cfg_get(config, "positioning_import.incremental_lookback_days.sec_float_denominator", 550)
         ),
         positioning_history_floor=str(
             cfg_get(config, "positioning_import.start_date", "2013-01-01")

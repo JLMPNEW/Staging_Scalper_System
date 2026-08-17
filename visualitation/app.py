@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
+from datetime import datetime
+from typing import cast
 import io
 import json
 import sqlite3
@@ -30,6 +32,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 APP_DIR = Path(__file__).resolve().parent
 RUNS_ROOT = APP_DIR.parent / "portfolio_layer" / "output" / "runs"
+IB_REPORTS_ROOT = APP_DIR.parent / "IB_reports"
 DB_PATH = APP_DIR.parent / "portfolio_layer" / "db" / "portfolio_layer.sqlite"
 H1_ROOT = APP_DIR.parent / "portfolio_layer" / "MacroLayer" / "out" / "regime_h1"
 SERVING_DB_PATH = APP_DIR.parent / "portfolio_layer" / "MacroLayer" / "macro_serving.sqlite"
@@ -56,6 +59,7 @@ INK_MUTED = "#898781"
 GRIDLINE = "#e1e0d9"
 BASELINE = "#c3c2b7"
 SERIES_BLUE = "#2a78d6"      # categorical slot 1
+SERIES_ORANGE = "#e68a00"     # categorical slot 2
 STATUS_GOOD = "#0ca30c"
 STATUS_CRITICAL = "#d03b3b"
 SUCCESS_TEXT = "#006300"     # success text green (light surface)
@@ -182,7 +186,7 @@ def load_score_metadata(run_date: str, mtime: float) -> pd.DataFrame:
             df[col] = ""
     df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
     df["industry"] = df["industry"].astype(str).str.strip()
-    return df.loc[:, ["ticker", "industry"]].drop_duplicates("ticker")
+    return df.loc[:, ["ticker", "industry"]].drop_duplicates()
 
 
 @st.cache_data(show_spinner=False)
@@ -358,6 +362,314 @@ def load_trades(signature: tuple) -> pd.DataFrame:
     return df
 
 
+
+def display_date(value: object) -> str:
+    """Render an ISO/date-like value as M/D/YYYY without leading zeroes."""
+    if value is None:
+        return ""
+    try:
+        timestamp = pd.Timestamp(str(value))
+    except (TypeError, ValueError):
+        return ""
+    if str(timestamp) == "NaT":
+        return ""
+    return f"{timestamp.month}/{timestamp.day}/{timestamp.year}"
+
+
+def parse_run_date(value: str) -> pd.Timestamp:
+    """Parse an ISO run-folder date with a concrete timestamp type."""
+    return cast(pd.Timestamp, pd.Timestamp(datetime.strptime(value, "%Y-%m-%d")))
+
+
+def cumulative_returns(values: pd.Series) -> pd.Series:
+    """Compound daily returns without relying on ambiguous pandas overloads."""
+    levels: list[float] = []
+    level = 1.0
+    for value in values:
+        level *= 1.0 + float(value)
+        levels.append(level - 1.0)
+    return pd.Series(levels, index=values.index)
+
+
+
+def performance_signature(run_date: str) -> tuple:
+    """Cache key for the selected run's IB reports and benchmark history."""
+    parts: list[tuple[str, float, int]] = []
+    if not RUNS_ROOT.is_dir():
+        return tuple(parts)
+    for run_dir in RUNS_ROOT.iterdir():
+        if not run_dir.is_dir() or run_dir.name > run_date:
+            continue
+        candidates = (
+            run_dir / "ledger" / "broker_statement_sources.csv",
+            run_dir / "risk" / "prices_adjclose.csv",
+        )
+        for path in candidates:
+            try:
+                stat = path.stat()
+                parts.append((str(path), stat.st_mtime, stat.st_size))
+            except OSError:
+                parts.append((str(path), 0.0, 0))
+    if IB_REPORTS_ROOT.is_dir():
+        for path in IB_REPORTS_ROOT.glob("*.csv"):
+            try:
+                stat = path.stat()
+                parts.append((str(path), stat.st_mtime, stat.st_size))
+            except OSError:
+                continue
+    return tuple(parts)
+
+
+def _read_ib_daily_twr(path: Path) -> tuple[float | None, float | None]:
+    """Read IB's daily TWR and ending NAV from an Activity Statement CSV."""
+    twr: float | None = None
+    ending_value: float | None = None
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.reader(handle):
+                if len(row) >= 3 and row[0] == "Net Asset Value" and row[1] == "Data":
+                    raw = row[2].strip()
+                    if raw.endswith("%"):
+                        try:
+                            twr = float(raw[:-1].replace(",", "")) / 100.0
+                        except ValueError:
+                            pass
+                if (
+                    len(row) >= 4
+                    and row[0] == "Change in NAV"
+                    and row[1] == "Data"
+                    and row[2] == "Ending Value"
+                ):
+                    try:
+                        ending_value = float(row[3].replace(",", ""))
+                    except ValueError:
+                        pass
+    except (OSError, csv.Error):
+        return None, None
+    return twr, ending_value
+
+
+@st.cache_data(show_spinner=False)
+def load_performance_history(run_date: str, signature: tuple) -> pd.DataFrame:
+    """Load IB daily TWR aligned with SPY and QQQ adjusted-close returns."""
+    _ = signature
+    rows: list[dict[str, object]] = []
+    if not RUNS_ROOT.is_dir():
+        return pd.DataFrame()
+    try:
+        run_dirs = sorted(
+            (d for d in RUNS_ROOT.iterdir() if d.is_dir() and d.name <= run_date),
+            key=lambda d: d.name,
+        )
+    except OSError:
+        return pd.DataFrame()
+
+    for run_dir in run_dirs:
+        source_path = run_dir / "ledger" / "broker_statement_sources.csv"
+        if not source_path.is_file():
+            continue
+        try:
+            source = pd.read_csv(source_path, dtype=str, keep_default_na=False)
+        except (OSError, pd.errors.ParserError):
+            continue
+        if source.empty:
+            continue
+        source_row = source.iloc[0]
+        period_start = str(source_row.get("period_start", "")).strip()
+        period_end = str(source_row.get("period_end", "")).strip()
+        if not period_end or period_start != period_end:
+            # The first available report may be a long lookback statement, not a
+            # daily observation; do not treat its cumulative TWR as one day.
+            continue
+        raw_source = str(source_row.get("source_file", "")).strip()
+        report_path = Path(raw_source)
+        if not report_path.is_file():
+            report_path = IB_REPORTS_ROOT / Path(raw_source).name
+        daily_twr, ending_value = _read_ib_daily_twr(report_path)
+        if daily_twr is None:
+            continue
+        rows.append({
+            "date": pd.Timestamp(period_end),
+            "portfolio_twr_daily": daily_twr,
+            "account_value": ending_value,
+            "account_id": str(source_row.get("account_id", "")).strip(),
+        })
+
+    if not rows:
+        return pd.DataFrame()
+    twr = pd.DataFrame(rows).drop_duplicates("date", keep="last").sort_values("date")
+
+    risk_paths = sorted(
+        (
+            d / "risk" / "prices_adjclose.csv"
+            for d in run_dirs
+            if (d / "risk" / "prices_adjclose.csv").is_file()
+        ),
+        reverse=True,
+    )
+    if not risk_paths:
+        return pd.DataFrame()
+    try:
+        prices = pd.read_csv(risk_paths[0], index_col=0)
+    except (OSError, pd.errors.ParserError):
+        return pd.DataFrame()
+    required = {"SPY", "QQQ"}
+    if not required.issubset(prices.columns):
+        return pd.DataFrame()
+    prices.index = pd.to_datetime(prices.index, errors="coerce")
+    prices = prices.loc[prices.index.notna(), ["SPY", "QQQ"]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    benchmark_returns = prices.pct_change().rename(
+        columns={"SPY": "sp500_daily", "QQQ": "nasdaq100_daily"}
+    )
+    benchmark_returns.index.name = "date"
+    benchmark_returns = benchmark_returns.reset_index()
+    result = twr.merge(benchmark_returns, on="date", how="inner")
+    return result.dropna(subset=["portfolio_twr_daily", "sp500_daily", "nasdaq100_daily"])
+
+
+@st.cache_data(show_spinner=False)
+def load_portfolio_beta(
+    run_date: str, holdings_mtime: float, prices_mtime: float
+) -> tuple[float | None, int, int, float]:
+    """Calculate stock beta versus SPY using market-value weights, excluding cash."""
+    _ = holdings_mtime, prices_mtime
+    holdings_path = RUNS_ROOT / run_date / "ledger" / "holding_state.csv"
+    prices_path = RUNS_ROOT / run_date / "risk" / "prices_adjclose.csv"
+    if not prices_path.is_file():
+        try:
+            candidates = sorted(
+                (
+                    d / "risk" / "prices_adjclose.csv"
+                    for d in RUNS_ROOT.iterdir()
+                    if d.is_dir() and d.name <= run_date
+                    and (d / "risk" / "prices_adjclose.csv").is_file()
+                ),
+                reverse=True,
+            )
+        except OSError:
+            candidates = []
+        prices_path = candidates[0] if candidates else prices_path
+    if not holdings_path.is_file() or not prices_path.is_file():
+        return None, 0, 0, 0.0
+
+    try:
+        holdings = pd.read_csv(holdings_path)
+        prices = pd.read_csv(prices_path, index_col=0)
+    except (OSError, pd.errors.ParserError):
+        return None, 0, 0, 0.0
+
+    required_columns = {"asset_category", "symbol", "market_value"}
+    if not required_columns.issubset(holdings.columns) or "SPY" not in prices.columns:
+        return None, 0, 0, 0.0
+
+    positions = holdings.loc[
+        holdings["asset_category"].astype(str).str.casefold().eq("stocks")
+        & ~holdings["symbol"].astype(str).str.strip().str.upper().eq("CASH")
+    ].copy()
+    positions["symbol"] = positions["symbol"].astype(str).str.strip().str.upper()
+    positions["market_value"] = pd.to_numeric(positions["market_value"], errors="coerce")
+    positions = positions.loc[positions["market_value"].notna()]
+    grouped = (
+        positions.groupby("symbol", as_index=False)["market_value"]
+        .sum()
+        .loc[lambda frame: frame["market_value"].ne(0.0)]
+    )
+    total_names = int(len(grouped))
+    invested_value = float(grouped["market_value"].sum()) if total_names else 0.0
+    if total_names == 0 or invested_value == 0.0:
+        return None, 0, total_names, invested_value
+
+    prices.index = pd.to_datetime(prices.index, errors="coerce")
+    prices = prices.loc[prices.index.notna()].apply(pd.to_numeric, errors="coerce")
+    returns = prices.pct_change()
+    benchmark = returns["SPY"]
+    benchmark_variance = benchmark.var()
+    if bool(pd.isna(benchmark_variance)) or float(benchmark_variance) <= 0.0:
+        return None, 0, total_names, invested_value
+
+    weighted_beta = 0.0
+    covered_names = 0
+    for row in grouped.itertuples(index=False):
+        ticker = str(row.symbol)
+        if ticker not in returns.columns:
+            continue
+        pair = pd.concat(
+            [returns[ticker].rename("asset"), benchmark.rename("benchmark")],
+            axis=1,
+        ).dropna()
+        if len(pair) < 60:
+            continue
+        asset_returns = cast(pd.Series, pair["asset"])
+        benchmark_returns = cast(pd.Series, pair["benchmark"])
+        asset_beta = asset_returns.cov(benchmark_returns) / benchmark_returns.var()
+        if bool(pd.isna(asset_beta)):
+            continue
+        weighted_beta += (
+            float(row.market_value) / invested_value
+        ) * float(asset_beta)
+        covered_names += 1
+
+    return (
+        weighted_beta if covered_names else None,
+        covered_names,
+        total_names,
+        invested_value,
+    )
+
+
+def composition_figure(
+    positions: pd.DataFrame, category: str, title: str
+) -> go.Figure | None:
+    """Build a market-value-weighted donut for one IB stock classification."""
+    if positions.empty or category not in positions.columns:
+        return None
+    grouped = cast(pd.DataFrame, (
+        positions.groupby(category, dropna=False, as_index=False)["market_value"]
+        .sum()
+    ))
+    grouped_category = cast(pd.Series, grouped[category])
+    grouped[category] = grouped_category.fillna("Unclassified").astype(str).str.strip()
+    grouped_category = cast(pd.Series, grouped[category])
+    grouped[category] = grouped_category.replace("", "Unclassified")
+    grouped = grouped.loc[grouped["market_value"] > 0].sort_values(
+        "market_value", ascending=False
+    )
+    if grouped.empty:
+        return None
+    if len(grouped) > 10:
+        top = grouped.head(9)
+        other = float(grouped.iloc[9:]["market_value"].sum())
+        grouped = pd.concat(
+            [
+                top,
+                pd.DataFrame([{category: "Other", "market_value": other}]),
+            ],
+            ignore_index=True,
+        )
+    fig = go.Figure(go.Pie(
+        labels=grouped[category],
+        values=grouped["market_value"],
+        hole=0.55,
+        sort=False,
+        textinfo="label+percent",
+        textposition="outside",
+        hovertemplate="%{label}<br>$%{value:,.0f}<br>%{percent:.1%}<extra></extra>",
+    ))
+    fig.update_layout(
+        height=420,
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
+        font=dict(family=FONT_STACK, color=INK, size=13),
+        margin=dict(l=12, r=12, t=46, b=100),
+        title=dict(text=title, x=0.02, xanchor="left"),
+        showlegend=True,
+        legend=dict(orientation="v", x=1.0, xanchor="left", y=0.5, yanchor="middle"),
+    )
+    return fig
+
+
 def base_layout(fig: go.Figure, height: int) -> None:
     fig.update_layout(
         height=height,
@@ -427,7 +739,7 @@ else:
     book["avg_cost_price"] = pd.NA
 
 # --- Header -----------------------------------------------------------------
-st.title(f"Final Target Book - {run_date}")
+st.title(f"Final Target Book - {display_date(run_date) or 'n/a'}")
 
 acceptance = manifest.get("acceptance", "UNKNOWN")
 # WARN checks are advisory diagnostics (they never gate acceptance) and must not
@@ -498,7 +810,7 @@ r1c1.metric("Macro regime (current)", fmt_regime(preamble.get("active_current_re
             regime_delta(v1_cur_tp, preamble.get("current_confidence")) or None, delta_color="off")
 r1c2.metric("Macro regime (next)", fmt_regime(preamble.get("active_next_regime", "")),
             regime_delta(v1_nxt_tp, preamble.get("next_confidence")) or None, delta_color="off")
-r1c3.metric("Macro as-of", preamble.get("macro_as_of_date", "n/a"))
+r1c3.metric("Macro as-of", display_date(preamble.get("macro_as_of_date")) or "n/a")
 
 r2c1, r2c2, r2c3 = st.columns(3)
 if h1:
@@ -508,7 +820,7 @@ if h1:
     r2c2.metric("H1 estimate (next)", fmt_regime(str(h1.get("active_next_regime", ""))),
                 regime_delta(h1.get("next_top_probability"), h1.get("next_confidence")) or None,
                 delta_color="off")
-    r2c3.metric("H1 as-of", str(h1.get("as_of_date", "n/a")))
+    r2c3.metric("H1 as-of", display_date(h1.get("as_of_date")) or "n/a")
     st.caption("H1 is the shadow candidate regime model (not promoted); "
                "the book is sized by the active source in the first row.")
 else:
@@ -538,163 +850,344 @@ k[5].metric("Earnings <= 7d", int(earnings_soon))
 
 st.divider()
 
-# --- IB realized P&L (account-level, from the run's normalized IB trades) -----
-st.subheader("IB realized P&L")
 
-# The sealed preamble carries IB's own statement figures - those are authoritative.
-# Summing broker_trades.realized_pl reproduces only the trade-level short-term
-# component (it excludes dividends and broker interest), so it must not headline.
-sealed_realized_mtd = preamble_float(preamble, "ib_realized_profit_loss_mtd")
-sealed_realized_ytd = preamble_float(preamble, "ib_realized_profit_loss_ytd")
-sealed_mtm_mtd = preamble_float(preamble, "ib_mark_to_market_mtd_profit")
-sealed_mtm_ytd = preamble_float(preamble, "ib_mark_to_market_ytd_profit")
+# --- IB realized P&L and performance ---------------------------------------
+pnl_col, performance_col = st.columns([1.08, 1.0])
+with pnl_col:
+    # --- IB realized P&L (account-level, from the run's normalized IB trades) -----
+    st.subheader("IB realized P&L")
 
-if sealed_realized_mtd is not None or sealed_realized_ytd is not None:
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Realized P&L - MTD",
-              f"${sealed_realized_mtd:,.2f}" if sealed_realized_mtd is not None else "n/a")
-    s2.metric("Realized P&L - YTD",
-              f"${sealed_realized_ytd:,.2f}" if sealed_realized_ytd is not None else "n/a")
-    s3.metric("Mark-to-market - MTD",
-              f"${sealed_mtm_mtd:,.2f}" if sealed_mtm_mtd is not None else "n/a")
-    s4.metric("Mark-to-market - YTD",
-              f"${sealed_mtm_ytd:,.2f}" if sealed_mtm_ytd is not None else "n/a")
+    # The sealed preamble carries IB's own statement figures - those are authoritative.
+    # Summing broker_trades.realized_pl reproduces only the trade-level short-term
+    # component (it excludes dividends and broker interest), so it must not headline.
+    sealed_realized_mtd = preamble_float(preamble, "ib_realized_profit_loss_mtd")
+    sealed_realized_ytd = preamble_float(preamble, "ib_realized_profit_loss_ytd")
+    sealed_mtm_mtd = preamble_float(preamble, "ib_mark_to_market_mtd_profit")
+    sealed_mtm_ytd = preamble_float(preamble, "ib_mark_to_market_ytd_profit")
 
-    def component_line(period: str) -> str:
-        labels = [("ib_realized_short_term", "short-term"), ("ib_realized_long_term", "long-term"),
-                  ("ib_dividends", "dividends"), ("ib_net_broker_interest", "net interest")]
-        parts = []
-        for key, label in labels:
-            value = preamble_float(preamble, f"{key}_{period}")
-            if value is not None:
-                parts.append(f"{label} ${value:,.2f}")
-        return " - ".join(parts)
+    if sealed_realized_mtd is not None or sealed_realized_ytd is not None:
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Realized P&L - MTD",
+                  f"${sealed_realized_mtd:,.2f}" if sealed_realized_mtd is not None else "n/a")
+        s2.metric("Realized P&L - YTD",
+                  f"${sealed_realized_ytd:,.2f}" if sealed_realized_ytd is not None else "n/a")
+        s3.metric("Mark-to-market - MTD",
+                  f"${sealed_mtm_mtd:,.2f}" if sealed_mtm_mtd is not None else "n/a")
+        s4.metric("Mark-to-market - YTD",
+                  f"${sealed_mtm_ytd:,.2f}" if sealed_mtm_ytd is not None else "n/a")
 
-    st.caption(
-        f"IB statement figures sealed in the book preamble (as of "
-        f"{preamble.get('ib_profit_as_of_date', 'n/a')}) - the authoritative account numbers.  \n"
-        f"MTD components: {component_line('mtd') or 'n/a'}  \n"
-        f"YTD components: {component_line('ytd') or 'n/a'}"
-    )
-else:
-    st.info("This run's book carries no sealed IB P&L preamble; falling back to trade-derived sums.")
+        def component_line(period: str) -> str:
+            labels = [("ib_realized_short_term", "short-term"), ("ib_realized_long_term", "long-term"),
+                      ("ib_dividends", "dividends"), ("ib_net_broker_interest", "net interest")]
+            parts = []
+            for key, label in labels:
+                value = preamble_float(preamble, f"{key}_{period}")
+                if value is not None:
+                    parts.append(f"{label} ${value:,.2f}")
+            return " - ".join(parts)
 
-st.markdown("**Trade-level attribution** (from the `broker_trades` history)")
-if not DB_PATH.is_file():
-    st.info(f"Portfolio-layer DB not found at {DB_PATH}.")
-else:
-    trades = load_trades(db_signature(DB_PATH))
-    ytd_trades = trades.loc[
-        trades["trade_date"].dt.year.eq(run_ts.year) & trades["trade_date"].le(run_ts)
-    ]
-    mtd_trades = ytd_trades.loc[ytd_trades["trade_date"].dt.month.eq(run_ts.month)]
-    pl1, pl2 = st.columns(2)
-    pl1.metric("Trade realized - MTD", f"${mtd_trades['realized_pl'].sum():,.2f}")
-    pl2.metric("Trade realized - YTD", f"${ytd_trades['realized_pl'].sum():,.2f}")
-    with st.expander("Per-symbol breakdown"):
-        per_symbol = (
-            ytd_trades.groupby("symbol")
-            .agg(
-                realized_pl_ytd=("realized_pl", "sum"),
-                trades_ytd=("realized_pl", "size"),
+        ib_as_of = display_date(preamble.get("ib_profit_as_of_date")) or "n/a"
+        st.caption(
+            f"IB statement figures sealed in the book preamble (as of "
+            f"{ib_as_of}) - the authoritative account numbers.  \n"
+            f"MTD components: {component_line('mtd') or 'n/a'}  \n"
+            f"YTD components: {component_line('ytd') or 'n/a'}"
+        )
+    else:
+        st.info("This run's book carries no sealed IB P&L preamble; falling back to trade-derived sums.")
+
+    st.markdown("**Trade-level attribution** (from the `broker_trades` history)")
+    if not DB_PATH.is_file():
+        st.info(f"Portfolio-layer DB not found at {DB_PATH}.")
+    else:
+        trades = load_trades(db_signature(DB_PATH))
+        ytd_trades = trades.loc[
+            trades["trade_date"].dt.year.eq(run_ts.year) & trades["trade_date"].le(run_ts)
+        ]
+        mtd_trades = ytd_trades.loc[ytd_trades["trade_date"].dt.month.eq(run_ts.month)]
+        pl1, pl2 = st.columns(2)
+        pl1.metric("Trade realized - MTD", f"${mtd_trades['realized_pl'].sum():,.2f}")
+        pl2.metric("Trade realized - YTD", f"${ytd_trades['realized_pl'].sum():,.2f}")
+        with st.expander("Per-symbol breakdown"):
+            per_symbol = (
+                ytd_trades.groupby("symbol")
+                .agg(
+                    realized_pl_ytd=("realized_pl", "sum"),
+                    trades_ytd=("realized_pl", "size"),
+                )
+                .join(mtd_trades.groupby("symbol")["realized_pl"].sum().rename("realized_pl_mtd"))
             )
-            .join(mtd_trades.groupby("symbol")["realized_pl"].sum().rename("realized_pl_mtd"))
+            per_symbol["realized_pl_mtd"] = per_symbol["realized_pl_mtd"].fillna(0.0)
+            per_symbol = (
+                per_symbol.loc[per_symbol["realized_pl_ytd"].ne(0) | per_symbol["realized_pl_mtd"].ne(0)]
+                .sort_index()
+                .reset_index()
+                .loc[:, ["symbol", "realized_pl_mtd", "realized_pl_ytd", "trades_ytd"]]
+            )
+            st.dataframe(
+                per_symbol.style.format({"realized_pl_mtd": "${:,.2f}", "realized_pl_ytd": "${:,.2f}"}),
+                width="stretch",
+            )
+        accounts = sorted(str(a) for a in ytd_trades["account"].dropna().unique())
+        st.caption(
+            f"Per-trade realized_pl by trade date <= {display_date(run_date) or 'n/a'}, all asset categories "
+            f"(stocks, options, crypto) across account(s) {', '.join(accounts) or 'n/a'}. "
+            f"This is trade-level attribution only - it excludes dividends and broker interest, "
+            f"so it will NOT tie to the sealed IB realized total above."
         )
-        per_symbol["realized_pl_mtd"] = per_symbol["realized_pl_mtd"].fillna(0.0)
-        per_symbol = (
-            per_symbol.loc[per_symbol["realized_pl_ytd"].ne(0) | per_symbol["realized_pl_mtd"].ne(0)]
-            .sort_index()
-            .reset_index()
-            .loc[:, ["symbol", "realized_pl_mtd", "realized_pl_ytd", "trades_ytd"]]
+with performance_col:
+    st.subheader("Performance")
+    performance = load_performance_history(run_date, performance_signature(run_date))
+    if performance.empty:
+        st.info("No daily IB TWR and benchmark history is available for this run.")
+    else:
+        perf_period = st.radio(
+            "Performance period",
+            options=["7D", "MTD", "YTD", "1Y", "All"],
+            index=1,
+            horizontal=True,
+            key="performance_period",
+            label_visibility="collapsed",
         )
-        st.dataframe(
-            per_symbol.style.format({"realized_pl_mtd": "${:,.2f}", "realized_pl_ytd": "${:,.2f}"}),
-            width="stretch",
-        )
-    accounts = sorted(str(a) for a in ytd_trades["account"].dropna().unique())
-    st.caption(
-        f"Per-trade `realized_pl` by trade date <= {run_date}, all asset categories "
-        f"(stocks, options, crypto) across account(s) {', '.join(accounts) or 'n/a'}. "
-        f"This is trade-level attribution only - it excludes dividends and broker interest, "
-        f"so it will NOT tie to the sealed IB realized total above."
-    )
+        period_end = parse_run_date(run_date)
+        if perf_period == "7D":
+            period_start = period_end - pd.Timedelta(days=7)
+        elif perf_period == "MTD":
+            period_start = period_end.replace(day=1)
+        elif perf_period == "YTD":
+            period_start = period_end.replace(month=1, day=1)
+        elif perf_period == "1Y":
+            period_start = period_end - pd.DateOffset(years=1)
+        else:
+            period_start = performance["date"].min()
+
+        visible = performance.loc[
+            performance["date"].between(period_start, period_end)
+        ].copy()
+        if visible.empty:
+            st.info(f"No performance observations are available for {perf_period}.")
+        else:
+            visible["portfolio_return"] = cumulative_returns(
+                visible["portfolio_twr_daily"].astype(float)
+            )
+            visible["sp500_return"] = cumulative_returns(
+                visible["sp500_daily"].astype(float)
+            )
+            visible["nasdaq100_return"] = cumulative_returns(
+                visible["nasdaq100_daily"].astype(float)
+            )
+
+            latest = visible.iloc[-1]
+            metric_left, metric_right = st.columns(2)
+            account_value = latest.get("account_value")
+            metric_left.metric(
+                "Account value",
+                "$" + f"{float(account_value):,.2f}" if pd.notna(account_value) else "n/a",
+            )
+            metric_right.metric(
+                f"Portfolio TWR ({perf_period})",
+                f"{float(latest['portfolio_return']):.2%}",
+            )
+
+            performance_fig = go.Figure()
+            performance_fig.add_trace(go.Scatter(
+                x=visible["date"],
+                y=visible["portfolio_return"],
+                mode="lines+markers",
+                name="Portfolio TWR",
+                line=dict(color=SERIES_BLUE, width=2.5),
+                marker=dict(size=4),
+                hovertemplate="%{x|%-m/%-d/%Y}<br>Portfolio TWR: %{y:.2%}<extra></extra>",
+            ))
+            performance_fig.add_trace(go.Scatter(
+                x=visible["date"],
+                y=visible["sp500_return"],
+                mode="lines",
+                name="S&P 500",
+                line=dict(color=STATUS_GOOD, width=2.0),
+                hovertemplate="%{x|%-m/%-d/%Y}<br>S&P 500: %{y:.2%}<extra></extra>",
+            ))
+            performance_fig.add_trace(go.Scatter(
+                x=visible["date"],
+                y=visible["nasdaq100_return"],
+                mode="lines",
+                name="Nasdaq-100",
+                line=dict(color=SERIES_ORANGE, width=2.0),
+                hovertemplate="%{x|%-m/%-d/%Y}<br>Nasdaq-100: %{y:.2%}<extra></extra>",
+            ))
+            base_layout(performance_fig, height=330)
+            performance_fig.update_layout(
+                margin=dict(l=8, r=8, t=34, b=8),
+                legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0.0),
+            )
+            performance_fig.update_xaxes(title_text=None, tickformat="%-m/%-d")
+            performance_fig.update_yaxes(title_text=None, tickformat=".1%", zeroline=True)
+            st.plotly_chart(
+                performance_fig,
+                width="stretch",
+                config={"displayModeBar": False},
+            )
+            account_id = str(latest.get("account_id", "")).strip()
+            start_display = display_date(visible["date"].iloc[0]) or "n/a"
+            end_display = display_date(visible["date"].iloc[-1]) or "n/a"
+            st.caption(
+                f"IB daily time-weighted returns from {start_display} through {end_display}. "
+                "S&P 500 uses SPY and Nasdaq-100 uses QQQ adjusted-close proxies. "
+                f"Account: {account_id or 'n/a'}."
+            )
 
 st.divider()
 
 # --- IB positions vs account value ---------------------------------------------
-st.subheader("IB positions - cost vs market value")
-if not holdings_path.is_file():
-    st.info("No ledger/holding_state.csv in this run (the ledger only runs on the strategic cadence).")
-else:
-    holdings = load_holdings(run_date, holdings_path.stat().st_mtime)
-    cash = load_ending_cash(run_date, cash_path.stat().st_mtime) if cash_path.is_file() else 0.0
-    account_value = float(holdings["market_value"].sum()) + cash
-    if account_value <= 0:  # never divide by a zero/absent account value
-        st.warning("Account value is zero or unavailable; percentage-of-account figures are hidden.")
-
-    a1, a2, a3, a4 = st.columns(4)
-    a1.metric("Account value", f"${account_value:,.0f}")
-    a2.metric("Positions market value", f"${holdings['market_value'].sum():,.0f}")
-    a3.metric("Cash", f"${cash:,.0f}",
-              f"{cash / account_value:.1%} of account" if account_value > 0 else None,
-              delta_color="off")
-    a4.metric("Unrealized P&L", f"${holdings['unrealized_pl'].sum():,.0f}")
-
-    pos = holdings.loc[:, ["symbol", "cost_basis", "market_value", "unrealized_pl"]].copy()
-    cash_row = pd.DataFrame([{"symbol": "CASH", "cost_basis": cash,
-                              "market_value": cash, "unrealized_pl": 0.0}])
-    pos = pd.concat([pos, cash_row], ignore_index=True)
-    pos["base"] = pos[["cost_basis", "market_value"]].min(axis=1)
-    pos["gain"] = (pos["market_value"] - pos["cost_basis"]).clip(lower=0.0)
-    pos["loss"] = (pos["cost_basis"] - pos["market_value"]).clip(lower=0.0)
-    pos["pct_of_account"] = pos["market_value"] / account_value if account_value > 0 else 0.0
-    pos = pos.sort_values("market_value")  # smallest at bottom; largest on top
-
-    hover = ("<b>%{y}</b><br>cost basis $%{customdata[0]:,.0f}"
-             "<br>market value $%{customdata[1]:,.0f}"
-             "<br>unrealized P&L $%{customdata[2]:,.0f}"
-             "<br>%{customdata[3]:.1%} of account<extra>%{fullData.name}</extra>")
-    custom = pos[["cost_basis", "market_value", "unrealized_pl", "pct_of_account"]].values
-    is_cash_bar = pos["symbol"].eq("CASH")
-    fig = go.Figure()
-    fig.add_trace(go.Bar(  # blue = the lower of cost basis / market value
-        y=pos["symbol"], x=pos["base"].where(~is_cash_bar, 0.0), orientation="h",
-        name="Position value (min of cost & market)", marker=dict(color=SERIES_BLUE),
-        width=0.62, customdata=custom, hovertemplate=hover,
-    ))
-    fig.add_trace(go.Bar(
-        y=pos["symbol"], x=pos["base"].where(is_cash_bar, 0.0), orientation="h",
-        name="Cash", marker=dict(color=INK_MUTED),
-        width=0.62, customdata=custom, hovertemplate=hover,
-    ))
-    fig.add_trace(go.Bar(  # green tip: bar ends at market value, boundary = cost
-        y=pos["symbol"], x=pos["gain"], orientation="h",
-        name="Unrealized gain", marker=dict(color=STATUS_GOOD),
-        width=0.62, customdata=custom, hovertemplate=hover,
-    ))
-    fig.add_trace(go.Bar(  # red tip: bar ends at cost basis, boundary = market value
-        y=pos["symbol"], x=pos["loss"], orientation="h",
-        name="Unrealized loss", marker=dict(color=STATUS_CRITICAL),
-        width=0.62, customdata=custom, hovertemplate=hover,
-    ))
-    for _, r in pos.iterrows():
-        fig.add_annotation(
-            x=max(r["cost_basis"], r["market_value"]), y=r["symbol"],
-            text=f"{r['pct_of_account']:.1%} (${r['market_value']:,.0f})",
-            showarrow=False, xanchor="left", xshift=6,
-            font=dict(color=INK_SECONDARY, size=13),
-        )
-    base_layout(fig, height=max(380, 28 * len(pos) + 130))
-    fig.update_layout(barmode="stack", xaxis_tickprefix="$", xaxis_tickformat=",.0f",
-                      margin=dict(r=150))
-    fig.update_yaxes(tickfont=dict(color=INK, size=13))
-    st.plotly_chart(fig, width="stretch")
-    st.caption(
-        "Each bar spans max(cost basis, market value): the colored tip is the unrealized "
-        "gain (green, bar ends at market value) or loss (red, bar ends at cost basis); "
-        "the label is the position's market value as % of the account. "
-        "Source: `ledger/holding_state.csv` + `broker_cash_report.csv` Ending Cash."
+risk_prices_path = RUNS_ROOT / run_date / "risk" / "prices_adjclose.csv"
+beta_value, beta_covered, beta_total, beta_invested = (
+    load_portfolio_beta(
+        run_date,
+        holdings_path.stat().st_mtime,
+        risk_prices_path.stat().st_mtime if risk_prices_path.is_file() else 0.0,
     )
+    if holdings_path.is_file()
+    else (None, 0, 0, 0.0)
+)
+position_title_col, beta_title_col = st.columns([1.0, 1.35])
+with position_title_col:
+    st.subheader("IB positions - cost vs market value")
+with beta_title_col:
+    beta_display = f"{beta_value:.2f}" if beta_value is not None else "n/a"
+    st.subheader(f"IB Portfolio Beta (excluding cash): {beta_display}")
+    if beta_value is not None:
+        st.caption(
+            f"Market-value weighted stock beta versus SPY; {beta_covered} of "
+            f"{beta_total} stock positions covered by local price history."
+        )
+ib_chart_left, ib_chart_right = st.columns([1.18, 1.0])
+with ib_chart_left:
+    if not holdings_path.is_file():
+        st.info("No ledger/holding_state.csv in this run (the ledger only runs on the strategic cadence).")
+    else:
+        holdings = load_holdings(run_date, holdings_path.stat().st_mtime)
+        cash = load_ending_cash(run_date, cash_path.stat().st_mtime) if cash_path.is_file() else 0.0
+        account_value = float(holdings["market_value"].sum()) + cash
+        if account_value <= 0:  # never divide by a zero/absent account value
+            st.warning("Account value is zero or unavailable; percentage-of-account figures are hidden.")
+    
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Account value", f"${account_value:,.0f}")
+        a2.metric("Positions market value", f"${holdings['market_value'].sum():,.0f}")
+        a3.metric("Cash", f"${cash:,.0f}",
+                  f"{cash / account_value:.1%} of account" if account_value > 0 else None,
+                  delta_color="off")
+        a4.metric("Unrealized P&L", f"${holdings['unrealized_pl'].sum():,.0f}")
+    
+        pos = holdings.loc[:, ["symbol", "cost_basis", "market_value", "unrealized_pl"]].copy()
+        cash_row = pd.DataFrame([{"symbol": "CASH", "cost_basis": cash,
+                                  "market_value": cash, "unrealized_pl": 0.0}])
+        pos = pd.concat([pos, cash_row], ignore_index=True)
+        pos["base"] = pos[["cost_basis", "market_value"]].min(axis=1)
+        pos["gain"] = (pos["market_value"] - pos["cost_basis"]).clip(lower=0.0)
+        pos["loss"] = (pos["cost_basis"] - pos["market_value"]).clip(lower=0.0)
+        pos["pct_of_account"] = pos["market_value"] / account_value if account_value > 0 else 0.0
+        pos = pos.sort_values("market_value")  # smallest at bottom; largest on top
+    
+        hover = ("<b>%{y}</b><br>cost basis $%{customdata[0]:,.0f}"
+                 "<br>market value $%{customdata[1]:,.0f}"
+                 "<br>unrealized P&L $%{customdata[2]:,.0f}"
+                 "<br>%{customdata[3]:.1%} of account<extra>%{fullData.name}</extra>")
+        custom = pos[["cost_basis", "market_value", "unrealized_pl", "pct_of_account"]].values
+        is_cash_bar = pos["symbol"].eq("CASH")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(  # blue = the lower of cost basis / market value
+            y=pos["symbol"], x=pos["base"].where(~is_cash_bar, 0.0), orientation="h",
+            name="Position value (min of cost & market)", marker=dict(color=SERIES_BLUE),
+            width=0.62, customdata=custom, hovertemplate=hover,
+        ))
+        fig.add_trace(go.Bar(
+            y=pos["symbol"], x=pos["base"].where(is_cash_bar, 0.0), orientation="h",
+            name="Cash", marker=dict(color=INK_MUTED),
+            width=0.62, customdata=custom, hovertemplate=hover,
+        ))
+        fig.add_trace(go.Bar(  # green tip: bar ends at market value, boundary = cost
+            y=pos["symbol"], x=pos["gain"], orientation="h",
+            name="Unrealized gain", marker=dict(color=STATUS_GOOD),
+            width=0.62, customdata=custom, hovertemplate=hover,
+        ))
+        fig.add_trace(go.Bar(  # red tip: bar ends at cost basis, boundary = market value
+            y=pos["symbol"], x=pos["loss"], orientation="h",
+            name="Unrealized loss", marker=dict(color=STATUS_CRITICAL),
+            width=0.62, customdata=custom, hovertemplate=hover,
+        ))
+        for _, r in pos.iterrows():
+            fig.add_annotation(
+                x=max(r["cost_basis"], r["market_value"]), y=r["symbol"],
+                text=f"{r['pct_of_account']:.1%} (${r['market_value']:,.0f})",
+                showarrow=False, xanchor="left", xshift=6,
+                font=dict(color=INK_SECONDARY, size=13),
+            )
+        base_layout(fig, height=max(380, 28 * len(pos) + 130))
+        fig.update_layout(barmode="stack", xaxis_tickprefix="$", xaxis_tickformat=",.0f",
+                          margin=dict(r=150))
+        fig.update_yaxes(tickfont=dict(color=INK, size=13))
+        st.plotly_chart(fig, width="stretch")
+        st.caption(
+            "Each bar spans max(cost basis, market value): the colored tip is the unrealized "
+            "gain (green, bar ends at market value) or loss (red, bar ends at cost basis); "
+            "the label is the position's market value as % of the account. "
+            "Source: `ledger/holding_state.csv` + `broker_cash_report.csv` Ending Cash."
+        )
+
+with ib_chart_right:
+    if holdings_path.is_file():
+        ib_stock_positions = holdings.loc[
+            holdings["asset_category"].astype(str).str.casefold().eq("stocks")
+        ].copy()
+        ib_stock_positions["ticker"] = (
+            ib_stock_positions["symbol"].astype(str).str.strip().str.upper()
+        )
+        ib_stock_positions = ib_stock_positions.merge(
+            book[["ticker", "sector", "industry"]].drop_duplicates(),
+            on="ticker",
+            how="left",
+        )
+        for classification in ("sector", "industry"):
+            ib_stock_positions[classification] = (
+                ib_stock_positions[classification]
+                .fillna("Unclassified")
+                .astype(str)
+                .str.strip()
+                .replace("", "Unclassified")
+            )
+    
+        st.subheader("IB portfolio composition")
+        sector_fig = composition_figure(
+            ib_stock_positions, "sector", "Sector"
+        )
+        industry_fig = composition_figure(
+            ib_stock_positions, "industry", "Industry"
+        )
+        sector_col, industry_col = st.columns(2)
+        with sector_col:
+            if sector_fig is None:
+                st.info("No positive stock market value is available for a sector breakdown.")
+            else:
+                st.plotly_chart(
+                    sector_fig,
+                    width="stretch",
+                    config={"displayModeBar": False},
+                )
+        with industry_col:
+            if industry_fig is None:
+                st.info("No positive stock market value is available for an industry breakdown.")
+            else:
+                st.plotly_chart(
+                    industry_fig,
+                    width="stretch",
+                    config={"displayModeBar": False},
+                )
+        st.caption(
+            "Sector and industry donuts use positive IB stock market value, with cash and "
+            "non-stock positions excluded. Short or negative net exposures are omitted from "
+            "the part-to-whole charts; the beta above uses signed stock market-value weights."
+        )
 
 # --- Filter row (scopes every chart and the table below) ---------------------
 all_sectors = [s if s else "Unclassified" for s in sorted(book["sector"].unique())]
@@ -758,7 +1251,7 @@ styler = (
         "add_band_low": "{:,.2f}", "add_band_high": "{:,.2f}",
         "trim_band_low": "{:,.2f}", "trim_band_high": "{:,.2f}",
         "IB_quantity": "{:,.0f}", "earnings_in_days": "{:.0f}",
-        "next_earnings_date": lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "",
+        "next_earnings_date": display_date,
     }, na_rep="")
 )
 # Styler.map is the pandas>=2.1 name for applymap; local stubs predate it.
@@ -847,7 +1340,7 @@ else:
         "current_price": "{:,.2f}",
         "starter_band_low": "{:,.2f}", "starter_band_high": "{:,.2f}",
         "add_band_low": "{:,.2f}", "add_band_high": "{:,.2f}",
-        "next_earnings_date": lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "",
+        "next_earnings_date": display_date,
     }, na_rep="")
     top_styler = top_styler.map(style_internal, subset=["internal_state"])
     top_styler = top_styler.map(style_action, subset=["action_state"])

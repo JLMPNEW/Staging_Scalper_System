@@ -22,7 +22,10 @@ from technology.core.portfolio_candidate_fields import (
     add_portfolio_candidate_fields,
     validate_portfolio_candidate_rows,
 )
-from technology.core.positioning_window import resolve_positioning_window
+from technology.core.positioning_window import (
+    resolve_positioning_window,
+    resolve_positioning_windows,
+)
 from technology.core.refresh_orchestration import asof_governance_conflict
 from technology.core.signal_diagnostics import (
     financial_subfeatures as shared_financial_subfeatures,
@@ -570,6 +573,73 @@ def test_positioning_incremental_window_is_bounded_and_respects_floor() -> None:
     assert floor_start == date(2013, 1, 1)
 
 
+def test_positioning_source_windows_use_approved_horizons() -> None:
+    windows = resolve_positioning_windows(
+        asof="2026-08-14",
+        configured_start="2013-01-01",
+    )
+    assert (windows.end - windows.form4_start).days == 120
+    assert (windows.end - windows.short_interest_start).days == 120
+    assert (windows.end - windows.institutional_13f_start).days == 550
+    assert (windows.end - windows.borrow_start).days == 45
+    assert (windows.end - windows.float_denominator_start).days == 550
+
+    overridden = resolve_positioning_windows(
+        asof="2026-08-14",
+        configured_start="2013-01-01",
+        requested_start="2025-01-01",
+        borrow_requested_start="2026-08-01",
+    )
+    assert overridden.form4_start == date(2025, 1, 1)
+    assert overridden.institutional_13f_start == date(2025, 1, 1)
+    assert overridden.borrow_start == date(2026, 8, 1)
+
+    full = resolve_positioning_windows(
+        asof="2026-08-14",
+        configured_start="2013-01-01",
+        full_history=True,
+    )
+    assert {
+        full.form4_start,
+        full.short_interest_start,
+        full.institutional_13f_start,
+        full.borrow_start,
+        full.float_denominator_start,
+    } == {date(2013, 1, 1)}
+
+
+def test_upstream_sync_propagates_source_windows_to_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream = load_script(
+        "technology/scripts/13_sync_technology_positioning_upstream.py",
+        "technology_positioning_window_propagation",
+    )
+    windows = resolve_positioning_windows(
+        asof="2026-08-14",
+        configured_start="2013-01-01",
+    )
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command: list[str], **_kwargs: Any) -> None:
+        captured["command"] = command
+
+    monkeypatch.setattr(upstream.subprocess, "run", fake_run)
+    upstream.run_technology_import(Path("technology/config.yaml"), windows=windows)
+    command = captured["command"]
+
+    expected = {
+        "--form4-history-start": windows.form4_start,
+        "--short-interest-history-start": windows.short_interest_start,
+        "--sec-13f-history-start": windows.institutional_13f_start,
+        "--ibkr-history-start": windows.borrow_start,
+        "--float-denominator-history-start": windows.float_denominator_start,
+        "--asof": windows.end,
+    }
+    for flag, expected_date in expected.items():
+        assert command[command.index(flag) + 1] == expected_date.isoformat()
+
+
 def test_historical_positioning_universe_is_scoped_to_asof_membership() -> None:
     importer = load_script(
         "technology/scripts/09_import_technology_positioning.py",
@@ -905,14 +975,25 @@ def test_refresh_orchestrators_use_recoverable_financial_batches(
     ]
     positioning = next(item for item in steps if item.step_id == "13_sync_positioning_upstream")
     assert "--allow-stale-ibkr-borrow-on-error" not in positioning.args
-    history_index = positioning.args.index("--history-start")
-    history_start = date.fromisoformat(positioning.args[history_index + 1])
-    assert (date(2026, 7, 8) - history_start).days == 550
+
+    def start_for(args: list[str], flag: str) -> date:
+        return date.fromisoformat(args[args.index(flag) + 1])
+
+    asof_date = date(2026, 7, 8)
+    assert (asof_date - start_for(positioning.args, "--finra-history-start")).days == 120
+    assert (asof_date - start_for(positioning.args, "--sec-13f-history-start")).days == 550
+    assert (asof_date - start_for(positioning.args, "--ibkr-history-start")).days == 45
+
     positioning_import = next(item for item in steps if item.step_id == "09_import_positioning")
-    assert positioning_import.args[-2:] == [
-        "--history-start",
-        history_start.isoformat(),
-    ]
+    expected_import_windows = {
+        "--form4-history-start": 120,
+        "--short-interest-history-start": 120,
+        "--sec-13f-history-start": 550,
+        "--ibkr-history-start": 45,
+        "--float-denominator-history-start": 550,
+    }
+    for flag, expected_days in expected_import_windows.items():
+        assert (asof_date - start_for(positioning_import.args, flag)).days == expected_days
 
     kwargs["allow_stale_ibkr_borrow_on_error"] = True
     fallback_steps = module.build_steps(**kwargs)

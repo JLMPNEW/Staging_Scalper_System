@@ -606,6 +606,28 @@ def load_current_universe(
                     WHERE model_family=? AND ticker IN ({placeholders})""",
                 [MODEL_FAMILY, *stale_tickers],
             )
+            now = utc_now()
+            conn.execute(
+                f"""UPDATE dim_security
+                    SET listing_status='superseded', is_primary_listing=0, updated_at=?
+                    WHERE ticker IN ({placeholders}) AND listing_status='active'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM dim_consumer_defensive_taxonomy t
+                          WHERE t.security_id=dim_security.security_id
+                      )""",
+                [now, *stale_tickers],
+            )
+            conn.execute(
+                f"""UPDATE dim_company
+                    SET universe_status='superseded_identity', is_active=0, updated_at=?
+                    WHERE primary_ticker IN ({placeholders})
+                      AND NOT EXISTS (
+                          SELECT 1 FROM dim_security s
+                          WHERE s.company_id=dim_company.company_id
+                            AND s.listing_status='active'
+                      )""",
+                [now, *stale_tickers],
+            )
         upsert_vehicles(conn, policy)
         for row in rows:
             company_id = _upsert_company(conn, row)

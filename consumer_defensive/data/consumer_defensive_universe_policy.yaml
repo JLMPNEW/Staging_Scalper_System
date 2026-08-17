@@ -45,6 +45,8 @@ delisted_seed_csv: ../system_csvs/consumer_defensive_delisted.csv
 terminal_event_policy: consumer_defensive_terminal_event_policy.yaml
 historical_identifier_csv: consumer_defensive_historical_issuer_identifiers.csv
 expected_historical_identifier_rows: 11
+current_provider_symbol_overrides_csv: consumer_defensive_current_provider_symbols.csv
+expected_current_provider_symbol_override_rows: 1
 delisted_security_exclusions: [CCE, DPS]
 delisted_exclusion_reason: provider_continuous_successor_lineage
 

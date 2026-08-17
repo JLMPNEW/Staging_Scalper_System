@@ -17,7 +17,7 @@ from dedicated_parser.semantic import SemanticBlock, parse_semantic_document
 from dedicated_parser.storage import catalog_documents
 
 
-RECOVERY_VERSION = "technology_financial_filing_recovery_v2"
+RECOVERY_VERSION = "technology_financial_filing_recovery_v3"
 CORE_METRICS = frozenset(
     {
         "assets",
@@ -33,9 +33,7 @@ CORE_METRICS = frozenset(
 SUPPORTED_DOCUMENT_SUFFIXES = frozenset({".htm", ".html", ".xhtml", ".xml"})
 MAX_DOCUMENT_BYTES = 12 * 1024 * 1024
 
-ATTR_RE = re.compile(
-    r"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)"
-)
+ATTR_RE = re.compile(r"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)")
 CONTEXT_RE = re.compile(
     r"<(?:[A-Za-z0-9_-]+:)?context\b(?P<attrs>[^>]*)>"
     r"(?P<body>.*?)</(?:[A-Za-z0-9_-]+:)?context>",
@@ -390,13 +388,9 @@ def _duration_months(context: str) -> int:
         re.IGNORECASE,
     ):
         return 3
-    if re.search(
-        r"\bsix month(?:s| periods?) ended\b", context, re.IGNORECASE
-    ):
+    if re.search(r"\bsix month(?:s| periods?) ended\b", context, re.IGNORECASE):
         return 6
-    if re.search(
-        r"\bnine month(?:s| periods?) ended\b", context, re.IGNORECASE
-    ):
+    if re.search(r"\bnine month(?:s| periods?) ended\b", context, re.IGNORECASE):
         return 9
     if re.search(r"\b(?:twelve months|year) ended\b", context, re.IGNORECASE):
         return 12
@@ -425,6 +419,28 @@ PERIOD_DATE_RE = re.compile(
 )
 QUARTER_TOKEN_RE = re.compile(
     r"\b(?:Q(?P<q1>[1-4])|(?P<q2>[1-4])Q)\s*'?(?P<year>\d{2,4})\b",
+    re.IGNORECASE,
+)
+MONTH_DAY_RE = re.compile(
+    rf"\b(?P<month>{MONTH_TOKEN})\s+(?P<day>\d{{1,2}})\b",
+    re.IGNORECASE,
+)
+YEAR_TOKEN_RE = re.compile(r"(?<!\d)(?P<year>20\d{2})(?!\d)")
+PROSE_REVENUE_RE = re.compile(
+    rf"\brevenue\s+(?:was|were|total(?:ed|led)?|of)\s+"
+    rf"(?P<currency>US\$|USD|NT\$|EUR|\$)?\s*"
+    rf"(?P<amount>\d[\d,]*(?:\.\d+)?)\s*"
+    rf"(?P<scale>thousand|million|billion)?\s+"
+    rf"for\s+the\s+(?:three\s+months|quarter)\s+ended\s+"
+    rf"(?P<date>{MONTH_TOKEN}\s+\d{{1,2}},?\s+20\d{{2}})",
+    re.IGNORECASE,
+)
+PROSE_CASH_RE = re.compile(
+    rf"(?P<currency>US\$|USD|NT\$|EUR|\$)?\s*"
+    rf"(?P<amount>\d[\d,]*(?:\.\d+)?)\s*"
+    rf"(?P<scale>thousand|million|billion)?\s+in\s+"
+    rf"cash\s+and\s+cash\s+equivalents\s+as\s+of\s+"
+    rf"(?P<date>{MONTH_TOKEN}\s+\d{{1,2}},?\s+20\d{{2}})",
     re.IGNORECASE,
 )
 
@@ -464,8 +480,7 @@ def _financial_period_end(context: str, fallback_report_date: str) -> str:
     explicit_dates = [
         parsed
         for match in PERIOD_DATE_RE.finditer(context)
-        if (parsed := _parse_disclosure_date(match.group("date"))) is not None
-        and parsed <= fallback
+        if (parsed := _parse_disclosure_date(match.group("date"))) is not None and parsed <= fallback
     ]
     if explicit_dates:
         return max(explicit_dates).isoformat()
@@ -479,7 +494,33 @@ def _financial_period_end(context: str, fallback_report_date: str) -> str:
         age_days = (fallback - candidate).days
         if 0 <= age_days <= 120:
             quarter_dates.append(candidate)
-    return max(quarter_dates).isoformat() if quarter_dates else fallback.isoformat()
+    return max(quarter_dates).isoformat() if quarter_dates else ""
+
+
+def _split_table_period_end(context: str, fallback_report_date: str) -> str:
+    """Resolve dates whose month/day and year occupy separate table rows."""
+    try:
+        fallback = date.fromisoformat(fallback_report_date)
+    except ValueError:
+        return ""
+    if RESULTS_PATTERN.search(context) is None:
+        return ""
+    month_days = [
+        (datetime.strptime(match.group("month")[:3], "%b").month, int(match.group("day")))
+        for match in MONTH_DAY_RE.finditer(context)
+    ]
+    years = {int(match.group("year")) for match in YEAR_TOKEN_RE.finditer(context)}
+    candidates: list[date] = []
+    for year in years:
+        for month, day in month_days:
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                continue
+            age_days = (fallback - candidate).days
+            if 0 <= age_days <= 550:
+                candidates.append(candidate)
+    return max(candidates).isoformat() if candidates else ""
 
 
 def _first_numeric(cells: Iterable[str]) -> tuple[float, int] | None:
@@ -584,7 +625,11 @@ def parse_explicit_statement_tables(
             )
             if RESULTS_PATTERN.search(table_context) is None:
                 continue
-            financial_period_end = _financial_period_end(table_context, report_date)
+            financial_period_end = (
+                _financial_period_end(table_context, report_date)
+                or _split_table_period_end(table_context, report_date)
+                or _financial_period_end(document_text, report_date)
+            )
             if not financial_period_end:
                 continue
             current_value_column = _current_period_value_column(
@@ -726,6 +771,45 @@ def parse_explicit_financial_prose(
             prior = candidates.get(key)
             if prior is None or fact.precision_scale < prior.precision_scale:
                 candidates[key] = fact
+        for metric, pattern, period_type in (
+            ("revenue", PROSE_REVENUE_RE, "duration"),
+            ("cash_and_equivalents", PROSE_CASH_RE, "instant"),
+        ):
+            for match in pattern.finditer(document_text):
+                disclosed_date = _parse_disclosure_date(str(match.group("date") or ""))
+                if disclosed_date is None or disclosed_date != period_end:
+                    continue
+                amount = float(str(match.group("amount") or "0").replace(",", ""))
+                scale = scale_values.get(str(match.group("scale") or "").lower(), 1.0)
+                unit_token = str(match.group("currency") or "").upper()
+                if unit_token in {"US$", "USD", "$"}:
+                    unit = "USD" if unit_token != "$" else _currency(document_text[:3000], fallback_currency)
+                elif unit_token == "NT$":
+                    unit = "TWD"
+                elif unit_token == "EUR":
+                    unit = "EUR"
+                else:
+                    unit = _currency(document_text[:3000], fallback_currency)
+                if not unit:
+                    continue
+                fact = RecoveredFact(
+                    taxonomy=taxonomy,
+                    concept=STANDARD_CONCEPTS[taxonomy][metric],
+                    unit=unit,
+                    value=amount * scale,
+                    start_date=(_period_start(financial_period_end, 3) if period_type == "duration" else ""),
+                    end_date=financial_period_end,
+                    period_type=period_type,
+                    frame=f"explicit_prose:{path.name}:{metric}",
+                    source_document=path.name,
+                    source_detail="filing_document_explicit_financial_prose",
+                    content_sha256=content_hash,
+                    precision_scale=scale,
+                )
+                key = (fact.concept, fact.end_date)
+                prior = candidates.get(key)
+                if prior is None or fact.precision_scale < prior.precision_scale:
+                    candidates[key] = fact
     return list(candidates.values())
 
 
@@ -746,9 +830,7 @@ def _fact_key(
         "frame": fact.frame,
         "value": fact.value,
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _mapped_metrics(
@@ -758,12 +840,17 @@ def _mapped_metrics(
     pairs = {(fact.taxonomy, fact.concept) for fact in facts}
     if not pairs:
         return set()
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(dim_xbrl_concept_map)")}
+    concept_column = "concept" if "concept" in columns else "concept_name"
+    if concept_column not in columns:
+        return set()
+    active_clause = "AND active_flag = 1" if "active_flag" in columns else ""
     output: set[str] = set()
     for taxonomy, concept in pairs:
         rows = conn.execute(
-            """
+            f"""
             SELECT canonical_metric FROM dim_xbrl_concept_map
-            WHERE taxonomy = ? AND concept = ?
+            WHERE taxonomy = ? AND {concept_column} = ? {active_clause}
             """,
             (taxonomy, concept),
         ).fetchall()
@@ -792,53 +879,103 @@ def _upsert_raw_facts(
         """,
         (filing.ticker, filing.accession_number),
     )
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(fact_sec_xbrl_fact_raw)")}
+    industrials_schema = "concept_name" in columns
     accession_no_dash = filing.accession_number.replace("-", "")
     archive_cik = str(filing.archive_cik or filing.cik).lstrip("0") or "0"
     for fact in facts:
-        source_url = (
-            "https://www.sec.gov/Archives/edgar/data/"
-            f"{archive_cik}/{accession_no_dash}/{fact.source_document}"
-        )
-        conn.execute(
-            """
-            INSERT INTO fact_sec_xbrl_fact_raw(
-                fact_key, ticker, cik, source_id, taxonomy, concept, unit, value,
-                start_date, end_date, fiscal_year, fiscal_period, form_type,
-                filing_date, accession_number, frame, period_type, source_detail,
-                source_accession_url, source_payload_hash, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(fact_key) DO UPDATE SET
-                value = excluded.value,
-                source_detail = excluded.source_detail,
-                source_accession_url = excluded.source_accession_url,
-                source_payload_hash = excluded.source_payload_hash,
-                updated_at = excluded.updated_at
-            """,
-            (
-                _fact_key(filing.ticker, filing.accession_number, fact),
-                filing.ticker,
-                filing.cik,
-                source_id,
-                fact.taxonomy,
-                fact.concept,
-                fact.unit,
-                fact.value,
-                fact.start_date,
-                fact.end_date,
-                int(fact.end_date[:4]),
-                "",
-                filing.form_type,
-                filing.filing_date,
-                filing.accession_number,
-                fact.frame,
-                fact.period_type,
-                fact.source_detail,
-                source_url,
-                fact.content_sha256,
-                now,
-                now,
-            ),
-        )
+        source_url = f"https://www.sec.gov/Archives/edgar/data/{archive_cik}/{accession_no_dash}/{fact.source_document}"
+        fact_key = _fact_key(filing.ticker, filing.accession_number, fact)
+        if industrials_schema:
+            payload = json.dumps(
+                {
+                    "period_type": fact.period_type,
+                    "source_accession_url": source_url,
+                    "source_payload_hash": fact.content_sha256,
+                },
+                sort_keys=True,
+            )
+            conn.execute(
+                """
+                INSERT INTO fact_sec_xbrl_fact_raw(
+                    fact_key, ticker, cik, source_id, accession_number, form_type,
+                    filing_date, accepted_at, fiscal_year, fiscal_period,
+                    period_start, period_end, frame, taxonomy, concept_name,
+                    unit, raw_value, decimals, source_detail, payload_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fact_key) DO UPDATE SET
+                    raw_value = excluded.raw_value,
+                    source_detail = excluded.source_detail,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    fact_key,
+                    filing.ticker,
+                    filing.cik,
+                    source_id,
+                    filing.accession_number,
+                    filing.form_type,
+                    filing.filing_date,
+                    filing.accepted_at,
+                    int(fact.end_date[:4]),
+                    "",
+                    fact.start_date,
+                    fact.end_date,
+                    fact.frame,
+                    fact.taxonomy,
+                    fact.concept,
+                    fact.unit,
+                    fact.value,
+                    "",
+                    fact.source_detail,
+                    payload,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO fact_sec_xbrl_fact_raw(
+                    fact_key, ticker, cik, source_id, taxonomy, concept, unit, value,
+                    start_date, end_date, fiscal_year, fiscal_period, form_type,
+                    filing_date, accession_number, frame, period_type, source_detail,
+                    source_accession_url, source_payload_hash, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fact_key) DO UPDATE SET
+                    value = excluded.value,
+                    source_detail = excluded.source_detail,
+                    source_accession_url = excluded.source_accession_url,
+                    source_payload_hash = excluded.source_payload_hash,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    fact_key,
+                    filing.ticker,
+                    filing.cik,
+                    source_id,
+                    fact.taxonomy,
+                    fact.concept,
+                    fact.unit,
+                    fact.value,
+                    fact.start_date,
+                    fact.end_date,
+                    int(fact.end_date[:4]),
+                    "",
+                    filing.form_type,
+                    filing.filing_date,
+                    filing.accession_number,
+                    fact.frame,
+                    fact.period_type,
+                    fact.source_detail,
+                    source_url,
+                    fact.content_sha256,
+                    now,
+                    now,
+                ),
+            )
         inserted += 1
     return inserted
 
@@ -863,11 +1000,7 @@ def recover_cached_filing(
             "core_metrics": "",
         }
     required_names = tuple(
-        sorted(
-            path.name
-            for path in directory.iterdir()
-            if path.is_file() and path.name != "index.json"
-        )
+        sorted(path.name for path in directory.iterdir() if path.is_file() and path.name != "index.json")
     )
     documents = build_document_refs(
         conn,
@@ -900,11 +1033,7 @@ def recover_cached_filing(
         fact
         for fact in explicit
         if next(
-            (
-                metric
-                for metric, concept in STANDARD_CONCEPTS[primary_taxonomy].items()
-                if concept == fact.concept
-            ),
+            (metric for metric, concept in STANDARD_CONCEPTS[primary_taxonomy].items() if concept == fact.concept),
             "",
         )
         not in structured_metrics
@@ -920,11 +1049,7 @@ def recover_cached_filing(
         fact
         for fact in explicit_prose
         if next(
-            (
-                metric
-                for metric, concept in STANDARD_CONCEPTS[primary_taxonomy].items()
-                if concept == fact.concept
-            ),
+            (metric for metric, concept in STANDARD_CONCEPTS[primary_taxonomy].items() if concept == fact.concept),
             "",
         )
         not in table_metrics

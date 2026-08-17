@@ -135,6 +135,10 @@ METRIC_OPERANDS: dict[str, tuple[str, ...]] = {
 SUPPLEMENTAL_METRICS = frozenset(
     {
         *SOURCE_METRIC_FEATURES,
+        "capex",
+        "operating_cash_flow",
+        "operating_income",
+        "revenue",
         "shares_outstanding",
         "debt_total",
     }
@@ -147,6 +151,7 @@ SUPPLEMENTAL_TAXONOMIES = frozenset(
         "issuer-ir",
         "sec-footnote",
         "sec-text",
+        "transportation-reviewed",
     }
 )
 

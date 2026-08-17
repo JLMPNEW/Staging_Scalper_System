@@ -1,0 +1,133 @@
+policy_version: transportation_tanker_score_policy_v1
+score_engine_version: transportation_cohort_fixed_denominator_v3
+cohort_id: oil_tanker_operators_v5
+calibration_pool: marine_shipping_and_maritime
+required_risk_tier: operating
+required_portfolio_role: core_candidate
+included_economic_peer_groups:
+  - marine_shipping
+  - crude_tanker
+  - product_tanker
+  - diversified_tanker
+metric_comparison_groups:
+  oil_tankers:
+    - marine_shipping
+    - crude_tanker
+    - product_tanker
+    - diversified_tanker
+comparison_group_tickers:
+  oil_tankers: [DHT, ECO, FRO, NAT, ASC, HAFN, STNG, TRMD, INSW, TNK, TEN]
+metric_comparison_domains:
+  fleet_age:
+    oil_tankers: [DHT, ECO, FRO, NAT, ASC, HAFN, STNG, TRMD, INSW, TNK, TEN]
+eligible_tickers:
+  - DHT
+  - ECO
+  - FRO
+  - NAT
+  - ASC
+  - HAFN
+  - STNG
+  - TRMD
+  - INSW
+  - TNK
+  - TEN
+historical_calibration_only:
+  OSG: {comparison_group: oil_tankers, effective_from: '2019-01-02', effective_to: '2024-07-09'}
+excluded_tickers:
+  NNA: insufficient_required_metric_history_zero_complete_snapshots
+minimum_active_cohort_size: 8
+historical_prebuild_gate:
+  minimum_source_ready_dates: 36
+  rationale: three_non_overlapping_12_month_research_blocks_before_future_validation
+score_construction:
+  missing_optional_metric_policy: fixed_slot_neutral_score
+  neutral_missing_score: 50.0
+  retained_specialized_metrics:
+    - fleet_age
+  component_metric_weights:
+    default:
+      market_trend:
+        ret_3m: 0.25
+        ret_6m: 0.25
+        ret_12m_ex_1m: 0.25
+        relative_strength_3m: 0.25
+      quality:
+        operating_margin: 0.40
+        fcf_margin: 0.40
+        fcf_conversion: 0.20
+      growth:
+        revenue_growth: 0.50
+        operating_income_growth: 0.50
+      valuation:
+        fcf_yield: 0.50
+        ev_operating_income: 0.50
+      operating_efficiency:
+        asset_turnover: 1.00
+      capital_risk:
+        realized_volatility_60d: 0.20
+        maximum_drawdown_12m: 0.20
+        average_dollar_volume_60d: 0.10
+        capex_to_revenue: 0.15
+        net_debt_to_ebitda: 0.125
+        interest_coverage: 0.125
+        fleet_age: 0.10
+specialized_metric_dispositions:
+  fleet_age: CALIBRATION_CANDIDATE
+  vessel_count: EXCLUDE_FAILED_STRICT_COVERAGE
+  fleet_capacity: EXCLUDE_FAILED_STRICT_COVERAGE
+  tce_day_rate: EXCLUDE_FAILED_STRICT_COVERAGE
+  spot_or_charter_day_rate: EXCLUDE_FAILED_STRICT_COVERAGE
+  fleet_utilization: EXCLUDE_FAILED_STRICT_COVERAGE
+  charter_coverage_next_12m: EXCLUDE_FAILED_STRICT_COVERAGE
+  contracted_revenue_backlog: EXCLUDE_FAILED_STRICT_COVERAGE
+  weighted_average_charter_term: EXCLUDE_FAILED_STRICT_COVERAGE
+  newbuild_capacity_commitments: EXCLUDE_FAILED_STRICT_COVERAGE
+  capex_commitments: EXCLUDE_FAILED_STRICT_COVERAGE
+  vessel_opex_per_day: EXCLUDE_FAILED_STRICT_COVERAGE
+  cash_breakeven_per_day: EXCLUDE_FAILED_STRICT_COVERAGE
+  offhire_or_drydock_ratio: EXCLUDE_FAILED_STRICT_COVERAGE
+  revenue_days: EXCLUDE_FAILED_STRICT_COVERAGE
+  spot_exposure_ratio: EXCLUDE_FAILED_STRICT_COVERAGE
+candidate_component_weights:
+  tanker_balanced_v1:
+    market_trend: 0.25
+    quality: 0.15
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.15
+    capital_risk: 0.25
+  tanker_quality_fleet_v1:
+    market_trend: 0.20
+    quality: 0.20
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.15
+    capital_risk: 0.25
+  tanker_balanced_positioning_v1:
+    market_trend: 0.20
+    quality: 0.15
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.15
+    capital_risk: 0.25
+    positioning: 0.05
+candidate_requirements:
+  tanker_balanced_positioning_v1:
+    - positioning_history
+positioning_history_gate:
+  minimum_rebuildable_row_coverage: 0.90
+  minimum_eligible_date_fraction: 0.90
+  minimum_date_cross_section: 8
+governance:
+  membership_selection_uses_outcomes: false
+  membership_basis: v5_oil_tanker_liquidity_reporting_quality_operating_status_and_economic_coherence
+  candidate_design_uses_outcomes: false
+  candidate_selection_split: future_untouched_validation
+  revealed_holdout_status: not_applicable_new_isolated_cohort
+  promotion_from_revealed_holdout_allowed: false
+  specialized_parser_status: frozen_conflict_free_replay_only
+  historical_universe_policy: point_in_time_membership_intersect_frozen_eligible_entities
+  historical_calibration_role: historical_calibration_only_no_portfolio_eligibility
+  historical_membership_selection_uses_outcomes: false
+  historical_membership_basis: economic_comparability_loaded_required_history_and_reviewed_lifecycle

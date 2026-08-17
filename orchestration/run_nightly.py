@@ -8,6 +8,7 @@ but it no longer blocks the master run -- sector refreshes and the current
 portfolio are always attempted. --mode daily provides a scheduled plain-daily
 lane (no catch-up scanning) as an operator escape hatch.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -27,9 +28,7 @@ ORCH_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ORCH_DIR.parent
 MASTER_RUNNER = ORCH_DIR / "run_all.py"
 LATE_STATEMENT_RECONCILER = ORCH_DIR / "reconcile_late_ib_statements.py"
-PROVIDER_VALIDATOR = (
-    PROJECT_ROOT / "portfolio_layer" / "provider_ingestion" / "validate.py"
-)
+PROVIDER_VALIDATOR = PROJECT_ROOT / "portfolio_layer" / "provider_ingestion" / "validate.py"
 DEFAULT_CONFIG = PROJECT_ROOT / "portfolio_layer" / "config.yaml"
 RUNS_ROOT = ORCH_DIR / "runs"
 NIGHTLY_ROOT = ORCH_DIR / "nightly_runs"
@@ -57,7 +56,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def master_command(mode: str, as_of: str, dry_run: bool) -> list[str]:
+def _is_first_trading_session_of_week(iso_date: str) -> bool:
+    target = run_all_mod._to_date(iso_date)
+    week = target.isocalendar()[:2]
+    cursor = target - timedelta(days=1)
+    while cursor.isocalendar()[:2] == week:
+        if run_all_mod.is_trading_day(cursor):
+            return False
+        cursor -= timedelta(days=1)
+    return True
+
+
+def master_command(mode: str, as_of: str, dry_run: bool, *, cadence: str = "daily") -> list[str]:
     """The run_all invocation for this nightly. catch-up is CURRENT-TARGET-FIRST in
     run_all (an unbuildable historical date can no longer wedge the current book);
     daily is the plain single-session lane."""
@@ -66,6 +76,8 @@ def master_command(mode: str, as_of: str, dry_run: bool) -> list[str]:
         command.append("--catch-up")
     if as_of:
         command.extend(["--as-of", as_of])
+    if cadence == "weekly":
+        command.extend(["--cadence", "weekly"])
     if dry_run:
         command.append("--dry-run")
     return command
@@ -94,9 +106,7 @@ def reconcile_abandoned_nightly_runs(root: Path = NIGHTLY_ROOT) -> list[Path]:
         if run_all_mod._holder_alive(pid_raw, started_iso) is not False:
             continue
         payload["acceptance"] = "ABORTED"
-        payload["aborted_reason"] = (
-            f"nightly process pid={pid_raw} is no longer alive; run did not seal"
-        )
+        payload["aborted_reason"] = f"nightly process pid={pid_raw} is no longer alive; run did not seal"
         payload["reconciled_at_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         _atomic_json(manifest_path, payload)
         reconciled.append(manifest_path)
@@ -187,20 +197,31 @@ def _selftest() -> int:
     cmd_daily = master_command("daily", "2026-08-06", True)
     assert "--catch-up" not in cmd_daily
     assert cmd_daily[-3:] == ["--as-of", "2026-08-06", "--dry-run"]
+    cmd_weekly = master_command("catch-up", "2026-08-17", True, cadence="weekly")
+    assert cmd_weekly[-5:] == ["--as-of", "2026-08-17", "--cadence", "weekly", "--dry-run"]
+    assert _is_first_trading_session_of_week("2026-08-17")
+    assert not _is_first_trading_session_of_week("2026-08-18")
+    assert _is_first_trading_session_of_week("2026-09-08")  # Labor Day Monday
     checks += 1
 
     # abandoned-nightly reconciliation: dead pid -> ABORTED; live/unknown pid kept
     nightly_root = root / "nightly_runs"
     dead_dir = nightly_root / "dead"
     dead_dir.mkdir(parents=True)
-    _atomic_json(dead_dir / "nightly_manifest.json",
-                 {"acceptance": "RUNNING", "nightly_pid": 2_000_000_000,
-                  "started_at_utc": "2020-01-01T00:00:00+00:00"})
+    _atomic_json(
+        dead_dir / "nightly_manifest.json",
+        {"acceptance": "RUNNING", "nightly_pid": 2_000_000_000, "started_at_utc": "2020-01-01T00:00:00+00:00"},
+    )
     live_dir = nightly_root / "live"
     live_dir.mkdir(parents=True)
-    _atomic_json(live_dir / "nightly_manifest.json",
-                 {"acceptance": "RUNNING", "nightly_pid": os.getpid(),
-                  "started_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    _atomic_json(
+        live_dir / "nightly_manifest.json",
+        {
+            "acceptance": "RUNNING",
+            "nightly_pid": os.getpid(),
+            "started_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+    )
     nopid_dir = nightly_root / "nopid"
     nopid_dir.mkdir(parents=True)
     _atomic_json(nopid_dir / "nightly_manifest.json", {"acceptance": "RUNNING"})
@@ -219,14 +240,8 @@ def _selftest() -> int:
     # nightly acceptance resolution: reconciliation failure is loud but never blocks
     assert _resolve_acceptance(reconciliation_failed=False, passed=True) == "PASS"
     assert _resolve_acceptance(reconciliation_failed=False, passed=False) == "FAIL_MASTER"
-    assert (
-        _resolve_acceptance(reconciliation_failed=True, passed=True)
-        == "FAIL_LATE_STATEMENT_RECONCILIATION"
-    )
-    assert (
-        _resolve_acceptance(reconciliation_failed=True, passed=False)
-        == "FAIL_LATE_STATEMENT_RECONCILIATION"
-    )
+    assert _resolve_acceptance(reconciliation_failed=True, passed=True) == "FAIL_LATE_STATEMENT_RECONCILIATION"
+    assert _resolve_acceptance(reconciliation_failed=True, passed=False) == "FAIL_LATE_STATEMENT_RECONCILIATION"
     checks += 1
 
     print(f"NIGHTLY SELFTEST PASS: {checks} checks")
@@ -250,8 +265,7 @@ def main() -> int:
     hydrated = hydrate_missing_user_environment()
     if hydrated:
         print(
-            "Hydrated missing local user environment variables by name: "
-            + ", ".join(hydrated),
+            "Hydrated missing local user environment variables by name: " + ", ".join(hydrated),
             flush=True,
         )
 
@@ -259,15 +273,17 @@ def main() -> int:
     if not config.is_file():
         raise FileNotFoundError(f"Config not found: {config}")
 
-    if args.as_of:
-        # Fail fast on a non-session target BEFORE the reconciler/master touch
-        # anything (loads the real registry so ad-hoc closures are known).
-        run_all_mod.load_registry(run_all_mod.DEFAULT_REGISTRY)
-        args.as_of = run_all_mod.parse_iso(args.as_of)
-        if not run_all_mod.is_trading_day(run_all_mod._to_date(args.as_of)):
-            raise SystemExit(
-                f"--as-of {args.as_of} is not a trading session (weekend/holiday/closure)"
-            )
+    # Resolve the target exactly once so the reconciler and master cannot disagree
+    # across a session boundary. Loading the real registry also installs ad-hoc
+    # market closures before the first-session-of-week test.
+    run_all_mod.load_registry(run_all_mod.DEFAULT_REGISTRY)
+    requested_as_of = args.as_of
+    if requested_as_of:
+        requested_as_of = run_all_mod.parse_iso(requested_as_of)
+        if not run_all_mod.is_trading_day(run_all_mod._to_date(requested_as_of)):
+            raise SystemExit(f"--as-of {requested_as_of} is not a trading session (weekend/holiday/closure)")
+    effective_as_of = run_all_mod.resolve_target_date(requested_as_of)
+    cadence = "weekly" if _is_first_trading_session_of_week(effective_as_of) else "daily"
 
     for reconciled in reconcile_abandoned_nightly_runs():
         print(f"reconciled abandoned RUNNING nightly manifest -> ABORTED: {reconciled}", flush=True)
@@ -283,7 +299,9 @@ def main() -> int:
         "acceptance": "RUNNING",
         "started_at_utc": started.isoformat(timespec="seconds"),
         "nightly_pid": os.getpid(),
-        "requested_as_of": args.as_of,
+        "requested_as_of": requested_as_of,
+        "effective_as_of": effective_as_of,
+        "cadence": cadence,
         "mode": args.mode,
         "dry_run": bool(args.dry_run),
         "provider_validation_rc": None,
@@ -310,9 +328,7 @@ def main() -> int:
         _atomic_json(manifest_path, manifest)
         if provider_rc != 0:
             manifest["acceptance"] = "FAIL_PROVIDER_STORE"
-            manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
-            )
+            manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             _atomic_json(manifest_path, manifest)
             return 1
 
@@ -325,8 +341,7 @@ def main() -> int:
             "--manifest",
             str(reconciliation_manifest_path),
         ]
-        if args.as_of:
-            reconciliation_command.extend(["--target", args.as_of])
+        reconciliation_command.extend(["--target", effective_as_of])
         if args.dry_run:
             reconciliation_command.append("--dry-run")
         reconciliation_rc = _run_logged(reconciliation_command, log)
@@ -358,7 +373,10 @@ def main() -> int:
                 flush=True,
             )
 
-        master_rc = _run_logged(master_command(args.mode, args.as_of, args.dry_run), log)
+        master_rc = _run_logged(
+            master_command(args.mode, effective_as_of, args.dry_run, cadence=cadence),
+            log,
+        )
 
     master_path, master_payload = _new_master_manifest(before)
     master_acceptance = str((master_payload or {}).get("acceptance", ""))
@@ -374,9 +392,7 @@ def main() -> int:
         passed = master_rc == 0
     else:
         passed = master_rc == 0 and master_path is not None and master_acceptance == "PASS"
-    manifest["acceptance"] = _resolve_acceptance(
-        reconciliation_failed=reconciliation_failed, passed=passed
-    )
+    manifest["acceptance"] = _resolve_acceptance(reconciliation_failed=reconciliation_failed, passed=passed)
     _atomic_json(manifest_path, manifest)
     print(f"nightly_manifest: {manifest_path}", flush=True)
     return 0 if manifest["acceptance"] == "PASS" else 1

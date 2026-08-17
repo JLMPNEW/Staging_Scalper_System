@@ -42,17 +42,15 @@ from market_positioning.core import parse_date as mp_parse_date  # noqa: E402
 from market_positioning.core import to_float, update_feed_state, utc_now  # noqa: E402
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.positioning_window import (  # noqa: E402
+    PositioningWindows,
+    resolve_positioning_windows,
+)
 
 
 LOGGER = logging.getLogger("sync_technology_positioning_upstream")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 
-
-def parse_date_arg(raw: object, *, default: date) -> date:
-    text = str(raw or "").strip()
-    if not text:
-        return default
-    return datetime.strptime(text[:10], "%Y-%m-%d").date()
 
 
 def parse_13f_date(raw: object) -> date | None:
@@ -75,7 +73,13 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--history-start", default="")
+    parser.add_argument("--history-start", default="", help="Backwards-compatible common start override.")
+    parser.add_argument("--form4-history-start", default="")
+    parser.add_argument("--finra-history-start", default="")
+    parser.add_argument("--sec-13f-history-start", default="")
+    parser.add_argument("--ibkr-history-start", default="")
+    parser.add_argument("--float-denominator-history-start", default="")
+    parser.add_argument("--full-history", action="store_true")
     parser.add_argument("--end-date", default=date.today().isoformat())
     parser.add_argument("--tickers-csv", type=Path, default=None)
     parser.add_argument("--market-positioning-db", type=Path, default=None)
@@ -105,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reaggregate-13f-only",
         action="store_true",
-        help="Rebuild institutional_13f_ownership_snapshots from already-loaded holdings without fetching any source.",
+        help="Rebuild the bounded 13F snapshot window from loaded holdings; use --full-history for a full restatement.",
     )
     parser.add_argument("--finra-max-files", type=int, default=0)
     parser.add_argument("--sec-13f-max-archives", type=int, default=0)
@@ -215,8 +219,7 @@ def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, ou
 def run_technology_import(
     config_path: Path,
     *,
-    history_start: date | None = None,
-    asof: date | None = None,
+    windows: PositioningWindows,
     allow_stale_market_positioning_on_error: bool = False,
 ) -> None:
     cmd = [
@@ -225,10 +228,22 @@ def run_technology_import(
         "--config",
         str(config_path),
     ]
-    if history_start is not None:
-        cmd.extend(["--history-start", history_start.isoformat()])
-    if asof is not None:
-        cmd.extend(["--asof", asof.isoformat()])
+    cmd.extend(
+        [
+            "--form4-history-start",
+            windows.form4_start.isoformat(),
+            "--short-interest-history-start",
+            windows.short_interest_start.isoformat(),
+            "--sec-13f-history-start",
+            windows.institutional_13f_start.isoformat(),
+            "--ibkr-history-start",
+            windows.borrow_start.isoformat(),
+            "--float-denominator-history-start",
+            windows.float_denominator_start.isoformat(),
+            "--asof",
+            windows.end.isoformat(),
+        ]
+    )
     if allow_stale_market_positioning_on_error:
         cmd.append("--allow-stale-market-positioning-on-error")
     LOGGER.info("Running technology positioning import: %s", " ".join(cmd))
@@ -568,11 +583,36 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
 
-    history_start = parse_date_arg(
-        args.history_start or cfg_get(config, "positioning_import.start_date", "2016-01-01"),
-        default=date(2016, 1, 1),
+    if args.full_history and any(
+        str(value or "").strip()
+        for value in (
+            args.history_start,
+            args.form4_history_start,
+            args.finra_history_start,
+            args.sec_13f_history_start,
+            args.ibkr_history_start,
+            args.float_denominator_history_start,
+        )
+    ):
+        raise ValueError("--full-history cannot be combined with history-start overrides")
+    configured_start = cfg_get(config, "positioning_import.start_date", "2016-01-01")
+    windows = resolve_positioning_windows(
+        asof=args.end_date,
+        configured_start=configured_start,
+        requested_start=args.history_start,
+        form4_requested_start=args.form4_history_start,
+        short_interest_requested_start=args.finra_history_start,
+        institutional_13f_requested_start=args.sec_13f_history_start,
+        borrow_requested_start=args.ibkr_history_start,
+        float_denominator_requested_start=args.float_denominator_history_start,
+        full_history=bool(args.full_history),
+        form4_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.form4", 120)),
+        short_interest_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.short_interest", 120)),
+        institutional_13f_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.institutional_13f", 550)),
+        borrow_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.ibkr_borrow", 45)),
+        float_denominator_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.sec_float_denominator", 550)),
     )
-    end_date = parse_date_arg(args.end_date, default=date.today())
+    end_date = windows.end
     mp_db = (
         args.market_positioning_db.expanduser().resolve()
         if args.market_positioning_db
@@ -605,7 +645,18 @@ def main() -> None:
 
     LOGGER.info("Universe CSV: %s", tickers_csv)
     LOGGER.info("Market positioning DB: %s", mp_db)
-    LOGGER.info("History window: %s to %s", history_start, end_date)
+    LOGGER.info(
+        "History windows: FINRA=%s 13F=%s IBKR=%s end=%s",
+        windows.short_interest_start,
+        windows.institutional_13f_start,
+        windows.borrow_start,
+        end_date,
+    )
+    borrow_duration = (
+        "7 Y"
+        if args.full_history
+        else f"{max(1, (end_date - windows.borrow_start).days)} D"
+    )
 
     try:
         with connect_market_positioning(mp_db) as conn:
@@ -617,6 +668,8 @@ def main() -> None:
                         conn,
                         tickers,
                         source="sec_13f_data_sets",
+                        history_start_date=windows.institutional_13f_start,
+                        end_date=end_date,
                     )
                 LOGGER.info(
                     "Reaggregated 13F ownership snapshots: rows=%d tickers=%d",
@@ -626,8 +679,7 @@ def main() -> None:
                 if not args.skip_technology_import:
                     run_technology_import(
                         config_path,
-                        history_start=history_start,
-                        asof=end_date,
+                        windows=windows,
                         allow_stale_market_positioning_on_error=allow_stale_market_positioning,
                     )
                 return
@@ -635,7 +687,7 @@ def main() -> None:
                 result = sync_finra_equity_short_interest_files(
                     conn,
                     tickers_csv=tickers_csv,
-                    history_start_date=history_start,
+                    history_start_date=windows.short_interest_start,
                     end_date=end_date,
                     cache_dir=cache_dir / "finra_short_interest",
                     user_agent=user_agent,
@@ -647,7 +699,7 @@ def main() -> None:
                     conn,
                     tickers_csv=tickers_csv,
                     cusip_ticker_map_csv=tickers_csv,
-                    history_start_date=history_start,
+                    history_start_date=windows.institutional_13f_start,
                     end_date=end_date,
                     cache_dir=cache_dir / "sec_13f",
                     user_agent=user_agent,
@@ -659,12 +711,14 @@ def main() -> None:
                     result = sync_ibkr_borrow_availability(
                         conn,
                         tickers_csv=tickers_csv,
-                        history_start_date=history_start,
+                        history_start_date=windows.borrow_start,
                         end_date=end_date,
                         host=args.ibkr_host,
                         port=args.ibkr_port,
                         client_id=args.ibkr_client_id,
                         market_data_type=args.ibkr_market_data_type,
+                        fee_rate_initial_duration=borrow_duration,
+                        fee_rate_incremental_duration=borrow_duration,
                         snapshot_wait_sec=args.ibkr_snapshot_wait_sec,
                         max_tickers=args.ibkr_max_tickers,
                     )
@@ -696,8 +750,7 @@ def main() -> None:
     if not args.skip_technology_import:
         run_technology_import(
             config_path,
-            history_start=history_start,
-            asof=end_date,
+            windows=windows,
             allow_stale_market_positioning_on_error=allow_stale_market_positioning,
         )
 

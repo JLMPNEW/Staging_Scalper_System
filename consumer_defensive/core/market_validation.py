@@ -273,7 +273,7 @@ def validate_stage3_market_data(
             """
             SELECT s.ticker FROM dim_security s
             JOIN dim_company c ON c.company_id=s.company_id
-            WHERE s.listing_status<>'active' AND c.is_active=0
+            WHERE s.listing_status='delisted' AND c.is_active=0
               AND NOT EXISTS (
                   SELECT 1 FROM fact_terminal_event_reconciliation e
                   WHERE e.ticker=s.ticker

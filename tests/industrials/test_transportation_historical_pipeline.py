@@ -89,6 +89,23 @@ def test_pit_history_uses_transportation_financial_wrapper(tmp_path: Path) -> No
     assert not financial[1].endswith("08_build_industrials_financial_features.py")
 
 
+def test_pit_history_stage_commands_accept_targeted_execution_scope(tmp_path: Path) -> None:
+    history = load_script("19_build_transportation_pit_feature_history.py")
+    commands = dict(
+        history.stage_commands(
+            asof="2026-07-30",
+            config_path=tmp_path / "config.yaml",
+            db_path=tmp_path / "industrials.sqlite",
+            output_dir=tmp_path / "features",
+            tickers=["DHT"],
+        )
+    )
+
+    for command in commands.values():
+        ticker_index = command.index("--tickers")
+        assert command[ticker_index + 1] == "DHT"
+
+
 def seed_source_registry(conn) -> None:
     init_db(conn)
     registry = load_source_registry(

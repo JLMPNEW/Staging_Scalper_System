@@ -92,9 +92,15 @@ sectors:
     # ceiling) and covers the worst observed run with headroom; 24's
     # ALREADY_COMPLETE resume-skip keeps retry attempts far below it.
     timeout_sec: 43200
-    health:                             # no acceptance/status manifest -> artifact presence + rc==0
-      manifest: null
-      status_keys: []
+    # The full universe screen performs SEC, CTGov, IB, and evidence checks. Run it
+    # weekly; the daily local runner consumes the last accepted screen without
+    # re-screening the complete mapping universe.
+    weekly_pre_steps:
+      - script: biotech_index/screen_biotech_universe.py
+        args_template: ["--config", "biotech_index/screen_biotech_universe_config.yaml"]
+    health:
+      manifest: "output/biotech_index_reports/{date}/biotech_refresh_acceptance_manifest.json"
+      status_keys: ["status", "acceptance"]
     backfill:
       script: biotech_index/scripts/24_run_biotech_refresh_pipeline.py
       args_template: ["--history-restatement", "--history-start-asof", "{from}", "--history-end-asof", "{to}"]

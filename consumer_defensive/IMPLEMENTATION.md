@@ -1,6 +1,6 @@
 # Consumer Defensive Implementation Plan
 
-Status: Stages 0-4 are deployed through migration v10; Stage 5 is implemented and passes its disposable `2026-08-10` validation and foundation audit, with production Stage 5 rollout awaiting explicit approval; Stage 6A is next
+Status: Stages 0-5 are deployed; Stage 4 passes 40/40 at `2026-08-14`, Stage 5 passes 18/18 at the latest fully supported PIT cutoff `2026-08-11`, and the foundation audit records `proceed_stage6a`
 Package: `consumer_defensive`  
 Canonical Portfolio Layer sector: `Consumer Staples`  
 Internal universe sector label: `Consumer Defensive`
@@ -672,7 +672,7 @@ A fresh chronological migration-v10 replay began with an empty database and cons
 
 The official FX cache-only replay for `2010-01-01` through `2026-08-10` accepted 12 currencies and published 49,867 rows: 49,815 usable and 52 quarantined. Its exact 12-file, 5,694,168-byte range manifest has SHA-256 `99deee8510b8e10b4ed581930fe1ad7f06fa01c67f9532563809126f19e486f6`. CLF is the sole upstream source gap because its preserved Yahoo payload contains only `2026-08-11`, outside the requested cutoff; the sync correctly reports partial status and exits nonzero. No selected canonical fact requires CLF, all five required currencies are covered, and `canonical_fx_missing` is zero, so this disclosed source gap is not an additional validator failure.
 
-The Companyfacts/inline-XBRL code gap is resolved. The terminology workflow generated and adjudicated a deterministic 10-row review pack from 1,067 candidates, covering all four cohorts, both census outcomes, active/historical roles, domestic/foreign profiles, annual/interim forms, and all six metric families. The reviewed standalone `sales leaders` trigger was removed, census parser v3 was rerun from the exact seal, and the regenerated ledger validates `ADJUDICATED`. The explicitly approved production rollout completed after a transactionally consistent 1.382 GB pre-change backup and backup-only rehearsal. Migrations v2-v10, full `2026-08-11` SEC/FX/fallback/financial/census rebuild, and the live 40-check validator pass. Production integrity and foreign keys are clean; the full Consumer Defensive/shared-parser suite passes 402 tests with 6 platform-specific skips. Stage 4 production rollout is complete. Separately, Stage 6B must establish a complete PIT historical filing/document inventory back to `2019-01-02`; a complete current-date seal does not prove that inventory.
+The Companyfacts/inline-XBRL code gap is resolved. The terminology workflow generated and adjudicated a deterministic 10-row review pack from 1,067 candidates, covering all four cohorts, both census outcomes, active/historical roles, domestic/foreign profiles, annual/interim forms, and all six metric families. The reviewed standalone `sales leaders` trigger was removed, census parser v3 was rerun from the exact seal, and the regenerated ledger validates `ADJUDICATED`. The FDP-corrected production rebuild now advances Stage 4 through `2026-08-14`: 2,179,929 raw facts, 233,510 canonical facts, 49,879 FX rows, 119 feature rows, 4,522 census summaries, and 782 evidence rows. The live validator passes 40/40, production integrity and foreign keys are clean, and the post-deployment Consumer Defensive/shared-parser suite passes 419 tests with 6 platform-specific skips. Separately, Stage 6B must establish a complete PIT historical filing/document inventory back to `2019-01-02`; a complete current-date seal does not prove that inventory.
 
 
 Exit gate:
@@ -698,8 +698,8 @@ Load Consumer Defensive-owned normalized insider, 13F, short-interest, and borro
 
 Implemented boundary:
 
-- `core/stage5_schema.py` owns the checksummed, atomic Stage 5 schema migration and source contract.
-- `core/stage5_import.py` imports Form 4 current truth by CIK, authoritative-source 13F/FINRA/borrow rows, stable observation identities, and PIT share-count proxies used only when FINRA does not provide short float percentage.
+- `core/stage5_schema.py` owns the ordered checksummed Stage 5 v1-v2 migrations, source contract, and issuer-level Section 16 coverage ledger.
+- `core/stage5_import.py` imports Form 4 current truth by CIK, independently records issuer filing coverage, imports authoritative-source 13F/FINRA/borrow rows, retains stable observation identities, and uses PIT share-count proxies only when they are safe.
 - `core/stage5.py` owns upstream handoff generation, read-only source audits, validation, and the daily foundation-coverage audit.
 - scripts `09`, `09a`, `10`, `10a`, and `10b` are Consumer Defensive entry points. The optional cache rematch utility is owned by the neutral `market_positioning` package and writes only the explicit target passed to it.
 - source birthdates, age limits, required coverage thresholds, and exact allowed upstream source names are configuration contracts. Missing pre-birth or unavailable data remain null.
@@ -713,16 +713,18 @@ Exit gate:
 - the foundation-coverage audit reports daily cohort breadth, source availability, identifier gaps, and terminal-event gaps from January 2, 2019; and
 - the continuation review decides whether to proceed to Stage 6A, implement a limited shadow candidate, or defer. This checkpoint does not certify the final feature panel.
 
-Disposable acceptance evidence at `2026-08-10`:
+Deployed acceptance evidence at `2026-08-11` (18/18 validator checks PASS):
 
-- Form 4: 14,239 observations / 104 taxonomy tickers;
-- 13F: 1,652 PIT observations / 114 tickers, with 104/108 numeric current coverage;
-- FINRA short interest: 12,335 observations / 114 tickers, with 104/108 numeric current coverage;
+- reviewed identity: Fresh Del Monte Produce is public `FDP`/CIK `1047340` and reviewed Norgate `DMC`/asset `132283`; DMC Global/`BOOM` is out of scope;
+- Section 16 source: 95/95 applicable current domestic issuers, with 13 current foreign private issuers explicitly not applicable;
+- eligible Form 4 P/S facts: 14,246 observations / 104 transaction tickers; the gate is 95/95 applicable domestic issuers, with 13 current foreign private issuers explicitly not applicable;
+- 13F: 1,724 PIT aggregates / 118 taxonomy tickers, with 108/108 current coverage;
+- FINRA short interest: 12,567 observations / 115 taxonomy tickers, with 108/108 current short-signal coverage;
+- short-float ratio: 105/108 current; IMKTA, ODD, and STZ use valid days-to-cover while retaining null unsafe ratios;
 - borrow: zero observations, explicitly optional;
-- required positioning features: 100/108 current names complete (`92.593%`, minimum `80%`);
-- foundation audit: PASS over 1,911 dates and 7,644 date/cohort rows, no canonical FX gap, WBA terminal gap explicitly represented, earliest potential common positioning date `2026-02-27`, continuation `proceed_stage6a`.
+- required positioning features: 108/108 current names complete at the configured `100%` threshold.
 
-The rehearsal used disposable database copies and cache-only neutral-source rematching. Production Consumer Defensive and shared positioning databases were not mutated. Production rollout remains a separately approved operational step.
+The rollout used a fresh chronological replay, transactional backups, a full production-copy rehearsal, and a network-forbidden neutral cache rematch before production mutation. Production Stage 2 contains 108 current plus 11 historical securities and exactly 119 membership intervals; Stage 3 qualifies 121/121 required series and writes 108/108 full-quality current features. Stage 4 passes 40/40 at `2026-08-14`; Stage 5 passes 18/18 at `2026-08-11`. The foundation audit passes with `proceed_stage6a` and an earliest potential common-feature date of `2026-05-28`. The later Stage 5 cutoff was not used because retained FDP FINRA evidence is 48 days old at `2026-08-14`, beyond the strict 45-day limit.
 
 ### Stage 6A - Core Scoring Feature Contract
 
@@ -1140,12 +1142,11 @@ The second slice is Technology Stage 3: load the complete market/corporate-actio
 
 ### Current ordered checkpoint
 
-Stages 0-4 and terminal-event reconciliation are implemented in production. The hardened Stage 4 code contract includes ordered immutable migrations, chronological SEC mutation, exact config/scope reconciliation, lifecycle identities, immutable CAS-backed date seals, contained SEC paths, exact sealed census input, a sealed sector-owned inline-XBRL fallback, and a fail-closed shared-parser intake boundary. After the fresh migration-v10 acceptance replay and backup-only rehearsal, the explicitly approved production rollout completed at the existing `2026-08-11` watermark. The production validator passes 40/40 with 119/119 reporting profiles covered, zero stale lifecycle outputs, zero missing required FX conversions, zero lineage mismatches, clean foreign keys, and `integrity_check=ok`. The 10-row terminology ledger remains adjudicated against its exact `2026-08-10` sample. Stage 4 is closed. Stage 5 implementation and disposable acceptance are complete; its production rollout remains separately gated. The remaining work must proceed in this order:
+Stages 0-5 and terminal-event reconciliation are implemented in production. The FDP-corrected chronological replay, transactionally consistent two-database backup, production-copy rehearsal, and approved deployment are complete. Production Stage 4 passes 40/40 at `2026-08-14` with 119/119 reporting profiles covered, zero stale lifecycle outputs, zero required FX gaps, zero lineage mismatches, and clean foreign keys. Production Stage 5 passes 18/18 at `2026-08-11` with current 13F, short-interest, and numeric positioning coverage all 108/108; Section 16 coverage is 95/95 applicable issuers. The foundation audit records `proceed_stage6a`. The remaining work must proceed in this order:
 
-1. rehearse and explicitly approve the production Stage 5 rollout without allowing Consumer Defensive to mutate shared upstream stores;
-2. implement and validate Stage 6A common scoring inputs with specialized rows reserved and zero-weight;
-3. implement Stage 6B's Consumer Defensive parser adapter, complete historical document inventory, shadow reconciliation, reviewed golden corpus, and viable specialized overlays;
-4. build and validate the definitive Stage 6C PIT historical feature panel from `2019-01-02`, then run signal diagnostics and the dedicated `factor_validation` adapter before Stage 7 calibration; and
-5. continue through Stages 7-12 only in the documented dependency order.
+1. implement and validate Stage 6A common scoring inputs with specialized rows reserved and zero-weight;
+2. implement Stage 6B's Consumer Defensive parser adapter, complete historical document inventory, shadow reconciliation, reviewed golden corpus, and viable specialized overlays;
+3. build and validate the definitive Stage 6C PIT historical feature panel from `2019-01-02`, then run signal diagnostics and the dedicated `factor_validation` adapter before Stage 7 calibration; and
+4. continue through Stages 7-12 only in the documented dependency order.
 
 Therefore, parser validation has priority over the definitive historical-readiness audit, and that audit has priority over signal diagnostics and factor validation. The earlier Stage 5 checkpoint is foundation coverage only.

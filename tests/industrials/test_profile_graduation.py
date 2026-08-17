@@ -191,6 +191,47 @@ def test_promoted_xbrl_profile_excludes_archive_text_rows() -> None:
     assert filtered == [rows[0]]
 
 
+def test_promoted_xbrl_profile_keeps_only_nonduplicative_archive_supplements() -> None:
+    rows = [
+        {"taxonomy": "ifrs-full", "canonical_metric": "revenue", "value": 500_000_000.0},
+        {"taxonomy": "sec-text", "canonical_metric": "revenue", "value": 3_000.0},
+        {"taxonomy": "sec-text", "canonical_metric": "capex", "value": 25_000_000.0},
+        {
+            "taxonomy": "transportation-reviewed",
+            "canonical_metric": "operating_cash_flow",
+            "value": 100_000_000.0,
+        },
+    ]
+
+    filtered, taxonomy = financial_features.rows_for_reporting_profile(
+        rows,
+        {"reporting_profile": "SEC_XBRL_IFRS"},
+    )
+
+    assert taxonomy == "ifrs-full"
+    assert rows[0] in filtered
+    assert rows[1] not in filtered
+    assert rows[2] in filtered
+    assert rows[3] in filtered
+
+
+def test_machinery_can_explicitly_authorize_archive_core_metric_fallback() -> None:
+    rows = [
+        {"taxonomy": "us-gaap", "canonical_metric": "revenue", "value": 500_000_000.0},
+        {"taxonomy": "sec-text", "canonical_metric": "revenue", "value": 490_000_000.0},
+    ]
+
+    filtered, taxonomy = financial_features.rows_for_reporting_profile(
+        rows,
+        {"reporting_profile": "SEC_XBRL_US_GAAP"},
+        model_family="machinery",
+        machinery_sec_text_core_metrics=frozenset({"revenue"}),
+    )
+
+    assert taxonomy == "us-gaap"
+    assert filtered == rows
+
+
 def test_archive_text_parser_maps_capex_and_reassembles_accounting_parentheses() -> None:
     assert sec_sync.text_table_label_concept("Additions of property and equipment") == ("Capex", "duration")
     assert sec_sync.row_values(

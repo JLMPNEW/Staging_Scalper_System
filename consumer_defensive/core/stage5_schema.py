@@ -11,11 +11,9 @@ from contextlib import contextmanager
 from .db import utc_now
 
 
-STAGE5_SCHEMA_VERSION = 1
-STAGE5_MIGRATION_NAME = "positioning_pit_contract_v1"
-STAGE5_MIGRATION_MANIFEST = {
-    "version": STAGE5_SCHEMA_VERSION,
-    "name": STAGE5_MIGRATION_NAME,
+STAGE5_V1_MANIFEST = {
+    "version": 1,
+    "name": "positioning_pit_contract_v1",
     "tables": ["stage5_schema_migrations", "stage5_source_contract"],
     "ownership_columns": [
         "accession_number",
@@ -52,9 +50,36 @@ STAGE5_MIGRATION_MANIFEST = {
         "definition_version",
     ],
 }
-STAGE5_MIGRATION_SHA256 = hashlib.sha256(
-    json.dumps(STAGE5_MIGRATION_MANIFEST, sort_keys=True, separators=(",", ":")).encode()
-).hexdigest()
+STAGE5_V2_MANIFEST = {
+    "version": 2,
+    "name": "section16_issuer_coverage_v2",
+    "requires": "positioning_pit_contract_v1",
+    "tables": ["fact_sec_ownership_issuer_coverage"],
+    "semantics": "issuer source coverage is distinct from eligible P/S transaction presence",
+}
+
+
+def _manifest_sha256(manifest: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+STAGE5_MIGRATION_HISTORY = (
+    (
+        1,
+        str(STAGE5_V1_MANIFEST["name"]),
+        _manifest_sha256(STAGE5_V1_MANIFEST),
+    ),
+    (
+        2,
+        str(STAGE5_V2_MANIFEST["name"]),
+        _manifest_sha256(STAGE5_V2_MANIFEST),
+    ),
+)
+STAGE5_SCHEMA_VERSION = STAGE5_MIGRATION_HISTORY[-1][0]
+STAGE5_MIGRATION_NAME = STAGE5_MIGRATION_HISTORY[-1][1]
+STAGE5_MIGRATION_SHA256 = STAGE5_MIGRATION_HISTORY[-1][2]
 
 
 SCHEMA_SQL = """
@@ -74,6 +99,19 @@ CREATE TABLE IF NOT EXISTS stage5_source_contract (
     availability_semantics TEXT NOT NULL,
     notes TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
+    FOREIGN KEY(source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS fact_sec_ownership_issuer_coverage (
+    ticker TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    issuer_cik TEXT NOT NULL,
+    submission_count INTEGER NOT NULL CHECK(submission_count > 0),
+    latest_accepted_at TEXT NOT NULL,
+    coverage_status TEXT NOT NULL CHECK(coverage_status = 'covered'),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, asof_date, source_id),
     FOREIGN KEY(source_id) REFERENCES source_registry(source_id) ON DELETE RESTRICT
 );
 """
@@ -125,6 +163,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_stage5_ownership_observation
     WHERE source_observation_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stage5_ownership_ticker_accepted
     ON fact_sec_ownership_transaction(ticker, accepted_at, source_id);
+CREATE INDEX IF NOT EXISTS idx_stage5_ownership_issuer_coverage
+    ON fact_sec_ownership_issuer_coverage(asof_date, ticker, source_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_stage5_13f_observation
     ON fact_13f_positioning(source_observation_id)
     WHERE source_observation_id IS NOT NULL;
@@ -186,20 +226,24 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def ensure_stage5_schema(conn: sqlite3.Connection) -> None:
-    """Apply the immutable Stage 5 v1 migration atomically and idempotently."""
+    """Apply the ordered immutable Stage 5 migrations atomically."""
 
     with _atomic(conn):
         _execute(conn, SCHEMA_SQL)
         ledger = conn.execute(
-            "SELECT migration_name, migration_sha256 FROM stage5_schema_migrations "
-            "WHERE migration_version=?",
-            (STAGE5_SCHEMA_VERSION,),
-        ).fetchone()
-        if ledger is not None and (
-            str(ledger[0]) != STAGE5_MIGRATION_NAME
-            or str(ledger[1]) != STAGE5_MIGRATION_SHA256
-        ):
-            raise RuntimeError("Stage 5 migration ledger checksum/name drift detected.")
+            """SELECT migration_version,migration_name,migration_sha256
+               FROM stage5_schema_migrations ORDER BY migration_version"""
+        ).fetchall()
+        if len(ledger) > len(STAGE5_MIGRATION_HISTORY):
+            raise RuntimeError("Stage 5 migration ledger contains an unknown future version.")
+        for position, row in enumerate(ledger):
+            expected = STAGE5_MIGRATION_HISTORY[position]
+            observed = (int(row[0]), str(row[1]), str(row[2]))
+            if observed != expected:
+                raise RuntimeError(
+                    "Stage 5 migration ledger is not an exact checksum-verified prefix: "
+                    f"expected={expected!r} observed={observed!r}"
+                )
 
         for table, additions in COLUMN_MIGRATIONS.items():
             existing = _columns(conn, table)
@@ -211,21 +255,20 @@ def ensure_stage5_schema(conn: sqlite3.Connection) -> None:
                     existing.add(column)
         _execute(conn, INDEX_SQL)
 
-        if ledger is None:
+        for version, name, digest in STAGE5_MIGRATION_HISTORY[len(ledger):]:
             conn.execute(
                 "INSERT INTO stage5_schema_migrations VALUES (?, ?, ?, ?)",
-                (
-                    STAGE5_SCHEMA_VERSION,
-                    STAGE5_MIGRATION_NAME,
-                    STAGE5_MIGRATION_SHA256,
-                    utc_now(),
-                ),
+                (version, name, digest, utc_now()),
             )
 
         for table, additions in COLUMN_MIGRATIONS.items():
             missing = sorted(set(additions) - _columns(conn, table))
             if missing:
                 raise RuntimeError(f"Stage 5 migration postcondition failed for {table}: {missing}")
+        if not _columns(conn, "fact_sec_ownership_issuer_coverage"):
+            raise RuntimeError(
+                "Stage 5 migration postcondition failed for issuer coverage table."
+            )
         violations = conn.execute("PRAGMA foreign_key_check").fetchmany(5)
         if violations:
             raise RuntimeError(f"Stage 5 migration introduced foreign-key violations: {violations}")

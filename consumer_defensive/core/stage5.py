@@ -366,10 +366,12 @@ def validate_stage5(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: st
     taxonomy_tickers = {str(row["ticker"]) for row in _universe(conn)}
     _check(
         checks,
-        "sec_ownership_import_present",
+        "sec_ownership_transaction_import_present",
         bool(ownership_tickers),
-        covered_tickers=len(ownership_tickers),
-        missing_tickers=sorted(taxonomy_tickers - ownership_tickers),
+        transaction_tickers=len(ownership_tickers),
+        tickers_without_eligible_purchase_or_sale=sorted(
+            taxonomy_tickers - ownership_tickers
+        ),
     )
     _check(
         checks,
@@ -397,8 +399,16 @@ def validate_stage5(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: st
     form4_not_applicable = sorted(
         ticker for ticker in current if profile_flags.get(ticker) == 1
     )
-    covered_applicable = sorted(set(form4_applicable) & ownership_tickers)
-    missing_applicable = sorted(set(form4_applicable) - ownership_tickers)
+    form4_coverage = {
+        str(row[0])
+        for row in conn.execute(
+            """SELECT ticker FROM fact_sec_ownership_issuer_coverage
+               WHERE source_id=? AND asof_date=? AND submission_count>0""",
+            (ownership_source, as_of),
+        )
+    }
+    covered_applicable = sorted(set(form4_applicable) & form4_coverage)
+    missing_applicable = sorted(set(form4_applicable) - form4_coverage)
     _check(
         checks,
         "sec_form4_applicable_current_coverage",
@@ -408,6 +418,7 @@ def validate_stage5(conn: sqlite3.Connection, bundle: ConfigBundle, *, as_of: st
         fraction=_fraction(len(covered_applicable), len(form4_applicable)),
         missing=missing_applicable,
         foreign_private_issuer_not_applicable=form4_not_applicable,
+        transaction_tickers=len(ownership_tickers & set(form4_applicable)),
     )
 
     coverage_specs = {

@@ -289,6 +289,36 @@ def test_full_validation_accepts_ten_complete_and_one_visible_exclusion() -> Non
         conn.close()
 
 
+def test_reconciliation_ignores_superseded_identity_corrections() -> None:
+    conn, policy, _ = initialized_connection()
+    try:
+        now = utc_now()
+        company_id = conn.execute(
+            """INSERT INTO dim_company(
+                   primary_ticker, company_name, universe_status, is_active,
+                   data_quality_status, first_seen_at, updated_at
+               ) VALUES ('DMC', 'Legacy Fresh Del Monte identity',
+                   'superseded_identity', 0, 'reviewed', ?, ?)""",
+            (now, now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO dim_security(
+                   company_id, ticker, provider_price_symbol, exchange,
+                   listing_country, security_type, listing_status,
+                   is_primary_listing, currency, created_at, updated_at
+               ) VALUES (?, 'DMC', 'DMC', 'NYSE', 'United States',
+                   'Common Stock', 'superseded', 0, 'USD', ?, ?)""",
+            (company_id, now, now),
+        )
+        result = reconcile_terminal_events(conn, policy)
+        assert result["events_loaded"] == 11
+        assert conn.execute(
+            "SELECT COUNT(*) FROM fact_terminal_event_reconciliation WHERE ticker='DMC'"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_terminal_validation_ignores_quotes_after_requested_asof() -> None:
     conn, policy, events = initialized_connection()
     as_of = '2021-05-29'

@@ -222,6 +222,10 @@ def import_sec_insider_transactions(
         raise ValueError("positioning.start_date must be an ISO date")
     source_id = str(cfg_get(bundle.payload, "positioning.ownership_source_id"))
     universe = _universe(conn)
+    cik_by_ticker = {
+        str(row["ticker"]): str(row["cik"] or "")
+        for row in universe
+    }
     cik_to_ticker = {
         str(row["cik"] or "").lstrip("0"): str(row["ticker"])
         for row in universe
@@ -239,11 +243,60 @@ def import_sec_insider_transactions(
         "trans_price_per_share", "trans_acquired_disp_cd",
     }
     records: list[tuple[Any, ...]] = []
+    coverage_records: list[tuple[Any, ...]] = []
     seen_ids: set[str] = set()
     invalid_rows = 0
     with _ro_connect(upstream_path) as upstream:
         _require_columns(upstream, "form4_events_tier1", required)
+        _require_columns(
+            upstream,
+            "sec_ownership_submission",
+            {
+                "accession_number",
+                "document_type",
+                "filing_date",
+                "accepted_ts_utc",
+                "issuer_cik",
+            },
+        )
         placeholders = ",".join("?" for _ in cik_to_ticker)
+        coverage: dict[str, tuple[int, str]] = {}
+        for row in upstream.execute(
+            f"""
+            SELECT accession_number,document_type,filing_date,accepted_ts_utc,issuer_cik
+            FROM sec_ownership_submission
+            WHERE LTRIM(COALESCE(issuer_cik,''),'0') IN ({placeholders})
+              AND document_type IN ('3','3/A','4','4/A','5','5/A')
+            ORDER BY issuer_cik,accepted_ts_utc,filing_date,accession_number
+            """,
+            tuple(sorted(cik_to_ticker)),
+        ):
+            ticker = cik_to_ticker.get(str(row["issuer_cik"] or "").lstrip("0"))
+            accepted = _accepted_at(row["accepted_ts_utc"], row["filing_date"])
+            accepted_date = _parse_date(accepted)
+            if (
+                ticker is None
+                or accepted is None
+                or accepted_date is None
+                or accepted_date < start_date
+                or accepted > cutoff
+            ):
+                continue
+            count, latest = coverage.get(ticker, (0, ""))
+            coverage[ticker] = (count + 1, max(latest, accepted))
+        coverage_records = [
+            (
+                ticker,
+                as_of,
+                source_id,
+                cik_by_ticker[ticker],
+                count,
+                latest,
+                "covered",
+                utc_now(),
+            )
+            for ticker, (count, latest) in sorted(coverage.items())
+        ]
         rows = upstream.execute(
             f"""
             SELECT event_key, accession_number, document_type, filing_date,
@@ -314,11 +367,24 @@ def import_sec_insider_transactions(
             """,
             records,
         )
+        conn.execute(
+            f"DELETE FROM fact_sec_ownership_issuer_coverage "
+            f"WHERE source_id=? AND ticker IN ({placeholders})",
+            (source_id, *tickers),
+        )
+        conn.executemany(
+            """INSERT INTO fact_sec_ownership_issuer_coverage(
+                   ticker,asof_date,source_id,issuer_cik,submission_count,
+                   latest_accepted_at,coverage_status,created_at
+               ) VALUES (?,?,?,?,?,?,?,?)""",
+            coverage_records,
+        )
     return {
         "source_id": source_id,
         "upstream_database": str(upstream_path),
         "rows": len(records),
         "tickers": len({row[1] for row in records}),
+        "issuer_coverage_tickers": len(coverage_records),
         "invalid_rows": invalid_rows,
         "as_of": as_of,
     }

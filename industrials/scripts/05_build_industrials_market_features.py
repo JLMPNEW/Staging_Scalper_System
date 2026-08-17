@@ -77,6 +77,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--model-family", default="", help="Industrials model family to build, e.g. defense.")
+    parser.add_argument(
+        "--tickers",
+        default="",
+        help="Optional comma-separated ticker filter; omitted preserves the full family universe.",
+    )
     parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
     parser.add_argument("--primary-benchmark", default="", help="Primary benchmark for rel_strength_bench_3m.")
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to latest available across universe and benchmarks.")
@@ -709,6 +714,7 @@ def main() -> None:
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
     if not model_family:
         raise ValueError("model_family cannot be empty")
+    ticker_filter = set(parse_ticker_list(args.tickers))
     max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
     # market_data_policy is the source of truth for full-feature thresholds
     # (CF-5); the market_feature_build copies are legacy fallbacks only.
@@ -784,6 +790,8 @@ def main() -> None:
                 membership_status=membership_status,
                 asof=asof,
             )
+            if ticker_filter:
+                members = [member for member in members if member.ticker in ticker_filter]
             tickers = [member.ticker for member in members]
             if not tickers:
                 raise ValueError(f"No industrials universe tickers found for model_family={model_family}.")
@@ -811,6 +819,8 @@ def main() -> None:
                     membership_status=membership_status,
                     asof=effective_asof,
                 )
+                if ticker_filter:
+                    members = [member for member in members if member.ticker in ticker_filter]
                 tickers = [member.ticker for member in members]
                 if not tickers:
                     raise ValueError(f"No as-of eligible industrials universe tickers found for model_family={model_family} asof={effective_asof}.")
@@ -838,7 +848,7 @@ def main() -> None:
             review_count = 0
             with conn:
                 ph_sources = placeholders(source_ids)
-                issue_tickers = sorted(
+                issue_tickers = sorted(tickers) if ticker_filter else sorted(
                     {
                         normalize_ticker(row["ticker"])
                         for row in conn.execute(

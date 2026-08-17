@@ -55,3 +55,21 @@ def test_reentry_decision_is_fail_closed_and_deterministic() -> None:
     )
     assert status == "BLOCKED"
     assert blockers == ("annual_revenue_integrity", "solvency_evidence")
+
+
+def test_explicit_zero_debt_interest_coverage_na_is_resolved() -> None:
+    module = load_module()
+    assert module._interest_coverage_resolved(
+        {
+            "availability_status": "NOT_APPLICABLE",
+            "metric_value": None,
+            "status_reason": "issuer_has_explicit_zero_debt_and_no_interest_expense",
+        }
+    )
+    assert not module._interest_coverage_resolved(
+        {
+            "availability_status": "NOT_APPLICABLE",
+            "metric_value": None,
+            "status_reason": "issuer_did_not_report_metric",
+        }
+    )

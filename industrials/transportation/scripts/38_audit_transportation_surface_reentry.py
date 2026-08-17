@@ -26,6 +26,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from industrials.core.config import cfg_get, family_config, load_yaml, resolve_path  # noqa: E402
+from industrials.core.canonical_fact_overrides import (  # noqa: E402
+    CanonicalConceptOverride,
+    load_canonical_concept_overrides,
+)
 from industrials.core.policy_loader import load_eligibility_policy, resolve_policy  # noqa: E402
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
 from industrials.transportation.contracts import file_sha256  # noqa: E402
@@ -77,6 +81,9 @@ OUTPUT_FIELDS = (
     "annual_revenue_period_end",
     "annual_revenue_candidate_count",
     "annual_revenue_value_spread",
+    "annual_revenue_resolution",
+    "annual_revenue_selected_concept",
+    "annual_revenue_selected_value",
     "specialized_accepted_metrics",
     "specialized_accepted_periods_json",
     "blockers",
@@ -161,6 +168,17 @@ def _observed(row: Mapping[str, Any] | None) -> bool:
     )
 
 
+def _interest_coverage_resolved(row: Mapping[str, Any] | None) -> bool:
+    if _observed(row):
+        return True
+    return bool(
+        row
+        and str(row.get("availability_status") or "") == "NOT_APPLICABLE"
+        and str(row.get("status_reason") or "")
+        == "issuer_has_explicit_zero_debt_and_no_interest_expense"
+    )
+
+
 def decide_candidate(gates: Mapping[str, bool]) -> tuple[str, tuple[str, ...]]:
     blockers = tuple(sorted(name for name, passed in gates.items() if not passed))
     return ("PASS", ()) if not blockers else ("BLOCKED", blockers)
@@ -171,6 +189,9 @@ def _annual_revenue_integrity(
     *,
     ticker: str,
     asof: str,
+    canonical_overrides: Mapping[
+        tuple[str, str], CanonicalConceptOverride
+    ],
 ) -> dict[str, object]:
     latest = connection.execute(
         """
@@ -193,6 +214,9 @@ def _annual_revenue_integrity(
             "period_end": "",
             "candidate_count": 0,
             "spread": None,
+            "resolution": "missing_annual_revenue_candidates",
+            "selected_concept": "",
+            "selected_value": None,
         }
     values = [
         float(row[0])
@@ -217,14 +241,56 @@ def _annual_revenue_integrity(
         ).fetchall()
     ]
     spread = max(values) / min(values) if values else None
+    canonical = connection.execute(
+        """
+        SELECT taxonomy, concept_name, value, canonical_quality
+        FROM fact_financial_statement_canonical
+        WHERE ticker=? AND model_family=? AND canonical_metric='revenue'
+          AND period_end=? AND accession_number=?
+        ORDER BY source_priority ASC, concept_name ASC
+        LIMIT 1
+        """,
+        (
+            ticker,
+            MODEL_FAMILY,
+            str(latest["period_end"]),
+            str(latest["accession_number"]),
+        ),
+    ).fetchone()
+    override = canonical_overrides.get((ticker, "revenue"))
+    selected_value = _number(canonical["value"]) if canonical is not None else None
+    reviewed_resolution = bool(
+        canonical is not None
+        and override is not None
+        and override.matches(
+            taxonomy=str(canonical["taxonomy"] or ""),
+            concept_name=str(canonical["concept_name"] or ""),
+        )
+        and str(canonical["canonical_quality"] or "")
+        == "mapped_xbrl_preferred_concept"
+        and selected_value in values
+    )
     # A greater-than-2x conflict in one annual accession is a deterministic
     # review trigger: the shared priority resolver may have selected a segment
     # or subset fact as consolidated revenue.  This is not an economic screen.
     return {
-        "passed": bool(values and spread is not None and spread <= 2.0),
+        "passed": bool(
+            values
+            and spread is not None
+            and (spread <= 2.0 or reviewed_resolution)
+        ),
         "period_end": str(latest["period_end"] or ""),
         "candidate_count": len(values),
         "spread": spread,
+        "resolution": (
+            "reviewed_preferred_consolidated_concept"
+            if reviewed_resolution
+            else "unambiguous_raw_candidates"
+            if spread is not None and spread <= 2.0
+            else "unresolved_raw_candidate_conflict"
+        ),
+        "selected_concept": str(canonical["concept_name"] or "") if canonical else "",
+        "selected_value": selected_value,
     }
 
 
@@ -302,6 +368,15 @@ def main() -> int:
         raise ValueError("re-entry candidates must remain outside active v4")
 
     registry_path = resolve_path(family["financial"]["metric_registry"], base_dir=base_dir)
+    canonical_override_path = resolve_path(
+        family["financial"]["canonical_concept_overrides_csv"],
+        base_dir=base_dir,
+    )
+    canonical_overrides = load_canonical_concept_overrides(
+        canonical_override_path,
+        model_family=MODEL_FAMILY,
+        asof=date.fromisoformat(asof),
+    )
     _, definitions = load_metric_registry(registry_path)
     eligibility_path = resolve_path(
         cfg_get(config, "scoring_policy.families.transportation.eligibility_policy_csv"),
@@ -437,7 +512,7 @@ def main() -> int:
             )
             if not (_observed(metrics.get("net_debt_to_ebitda")) or negative_ebitda):
                 unresolved_solvency.append("net_debt_to_ebitda")
-            if not _observed(metrics.get("interest_coverage")):
+            if not _interest_coverage_resolved(metrics.get("interest_coverage")):
                 unresolved_solvency.append("interest_coverage")
             if not (_observed(metrics.get("fcf_conversion")) or nonpositive_income):
                 unresolved_solvency.append("fcf_conversion")
@@ -468,6 +543,7 @@ def main() -> int:
                 connection,
                 ticker=ticker,
                 asof=asof,
+                canonical_overrides=canonical_overrides,
             )
             specialized = _specialized_depth(connection, ticker=ticker, asof=asof)
             gates = {
@@ -518,6 +594,13 @@ def main() -> int:
                         if integrity["spread"] is not None
                         else ""
                     ),
+                    "annual_revenue_resolution": integrity["resolution"],
+                    "annual_revenue_selected_concept": integrity["selected_concept"],
+                    "annual_revenue_selected_value": (
+                        integrity["selected_value"]
+                        if integrity["selected_value"] is not None
+                        else ""
+                    ),
                     "specialized_accepted_metrics": len(specialized),
                     "specialized_accepted_periods_json": json.dumps(specialized, sort_keys=True),
                     "blockers": "|".join(blockers),
@@ -560,6 +643,10 @@ def main() -> int:
             "eligibility_policy": {
                 "path": str(eligibility_path),
                 "sha256": file_sha256(eligibility_path),
+            },
+            "canonical_concept_overrides": {
+                "path": str(canonical_override_path),
+                "sha256": file_sha256(canonical_override_path),
             },
         },
         "output_csv": str(output_csv),

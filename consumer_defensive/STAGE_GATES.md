@@ -205,13 +205,17 @@ Acceptance tests:
 - It estimates the earliest potential common-feature date but does not certify the final historical scoring panel.
 - The continuation review chooses full Stage 6 work, a limited shadow candidate, or defer.
 
-Disposable acceptance at `2026-08-10`:
+Deployed acceptance at `2026-08-11`:
 
-- Stage 5 validation passes with 14,239 Form 4 observations across 104 taxonomy tickers, 1,652 PIT 13F observations across 114 tickers, and 12,335 FINRA short-interest observations across 114 tickers.
-- Current PIT numeric coverage is 104/108 (`96.296%`) for 13F and 104/108 (`96.296%`) for short interest. Required 13F-plus-short positioning features are complete for 100/108 (`92.593%`) current names, above the configured `80%` gate.
+- The production validator passes 18/18 checks at the strict `100%` current gate: 13F 108/108, short-interest signal 108/108, and required numeric positioning features 108/108.
+- Section 16 source coverage is 95/95 applicable current domestic issuers. Thirteen current foreign private issuers are explicit not-applicable rows; raw transaction-ticker counts are therefore not the coverage denominator.
+- The transaction table contains 14,246 observations across 104 transaction tickers. The rematch imports 1,724 PIT 13F aggregates across 118 taxonomy tickers and 12,567 FINRA rows across 115 taxonomy tickers.
+- Short-float percentage is 105/108. IMKTA, ODD, and STZ remain null at the ratio level because no safe PIT float proxy exists, but their days-to-cover values satisfy the v2 short-signal contract without inventing ratios.
 - Borrow coverage is zero and remains optional with a zero minimum; missing borrow data are null, not neutral or zero observations.
-- The foundation audit passes for 1,911 SPY dates and 7,644 date/cohort rows, estimates `2026-02-27` as the earliest potential common positioning-feature date, and records `proceed_stage6a`.
-- This evidence comes from disposable databases. Production Stage 5 mutation requires a separate approved rollout; the shared production positioning store and production Consumer Defensive database were not changed by the rehearsal.
+- The reviewed public/provider split is now explicit: public `FDP`/CIK `1047340` maps to reviewed Norgate `DMC`/asset `132283`; DMC Global/`BOOM` remains out of scope. Fresh chronological replay and a production-copy rehearsal both passed before deployment.
+- Production Stage 5 passes 18/18 at `2026-08-11`: current 13F 108/108, short interest 108/108, required numeric positioning features 108/108, and Section 16 source coverage 95/95 applicable domestic issuers. Thirteen current foreign private issuers are explicit not-applicable profiles.
+- The neutral cache rematch ran with network access forbidden and produced 9,867,997 total 13F holdings plus 197,912 FINRA rows. Both production databases pass `quick_check` with zero foreign-key violations; the pristine pre-change backups retain their recorded hashes.
+- The Stage 6A foundation audit passes with `proceed_stage6a` and earliest potential common-feature date `2026-05-28`. This remains a foundation gate, not the definitive Stage 6C historical-panel certification.
 
 ## Stage 6A - Core Scoring Feature Contract
 

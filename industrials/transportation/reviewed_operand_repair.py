@@ -27,9 +27,13 @@ ALLOWED_FACT_DERIVATIONS = frozenset(
         "document_ix_fact",
         "document_explicit_zero",
         "document_reviewed_formula",
+        "document_line_item_sum",
     }
 )
 ALLOWED_OVERRIDE_STATUSES = frozenset({"NOT_APPLICABLE"})
+SIGNED_REVIEWED_METRICS = frozenset(
+    {"operating_income", "operating_cash_flow", "pretax_income", "net_income"}
+)
 
 
 @dataclass(frozen=True)
@@ -133,12 +137,19 @@ def _resolve_document(
     return path, actual_sha
 
 
-def validate_policy_contract(policy: Mapping[str, Any]) -> None:
-    if policy.get("policy_version") != POLICY_VERSION:
+def validate_policy_contract(
+    policy: Mapping[str, Any],
+    *,
+    policy_version: str = POLICY_VERSION,
+    source_id: str = SOURCE_ID,
+    model_family: str = MODEL_FAMILY,
+    require_availability_overrides: bool = True,
+) -> None:
+    if policy.get("policy_version") != policy_version:
         raise ValueError("reviewed operand policy_version changed")
-    if policy.get("model_family") != MODEL_FAMILY:
+    if policy.get("model_family") != model_family:
         raise ValueError("reviewed operand policy model_family changed")
-    if policy.get("source_id") != SOURCE_ID:
+    if policy.get("source_id") != source_id:
         raise ValueError("reviewed operand policy source_id changed")
     if policy.get("review_status") != "ACCEPTED":
         raise ValueError("reviewed operand policy is not ACCEPTED")
@@ -155,7 +166,9 @@ def validate_policy_contract(policy: Mapping[str, Any]) -> None:
     overrides = policy.get("availability_overrides")
     if not isinstance(facts, list) or not facts:
         raise ValueError("fact_repairs must be a non-empty list")
-    if not isinstance(overrides, list) or not overrides:
+    if not isinstance(overrides, list):
+        raise ValueError("availability_overrides must be a list")
+    if require_availability_overrides and not overrides:
         raise ValueError("availability_overrides must be a non-empty list")
     repair_ids: set[str] = set()
     fact_identities: set[tuple[str, str, str, str, str]] = set()
@@ -183,7 +196,13 @@ def validate_policy_contract(policy: Mapping[str, Any]) -> None:
             raise ValueError(f"{repair_id}: duplicate output identity={identity}")
         fact_identities.add(identity)
         raw_value = raw.get("value")
-        if raw_value is None or float(str(raw_value)) < 0:
+        canonical_metric = _required_text(raw, "canonical_metric", identity=repair_id)
+        if raw_value is None:
+            raise ValueError(f"{repair_id}: reviewed operand value is required")
+        if (
+            float(str(raw_value)) < 0
+            and canonical_metric not in SIGNED_REVIEWED_METRICS
+        ):
             raise ValueError(f"{repair_id}: reviewed operand value must be nonnegative")
     override_ids: set[str] = set()
     for raw in overrides:
@@ -612,13 +631,102 @@ def _resolved_from_reviewed_formula(
     )
 
 
+def _resolved_from_document_line_item_sum(
+    raw: Mapping[str, Any],
+    *,
+    project_root: Path,
+) -> ResolvedFact:
+    """Resolve an audited additive line-item total from one hash-locked filing.
+
+    This derivation is intentionally narrower than ``document_reviewed_formula``:
+    every component must be a separately presented row in the same source
+    document, and the output is the positive sum of those cash-flow line items.
+    It is used when an issuer reports capex in multiple mutually exclusive rows
+    rather than one taxonomy concept.  No economic estimate or imputation is
+    permitted.
+    """
+    repair_id = str(raw["repair_id"])
+    path, sha = _resolve_document(
+        raw["source_document"],
+        project_root=project_root,
+        identity=repair_id,
+    )
+    soup = BeautifulSoup(
+        path.read_text(encoding="utf-8", errors="ignore"),
+        "html.parser",
+    )
+    normalized_rows = {
+        re.sub(
+            r"\s+",
+            " ",
+            html.unescape(row.get_text(" ", strip=True)).replace("\xa0", " "),
+        ).strip()
+        for row in soup.find_all("tr")
+    }
+    components = raw.get("line_item_components")
+    if not isinstance(components, list) or not components:
+        raise ValueError(f"{repair_id}: line_item_components are required")
+    matched_rows: list[dict[str, Any]] = []
+    values: list[float] = []
+    for component in components:
+        label = str(component.get("label") or "").strip()
+        display = str(component.get("display_value") or "").strip()
+        if not label or not display:
+            raise ValueError(f"{repair_id}: line-item label/display value is required")
+        matches = sorted(
+            row
+            for row in normalized_rows
+            if label.lower() in row.lower() and display.lower() in row.lower()
+        )
+        if not matches:
+            raise ValueError(
+                f"{repair_id}: line-item evidence changed label={label!r} "
+                f"display_value={display!r}"
+            )
+        value = float(component["value"])
+        if value < 0:
+            raise ValueError(f"{repair_id}: line-item values must be nonnegative")
+        values.append(value)
+        matched_rows.append(
+            {
+                "label": label,
+                "display_value": display,
+                "value": value,
+                "matched_row_count": len(matches),
+                "matched_row_sha256": stable_hash(matches),
+            }
+        )
+    expected = float(raw["value"])
+    _assert_close(sum(values), expected, identity=repair_id)
+    return _base_document_fact(
+        raw,
+        provenance={
+            "source_document": str(path),
+            "content_sha256": sha,
+            "line_item_components": matched_rows,
+            "component_values": values,
+            "aggregation": "positive_additive_cash_flow_line_items",
+        },
+    )
+
+
 def resolve_policy(
     connection: sqlite3.Connection,
     policy: Mapping[str, Any],
     *,
     project_root: Path = PROJECT_ROOT,
+    policy_version: str = POLICY_VERSION,
+    source_id: str = SOURCE_ID,
+    model_family: str = MODEL_FAMILY,
+    require_availability_overrides: bool = True,
 ) -> tuple[list[ResolvedFact], list[ResolvedOverride], int]:
-    validate_policy_contract(policy)
+    validate_policy_contract(
+        policy,
+        policy_version=policy_version,
+        source_id=source_id,
+        model_family=model_family,
+        require_availability_overrides=require_availability_overrides,
+    )
     run_id = int(policy["parser_run_id"])
     run = connection.execute(
         "SELECT * FROM sec_parser_run WHERE run_id=?",
@@ -626,7 +734,7 @@ def resolve_policy(
     ).fetchone()
     if (
         run is None
-        or str(run["model_family"]) != MODEL_FAMILY
+        or str(run["model_family"]) != model_family
         or str(run["status"]) != "COMPLETED"
         or int(run["failed_work_count"] or 0) != 0
     ):
@@ -653,6 +761,11 @@ def resolve_policy(
             fact = _resolved_from_explicit_zero(raw, project_root=project_root)
         elif derivation == "document_reviewed_formula":
             fact = _resolved_from_reviewed_formula(raw, project_root=project_root)
+        elif derivation == "document_line_item_sum":
+            fact = _resolved_from_document_line_item_sum(
+                raw,
+                project_root=project_root,
+            )
         else:  # pragma: no cover - guarded by validate_policy_contract
             raise AssertionError(derivation)
         if "source_document" in raw:
@@ -674,7 +787,7 @@ def resolve_policy(
         validated_documents.add(path)
         evidence_key = stable_hash(
             {
-                "policy_version": POLICY_VERSION,
+                "policy_version": policy_version,
                 "override_id": override_id,
                 "content_sha256": sha,
                 "status": raw["availability_status"],
@@ -687,7 +800,7 @@ def resolve_policy(
                 metric_name=str(raw["metric_name"]),
                 availability_status=str(raw["availability_status"]),
                 status_reason=(
-                    f"{POLICY_VERSION}:{str(raw['status_reason'])}"
+                    f"{policy_version}:{str(raw['status_reason'])}"
                 ),
                 valid_from=str(raw["valid_from"])[:10],
                 evidence_key=evidence_key,
@@ -767,6 +880,7 @@ def _insert_resolved_fact(
     source_id: str,
     source_priority: int,
     policy_sha256: str,
+    policy_version: str,
     now: str,
 ) -> int:
     fact_key = stable_hash(
@@ -784,11 +898,9 @@ def _insert_resolved_fact(
         }
     )
     frame = f"reviewed-policy:{fact.repair_id}"
-    source_detail = (
-        f"{fact.canonical_metric}:transportation_reviewed_required_metric_operand"
-    )
+    source_detail = f"{fact.canonical_metric}:{source_id}"
     payload = {
-        "policy_version": POLICY_VERSION,
+        "policy_version": policy_version,
         "policy_sha256": policy_sha256,
         "repair_id": fact.repair_id,
         "review_status": "ACCEPTED",
@@ -910,19 +1022,22 @@ def persist_policy(
     overrides: list[ResolvedOverride],
     policy_path: Path,
     source_priority: int,
+    source_id: str = SOURCE_ID,
+    policy_version: str = POLICY_VERSION,
+    model_family: str = MODEL_FAMILY,
 ) -> dict[str, Any]:
     ensure_parser_schema(connection)
     now = utc_now()
     policy_sha = file_sha256(policy_path)
     with connection:
-        _ensure_source_registry(connection, source_id=SOURCE_ID, now=now)
+        _ensure_source_registry(connection, source_id=source_id, now=now)
         connection.execute(
             "DELETE FROM fact_sec_xbrl_fact WHERE source_id=?",
-            (SOURCE_ID,),
+            (source_id,),
         )
         connection.execute(
             "DELETE FROM fact_sec_xbrl_fact_raw WHERE source_id=?",
-            (SOURCE_ID,),
+            (source_id,),
         )
         connection.execute(
             """
@@ -931,15 +1046,16 @@ def persist_policy(
             WHERE model_family=?
               AND status_reason LIKE ?
             """,
-            (MODEL_FAMILY, f"{POLICY_VERSION}:%"),
+            (model_family, f"{policy_version}:%"),
         )
         raw_fact_ids = [
             _insert_resolved_fact(
                 connection,
                 fact=fact,
-                source_id=SOURCE_ID,
+                source_id=source_id,
                 source_priority=source_priority,
                 policy_sha256=policy_sha,
+                policy_version=policy_version,
                 now=now,
             )
             for fact in facts
@@ -960,7 +1076,7 @@ def persist_policy(
                     active=1
                 """,
                 (
-                    MODEL_FAMILY,
+                    model_family,
                     override.ticker,
                     override.metric_name,
                     override.availability_status,
@@ -973,7 +1089,7 @@ def persist_policy(
     fact_count = int(
         connection.execute(
             "SELECT COUNT(*) FROM fact_sec_xbrl_fact WHERE source_id=?",
-            (SOURCE_ID,),
+            (source_id,),
         ).fetchone()[0]
     )
     active_override_count = int(
@@ -984,7 +1100,7 @@ def persist_policy(
             WHERE model_family=? AND active=1
               AND status_reason LIKE ?
             """,
-            (MODEL_FAMILY, f"{POLICY_VERSION}:%"),
+            (model_family, f"{policy_version}:%"),
         ).fetchone()[0]
     )
     if fact_count != len(facts):
@@ -997,7 +1113,7 @@ def persist_policy(
             f"{active_override_count} expected={len(overrides)}"
         )
     return {
-        "source_id": SOURCE_ID,
+        "source_id": source_id,
         "policy_sha256": policy_sha,
         "fact_count": fact_count,
         "raw_fact_ids": raw_fact_ids,

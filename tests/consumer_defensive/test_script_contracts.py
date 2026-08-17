@@ -74,7 +74,7 @@ def _current_only_db(tmp_path: Path):
 
 def test_all_consumer_defensive_scripts_import_and_expose_help() -> None:
     scripts = sorted(SCRIPTS.glob("*.py"))
-    assert len(scripts) == 24
+    assert len(scripts) == 25
     for script in scripts:
         completed = subprocess.run(
             [sys.executable, str(script), "--help"],
@@ -289,7 +289,15 @@ def test_current_universe_reload_removes_stale_taxonomy_members(tmp_path: Path) 
         assert conn.execute(
             "SELECT COUNT(*) FROM dim_security WHERE ticker=? AND listing_status='active'",
             (old_ticker,),
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT listing_status FROM dim_security WHERE ticker=?",
+            (old_ticker,),
+        ).fetchone()[0] == "superseded"
+        assert conn.execute(
+            "SELECT is_active FROM dim_company WHERE primary_ticker=?",
+            (old_ticker,),
+        ).fetchone()[0] == 0
     finally:
         conn.close()
 

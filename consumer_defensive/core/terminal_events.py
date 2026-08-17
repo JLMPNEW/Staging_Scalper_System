@@ -352,7 +352,7 @@ def reconcile_terminal_events(
             """
             SELECT s.ticker FROM dim_security s
             JOIN dim_company c ON c.company_id=s.company_id
-            WHERE s.listing_status<>'active' AND c.is_active=0
+            WHERE s.listing_status='delisted' AND c.is_active=0
             """
         ).fetchall()
     }
@@ -365,7 +365,7 @@ def reconcile_terminal_events(
     with conn:
         for event in events:
             security = conn.execute(
-                "SELECT security_id, company_id FROM dim_security WHERE ticker=? AND listing_status<>'active'",
+                "SELECT security_id, company_id FROM dim_security WHERE ticker=? AND listing_status='delisted'",
                 (event.ticker,),
             ).fetchone()
             if security is None:

@@ -75,6 +75,7 @@ silently non-blocking). Blocking applies only to sectors in the run's
 selection, so a required-stale probe on an unselected sector cannot flip a
 partial run. A registry with no probes behaves exactly as before.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -115,9 +116,10 @@ from orchestration_contracts.financial_lineage import (  # noqa: E402
     financial_lineage_sidecar_alignment_errors,
     policy_for_model_family,
 )
+
 DEFAULT_REGISTRY = ORCH_DIR / "registry.yaml"
-RUNS_ROOT = ORCH_DIR / "runs"                 # live master manifests (resume source)
-DRYRUN_RUNS_ROOT = ORCH_DIR / "runs_dryrun"   # dry-run manifests (NEVER consulted for resume)
+RUNS_ROOT = ORCH_DIR / "runs"  # live master manifests (resume source)
+DRYRUN_RUNS_ROOT = ORCH_DIR / "runs_dryrun"  # dry-run manifests (NEVER consulted for resume)
 ORCH_LOCK_PATH = ORCH_DIR / ".orchestrator.lock"
 PY = sys.executable
 
@@ -131,9 +133,7 @@ DEFAULT_LOCK_STALE_SEC = 6 * 3600  # override a lock older than this (crash reco
 # PASS_WITH_BACKFILL_GAPS: the CURRENT target date published and verified but one
 # or more best-effort historical backfill dates failed -- healthy by policy (an
 # unavailable historical date must never prevent the current portfolio).
-HEALTHY_STATES = frozenset(
-    {"PASS", "DRY_RUN", "SKIPPED_RESUME", "UP_TO_DATE", "PASS_WITH_BACKFILL_GAPS"}
-)
+HEALTHY_STATES = frozenset({"PASS", "DRY_RUN", "SKIPPED_RESUME", "UP_TO_DATE", "PASS_WITH_BACKFILL_GAPS"})
 
 # Persistent permanent-gap marker store (catch-up backfill tombstones).
 GAP_MARKER_PATH = ORCH_DIR / "backfill_gap_markers.json"
@@ -187,6 +187,7 @@ class FreshnessProbe:
                             the sqlite max-date value, so it never demands data before
                             the source can publish it.
     """
+
     name: str
     kind: str
     target: dict[str, Any]
@@ -286,9 +287,7 @@ def _parse_freshness_probes(sector_name: str, raw_probes: Any) -> list[Freshness
             raise ValueError(f"sector {sector_name}: freshness probe missing name")
         kind = str(raw.get("kind") or "").strip()
         if kind not in _PROBE_KINDS:
-            raise ValueError(
-                f"sector {sector_name}: probe {name}: unknown kind {kind!r}; valid={sorted(_PROBE_KINDS)}"
-            )
+            raise ValueError(f"sector {sector_name}: probe {name}: unknown kind {kind!r}; valid={sorted(_PROBE_KINDS)}")
         target = raw.get("target")
         if not isinstance(target, dict):
             raise ValueError(f"sector {sector_name}: probe {name}: target must be a mapping")
@@ -308,9 +307,7 @@ def _parse_freshness_probes(sector_name: str, raw_probes: Any) -> list[Freshness
         tolerance_days = int(raw.get("tolerance_days", 0))
         warn_lead_days = int(raw.get("warn_lead_days", 0))
         if tolerance_days < 0 or warn_lead_days < 0:
-            raise ValueError(
-                f"sector {sector_name}: probe {name}: tolerance_days and warn_lead_days must be >= 0"
-            )
+            raise ValueError(f"sector {sector_name}: probe {name}: tolerance_days and warn_lead_days must be >= 0")
         probes.append(
             FreshnessProbe(
                 name=name,
@@ -339,13 +336,8 @@ def load_registry(path: Path) -> Registry:
         sector_name = str(entry["name"])
         lineage_policy = policy_for_model_family(sector_name)
         legacy_lineage_required = entry.get("financial_lineage_required")
-        production_lineage_required = (
-            lineage_policy.mode_for("production") != POLICY_DISABLED
-        )
-        if (
-            legacy_lineage_required is not None
-            and bool(legacy_lineage_required) != production_lineage_required
-        ):
+        production_lineage_required = lineage_policy.mode_for("production") != POLICY_DISABLED
+        if legacy_lineage_required is not None and bool(legacy_lineage_required) != production_lineage_required:
             raise ValueError(
                 f"sector {sector_name}: registry financial_lineage_required conflicts "
                 "with orchestration/financial_lineage_policy.yaml"
@@ -395,15 +387,9 @@ def load_registry(path: Path) -> Registry:
                 require_oos_valid=bool(entry.get("require_oos_valid", False)),
                 staleness_tolerance_days=int(entry.get("staleness_tolerance_days", 3)),
                 backfill_window_days=(
-                    int(entry["backfill_window_days"])
-                    if entry.get("backfill_window_days") is not None
-                    else None
+                    int(entry["backfill_window_days"]) if entry.get("backfill_window_days") is not None else None
                 ),
-                publish_epoch=(
-                    parse_iso(str(entry["publish_epoch"]))
-                    if entry.get("publish_epoch")
-                    else None
-                ),
+                publish_epoch=(parse_iso(str(entry["publish_epoch"])) if entry.get("publish_epoch") else None),
                 health=health,
                 backfill=backfill,
                 repair=repair,
@@ -416,10 +402,7 @@ def load_registry(path: Path) -> Registry:
                 financial_lineage_required=production_lineage_required,
                 financial_lineage_policy=lineage_policy.mode_for("production"),
                 financial_lineage_min_core_metric_count=lineage_policy.min_core_metric_count,
-                financial_lineage_artifact=(
-                    str(entry.get("financial_lineage_artifact") or "").strip()
-                    or None
-                ),
+                financial_lineage_artifact=(str(entry.get("financial_lineage_artifact") or "").strip() or None),
             )
         )
     names = [sector.name for sector in sectors]
@@ -446,9 +429,7 @@ def load_registry(path: Path) -> Registry:
     unknown_ordered = sorted(set(ordered_names) - set(names))
     duplicate_ordered = sorted({name for name in ordered_names if ordered_names.count(name) > 1})
     if unknown_ordered or duplicate_ordered:
-        raise ValueError(
-            f"invalid group_order: unknown={unknown_ordered} duplicated={duplicate_ordered}"
-        )
+        raise ValueError(f"invalid group_order: unknown={unknown_ordered} duplicated={duplicate_ordered}")
     calendar_refs = list(defaults.get("calendar_reference_sectors") or [])
     unknown_refs = sorted(set(calendar_refs) - set(names))
     if unknown_refs:
@@ -463,9 +444,7 @@ def load_registry(path: Path) -> Registry:
     catch_up_threshold = int(defaults.get("catch_up_gap_backfill_threshold", 10))
     catch_up_window = int(defaults.get("catch_up_window_days", 45))
     if catch_up_threshold < 1 or catch_up_window < 1:
-        raise ValueError(
-            "catch_up_gap_backfill_threshold and catch_up_window_days must both be >= 1"
-        )
+        raise ValueError("catch_up_gap_backfill_threshold and catch_up_window_days must both be >= 1")
     permanent_after = int(defaults.get("permanent_gap_after_failures", 3))
     if permanent_after < 1:
         raise ValueError(f"permanent_gap_after_failures must be >= 1, got {permanent_after}")
@@ -494,8 +473,7 @@ def validate_registry_paths(reg: Registry) -> None:
         if sector.backfill and sector.backfill.script:
             candidates.append(sector.backfill.script)
         candidates.extend(
-            str(step.get("script") or "")
-            for step in [*sector.weekly_pre_steps, *sector.daily_post_steps]
+            str(step.get("script") or "") for step in [*sector.weekly_pre_steps, *sector.daily_post_steps]
         )
         for relative in candidates:
             if relative and not (PROJECT_ROOT / relative).is_file():
@@ -620,17 +598,17 @@ def _observed(d: date, *, is_new_year: bool = False) -> date:
 def us_market_holidays(year: int) -> set[date]:
     """Full-close NYSE holidays for `year` (observed shifts applied)."""
     holidays: set[date] = set()
-    holidays.add(_observed(date(year, 1, 1), is_new_year=True))         # New Year's Day
-    holidays.add(_nth_weekday(year, 1, 0, 3))                            # MLK (3rd Mon Jan)
-    holidays.add(_nth_weekday(year, 2, 0, 3))                           # Washington's Birthday (3rd Mon Feb)
-    holidays.add(_easter_sunday(year) - timedelta(days=2))              # Good Friday
-    holidays.add(_last_weekday(year, 5, 0))                             # Memorial Day (last Mon May)
+    holidays.add(_observed(date(year, 1, 1), is_new_year=True))  # New Year's Day
+    holidays.add(_nth_weekday(year, 1, 0, 3))  # MLK (3rd Mon Jan)
+    holidays.add(_nth_weekday(year, 2, 0, 3))  # Washington's Birthday (3rd Mon Feb)
+    holidays.add(_easter_sunday(year) - timedelta(days=2))  # Good Friday
+    holidays.add(_last_weekday(year, 5, 0))  # Memorial Day (last Mon May)
     if year >= 2022:
-        holidays.add(_observed(date(year, 6, 19)))                     # Juneteenth
-    holidays.add(_observed(date(year, 7, 4)))                          # Independence Day
-    holidays.add(_nth_weekday(year, 9, 0, 1))                          # Labor Day (1st Mon Sep)
-    holidays.add(_nth_weekday(year, 11, 3, 4))                         # Thanksgiving (4th Thu Nov)
-    holidays.add(_observed(date(year, 12, 25)))                        # Christmas
+        holidays.add(_observed(date(year, 6, 19)))  # Juneteenth
+    holidays.add(_observed(date(year, 7, 4)))  # Independence Day
+    holidays.add(_nth_weekday(year, 9, 0, 1))  # Labor Day (1st Mon Sep)
+    holidays.add(_nth_weekday(year, 11, 3, 4))  # Thanksgiving (4th Thu Nov)
+    holidays.add(_observed(date(year, 12, 25)))  # Christmas
     return holidays
 
 
@@ -814,10 +792,11 @@ def clear_gap_record(markers: dict[str, Any], sector_name: str, iso_date: str) -
 @dataclass(frozen=True)
 class GapReport:
     """Per-sector missing-date classification for one catch-up target."""
+
     target_missing: bool
-    backfill_missing: list[str]   # auto-run candidates, NEWEST-first
-    historical_gaps: list[str]    # inside the outer window but older than the backfill window
-    permanent_gaps: list[str]     # tombstoned by marker; skipped but surfaced
+    backfill_missing: list[str]  # auto-run candidates, NEWEST-first
+    historical_gaps: list[str]  # inside the outer window but older than the backfill window
+    permanent_gaps: list[str]  # tombstoned by marker; skipped but surfaced
 
 
 def sector_gap_report(
@@ -847,9 +826,7 @@ def sector_gap_report(
         return GapReport(target_missing, [], [], [])
     expected = trading_dates_in_range(reg, floor, target)
     missing_all = [d for d in expected if d not in published and d != target]
-    window_start = max(
-        floor, (_to_date(target) - timedelta(days=sector_backfill_window_days(sector))).isoformat()
-    )
+    window_start = max(floor, (_to_date(target) - timedelta(days=sector_backfill_window_days(sector))).isoformat())
     tombstoned = permanent_gap_dates(markers if markers is not None else load_gap_markers(), sector.name)
     backfill = sorted((d for d in missing_all if d >= window_start and d not in tombstoned), reverse=True)
     historical = sorted(d for d in missing_all if d < window_start and d not in tombstoned)
@@ -864,9 +841,7 @@ def resolve_target_date(requested: str | None, *, now_utc: datetime | None = Non
         # sector for a weekend/holiday/closure manufactures phantom dated
         # artifacts that can 'PASS' for a session that never existed.
         if not is_trading_day(_to_date(iso)):
-            raise SystemExit(
-                f"--as-of {iso} is not a trading session (weekend/holiday/ad-hoc closure)"
-            )
+            raise SystemExit(f"--as-of {iso} is not a trading session (weekend/holiday/ad-hoc closure)")
         return iso
     return latest_completed_trading_session(now_utc=now_utc)
 
@@ -924,11 +899,14 @@ def backfill_commands(sector: Sector, frm: str, to: str, reg: Registry) -> tuple
     if sector.backfill.per_date:
         dates = trading_dates_in_range(reg, frm, to)
         cmds = [
-            [PY, str(PROJECT_ROOT / sector.backfill.script)] + _sub(sector.backfill.args_template, {"date": d, "from": frm, "to": to})
+            [PY, str(PROJECT_ROOT / sector.backfill.script)]
+            + _sub(sector.backfill.args_template, {"date": d, "from": frm, "to": to})
             for d in dates
         ]
         return cmds, ""
-    cmd = [PY, str(PROJECT_ROOT / sector.backfill.script)] + _sub(sector.backfill.args_template, {"from": frm, "to": to})
+    cmd = [PY, str(PROJECT_ROOT / sector.backfill.script)] + _sub(
+        sector.backfill.args_template, {"from": frm, "to": to}
+    )
     return [cmd], ""
 
 
@@ -980,6 +958,7 @@ def _catch_up_daily_command(
 class CatchUpPlan:
     """Execution plan for one sector's catch-up: CURRENT target first, then
     best-effort historical backfill groups, newest-first."""
+
     target: str
     target_missing: bool
     target_unhealthy: bool
@@ -1021,6 +1000,7 @@ def build_catch_up_plan(
     target: str,
     *,
     force: bool,
+    include_weekly_pre: bool = False,
     live_completed_session: str | None = None,
     markers: dict[str, Any] | None = None,
 ) -> CatchUpPlan:
@@ -1047,9 +1027,9 @@ def build_catch_up_plan(
         target_unhealthy = not target_ok
     target_cmds: list[list[str]] = []
     if report.target_missing or target_unhealthy:
-        target_cmds.append(
-            _catch_up_daily_command(sector, target, force=force, live_completed_session=live_session)
-        )
+        if include_weekly_pre:
+            target_cmds.extend(weekly_pre_commands(sector, target))
+        target_cmds.append(_catch_up_daily_command(sector, target, force=force, live_completed_session=live_session))
         target_cmds.extend(daily_post_commands(sector, target))
     groups: list[tuple[tuple[str, ...], list[list[str]]]] = []
     missing = report.backfill_missing  # newest-first
@@ -1069,9 +1049,7 @@ def build_catch_up_plan(
             groups.append((tuple(chunk), cmds))
     else:
         for iso_date in missing:
-            cmds = [
-                _catch_up_daily_command(sector, iso_date, force=force, live_completed_session=live_session)
-            ]
+            cmds = [_catch_up_daily_command(sector, iso_date, force=force, live_completed_session=live_session)]
             # Preserve the exact daily post-publish contract for every date.
             cmds.extend(daily_post_commands(sector, iso_date))
             groups.append(((iso_date,), cmds))
@@ -1243,6 +1221,7 @@ def _pid_creation_time_utc(pid: int | None) -> datetime | None:
         if not handle:
             return None
         try:
+
             class FILETIME(ctypes.Structure):
                 _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
 
@@ -1382,9 +1361,7 @@ class OrchestrationLock:
                     # descendants keep ownership closed.
                     recorded_pid = self._recorded_pid()
                     alive = (
-                        _holder_alive(recorded_pid, self._recorded_started_utc())
-                        if recorded_pid is not None
-                        else None
+                        _holder_alive(recorded_pid, self._recorded_started_utc()) if recorded_pid is not None else None
                     )
                     recorded_children = self._recorded_children()
                     live_children = [pid for pid in recorded_children if _pid_alive(pid) is True]
@@ -1404,11 +1381,7 @@ class OrchestrationLock:
                         self.fd = self._try_create()
             if self.fd is None:
                 recorded_pid = self._recorded_pid()
-                alive = (
-                    _holder_alive(recorded_pid, self._recorded_started_utc())
-                    if recorded_pid is not None
-                    else None
-                )
+                alive = _holder_alive(recorded_pid, self._recorded_started_utc()) if recorded_pid is not None else None
                 age = self._age()
                 reason = "lock remained owned after serialized recovery"
                 detail = self.path.read_text(encoding="utf-8", errors="replace") if self.path.exists() else ""
@@ -1577,7 +1550,8 @@ def read_manifest(sector: Sector, iso_date: str | None) -> tuple[str, str]:
     """
     if not sector.health.manifest:
         return "NO_MANIFEST", ""
-    rel = sector.health.manifest.replace("{date}", iso_date or "")
+    manifest_date = _publish_folder_name(sector, iso_date) if iso_date else ""
+    rel = sector.health.manifest.replace("{date}", manifest_date)
     path = PROJECT_ROOT / rel
     if not path.exists():
         return "MISSING", ""
@@ -1606,7 +1580,15 @@ def _oos_required(sector: Sector) -> bool:
 # sector's published CSV carries exactly one of these (asof_date for the sector rank
 # tables / score packs, as_of_date for the portfolio stocks_scores.csv).
 _DATE_COLUMN_CANDIDATES = (
-    "asof_date", "as_of_date", "asof", "as_of", "run_as_of", "target_date", "trade_date", "session_date", "date",
+    "asof_date",
+    "as_of_date",
+    "asof",
+    "as_of",
+    "run_as_of",
+    "target_date",
+    "trade_date",
+    "session_date",
+    "date",
 )
 
 
@@ -1677,9 +1659,7 @@ def _financial_lineage_sidecar_errors(
     try:
         with rank_path.open("r", encoding="utf-8-sig", newline="") as handle:
             rank_rows = [dict(row) for row in csv.DictReader(handle)]
-        with lineage_path.open(
-            "r", encoding="utf-8-sig", newline=""
-        ) as handle:
+        with lineage_path.open("r", encoding="utf-8-sig", newline="") as handle:
             lineage_rows = [dict(row) for row in csv.DictReader(handle)]
     except OSError as exc:
         return [f"financial lineage sidecar unreadable: {exc}"]
@@ -1700,9 +1680,7 @@ def _financial_lineage_artifact_for_date(
     if not template:
         return published_artifact
     if "{date}" not in template:
-        raise ValueError(
-            f"sector {sector.name}: financial_lineage_artifact must contain {{date}}"
-        )
+        raise ValueError(f"sector {sector.name}: financial_lineage_artifact must contain {{date}}")
     rendered = template.replace("{date}", _publish_folder_name(sector, iso_date))
     path = Path(rendered)
     return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
@@ -1756,9 +1734,7 @@ def verify_published_artifact_for_date(
         date_checked, date_ok, date_detail = _csv_date_column_matches(artifact, iso_date)
         if date_checked and not date_ok:
             reasons.append(f"internal as-of column mismatch: {date_detail}")
-        lineage_policy_mode = policy_for_model_family(
-            sector.name
-        ).mode_for_asof("production", iso_date)
+        lineage_policy_mode = policy_for_model_family(sector.name).mode_for_asof("production", iso_date)
         if lineage_policy_mode != POLICY_DISABLED:
             lineage_artifact = _financial_lineage_artifact_for_date(
                 sector,
@@ -1766,9 +1742,7 @@ def verify_published_artifact_for_date(
                 published_artifact=artifact,
             )
             if not lineage_artifact.is_file():
-                reasons.append(
-                    f"financial lineage artifact missing: {lineage_artifact}"
-                )
+                reasons.append(f"financial lineage artifact missing: {lineage_artifact}")
             else:
                 if lineage_artifact != artifact:
                     reasons.extend(
@@ -1783,9 +1757,7 @@ def verify_published_artifact_for_date(
                         lineage_artifact,
                         iso_date,
                         policy_mode=lineage_policy_mode,
-                        min_core_metric_count=(
-                            sector.financial_lineage_min_core_metric_count
-                        ),
+                        min_core_metric_count=(sector.financial_lineage_min_core_metric_count),
                     )
                 )
     if verify_manifest and sector.health.manifest:
@@ -1843,11 +1815,7 @@ def health_check(reg: Registry, sectors: list[Sector], target: str) -> dict[str,
             else:
                 status = "PASS"
         lineage_policy_mode = (
-            policy_for_model_family(sector.name).mode_for_asof(
-                "production", last
-            )
-            if last
-            else POLICY_DISABLED
+            policy_for_model_family(sector.name).mode_for_asof("production", last) if last else POLICY_DISABLED
         )
         lineage_artifact_path = (
             str(
@@ -1857,11 +1825,7 @@ def health_check(reg: Registry, sectors: list[Sector], target: str) -> dict[str,
                     published_artifact=artifact,
                 )
             )
-            if (
-                last
-                and artifact is not None
-                and lineage_policy_mode != POLICY_DISABLED
-            )
+            if (last and artifact is not None and lineage_policy_mode != POLICY_DISABLED)
             else ""
         )
         rows.append(
@@ -2077,8 +2041,7 @@ def evaluate_freshness(sectors: list[Sector], target: str, log) -> dict[str, lis
                 log(f"FRESHNESS ERROR: [{sector.name}] probe={row['probe']} ERROR: {row['detail']}")
     if freshness:
         summary = "; ".join(
-            f"{name} " + ",".join(f"{r['probe']}={r['status']}" for r in rows)
-            for name, rows in freshness.items()
+            f"{name} " + ",".join(f"{r['probe']}={r['status']}" for r in rows) for name, rows in freshness.items()
         )
         log(f"freshness: {summary}")
     return freshness
@@ -2104,9 +2067,7 @@ def apply_freshness_consequences(
     blocking_required: list[str] = []
     for name, rows in sorted(freshness.items()):
         blocking = [
-            (r["probe"], r.get("status"))
-            for r in rows
-            if r.get("required") and r.get("status") in {"STALE", "ERROR"}
+            (r["probe"], r.get("status")) for r in rows if r.get("required") and r.get("status") in {"STALE", "ERROR"}
         ]
         if not blocking:
             continue
@@ -2123,10 +2084,7 @@ def apply_freshness_consequences(
             res.note = (res.note + "; " if res.note else "") + f"FRESHNESS_BLOCKING: {','.join(rendered)}"
     if blocking_required and overall == "PASS":
         overall = "FAIL"
-        log(
-            "FRESHNESS ERROR: required freshness probe(s) STALE/ERROR -> master acceptance "
-            f"FAIL: {blocking_required}"
-        )
+        log(f"FRESHNESS ERROR: required freshness probe(s) STALE/ERROR -> master acceptance FAIL: {blocking_required}")
     return overall, blocking_required
 
 
@@ -2216,6 +2174,7 @@ def run_catch_up_sector(
     backfill_failed: dict[str, str] = {}
     date_partitioned_manifest = bool(sector.health.manifest and "{date}" in sector.health.manifest)
     with log_path.open("w", encoding="utf-8", newline="") as logfile:
+
         def _exec(command: list[str]) -> int:
             if runner is not None:
                 return int(runner(command))
@@ -2248,9 +2207,7 @@ def run_catch_up_sector(
                 result.status = "UP_TO_DATE"
             else:
                 result.status = "FAIL"
-                result.note = (
-                    f"target {plan.target} published but unverifiable: " + "; ".join(reasons)
-                )
+                result.note = f"target {plan.target} published but unverifiable: " + "; ".join(reasons)
         # ---- 2) historical backfill, best-effort, newest-first ------------- #
         if result.status in {"PASS", "UP_TO_DATE"} and plan.backfill_groups:
             for dates, cmds in plan.backfill_groups:
@@ -2282,7 +2239,10 @@ def run_catch_up_sector(
             markers = load_gap_markers(markers_path)
             for iso_date, reason in backfill_failed.items():
                 record_gap_failure(
-                    markers, sector.name, iso_date, reason,
+                    markers,
+                    sector.name,
+                    iso_date,
+                    reason,
                     auto_permanent_after=reg.permanent_gap_after_failures,
                 )
             for iso_date in plan.backfill_dates:
@@ -2306,8 +2266,7 @@ def run_catch_up_sector(
     }
     result.elapsed_sec = round(time.perf_counter() - started, 2)
     log(
-        f"  [{sector.name}] {result.status} rcs={result.return_codes} "
-        f"elapsed={result.elapsed_sec}s ({plan_note(plan)})"
+        f"  [{sector.name}] {result.status} rcs={result.return_codes} elapsed={result.elapsed_sec}s ({plan_note(plan)})"
     )
     return result
 
@@ -2340,9 +2299,7 @@ def _run_one(sector: Sector, command: list[str], *, net_sem: threading.Semaphore
         proc: subprocess.Popen[bytes] | None = None
         tracker = _ACTIVE_ORCHESTRATION_LOCK
         try:
-            logfile.write(
-                f"\n=== attempt {attempt}/{attempts}: {subprocess.list2cmdline(attempt_command)}\n"
-            )
+            logfile.write(f"\n=== attempt {attempt}/{attempts}: {subprocess.list2cmdline(attempt_command)}\n")
             logfile.flush()
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             child_env = os.environ.copy()
@@ -2480,9 +2437,15 @@ def _result_rows(
     rows: list[dict[str, Any]] = []
     for r in results.values():
         row: dict[str, Any] = {
-            "sector": r.sector, "status": r.status, "note": r.note, "elapsed_sec": r.elapsed_sec,
-            "return_codes": r.return_codes, "artifact": r.artifact, "sha256": r.sha256,
-            "command_hash": r.command_hash, "content_hash": r.content_hash,
+            "sector": r.sector,
+            "status": r.status,
+            "note": r.note,
+            "elapsed_sec": r.elapsed_sec,
+            "return_codes": r.return_codes,
+            "artifact": r.artifact,
+            "sha256": r.sha256,
+            "command_hash": r.command_hash,
+            "content_hash": r.content_hash,
             "commands": [subprocess.list2cmdline(c) for c in r.commands],
         }
         if r.backfill is not None:
@@ -2552,9 +2515,7 @@ def reconcile_abandoned_runs() -> list[Path]:
         if stamp_match:
             try:
                 started_iso = (
-                    datetime.strptime(stamp_match.group(1), "%Y%m%dT%H%M%S_%f")
-                    .replace(tzinfo=timezone.utc)
-                    .isoformat()
+                    datetime.strptime(stamp_match.group(1), "%Y%m%dT%H%M%S_%f").replace(tzinfo=timezone.utc).isoformat()
                 )
             except ValueError:
                 started_iso = ""
@@ -2622,7 +2583,11 @@ def build_sector_commands(
         return repair_commands(sector, dates), ""
     if args.mode == "catch-up":
         plan = build_catch_up_plan(
-            reg, sector, target, force=args.force,
+            reg,
+            sector,
+            target,
+            force=args.force,
+            include_weekly_pre=args.cadence == "weekly",
             live_completed_session=getattr(args, "live_session", None),
         )
         return plan.all_commands, plan_note(plan)
@@ -2748,7 +2713,11 @@ def run_tier0(
                 # CURRENT-TARGET-FIRST plan; verification happens inline in
                 # run_catch_up_sector (per date, immediately after each run).
                 plan = build_catch_up_plan(
-                    reg, sector, target, force=args.force,
+                    reg,
+                    sector,
+                    target,
+                    force=args.force,
+                    include_weekly_pre=args.cadence == "weekly",
                     live_completed_session=getattr(args, "live_session", None),
                 )
                 commands, note = plan.all_commands, plan_note(plan)
@@ -2761,9 +2730,14 @@ def run_tier0(
                 and not args.dry_run
                 and resume_match(resume_records, sector, target, args.mode, cmd_hash, content_hash)
             ):
-                res = RunResult(sector=sector.name, status="SKIPPED_RESUME", commands=commands,
-                                command_hash=cmd_hash, content_hash=content_hash,
-                                note="resume: prior PASS matched target/mode/command/content/artifact-sha")
+                res = RunResult(
+                    sector=sector.name,
+                    status="SKIPPED_RESUME",
+                    commands=commands,
+                    command_hash=cmd_hash,
+                    content_hash=content_hash,
+                    note="resume: prior PASS matched target/mode/command/content/artifact-sha",
+                )
                 _set_artifact(sector, res, target, dry_run=False)
                 record_progress(res)
                 log(f"  [{sector.name}] SKIPPED_RESUME (prior PASS matched)")
@@ -2771,8 +2745,15 @@ def run_tier0(
             if plan is not None and not args.dry_run:
                 res = run_catch_up_sector(reg, sector, plan, run_dir=run_dir, net_sem=net_sem, log=log)
             else:
-                res = run_commands(sector, commands, run_dir=run_dir, net_sem=net_sem,
-                                   dry_run=args.dry_run, empty_status="NOTE", log=log)
+                res = run_commands(
+                    sector,
+                    commands,
+                    run_dir=run_dir,
+                    net_sem=net_sem,
+                    dry_run=args.dry_run,
+                    empty_status="NOTE",
+                    log=log,
+                )
             res.note = "; ".join(part for part in (note, res.note) if part)
             res.command_hash = cmd_hash
             res.content_hash = content_hash
@@ -2874,26 +2855,72 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Master cross-sector orchestrator.")
     p.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     p.add_argument("--mode", choices=["daily", "backfill", "health-check"], default="daily")
-    p.add_argument("--as-of", dest="as_of", default=None,
-                   help="Target trading date YYYY-MM-DD (default: latest COMPLETED trading session, close-aware).")
-    p.add_argument("--catch-up", action="store_true", help="Run every missing trading date per sector through the target.")
-    p.add_argument("--repair", default="", help="Repair spec: 'sector[:step],sector2,...' (re-run IB/network steps + rebuild dependents).")
-    p.add_argument("--repair-days", type=int, default=None, help="Trailing dates a --repair pass re-runs (>=1; default from registry).")
+    p.add_argument(
+        "--as-of",
+        dest="as_of",
+        default=None,
+        help="Target trading date YYYY-MM-DD (default: latest COMPLETED trading session, close-aware).",
+    )
+    p.add_argument(
+        "--catch-up", action="store_true", help="Run every missing trading date per sector through the target."
+    )
+    p.add_argument(
+        "--repair",
+        default="",
+        help="Repair spec: 'sector[:step],sector2,...' (re-run IB/network steps + rebuild dependents).",
+    )
+    p.add_argument(
+        "--repair-days",
+        type=int,
+        default=None,
+        help="Trailing dates a --repair pass re-runs (>=1; default from registry).",
+    )
     p.add_argument("--from", dest="from_date", default="", help="Backfill start date YYYY-MM-DD.")
     p.add_argument("--to", dest="to_date", default="", help="Backfill end date YYYY-MM-DD.")
-    p.add_argument("--cadence", choices=["daily", "weekly"], default="daily", help="weekly runs each sector's weekly_pre_steps before the daily publish (none by default).")
+    p.add_argument(
+        "--cadence",
+        choices=["daily", "weekly"],
+        default="daily",
+        help="weekly runs each sector's weekly_pre_steps before the daily publish (none by default).",
+    )
     p.add_argument("--only-sectors", default="", help="Comma-separated registry sector names to include.")
     p.add_argument("--skip-sectors", default="", help="Comma-separated registry sector names to exclude.")
     p.add_argument("--force", action="store_true", help="Forward each sector's force flag.")
-    p.add_argument("--resume", action="store_true", help="Skip sectors whose prior PASS matches (target, mode, command-hash) with a live artifact.")
-    p.add_argument("--dry-run", action="store_true", help="Print the command matrix; execute nothing (manifest isolated under runs_dryrun/).")
-    p.add_argument("--ignore-gate", action="store_true", help="Run portfolio even if the Tier-0 gate fails (required for partial runs that exclude required sectors).")
-    p.add_argument("--lock-stale-sec", type=int, default=DEFAULT_LOCK_STALE_SEC, help="Override a global orchestration lock older than this many seconds.")
-    p.add_argument("--mark-gap", default="", metavar="SECTOR:DATE[:REASON]",
-                   help="Mark one backfill date as a permanent gap (tombstone) and exit; catch-up will stop retrying it.")
-    p.add_argument("--clear-gap", default="", metavar="SECTOR:DATE",
-                   help="Clear a permanent-gap marker / failure record and exit.")
-    p.add_argument("--selftest", action="store_true", help="In-process validation of registry/date-math/scheduling/repair; no subprocess.")
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip sectors whose prior PASS matches (target, mode, command-hash) with a live artifact.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the command matrix; execute nothing (manifest isolated under runs_dryrun/).",
+    )
+    p.add_argument(
+        "--ignore-gate",
+        action="store_true",
+        help="Run portfolio even if the Tier-0 gate fails (required for partial runs that exclude required sectors).",
+    )
+    p.add_argument(
+        "--lock-stale-sec",
+        type=int,
+        default=DEFAULT_LOCK_STALE_SEC,
+        help="Override a global orchestration lock older than this many seconds.",
+    )
+    p.add_argument(
+        "--mark-gap",
+        default="",
+        metavar="SECTOR:DATE[:REASON]",
+        help="Mark one backfill date as a permanent gap (tombstone) and exit; catch-up will stop retrying it.",
+    )
+    p.add_argument(
+        "--clear-gap", default="", metavar="SECTOR:DATE", help="Clear a permanent-gap marker / failure record and exit."
+    )
+    p.add_argument(
+        "--selftest",
+        action="store_true",
+        help="In-process validation of registry/date-math/scheduling/repair; no subprocess.",
+    )
     return p.parse_args(argv)
 
 
@@ -2921,8 +2948,8 @@ def resolve_mode(args: argparse.Namespace) -> None:
             f"conflicting mode flags: {conflicts}; choose exactly one of "
             f"--repair / --catch-up / --mode backfill / --mode health-check"
         )
-    if args.cadence == "weekly" and (args.repair or args.catch_up or explicit_backfill or explicit_health):
-        raise SystemExit("--cadence weekly only applies to daily mode")
+    if args.cadence == "weekly" and (args.repair or explicit_backfill or explicit_health):
+        raise SystemExit("--cadence weekly only applies to daily or catch-up mode")
     if args.repair:
         args.mode = "repair"
     elif args.catch_up:
@@ -2946,9 +2973,7 @@ def handle_gap_marker_cli(reg: Registry, args: argparse.Namespace) -> int:
             reason = ":".join(parts[2:]).strip() or "operator-marked permanent gap"
             sectors = markers.setdefault("sectors", {})
             sectors.setdefault(sector_name, {})[iso_date] = {
-                "failures": int(
-                    (sectors.get(sector_name, {}).get(iso_date) or {}).get("failures", 0)
-                ),
+                "failures": int((sectors.get(sector_name, {}).get(iso_date) or {}).get("failures", 0)),
                 "permanent": True,
                 "reason": reason,
                 "source": "operator",
@@ -3005,8 +3030,10 @@ def main(argv: list[str] | None = None) -> int:
         if not selected:
             raise SystemExit("--repair selection is empty")
 
-    log(f"orchestrator mode={args.mode} cadence={args.cadence} target={target} "
-        f"sectors={[s.name for s in selected]} dry_run={args.dry_run}")
+    log(
+        f"orchestrator mode={args.mode} cadence={args.cadence} target={target} "
+        f"sectors={[s.name for s in selected]} dry_run={args.dry_run}"
+    )
 
     if args.mode == "health-check":
         report = health_check(reg, list(selected), target)
@@ -3025,14 +3052,25 @@ def main(argv: list[str] | None = None) -> int:
             matrix[sector.name] = build_sector_commands(reg, sector, args, target, repair_map)
         print_matrix(matrix)
         rows = [
-            {"sector": name, "status": "DRY_RUN", "command_hash": _command_hash(cmds),
-             "commands": [subprocess.list2cmdline(c) for c in cmds], "note": note}
+            {
+                "sector": name,
+                "status": "DRY_RUN",
+                "command_hash": _command_hash(cmds),
+                "commands": [subprocess.list2cmdline(c) for c in cmds],
+                "note": note,
+            }
             for name, (cmds, note) in matrix.items()
         ]
         write_master_manifest(
             run_dir,
-            {"run_stamp": run_stamp, "mode": args.mode, "cadence": args.cadence, "target": target,
-             "dry_run": True, "sectors": rows},
+            {
+                "run_stamp": run_stamp,
+                "mode": args.mode,
+                "cadence": args.cadence,
+                "target": target,
+                "dry_run": True,
+                "sectors": rows,
+            },
         )
         return 0
 
@@ -3046,9 +3084,17 @@ def main(argv: list[str] | None = None) -> int:
         # Crash-resumable: write an in-progress RUNNING manifest BEFORE execution.
         write_master_manifest(
             run_dir,
-            {"run_stamp": run_stamp, "mode": args.mode, "cadence": args.cadence, "target": target,
-             "master_pid": os.getpid(), "dry_run": False, "acceptance": "RUNNING",
-             "tier0_gate": "RUNNING", "sectors": []},
+            {
+                "run_stamp": run_stamp,
+                "mode": args.mode,
+                "cadence": args.cadence,
+                "target": target,
+                "master_pid": os.getpid(),
+                "dry_run": False,
+                "acceptance": "RUNNING",
+                "tier0_gate": "RUNNING",
+                "sectors": [],
+            },
         )
         results: dict[str, RunResult] = {}
         overall = "FAIL"
@@ -3069,9 +3115,17 @@ def main(argv: list[str] | None = None) -> int:
                 # Record excluded required Tier-0 sectors as UNKNOWN for transparency (finding 4).
                 selected_names = {s.name for s in selected}
                 for sector in reg.sectors:
-                    if sector.dependency_tier == 0 and sector.required and sector.name not in results and sector.name not in selected_names:
-                        results[sector.name] = RunResult(sector=sector.name, status="UNKNOWN",
-                                                         note="excluded from selection; required for the Tier-0 gate")
+                    if (
+                        sector.dependency_tier == 0
+                        and sector.required
+                        and sector.name not in results
+                        and sector.name not in selected_names
+                    ):
+                        results[sector.name] = RunResult(
+                            sector=sector.name,
+                            status="UNKNOWN",
+                            note="excluded from selection; required for the Tier-0 gate",
+                        )
             log(f"tier0 gate: {'PASS' if gate_ok else 'FAIL'} (failing_required={failing})")
 
             # Tier 1 (portfolio) only after the gate. It never runs in repair mode: the repair
@@ -3083,17 +3137,26 @@ def main(argv: list[str] | None = None) -> int:
                             # CURRENT-TARGET-FIRST: the current book is attempted
                             # before (and independently of) any historical backfill.
                             plan = build_catch_up_plan(
-                                reg, sector, target, force=args.force,
+                                reg,
+                                sector,
+                                target,
+                                force=args.force,
+                                include_weekly_pre=args.cadence == "weekly",
                                 live_completed_session=getattr(args, "live_session", None),
                             )
                             commands, note = plan.all_commands, plan_note(plan)
-                            res = run_catch_up_sector(
-                                reg, sector, plan, run_dir=run_dir, net_sem=net_sem, log=log
-                            )
+                            res = run_catch_up_sector(reg, sector, plan, run_dir=run_dir, net_sem=net_sem, log=log)
                         else:
                             commands, note = build_sector_commands(reg, sector, args, target, repair_map)
-                            res = run_commands(sector, commands, run_dir=run_dir, net_sem=net_sem,
-                                               dry_run=False, empty_status="NOTE", log=log)
+                            res = run_commands(
+                                sector,
+                                commands,
+                                run_dir=run_dir,
+                                net_sem=net_sem,
+                                dry_run=False,
+                                empty_status="NOTE",
+                                log=log,
+                            )
                         res.note = "; ".join(part for part in (note, res.note) if part)
                         res.command_hash = _command_hash(commands)
                         res.content_hash = _content_hash(sector, args.registry)
@@ -3102,16 +3165,24 @@ def main(argv: list[str] | None = None) -> int:
                         results[sector.name] = res
                         write_master_manifest(
                             run_dir,
-                            {"run_stamp": run_stamp, "mode": args.mode, "cadence": args.cadence,
-                             "target": target, "master_pid": os.getpid(), "dry_run": False,
-                             "acceptance": "RUNNING",
-                             "tier0_gate": _gate_manifest_value(gate_ok, args.ignore_gate),
-                             "tier0_failing_required": failing, "sectors": _result_rows(results)},
+                            {
+                                "run_stamp": run_stamp,
+                                "mode": args.mode,
+                                "cadence": args.cadence,
+                                "target": target,
+                                "master_pid": os.getpid(),
+                                "dry_run": False,
+                                "acceptance": "RUNNING",
+                                "tier0_gate": _gate_manifest_value(gate_ok, args.ignore_gate),
+                                "tier0_failing_required": failing,
+                                "sectors": _result_rows(results),
+                            },
                         )
                 else:
                     for sector in tier1_selected:
-                        results[sector.name] = RunResult(sector=sector.name, status="SKIPPED_GATE",
-                                                         note=f"tier0 gate failed: {failing}")
+                        results[sector.name] = RunResult(
+                            sector=sector.name, status="SKIPPED_GATE", note=f"tier0 gate failed: {failing}"
+                        )
                         log(f"  [{sector.name}] SKIPPED_GATE (tier0 failing_required={failing})")
             elif tier1_selected and args.mode == "backfill":
                 for sector in tier1_selected:
@@ -3125,15 +3196,24 @@ def main(argv: list[str] | None = None) -> int:
             # publication; only a required probe that is STALE flips the acceptance.
             freshness = evaluate_freshness(reg.sectors, target, log)
             overall, freshness_blocking_required = apply_freshness_consequences(
-                freshness, results, overall, log,
+                freshness,
+                results,
+                overall,
+                log,
                 selected_names={s.name for s in selected},
             )
         finally:
             payload: dict[str, Any] = {
-                "run_stamp": run_stamp, "mode": args.mode, "cadence": args.cadence, "target": target,
-                "master_pid": os.getpid(), "dry_run": False, "acceptance": overall,
+                "run_stamp": run_stamp,
+                "mode": args.mode,
+                "cadence": args.cadence,
+                "target": target,
+                "master_pid": os.getpid(),
+                "dry_run": False,
+                "acceptance": overall,
                 "tier0_gate": _gate_manifest_value(gate_ok, bool(args.ignore_gate)),
-                "tier0_failing_required": failing, "ignore_gate": bool(args.ignore_gate),
+                "tier0_failing_required": failing,
+                "ignore_gate": bool(args.ignore_gate),
                 "sectors": _result_rows(results, freshness=freshness),
             }
             if freshness:
@@ -3151,64 +3231,179 @@ def main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------- #
 FAKE_REGISTRY = {
     "defaults": {
-        "timeout_sec": 60, "retries": 0, "max_concurrent_network_lanes": 2,
-        "catch_up_gap_backfill_threshold": 3, "catch_up_window_days": 45, "repair_days": 5,
-        "permanent_gap_after_failures": 2, "market_closures": [],
+        "timeout_sec": 60,
+        "retries": 0,
+        "max_concurrent_network_lanes": 2,
+        "catch_up_gap_backfill_threshold": 3,
+        "catch_up_window_days": 45,
+        "repair_days": 5,
+        "permanent_gap_after_failures": 2,
+        "market_closures": [],
         "calendar_reference_sectors": ["alpha", "defense_x"],
     },
     "group_order": {"grp_tech": ["alpha", "beta"], "grp_ind": ["defense_x", "mach_x"]},
     "sectors": [
-        {"name": "alpha", "db_group": "grp_tech", "dependency_tier": 0, "required": True, "network": True,
-         "entry_script": "a/run.py", "date_flag": "--asof", "args_template": ["--asof", "{date}"],
-         "force_args": ["--force-refresh"], "publish_glob": "output/a/{date}/a.csv", "publish_date_format": "%Y-%m-%d",
-         "oos_column": "oos_score_valid_flag", "require_oos_valid": True, "staleness_tolerance_days": 3,
-         "backfill_window_days": 5,
-         "health": {"manifest": "output/a/m.json", "status_keys": ["status"]},
-         "daily_post_steps": [{"script": "a/promote.py", "args_template": ["--asof", "{date}"]}],
-         "backfill": {"script": "a/bf.py", "args_template": ["--start", "{from}", "--end", "{to}"], "per_date": False},
-         "repair": {"date_flag": "--asof", "selection_flag": "--only", "steps": ["s1", "s2"],
-                    "rebuild_steps": ["r1", "r2"], "extra_args": []}},
-        {"name": "beta", "db_group": "grp_tech", "dependency_tier": 0, "required": True, "network": True,
-         "entry_script": "b/run.py", "date_flag": "--asof", "args_template": ["--asof", "{date}"],
-         "force_args": [], "publish_glob": "output/b/{date}/b.csv", "publish_date_format": "%Y-%m-%d",
-         "oos_column": None, "staleness_tolerance_days": 3,
-         "health": {"manifest": None, "status_keys": []},
-         "backfill": {"script": "b/bf.py", "args_template": ["--from", "{from}", "--to", "{to}"], "per_date": True},
-         "repair": {"date_flag": "--asof", "selection_flag": "--steps", "steps": ["x1"], "rebuild_steps": ["x9"], "extra_args": []}},
-        {"name": "defense_x", "db_group": "grp_ind", "dependency_tier": 0, "required": True, "network": True,
-         "entry_script": "d/run.py", "date_flag": "--asof", "args_template": ["--asof", "{date}"],
-         "force_args": [], "publish_glob": "output/d/{date}/d.csv", "publish_date_format": "%Y-%m-%d",
-         "oos_column": "oos_score_valid_flag", "require_oos_valid": True, "staleness_tolerance_days": 3,
-         "health": {"manifest": "output/d/m.json", "status_keys": ["acceptance"]},
-         "weekly_pre_steps": [{"script": "d/snap.py", "args_template": ["--end-date", "{date}"]}],
-         "backfill": {"script": "d/19.py", "args_template": ["--start-date", "{from}", "--end-date", "{to}", "--membership-mode", "pit"], "per_date": False},
-         "repair": {"date_flag": "--asof", "selection_flag": "", "steps": ["13", "17"], "rebuild_steps": [],
-                    "extra_args": ["--positioning-through-publish-only"]},
-         "freshness_probes": [
-             {"name": "borrow_age", "kind": "sqlite_max_date",
-              "target": {"db": "fixture/f.sqlite", "sql": "SELECT MAX(asof_date) FROM t"},
-              "tolerance_days": 10, "warn_lead_days": 3},
-             {"name": "13f_period", "kind": "deadline_schedule",
-              "target": {"db": "fixture/f.sqlite", "sql": "SELECT MAX(period_of_report) FROM t",
-                         "cadence": "quarterly", "deadline_days": 45, "publication_lag_days": 35},
-              "tolerance_days": 0, "warn_lead_days": 7, "required": True},
-         ]},
-        {"name": "mach_x", "db_group": "grp_ind", "dependency_tier": 0, "required": False, "network": True,
-         "entry_script": "m/run.py", "date_flag": "--asof", "args_template": ["--asof", "{date}"],
-         "force_args": ["--force"], "publish_glob": "output/m/{date}/m.csv", "publish_date_format": "%Y-%m-%d",
-         "oos_column": "oos_score_valid_flag", "require_oos_valid": True, "staleness_tolerance_days": 3,
-         "health": {"manifest": "output/m/m.json", "status_keys": ["acceptance"]},
-         "backfill": {"script": "m/run.py", "args_template": ["--asof", "{to}", "--include-historical-backfill", "--history-start-date", "{from}"], "per_date": False},
-         "repair": {"date_flag": "--asof", "selection_flag": "--only", "steps": ["12", "13"], "rebuild_steps": ["06a", "10b"], "extra_args": []}},
-        {"name": "port_x", "db_group": "portfolio", "dependency_tier": 1, "required": True, "network": True,
-         "entry_script": "p/18.py", "date_flag": "--as-of", "args_template": ["--as-of", "{date}"],
-         "force_args": ["--force"], "publish_glob": "p/output/runs/{date}/final/final_manifest.json", "publish_date_format": "%Y-%m-%d",
-         "oos_column": None, "require_oos_valid": False, "staleness_tolerance_days": 10,
-         "publish_epoch": "2026-07-02",
-         "health": {"manifest": "p/output/runs/{date}/orchestration_meta.json", "status_keys": ["acceptance"],
-                    "healthy_values": ["PASS", "PASS_WITH_ADVISORY_WARNINGS"]},
-         "backfill": {"script": "", "args_template": [], "per_date": False, "note": "stage11 not auto-run"},
-         "repair": None},
+        {
+            "name": "alpha",
+            "db_group": "grp_tech",
+            "dependency_tier": 0,
+            "required": True,
+            "network": True,
+            "entry_script": "a/run.py",
+            "date_flag": "--asof",
+            "args_template": ["--asof", "{date}"],
+            "force_args": ["--force-refresh"],
+            "publish_glob": "output/a/{date}/a.csv",
+            "publish_date_format": "%Y-%m-%d",
+            "oos_column": "oos_score_valid_flag",
+            "require_oos_valid": True,
+            "staleness_tolerance_days": 3,
+            "backfill_window_days": 5,
+            "health": {"manifest": "output/a/m.json", "status_keys": ["status"]},
+            "daily_post_steps": [{"script": "a/promote.py", "args_template": ["--asof", "{date}"]}],
+            "backfill": {
+                "script": "a/bf.py",
+                "args_template": ["--start", "{from}", "--end", "{to}"],
+                "per_date": False,
+            },
+            "repair": {
+                "date_flag": "--asof",
+                "selection_flag": "--only",
+                "steps": ["s1", "s2"],
+                "rebuild_steps": ["r1", "r2"],
+                "extra_args": [],
+            },
+        },
+        {
+            "name": "beta",
+            "db_group": "grp_tech",
+            "dependency_tier": 0,
+            "required": True,
+            "network": True,
+            "entry_script": "b/run.py",
+            "date_flag": "--asof",
+            "args_template": ["--asof", "{date}"],
+            "force_args": [],
+            "publish_glob": "output/b/{date}/b.csv",
+            "publish_date_format": "%Y-%m-%d",
+            "oos_column": None,
+            "staleness_tolerance_days": 3,
+            "health": {"manifest": None, "status_keys": []},
+            "backfill": {"script": "b/bf.py", "args_template": ["--from", "{from}", "--to", "{to}"], "per_date": True},
+            "repair": {
+                "date_flag": "--asof",
+                "selection_flag": "--steps",
+                "steps": ["x1"],
+                "rebuild_steps": ["x9"],
+                "extra_args": [],
+            },
+        },
+        {
+            "name": "defense_x",
+            "db_group": "grp_ind",
+            "dependency_tier": 0,
+            "required": True,
+            "network": True,
+            "entry_script": "d/run.py",
+            "date_flag": "--asof",
+            "args_template": ["--asof", "{date}"],
+            "force_args": [],
+            "publish_glob": "output/d/{date}/d.csv",
+            "publish_date_format": "%Y-%m-%d",
+            "oos_column": "oos_score_valid_flag",
+            "require_oos_valid": True,
+            "staleness_tolerance_days": 3,
+            "health": {"manifest": "output/d/m.json", "status_keys": ["acceptance"]},
+            "weekly_pre_steps": [{"script": "d/snap.py", "args_template": ["--end-date", "{date}"]}],
+            "backfill": {
+                "script": "d/19.py",
+                "args_template": ["--start-date", "{from}", "--end-date", "{to}", "--membership-mode", "pit"],
+                "per_date": False,
+            },
+            "repair": {
+                "date_flag": "--asof",
+                "selection_flag": "",
+                "steps": ["13", "17"],
+                "rebuild_steps": [],
+                "extra_args": ["--positioning-through-publish-only"],
+            },
+            "freshness_probes": [
+                {
+                    "name": "borrow_age",
+                    "kind": "sqlite_max_date",
+                    "target": {"db": "fixture/f.sqlite", "sql": "SELECT MAX(asof_date) FROM t"},
+                    "tolerance_days": 10,
+                    "warn_lead_days": 3,
+                },
+                {
+                    "name": "13f_period",
+                    "kind": "deadline_schedule",
+                    "target": {
+                        "db": "fixture/f.sqlite",
+                        "sql": "SELECT MAX(period_of_report) FROM t",
+                        "cadence": "quarterly",
+                        "deadline_days": 45,
+                        "publication_lag_days": 35,
+                    },
+                    "tolerance_days": 0,
+                    "warn_lead_days": 7,
+                    "required": True,
+                },
+            ],
+        },
+        {
+            "name": "mach_x",
+            "db_group": "grp_ind",
+            "dependency_tier": 0,
+            "required": False,
+            "network": True,
+            "entry_script": "m/run.py",
+            "date_flag": "--asof",
+            "args_template": ["--asof", "{date}"],
+            "force_args": ["--force"],
+            "publish_glob": "output/m/{date}/m.csv",
+            "publish_date_format": "%Y-%m-%d",
+            "oos_column": "oos_score_valid_flag",
+            "require_oos_valid": True,
+            "staleness_tolerance_days": 3,
+            "health": {"manifest": "output/m/m.json", "status_keys": ["acceptance"]},
+            "backfill": {
+                "script": "m/run.py",
+                "args_template": ["--asof", "{to}", "--include-historical-backfill", "--history-start-date", "{from}"],
+                "per_date": False,
+            },
+            "repair": {
+                "date_flag": "--asof",
+                "selection_flag": "--only",
+                "steps": ["12", "13"],
+                "rebuild_steps": ["06a", "10b"],
+                "extra_args": [],
+            },
+        },
+        {
+            "name": "port_x",
+            "db_group": "portfolio",
+            "dependency_tier": 1,
+            "required": True,
+            "network": True,
+            "entry_script": "p/18.py",
+            "date_flag": "--as-of",
+            "args_template": ["--as-of", "{date}"],
+            "force_args": ["--force"],
+            "publish_glob": "p/output/runs/{date}/final/final_manifest.json",
+            "publish_date_format": "%Y-%m-%d",
+            "oos_column": None,
+            "require_oos_valid": False,
+            "staleness_tolerance_days": 10,
+            "publish_epoch": "2026-07-02",
+            "health": {
+                "manifest": "p/output/runs/{date}/orchestration_meta.json",
+                "status_keys": ["acceptance"],
+                "healthy_values": ["PASS", "PASS_WITH_ADVISORY_WARNINGS"],
+            },
+            "backfill": {"script": "", "args_template": [], "per_date": False, "note": "stage11 not auto-run"},
+            "repair": None,
+        },
     ],
 }
 
@@ -3229,15 +3424,22 @@ def run_selftest() -> int:
     ok("registry_catch_up_window", reg.catch_up_window_days == 45)
     ok("registry_permanent_gap_threshold", reg.permanent_gap_after_failures == 2)
     ok("registry_publish_epoch_parsed", reg.by_name("port_x").publish_epoch == "2026-07-02")
-    ok("registry_backfill_window_parsed",
-       reg.by_name("alpha").backfill_window_days == 5 and reg.by_name("beta").backfill_window_days is None)
-    ok("registry_backfill_window_default_tolerance",
-       sector_backfill_window_days(reg.by_name("beta")) == 3
-       and sector_backfill_window_days(reg.by_name("alpha")) == 5)
+    ok(
+        "registry_backfill_window_parsed",
+        reg.by_name("alpha").backfill_window_days == 5 and reg.by_name("beta").backfill_window_days is None,
+    )
+    ok(
+        "registry_backfill_window_default_tolerance",
+        sector_backfill_window_days(reg.by_name("beta")) == 3
+        and sector_backfill_window_days(reg.by_name("alpha")) == 5,
+    )
     ok("registry_group_order", reg.group_order["grp_ind"] == ["defense_x", "mach_x"])
     port = reg.by_name("port_x")
     ok("registry_tier1", port.dependency_tier == 1 and port.date_flag == "--as-of")
-    ok("registry_backfill_note", port.backfill is not None and port.backfill.script == "" and "stage11" in port.backfill.note)
+    ok(
+        "registry_backfill_note",
+        port.backfill is not None and port.backfill.script == "" and "stage11" in port.backfill.note,
+    )
     ok("registry_require_oos", reg.by_name("alpha").require_oos_valid and not port.require_oos_valid)
 
     # --- registry validation: bad lanes / repair_days ---
@@ -3279,10 +3481,8 @@ def run_selftest() -> int:
         force=False,
         live_completed_session="2026-07-17",
     )
-    ok("catch_up_historical_portfolio_suppresses_event_cycle",
-       "--historical-catchup" in historical_portfolio)
-    ok("catch_up_live_portfolio_keeps_event_cycle",
-       "--historical-catchup" not in live_portfolio)
+    ok("catch_up_historical_portfolio_suppresses_event_cycle", "--historical-catchup" in historical_portfolio)
+    ok("catch_up_live_portfolio_keeps_event_cycle", "--historical-catchup" not in live_portfolio)
 
     # --- repair selection (two-stage) ---
     rmap = parse_repair_arg(reg, "alpha:s1,mach_x")
@@ -3303,20 +3503,25 @@ def run_selftest() -> int:
     ok("repair_cmd_source_only", "--only" in rcmds[0] and "s1,s2".split(",")[0] in " ".join(rcmds[0]))
     ok("repair_cmd_rebuild", "r1,r2" in " ".join(rcmds[1]) and "--only" in rcmds[1])
     rcmds_def = repair_commands(defense, ["2026-07-17"])
-    ok("repair_defense_single_tail", len(rcmds_def) == 1 and "--positioning-through-publish-only" in rcmds_def[0] and "--only" not in rcmds_def[0])
+    ok(
+        "repair_defense_single_tail",
+        len(rcmds_def) == 1 and "--positioning-through-publish-only" in rcmds_def[0] and "--only" not in rcmds_def[0],
+    )
 
     # --- date / gap math + NYSE holidays ---
     ok("parse_iso", parse_iso(" 2026-07-17 ") == "2026-07-17")
-    ok("holiday_july3_2026_observed", not is_trading_day(date(2026, 7, 3)))     # observed July 4 (Sat)
+    ok("holiday_july3_2026_observed", not is_trading_day(date(2026, 7, 3)))  # observed July 4 (Sat)
     ok("holiday_july6_2026_trading", is_trading_day(date(2026, 7, 6)))
     ok("holiday_new_year_2026", not is_trading_day(date(2026, 1, 1)))
     ok("holiday_mlk_2026", not is_trading_day(date(2026, 1, 19)))
     ok("holiday_good_friday_2026", not is_trading_day(date(2026, 4, 3)))
     ok("holiday_christmas_2026", not is_trading_day(date(2026, 12, 25)))
-    ok("holiday_new_year_2022_no_dec31", is_trading_day(date(2021, 12, 31)))     # Jan 1 2022 was Sat; Fri stays open
+    ok("holiday_new_year_2022_no_dec31", is_trading_day(date(2021, 12, 31)))  # Jan 1 2022 was Sat; Fri stays open
     span = trading_dates_in_range(reg, "2026-06-29", "2026-07-07")
-    ok("trading_span_excludes_july3_and_weekend",
-       span == ["2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-06", "2026-07-07"])
+    ok(
+        "trading_span_excludes_july3_and_weekend",
+        span == ["2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-06", "2026-07-07"],
+    )
     span2 = trading_dates_in_range(reg, "2026-07-18", "2026-07-19")  # Sat..Sun
     ok("trading_span_weekend_empty", span2 == [])
     saved_project_root = globals()["PROJECT_ROOT"]
@@ -3341,18 +3546,26 @@ def run_selftest() -> int:
 
     # --- default target = latest COMPLETED trading session (close-aware, never artifacts) ---
     utc = timezone.utc
-    ok("target_after_close_same_day",
-       resolve_target_date(None, now_utc=datetime(2026, 7, 21, 22, 0, tzinfo=utc)) == "2026-07-21")   # Tue 18:00 ET
-    ok("target_before_close_prev_day",
-       resolve_target_date(None, now_utc=datetime(2026, 7, 21, 12, 0, tzinfo=utc)) == "2026-07-20")   # Tue 08:00 ET
-    ok("target_monday_before_close_skips_holiday",
-       resolve_target_date(None, now_utc=datetime(2026, 7, 6, 12, 0, tzinfo=utc)) == "2026-07-02")    # Mon 08:00 ET -> skip Jul3 + weekend
-    ok("target_saturday_prev_friday",
-       resolve_target_date(None, now_utc=datetime(2026, 7, 18, 22, 0, tzinfo=utc)) == "2026-07-17")
+    ok(
+        "target_after_close_same_day",
+        resolve_target_date(None, now_utc=datetime(2026, 7, 21, 22, 0, tzinfo=utc)) == "2026-07-21",
+    )  # Tue 18:00 ET
+    ok(
+        "target_before_close_prev_day",
+        resolve_target_date(None, now_utc=datetime(2026, 7, 21, 12, 0, tzinfo=utc)) == "2026-07-20",
+    )  # Tue 08:00 ET
+    ok(
+        "target_monday_before_close_skips_holiday",
+        resolve_target_date(None, now_utc=datetime(2026, 7, 6, 12, 0, tzinfo=utc)) == "2026-07-02",
+    )  # Mon 08:00 ET -> skip Jul3 + weekend
+    ok(
+        "target_saturday_prev_friday",
+        resolve_target_date(None, now_utc=datetime(2026, 7, 18, 22, 0, tzinfo=utc)) == "2026-07-17",
+    )
     ok("target_requested_passthrough", resolve_target_date("2026-05-01") == "2026-05-01")
 
     # --- missing dates: internal gaps surfaced ---
-    published = {"2026-07-13", "2026-07-14", "2026-07-16", "2026-07-17"}   # 07-15 internal gap
+    published = {"2026-07-13", "2026-07-14", "2026-07-16", "2026-07-17"}  # 07-15 internal gap
     expected = trading_dates_in_range(reg, "2026-07-13", "2026-07-17")
     ok("missing_internal_gap", _missing_from_expected(published, expected) == ["2026-07-15"])
 
@@ -3371,8 +3584,12 @@ def run_selftest() -> int:
     ok("lane_excludes_tier1", all("port_x" not in t for t in lane_map))
 
     # --- gate logic (UP_TO_DATE healthy; UNKNOWN/excluded unhealthy; optional ignored) ---
-    base = {"alpha": RunResult("alpha", "PASS"), "beta": RunResult("beta", "UP_TO_DATE"),
-            "defense_x": RunResult("defense_x", "PASS"), "mach_x": RunResult("mach_x", "OPTIONAL_FAIL")}
+    base = {
+        "alpha": RunResult("alpha", "PASS"),
+        "beta": RunResult("beta", "UP_TO_DATE"),
+        "defense_x": RunResult("defense_x", "PASS"),
+        "mach_x": RunResult("mach_x", "OPTIONAL_FAIL"),
+    }
     gate_ok, failing = tier0_gate(reg, base)
     ok("gate_up_to_date_healthy_optional_ignored", gate_ok and failing == [])
     base2 = dict(base)
@@ -3385,15 +3602,30 @@ def run_selftest() -> int:
 
     # --- overall consistency ---
     sel = [s for s in reg.sectors]
-    ok("overall_up_to_date_pass",
-       compute_overall(sel, {**base, "port_x": RunResult("port_x", "PASS")}, mode="catch-up", gate_ok=True, ignore_gate=False) == "PASS")
-    ok("overall_gate_fail_no_bypass",
-       compute_overall(sel, base, mode="daily", gate_ok=False, ignore_gate=False) == "FAIL")
+    ok(
+        "overall_up_to_date_pass",
+        compute_overall(
+            sel, {**base, "port_x": RunResult("port_x", "PASS")}, mode="catch-up", gate_ok=True, ignore_gate=False
+        )
+        == "PASS",
+    )
+    ok(
+        "overall_gate_fail_no_bypass",
+        compute_overall(sel, base, mode="daily", gate_ok=False, ignore_gate=False) == "FAIL",
+    )
     note_sel = [reg.by_name("port_x")]
-    ok("overall_backfill_note_ok",
-       compute_overall(note_sel, {"port_x": RunResult("port_x", "NOTE")}, mode="backfill", gate_ok=True, ignore_gate=True) == "PASS")
-    ok("overall_daily_note_required_fail",
-       compute_overall(note_sel, {"port_x": RunResult("port_x", "NOTE")}, mode="daily", gate_ok=True, ignore_gate=True) == "FAIL")
+    ok(
+        "overall_backfill_note_ok",
+        compute_overall(
+            note_sel, {"port_x": RunResult("port_x", "NOTE")}, mode="backfill", gate_ok=True, ignore_gate=True
+        )
+        == "PASS",
+    )
+    ok(
+        "overall_daily_note_required_fail",
+        compute_overall(note_sel, {"port_x": RunResult("port_x", "NOTE")}, mode="daily", gate_ok=True, ignore_gate=True)
+        == "FAIL",
+    )
 
     # --- resume keying (finding 5: command + script/registry content hashes + artifact SHA) ---
     cmds_a = [daily_command(alpha, "2026-07-17", force=False)]
@@ -3412,8 +3644,18 @@ def run_selftest() -> int:
         manifest = tmp_resume / "output" / "a" / "m.json"
         manifest.write_text(json.dumps({"status": "PASS", "asof_date": "2026-07-17"}), encoding="utf-8")
         art_sha = sha256_file(art)
-        recs = [{"sector": "alpha", "status": "PASS", "target": "2026-07-17", "mode": "daily",
-                 "command_hash": h, "content_hash": ch, "sha256": art_sha, "artifact": str(art)}]
+        recs = [
+            {
+                "sector": "alpha",
+                "status": "PASS",
+                "target": "2026-07-17",
+                "mode": "daily",
+                "command_hash": h,
+                "content_hash": ch,
+                "sha256": art_sha,
+                "artifact": str(art),
+            }
+        ]
         ok("resume_match_full_identity", resume_match(recs, alpha, "2026-07-17", "daily", h, ch))
         ok("resume_reject_wrong_target", not resume_match(recs, alpha, "2026-07-16", "daily", h, ch))
         ok("resume_reject_wrong_mode", not resume_match(recs, alpha, "2026-07-17", "catch-up", h, ch))
@@ -3428,6 +3670,7 @@ def run_selftest() -> int:
     finally:
         globals()["PROJECT_ROOT"] = _saved_resume_root
         import shutil
+
         shutil.rmtree(tmp_resume, ignore_errors=True)
 
     # --- dry-run isolation ---
@@ -3450,9 +3693,12 @@ def run_selftest() -> int:
 
     # --- conflicting mode flags / cadence (health-check participates: it must never
     # silently become an executing catch-up run) ---
-    for flags in (["--repair", "alpha", "--catch-up"], ["--mode", "backfill", "--catch-up"],
-                  ["--cadence", "weekly", "--catch-up"], ["--mode", "health-check", "--catch-up"],
-                  ["--mode", "health-check", "--repair", "alpha"]):
+    for flags in (
+        ["--repair", "alpha", "--catch-up"],
+        ["--mode", "backfill", "--catch-up"],
+        ["--mode", "health-check", "--catch-up"],
+        ["--mode", "health-check", "--repair", "alpha"],
+    ):
         a = parse_args(flags)
         try:
             resolve_mode(a)
@@ -3460,12 +3706,24 @@ def run_selftest() -> int:
         except SystemExit:
             ok(f"reject_conflict_{'_'.join(flags)}", True)
 
+    weekly_catchup = parse_args(["--cadence", "weekly", "--catch-up"])
+    resolve_mode(weekly_catchup)
+    ok(
+        "weekly_catchup_allowed",
+        weekly_catchup.mode == "catch-up" and weekly_catchup.cadence == "weekly",
+    )
+
     # --- finding 1: daily post-steps appended after the publish command ---
     args_daily = parse_args([])
     dcmds, dnote = build_sector_commands(reg, reg.by_name("alpha"), args_daily, "2026-07-17", {})
     ok("finding1_daily_post_step_appended", any("promote.py" in " ".join(c) for c in dcmds))
-    ok("finding1_post_step_after_publish",
-       "run.py" in " ".join(dcmds[0]) and "promote.py" in " ".join(dcmds[-1]) and "--asof" in dcmds[-1] and "2026-07-17" in dcmds[-1])
+    ok(
+        "finding1_post_step_after_publish",
+        "run.py" in " ".join(dcmds[0])
+        and "promote.py" in " ".join(dcmds[-1])
+        and "--asof" in dcmds[-1]
+        and "2026-07-17" in dcmds[-1],
+    )
     ok("finding1_post_step_note", dnote == "daily+post_steps")
     dcmds_np, dnote_np = build_sector_commands(reg, reg.by_name("beta"), args_daily, "2026-07-17", {})
     ok("finding1_no_post_step_when_none", all("promote.py" not in " ".join(c) for c in dcmds_np) and dnote_np == "")
@@ -3487,8 +3745,15 @@ def run_selftest() -> int:
     _saved_root = _globals["PROJECT_ROOT"]
     tmp_root = Path(tempfile.mkdtemp())
 
-    def _mk_artifact(folder_parent: str, folder: str, filename: str, rows: int,
-                     *, date_col: str | None = "asof_date", date_val: str | None = None) -> None:
+    def _mk_artifact(
+        folder_parent: str,
+        folder: str,
+        filename: str,
+        rows: int,
+        *,
+        date_col: str | None = "asof_date",
+        date_val: str | None = None,
+    ) -> None:
         d = tmp_root / folder_parent / folder
         d.mkdir(parents=True, exist_ok=True)
         with (d / filename).open("w", encoding="utf-8", newline="") as handle:
@@ -3500,13 +3765,30 @@ def run_selftest() -> int:
 
     def _sector(**over: Any) -> Sector:
         base = dict(
-            name="fsec", db_group="g", dependency_tier=0, required=True, network=False,
-            entry_script="x/run.py", date_flag="--asof", args_template=["--asof", "{date}"],
-            force_args=[], publish_glob="pub/{date}/t.csv", publish_date_format="%Y-%m-%d",
-            oos_column="oos_score_valid_flag", gate_column=None, require_oos_valid=True,
-            staleness_tolerance_days=3, backfill_window_days=None, publish_epoch=None,
+            name="fsec",
+            db_group="g",
+            dependency_tier=0,
+            required=True,
+            network=False,
+            entry_script="x/run.py",
+            date_flag="--asof",
+            args_template=["--asof", "{date}"],
+            force_args=[],
+            publish_glob="pub/{date}/t.csv",
+            publish_date_format="%Y-%m-%d",
+            oos_column="oos_score_valid_flag",
+            gate_column=None,
+            require_oos_valid=True,
+            staleness_tolerance_days=3,
+            backfill_window_days=None,
+            publish_epoch=None,
             health=HealthSpec(manifest=None, status_keys=[]),
-            backfill=None, repair=None, weekly_pre_steps=[], daily_post_steps=[], timeout_sec=60, retries=0,
+            backfill=None,
+            repair=None,
+            weekly_pre_steps=[],
+            daily_post_steps=[],
+            timeout_sec=60,
+            retries=0,
         )
         base.update(over)
         return Sector(**base)  # type: ignore[arg-type]
@@ -3536,6 +3818,23 @@ def run_selftest() -> int:
         ok("daily_finalize_verified_target_pass", res_daily_ok.status == "PASS")
         man_dir = tmp_root / "mani"
         man_dir.mkdir(parents=True, exist_ok=True)
+        compact_manifest = tmp_root / "mani_compact" / "20260716" / "manifest.json"
+        compact_manifest.parent.mkdir(parents=True, exist_ok=True)
+        compact_manifest.write_text(
+            json.dumps({"status": "PASS", "asof": "2026-07-16"}),
+            encoding="utf-8",
+        )
+        fsec_compact = _sector(
+            publish_date_format="%Y%m%d",
+            health=HealthSpec(
+                manifest="mani_compact/{date}/manifest.json",
+                status_keys=["status"],
+            ),
+        )
+        ok(
+            "health_manifest_uses_sector_date_format",
+            read_manifest(fsec_compact, "2026-07-16") == ("PASS", "2026-07-16"),
+        )
 
         # finding 4: empty-asof manifest is NOT date-verifying -> artifact date column must verify
         (man_dir / "empty_2026-07-16.json").write_text(json.dumps({"status": "PASS", "asof": ""}), encoding="utf-8")
@@ -3548,23 +3847,34 @@ def run_selftest() -> int:
             writer = csv.writer(handle)
             writer.writerow(["oos_score_valid_flag", "ticker"])
             writer.writerow(["1", "T0"])
-        fsec_nodate = _sector(publish_glob="pub2/{date}/t.csv",
-                              health=HealthSpec(manifest="mani/empty_{date}.json", status_keys=["status"]))
+        fsec_nodate = _sector(
+            publish_glob="pub2/{date}/t.csv",
+            health=HealthSpec(manifest="mani/empty_{date}.json", status_keys=["status"]),
+        )
         vfc = verify_published_artifact_for_date(fsec_nodate, "2026-07-16")
         ok("finding4_empty_asof_no_datecol_failclosed", not vfc[0] and any("date unverified" in r for r in vfc[1]))
         # populated manifest asof that disagrees with folder -> fail
-        (man_dir / "wrong_2026-07-16.json").write_text(json.dumps({"status": "PASS", "asof": "2026-07-10"}), encoding="utf-8")
+        (man_dir / "wrong_2026-07-16.json").write_text(
+            json.dumps({"status": "PASS", "asof": "2026-07-10"}), encoding="utf-8"
+        )
         fsec_wrong = _sector(health=HealthSpec(manifest="mani/wrong_{date}.json", status_keys=["status"]))
         vwrong = verify_published_artifact_for_date(fsec_wrong, "2026-07-16")
-        ok("finding4_manifest_asof_mismatch_fails", not vwrong[0] and any("manifest asof=2026-07-10" in r for r in vwrong[1]))
+        ok(
+            "finding4_manifest_asof_mismatch_fails",
+            not vwrong[0] and any("manifest asof=2026-07-10" in r for r in vwrong[1]),
+        )
         # M10: healthy_values set -- PASS_WITH_ADVISORY_WARNINGS healthy only when declared
         (man_dir / "advisory_2026-07-16.json").write_text(
             json.dumps({"acceptance": "PASS_WITH_ADVISORY_WARNINGS", "run_as_of": "2026-07-16"}),
             encoding="utf-8",
         )
-        fsec_adv = _sector(health=HealthSpec(
-            manifest="mani/advisory_{date}.json", status_keys=["acceptance"],
-            healthy_values=["PASS", "PASS_WITH_ADVISORY_WARNINGS"]))
+        fsec_adv = _sector(
+            health=HealthSpec(
+                manifest="mani/advisory_{date}.json",
+                status_keys=["acceptance"],
+                healthy_values=["PASS", "PASS_WITH_ADVISORY_WARNINGS"],
+            )
+        )
         st_adv, asof_adv = read_manifest(fsec_adv, "2026-07-16")
         ok("m10_advisory_value_set_healthy", st_adv == "PASS" and asof_adv == "2026-07-16")
         fsec_strict = _sector(health=HealthSpec(manifest="mani/advisory_{date}.json", status_keys=["acceptance"]))
@@ -3572,6 +3882,7 @@ def run_selftest() -> int:
     finally:
         _globals["PROJECT_ROOT"] = _saved_root
         import shutil
+
         shutil.rmtree(tmp_root, ignore_errors=True)
 
     # --- catch-up policy (2026-08-07 redesign): current-first, bounded window,
@@ -3596,6 +3907,7 @@ def run_selftest() -> int:
 
         def _mk_runner(fail_dates: set[str], publish_sec: Sector):
             """No-subprocess command runner: publishes the date's artifact on success."""
+
             def _runner(command: list[str]) -> int:
                 date_tok = next((t for t in command if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t)), None)
                 if date_tok is None:
@@ -3605,30 +3917,39 @@ def run_selftest() -> int:
                 if "post.py" not in " ".join(command):
                     _publish(publish_sec, date_tok)
                 return 0
+
             return _runner
 
         # gap report: window bounded by tolerance; historical gaps surfaced not run
-        cusec = _sector(name="cusec", publish_glob="cu/{date}/t.csv",
-                        daily_post_steps=[{"script": "x/post.py", "args_template": ["--asof", "{date}"]}])
+        cusec = _sector(
+            name="cusec",
+            publish_glob="cu/{date}/t.csv",
+            daily_post_steps=[{"script": "x/post.py", "args_template": ["--asof", "{date}"]}],
+        )
         for d in ("2026-07-06", "2026-07-13"):
             _publish(cusec, d)
         rep = sector_gap_report(reg, cusec, target_cu, markers={"sectors": {}})
         ok("cu_target_missing_detected", rep.target_missing)
-        ok("cu_window_bounded_by_tolerance",
-           rep.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"])
+        ok("cu_window_bounded_by_tolerance", rep.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"])
         ok("cu_newest_first_ordering", rep.backfill_missing == sorted(rep.backfill_missing, reverse=True))
-        ok("cu_historical_gaps_surfaced_not_run",
-           rep.historical_gaps == ["2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10"])
+        ok(
+            "cu_historical_gaps_surfaced_not_run",
+            rep.historical_gaps == ["2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10"],
+        )
         cusec_w = _sector(name="cusec", publish_glob="cu/{date}/t.csv", backfill_window_days=7)
         rep_w = sector_gap_report(reg, cusec_w, target_cu, markers={"sectors": {}})
-        ok("cu_backfill_window_days_override",
-           "2026-07-10" in rep_w.backfill_missing and "2026-07-09" not in rep_w.backfill_missing)
+        ok(
+            "cu_backfill_window_days_override",
+            "2026-07-10" in rep_w.backfill_missing and "2026-07-09" not in rep_w.backfill_missing,
+        )
 
         # publish-convention epoch: pre-epoch dates exempt from missing-detection
         cusec_e = _sector(name="cusec", publish_glob="cu/{date}/t.csv", publish_epoch="2026-07-13")
         rep_e = sector_gap_report(reg, cusec_e, target_cu, markers={"sectors": {}})
-        ok("cu_epoch_exempts_preepoch_dates",
-           rep_e.historical_gaps == [] and rep_e.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"])
+        ok(
+            "cu_epoch_exempts_preepoch_dates",
+            rep_e.historical_gaps == [] and rep_e.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"],
+        )
 
         # permanent-gap markers: auto-tombstone after N failures; respected by scans
         mk = {"sectors": {}}
@@ -3637,128 +3958,190 @@ def run_selftest() -> int:
         record_gap_failure(mk, "cusec", "2026-07-15", "rc=1", auto_permanent_after=2)
         ok("cu_marker_auto_permanent_after_threshold", permanent_gap_dates(mk, "cusec") == {"2026-07-15"})
         rep_m = sector_gap_report(reg, cusec, target_cu, markers=mk)
-        ok("cu_permanent_gap_not_retried",
-           "2026-07-15" not in rep_m.backfill_missing and rep_m.permanent_gaps == ["2026-07-15"])
+        ok(
+            "cu_permanent_gap_not_retried",
+            "2026-07-15" not in rep_m.backfill_missing and rep_m.permanent_gaps == ["2026-07-15"],
+        )
         clear_gap_record(mk, "cusec", "2026-07-15")
         ok("cu_marker_cleared", permanent_gap_dates(mk, "cusec") == set())
 
         # plan: CURRENT TARGET FIRST, then newest-first backfill, post steps per date
-        plan_cu = build_catch_up_plan(reg, cusec, target_cu, force=False,
-                                      live_completed_session=target_cu, markers={"sectors": {}})
-        ok("cu_plan_current_target_first",
-           plan_cu.target_missing and target_cu in " ".join(plan_cu.all_commands[0]))
+        plan_cu = build_catch_up_plan(
+            reg, cusec, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
+        )
+        ok("cu_plan_current_target_first", plan_cu.target_missing and target_cu in " ".join(plan_cu.all_commands[0]))
         ok("cu_plan_target_post_step", "post.py" in " ".join(plan_cu.all_commands[1]))
-        ok("cu_plan_backfill_newest_first",
-           plan_cu.backfill_dates == ["2026-07-16", "2026-07-15", "2026-07-14"])
-        ok("cu_plan_backfill_after_target",
-           all(target_cu in " ".join(c) for c in plan_cu.target_commands)
-           and plan_cu.all_commands[: len(plan_cu.target_commands)] == plan_cu.target_commands)
-        ok("cu_plan_historical_flag_on_backfill_only",
-           all("--historical-catchup" not in c for c in plan_cu.target_commands))
+        ok("cu_plan_backfill_newest_first", plan_cu.backfill_dates == ["2026-07-16", "2026-07-15", "2026-07-14"])
+        ok(
+            "cu_plan_backfill_after_target",
+            all(target_cu in " ".join(c) for c in plan_cu.target_commands)
+            and plan_cu.all_commands[: len(plan_cu.target_commands)] == plan_cu.target_commands,
+        )
+        ok(
+            "cu_plan_historical_flag_on_backfill_only",
+            all("--historical-catchup" not in c for c in plan_cu.target_commands),
+        )
 
         # native backfill route: chunked to <= threshold dates per command, newest chunk
         # first, per-date post steps preserved on the backfill route too
         cusec_bf = _sector(
-            name="cusec_bf", publish_glob="cubf/{date}/t.csv", backfill_window_days=10,
-            backfill=BackfillSpec(script="a/bf.py", args_template=["--start", "{from}", "--end", "{to}"], per_date=False),
+            name="cusec_bf",
+            publish_glob="cubf/{date}/t.csv",
+            backfill_window_days=10,
+            backfill=BackfillSpec(
+                script="a/bf.py", args_template=["--start", "{from}", "--end", "{to}"], per_date=False
+            ),
             daily_post_steps=[{"script": "x/post.py", "args_template": ["--asof", "{date}"]}],
         )
         _publish(cusec_bf, "2026-07-06")
-        plan_bf = build_catch_up_plan(reg, cusec_bf, target_cu, force=False,
-                                      live_completed_session=target_cu, markers={"sectors": {}})
-        ok("cu_native_backfill_chunked",
-           plan_bf.used_native_backfill and len(plan_bf.backfill_groups) == 3
-           and all(len(dates) <= reg.catch_up_gap_backfill_threshold for dates, _c in plan_bf.backfill_groups))
-        ok("cu_native_chunks_newest_first",
-           plan_bf.backfill_groups[0][0] == ("2026-07-15", "2026-07-16")
-           and plan_bf.backfill_groups[-1][0][0] == "2026-07-07")
-        ok("cu_native_chunk_post_steps",
-           sum("post.py" in " ".join(c) for c in plan_bf.backfill_groups[0][1]) == 2)
+        plan_bf = build_catch_up_plan(
+            reg, cusec_bf, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
+        )
+        ok(
+            "cu_native_backfill_chunked",
+            plan_bf.used_native_backfill
+            and len(plan_bf.backfill_groups) == 3
+            and all(len(dates) <= reg.catch_up_gap_backfill_threshold for dates, _c in plan_bf.backfill_groups),
+        )
+        ok(
+            "cu_native_chunks_newest_first",
+            plan_bf.backfill_groups[0][0] == ("2026-07-15", "2026-07-16")
+            and plan_bf.backfill_groups[-1][0][0] == "2026-07-07",
+        )
+        ok("cu_native_chunk_post_steps", sum("post.py" in " ".join(c) for c in plan_bf.backfill_groups[0][1]) == 2)
 
         # execution: a failed backfill date NEVER fails the sector/master; the failed
         # date is recorded per-date and its marker failure count persisted
         cus_a = _sector(name="cus_a", publish_glob="cua/{date}/t.csv")
         for d in ("2026-07-06", "2026-07-13"):
             _publish(cus_a, d)
-        plan_a = build_catch_up_plan(reg, cus_a, target_cu, force=False,
-                                     live_completed_session=target_cu, markers={"sectors": {}})
-        res_a = run_catch_up_sector(reg, cus_a, plan_a, run_dir=run_dir_cu, net_sem=None,
-                                    log=lambda _m: None, markers_path=markers_path,
-                                    runner=_mk_runner({"2026-07-15"}, cus_a))
+        plan_a = build_catch_up_plan(
+            reg, cus_a, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
+        )
+        res_a = run_catch_up_sector(
+            reg,
+            cus_a,
+            plan_a,
+            run_dir=run_dir_cu,
+            net_sem=None,
+            log=lambda _m: None,
+            markers_path=markers_path,
+            runner=_mk_runner({"2026-07-15"}, cus_a),
+        )
         ok("cu_exec_backfill_failure_not_fatal", res_a.status == "PASS_WITH_BACKFILL_GAPS")
         ok("cu_exec_current_book_published", (cu_root / "cua" / target_cu / "t.csv").exists())
-        ok("cu_exec_failed_date_recorded",
-           res_a.backfill is not None and set(res_a.backfill["failed"]) == {"2026-07-15"})
-        ok("cu_exec_backfill_gap_master_pass",
-           compute_overall([cus_a], {"cus_a": res_a}, mode="catch-up", gate_ok=True, ignore_gate=False) == "PASS")
+        ok(
+            "cu_exec_failed_date_recorded",
+            res_a.backfill is not None and set(res_a.backfill["failed"]) == {"2026-07-15"},
+        )
+        ok(
+            "cu_exec_backfill_gap_master_pass",
+            compute_overall([cus_a], {"cus_a": res_a}, mode="catch-up", gate_ok=True, ignore_gate=False) == "PASS",
+        )
         ok("cu_exec_backfill_gap_gate_healthy", "PASS_WITH_BACKFILL_GAPS" in HEALTHY_STATES)
-        ok("cu_exec_marker_failure_persisted",
-           load_gap_markers(markers_path)["sectors"]["cus_a"]["2026-07-15"]["failures"] == 1)
+        ok(
+            "cu_exec_marker_failure_persisted",
+            load_gap_markers(markers_path)["sectors"]["cus_a"]["2026-07-15"]["failures"] == 1,
+        )
 
         # second failing night: up-to-date target + same gap -> auto-tombstone at the
         # fake registry threshold (2), and the next scan skips the tombstoned date
-        plan_a2 = build_catch_up_plan(reg, cus_a, target_cu, force=False,
-                                      live_completed_session=target_cu,
-                                      markers=load_gap_markers(markers_path))
-        ok("cu_second_night_only_gap_remains",
-           not plan_a2.target_missing and plan_a2.backfill_dates == ["2026-07-15"])
-        res_a2 = run_catch_up_sector(reg, cus_a, plan_a2, run_dir=run_dir_cu, net_sem=None,
-                                     log=lambda _m: None, markers_path=markers_path,
-                                     runner=_mk_runner({"2026-07-15"}, cus_a))
+        plan_a2 = build_catch_up_plan(
+            reg, cus_a, target_cu, force=False, live_completed_session=target_cu, markers=load_gap_markers(markers_path)
+        )
+        ok("cu_second_night_only_gap_remains", not plan_a2.target_missing and plan_a2.backfill_dates == ["2026-07-15"])
+        res_a2 = run_catch_up_sector(
+            reg,
+            cus_a,
+            plan_a2,
+            run_dir=run_dir_cu,
+            net_sem=None,
+            log=lambda _m: None,
+            markers_path=markers_path,
+            runner=_mk_runner({"2026-07-15"}, cus_a),
+        )
         ok("cu_exec_up_to_date_target_with_gap", res_a2.status == "PASS_WITH_BACKFILL_GAPS")
-        ok("cu_exec_marker_auto_permanent",
-           load_gap_markers(markers_path)["sectors"]["cus_a"]["2026-07-15"]["permanent"] is True)
-        plan_a3 = build_catch_up_plan(reg, cus_a, target_cu, force=False,
-                                      live_completed_session=target_cu,
-                                      markers=load_gap_markers(markers_path))
-        ok("cu_exec_tombstone_respected_next_scan",
-           plan_a3.backfill_dates == [] and plan_a3.permanent_gaps == ["2026-07-15"])
+        ok(
+            "cu_exec_marker_auto_permanent",
+            load_gap_markers(markers_path)["sectors"]["cus_a"]["2026-07-15"]["permanent"] is True,
+        )
+        plan_a3 = build_catch_up_plan(
+            reg, cus_a, target_cu, force=False, live_completed_session=target_cu, markers=load_gap_markers(markers_path)
+        )
+        ok(
+            "cu_exec_tombstone_respected_next_scan",
+            plan_a3.backfill_dates == [] and plan_a3.permanent_gaps == ["2026-07-15"],
+        )
 
         # execution: CURRENT-date failure fails the sector exactly like daily and
         # skips backfill (no historical mutation on a failed night)
         cus_b = _sector(name="cus_b", publish_glob="cub/{date}/t.csv")
         for d in ("2026-07-06", "2026-07-13"):
             _publish(cus_b, d)
-        plan_b = build_catch_up_plan(reg, cus_b, target_cu, force=False,
-                                     live_completed_session=target_cu, markers={"sectors": {}})
-        res_b = run_catch_up_sector(reg, cus_b, plan_b, run_dir=run_dir_cu, net_sem=None,
-                                    log=lambda _m: None, markers_path=markers_path,
-                                    runner=_mk_runner({target_cu}, cus_b))
+        plan_b = build_catch_up_plan(
+            reg, cus_b, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
+        )
+        res_b = run_catch_up_sector(
+            reg,
+            cus_b,
+            plan_b,
+            run_dir=run_dir_cu,
+            net_sem=None,
+            log=lambda _m: None,
+            markers_path=markers_path,
+            runner=_mk_runner({target_cu}, cus_b),
+        )
         ok("cu_exec_current_failure_fails_sector", res_b.status == "FAIL")
         ok("cu_exec_current_failure_skips_backfill", res_b.return_codes == [1])
 
         # fully current catch-up -> UP_TO_DATE (healthy), never NOTE/FAIL
         cus_c = _sector(name="cus_c", publish_glob="cuc/{date}/t.csv")
         _publish(cus_c, target_cu)
-        plan_c = build_catch_up_plan(reg, cus_c, target_cu, force=False,
-                                     live_completed_session=target_cu, markers={"sectors": {}})
+        plan_c = build_catch_up_plan(
+            reg, cus_c, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
+        )
         ok(
             "cu_plan_empty_when_current",
             plan_c.all_commands == [] and not plan_c.target_missing and not plan_c.target_unhealthy,
         )
-        res_c = run_catch_up_sector(reg, cus_c, plan_c, run_dir=run_dir_cu, net_sem=None,
-                                    log=lambda _m: None, markers_path=markers_path,
-                                    runner=lambda _c: 1)  # must never be invoked
+        res_c = run_catch_up_sector(
+            reg,
+            cus_c,
+            plan_c,
+            run_dir=run_dir_cu,
+            net_sem=None,
+            log=lambda _m: None,
+            markers_path=markers_path,
+            runner=lambda _c: 1,
+        )  # must never be invoked
         ok("cu_exec_up_to_date_healthy", res_c.status == "UP_TO_DATE" and res_c.return_codes == [])
-        ok("cu_up_to_date_master_pass",
-           compute_overall([cus_c], {"cus_c": res_c}, mode="catch-up", gate_ok=True, ignore_gate=False) == "PASS")
+        ok(
+            "cu_up_to_date_master_pass",
+            compute_overall([cus_c], {"cus_c": res_c}, mode="catch-up", gate_ok=True, ignore_gate=False) == "PASS",
+        )
 
         # published-but-unverifiable target fails closed
         bad_dir = cu_root / "cud" / target_cu
         bad_dir.mkdir(parents=True, exist_ok=True)
-        (bad_dir / "t.csv").write_text(
-            "asof_date,oos_score_valid_flag,ticker\n2026-07-10,1,T0\n", encoding="utf-8"
-        )
+        (bad_dir / "t.csv").write_text("asof_date,oos_score_valid_flag,ticker\n2026-07-10,1,T0\n", encoding="utf-8")
         cus_d = _sector(name="cus_d", publish_glob="cud/{date}/t.csv")
-        plan_d = build_catch_up_plan(reg, cus_d, target_cu, force=False,
-                                     live_completed_session=target_cu, markers={"sectors": {}})
+        plan_d = build_catch_up_plan(
+            reg, cus_d, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
+        )
         ok(
             "cu_plan_unhealthy_target_is_rerun",
             plan_d.target_unhealthy and not plan_d.target_missing and bool(plan_d.target_commands),
         )
-        res_d = run_catch_up_sector(reg, cus_d, plan_d, run_dir=run_dir_cu, net_sem=None,
-                                    log=lambda _m: None, markers_path=markers_path,
-                                    runner=lambda _c: 0)
+        res_d = run_catch_up_sector(
+            reg,
+            cus_d,
+            plan_d,
+            run_dir=run_dir_cu,
+            net_sem=None,
+            log=lambda _m: None,
+            markers_path=markers_path,
+            runner=lambda _c: 0,
+        )
         ok("cu_exec_unverifiable_target_fails", res_d.status == "FAIL")
 
         # The same present-but-unhealthy state passes only after the rerun repairs
@@ -3766,11 +4149,10 @@ def run_selftest() -> int:
         cus_d2 = _sector(name="cus_d2", publish_glob="cud2/{date}/t.csv")
         bad_dir2 = cu_root / "cud2" / target_cu
         bad_dir2.mkdir(parents=True, exist_ok=True)
-        (bad_dir2 / "t.csv").write_text(
-            "asof_date,oos_score_valid_flag,ticker\n2026-07-10,1,T0\n", encoding="utf-8"
+        (bad_dir2 / "t.csv").write_text("asof_date,oos_score_valid_flag,ticker\n2026-07-10,1,T0\n", encoding="utf-8")
+        plan_d2 = build_catch_up_plan(
+            reg, cus_d2, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
         )
-        plan_d2 = build_catch_up_plan(reg, cus_d2, target_cu, force=False,
-                                      live_completed_session=target_cu, markers={"sectors": {}})
         res_d2 = run_catch_up_sector(
             reg,
             cus_d2,
@@ -3788,32 +4170,51 @@ def run_selftest() -> int:
 
         # {date}-partitioned health manifests are verified PER backfill date (a FAIL
         # per-date manifest turns that date into a recorded gap, not a sector FAIL)
-        cus_e = _sector(name="cus_e", publish_glob="cue/{date}/t.csv",
-                        health=HealthSpec(manifest="cuman/{date}/m.json", status_keys=["acceptance"]))
+        cus_e = _sector(
+            name="cus_e",
+            publish_glob="cue/{date}/t.csv",
+            health=HealthSpec(manifest="cuman/{date}/m.json", status_keys=["acceptance"]),
+        )
         _publish(cus_e, "2026-07-13")
-        for iso, acc in (("2026-07-17", "PASS"), ("2026-07-16", "PASS"),
-                         ("2026-07-15", "PASS"), ("2026-07-14", "FAIL")):
+        for iso, acc in (
+            ("2026-07-17", "PASS"),
+            ("2026-07-16", "PASS"),
+            ("2026-07-15", "PASS"),
+            ("2026-07-14", "FAIL"),
+        ):
             meta_dir = cu_root / "cuman" / iso
             meta_dir.mkdir(parents=True, exist_ok=True)
-            (meta_dir / "m.json").write_text(
-                json.dumps({"acceptance": acc, "run_as_of": iso}), encoding="utf-8"
-            )
-        plan_e = build_catch_up_plan(reg, cus_e, target_cu, force=False,
-                                     live_completed_session=target_cu, markers={"sectors": {}})
-        res_e = run_catch_up_sector(reg, cus_e, plan_e, run_dir=run_dir_cu, net_sem=None,
-                                    log=lambda _m: None, markers_path=markers_path,
-                                    runner=_mk_runner(set(), cus_e))
-        ok("cu_perdate_manifest_checked",
-           res_e.status == "PASS_WITH_BACKFILL_GAPS"
-           and res_e.backfill is not None
-           and set(res_e.backfill["failed"]) == {"2026-07-14"}
-           and "manifest" in res_e.backfill["failed"]["2026-07-14"])
+            (meta_dir / "m.json").write_text(json.dumps({"acceptance": acc, "run_as_of": iso}), encoding="utf-8")
+        plan_e = build_catch_up_plan(
+            reg, cus_e, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
+        )
+        res_e = run_catch_up_sector(
+            reg,
+            cus_e,
+            plan_e,
+            run_dir=run_dir_cu,
+            net_sem=None,
+            log=lambda _m: None,
+            markers_path=markers_path,
+            runner=_mk_runner(set(), cus_e),
+        )
+        ok(
+            "cu_perdate_manifest_checked",
+            res_e.status == "PASS_WITH_BACKFILL_GAPS"
+            and res_e.backfill is not None
+            and set(res_e.backfill["failed"]) == {"2026-07-14"}
+            and "manifest" in res_e.backfill["failed"]["2026-07-14"],
+        )
 
         # JSON publish artifacts (portfolio final_manifest.json) are verified as JSON:
         # compact serialization passes, internal run_as_of mismatch / invalid JSON fail
-        jsec = _sector(name="jsec", publish_glob="jout/{date}/final_manifest.json",
-                       oos_column=None, require_oos_valid=False,
-                       health=HealthSpec(manifest=None, status_keys=[]))
+        jsec = _sector(
+            name="jsec",
+            publish_glob="jout/{date}/final_manifest.json",
+            oos_column=None,
+            require_oos_valid=False,
+            health=HealthSpec(manifest=None, status_keys=[]),
+        )
         for iso, payload in (
             ("2026-07-16", json.dumps({"acceptance": "PASS", "run_as_of": "2026-07-16"}, separators=(",", ":"))),
             ("2026-07-15", json.dumps({"acceptance": "PASS", "run_as_of": "2026-07-10"})),
@@ -3823,8 +4224,7 @@ def run_selftest() -> int:
             jdir.mkdir(parents=True, exist_ok=True)
             (jdir / "final_manifest.json").write_text(payload, encoding="utf-8")
         ok("json_artifact_compact_verifies", verify_published_artifact_for_date(jsec, "2026-07-16")[0])
-        ok("json_artifact_internal_date_mismatch_fails",
-           not verify_published_artifact_for_date(jsec, "2026-07-15")[0])
+        ok("json_artifact_internal_date_mismatch_fails", not verify_published_artifact_for_date(jsec, "2026-07-15")[0])
         ok("json_artifact_invalid_fails", not verify_published_artifact_for_date(jsec, "2026-07-14")[0])
 
         # require_oos_valid is authoritative: a declared oos_column with the knob
@@ -3832,14 +4232,13 @@ def run_selftest() -> int:
         shadow = _sector(name="shadow", publish_glob="sh/{date}/t.csv", require_oos_valid=False)
         sh_dir = cu_root / "sh" / "2026-07-16"
         sh_dir.mkdir(parents=True, exist_ok=True)
-        (sh_dir / "t.csv").write_text(
-            "asof_date,oos_score_valid_flag,ticker\n2026-07-16,0,T0\n", encoding="utf-8"
-        )
+        (sh_dir / "t.csv").write_text("asof_date,oos_score_valid_flag,ticker\n2026-07-16,0,T0\n", encoding="utf-8")
         ok("require_oos_valid_knob_authoritative", not _oos_required(shadow))
         ok("shadow_zero_flag_artifact_verifies", verify_published_artifact_for_date(shadow, "2026-07-16")[0])
     finally:
         _globals["PROJECT_ROOT"] = _saved_cu_root
         import shutil
+
         shutil.rmtree(cu_root, ignore_errors=True)
 
     # --- ad-hoc market closures: registry-declared, excluded from the calendar ---
@@ -3850,8 +4249,10 @@ def run_selftest() -> int:
         creg = load_registry(ctmp)
         ok("closure_parsed", creg.market_closures == ["2026-07-15"])
         ok("closure_not_trading_day", not is_trading_day(date(2026, 7, 15)))
-        ok("closure_excluded_from_expected_sessions",
-           "2026-07-15" not in trading_dates_in_range(creg, "2026-07-13", "2026-07-17"))
+        ok(
+            "closure_excluded_from_expected_sessions",
+            "2026-07-15" not in trading_dates_in_range(creg, "2026-07-13", "2026-07-17"),
+        )
     finally:
         load_registry(tmp)  # restore the plain fake registry's (empty) closure set
     ok("closure_restored_after_reload", is_trading_day(date(2026, 7, 15)))
@@ -3878,18 +4279,21 @@ def run_selftest() -> int:
     )
 
     # --- sealed-manifest gate value preserves the BYPASSED distinction ---
-    ok("gate_value_bypassed_preserved",
-       _gate_manifest_value(True, False) == "PASS"
-       and _gate_manifest_value(False, True) == "BYPASSED"
-       and _gate_manifest_value(False, False) == "FAIL")
+    ok(
+        "gate_value_bypassed_preserved",
+        _gate_manifest_value(True, False) == "PASS"
+        and _gate_manifest_value(False, True) == "BYPASSED"
+        and _gate_manifest_value(False, False) == "FAIL",
+    )
 
     # --- PID identity: a recycled PID cannot impersonate a dead holder ---
     ok("holder_identity_no_timestamp_falls_back", _holder_alive(os.getpid(), "") is True)
     if _pid_creation_time_utc(os.getpid()) is not None:
-        ok("holder_identity_recycled_pid_dead",
-           _holder_alive(os.getpid(), "2000-01-01T00:00:00+00:00") is False)
-        ok("holder_identity_current_pid_alive",
-           _holder_alive(os.getpid(), datetime.now(timezone.utc).isoformat(timespec="seconds")) is True)
+        ok("holder_identity_recycled_pid_dead", _holder_alive(os.getpid(), "2000-01-01T00:00:00+00:00") is False)
+        ok(
+            "holder_identity_current_pid_alive",
+            _holder_alive(os.getpid(), datetime.now(timezone.utc).isoformat(timespec="seconds")) is True,
+        )
 
     # --- finding 8: health-check subset semantics ---
     all_t0 = [s for s in reg.sectors if s.dependency_tier == 0]
@@ -3909,7 +4313,7 @@ def run_selftest() -> int:
     _lockdir = Path(tempfile.mkdtemp())
     dead_lock = _lockdir / "dead.lock"
     dead_lock.write_text("pid=2000000000 started_utc=2000-01-01T00:00:00+00:00\n", encoding="utf-8")
-    with OrchestrationLock(dead_lock, stale_after_sec=10 ** 9):  # dead PID -> override even though fresh
+    with OrchestrationLock(dead_lock, stale_after_sec=10**9):  # dead PID -> override even though fresh
         ok("finding9_dead_pid_override", dead_lock.exists())
     live_lock = _lockdir / "live.lock"
     # A genuinely-live holder (matching start time) must NOT be overridden even when old.
@@ -3924,10 +4328,8 @@ def run_selftest() -> int:
     # is provably not the holder -> override even with a huge stale threshold.
     if _pid_creation_time_utc(os.getpid()) is not None:
         recycled_lock = _lockdir / "recycled.lock"
-        recycled_lock.write_text(
-            f"pid={os.getpid()} started_utc=2000-01-01T00:00:00+00:00\n", encoding="utf-8"
-        )
-        with OrchestrationLock(recycled_lock, stale_after_sec=10 ** 9):
+        recycled_lock.write_text(f"pid={os.getpid()} started_utc=2000-01-01T00:00:00+00:00\n", encoding="utf-8")
+        with OrchestrationLock(recycled_lock, stale_after_sec=10**9):
             ok("finding9_recycled_pid_overridden", True)
     orphan_lock = _lockdir / "orphan.lock"
     orphan_lock.write_text(
@@ -3944,18 +4346,31 @@ def run_selftest() -> int:
     fr_def = reg.by_name("defense_x")
     ok("freshness_parse_count", len(fr_def.freshness_probes) == 2)
     fp_borrow = fr_def.freshness_probes[0]
-    ok("freshness_parse_fields",
-       fp_borrow.name == "borrow_age" and fp_borrow.kind == "sqlite_max_date"
-       and fp_borrow.tolerance_days == 10 and fp_borrow.warn_lead_days == 3 and not fp_borrow.required)
-    ok("freshness_parse_required_flag", fr_def.freshness_probes[1].required
-       and fr_def.freshness_probes[1].kind == "deadline_schedule")
+    ok(
+        "freshness_parse_fields",
+        fp_borrow.name == "borrow_age"
+        and fp_borrow.kind == "sqlite_max_date"
+        and fp_borrow.tolerance_days == 10
+        and fp_borrow.warn_lead_days == 3
+        and not fp_borrow.required,
+    )
+    ok(
+        "freshness_parse_required_flag",
+        fr_def.freshness_probes[1].required and fr_def.freshness_probes[1].kind == "deadline_schedule",
+    )
     ok("freshness_no_probes_default", reg.by_name("alpha").freshness_probes == [])
     for bad_probe, label in (
         ({"name": "x", "kind": "bogus", "target": {"db": "d", "sql": "s"}}, "bad_kind"),
         ({"name": "x", "kind": "sqlite_max_date", "target": {"db": "d"}}, "missing_sql"),
         ({"name": "x", "kind": "manifest_date", "target": {"path": "p"}}, "missing_key"),
-        ({"name": "x", "kind": "deadline_schedule", "target": {"db": "d", "sql": "s", "cadence": "weekly"}}, "bad_cadence"),
-        ({"name": "x", "kind": "sqlite_max_date", "target": {"db": "d", "sql": "s"}, "tolerance_days": -1}, "neg_tolerance"),
+        (
+            {"name": "x", "kind": "deadline_schedule", "target": {"db": "d", "sql": "s", "cadence": "weekly"}},
+            "bad_cadence",
+        ),
+        (
+            {"name": "x", "kind": "sqlite_max_date", "target": {"db": "d", "sql": "s"}, "tolerance_days": -1},
+            "neg_tolerance",
+        ),
         ({"name": "", "kind": "sqlite_max_date", "target": {"db": "d", "sql": "s"}}, "empty_name"),
     ):
         try:
@@ -3964,10 +4379,13 @@ def run_selftest() -> int:
         except ValueError:
             ok(f"freshness_reject_{label}", True)
     try:
-        _parse_freshness_probes("t", [
-            {"name": "dup", "kind": "manifest_date", "target": {"path": "p", "key": "k"}},
-            {"name": "dup", "kind": "manifest_date", "target": {"path": "p", "key": "k"}},
-        ])
+        _parse_freshness_probes(
+            "t",
+            [
+                {"name": "dup", "kind": "manifest_date", "target": {"path": "p", "key": "k"}},
+                {"name": "dup", "kind": "manifest_date", "target": {"path": "p", "key": "k"}},
+            ],
+        )
         ok("freshness_reject_duplicate_names", False)
     except ValueError:
         ok("freshness_reject_duplicate_names", True)
@@ -3990,80 +4408,132 @@ def run_selftest() -> int:
 
     def _mk_probe(**over: Any) -> FreshnessProbe:
         base: dict[str, Any] = dict(
-            name="p", kind="sqlite_max_date",
+            name="p",
+            kind="sqlite_max_date",
             target={"db": str(fdb), "sql": "SELECT MAX(d) FROM obs"},
-            tolerance_days=10, warn_lead_days=3, required=False, notes="")
+            tolerance_days=10,
+            warn_lead_days=3,
+            required=False,
+            notes="",
+        )
         base.update(over)
         return FreshnessProbe(**base)
 
     try:
         r_cur = evaluate_freshness_probe(_mk_probe(), "2026-08-05")
-        ok("freshness_sqlite_current",
-           r_cur["status"] == "CURRENT" and r_cur["latest"] == "2026-08-01" and r_cur["age_days"] == 4
-           and r_cur["threshold"] == 10)
-        ok("freshness_sqlite_warn_approaching",
-           evaluate_freshness_probe(_mk_probe(), "2026-08-09")["status"] == "WARN_APPROACHING")  # age 8, breach at 11
-        ok("freshness_sqlite_stale",
-           evaluate_freshness_probe(_mk_probe(), "2026-08-17")["status"] == "STALE")  # age 16 > 10
+        ok(
+            "freshness_sqlite_current",
+            r_cur["status"] == "CURRENT"
+            and r_cur["latest"] == "2026-08-01"
+            and r_cur["age_days"] == 4
+            and r_cur["threshold"] == 10,
+        )
+        ok(
+            "freshness_sqlite_warn_approaching",
+            evaluate_freshness_probe(_mk_probe(), "2026-08-09")["status"] == "WARN_APPROACHING",
+        )  # age 8, breach at 11
+        ok(
+            "freshness_sqlite_stale", evaluate_freshness_probe(_mk_probe(), "2026-08-17")["status"] == "STALE"
+        )  # age 16 > 10
         r_badsql = evaluate_freshness_probe(
-            _mk_probe(target={"db": str(fdb), "sql": "SELECT MAX(d) FROM missing_table"}), "2026-08-05")
+            _mk_probe(target={"db": str(fdb), "sql": "SELECT MAX(d) FROM missing_table"}), "2026-08-05"
+        )
         ok("freshness_sqlite_error_bad_sql", r_badsql["status"] == "ERROR" and bool(r_badsql["detail"]))
-        ok("freshness_sqlite_error_missing_db",
-           evaluate_freshness_probe(
-               _mk_probe(target={"db": str(fr_tmp / "nope.sqlite"), "sql": "SELECT 1"}), "2026-08-05",
-           )["status"] == "ERROR")
-        ok("freshness_sqlite_error_null_date",
-           evaluate_freshness_probe(
-               _mk_probe(target={"db": str(fdb), "sql": "SELECT MAX(d) FROM empty_obs"}), "2026-08-05",
-           )["status"] == "ERROR")
+        ok(
+            "freshness_sqlite_error_missing_db",
+            evaluate_freshness_probe(
+                _mk_probe(target={"db": str(fr_tmp / "nope.sqlite"), "sql": "SELECT 1"}),
+                "2026-08-05",
+            )["status"]
+            == "ERROR",
+        )
+        ok(
+            "freshness_sqlite_error_null_date",
+            evaluate_freshness_probe(
+                _mk_probe(target={"db": str(fdb), "sql": "SELECT MAX(d) FROM empty_obs"}),
+                "2026-08-05",
+            )["status"]
+            == "ERROR",
+        )
 
         fman = fr_tmp / "m.json"
         fman.write_text(json.dumps({"meta": {"asof_date": "2026-08-01T00:00:00"}}), encoding="utf-8")
         r_man = evaluate_freshness_probe(
-            _mk_probe(kind="manifest_date", target={"path": str(fman), "key": "meta.asof_date"}), "2026-08-05")
-        ok("freshness_manifest_current_dotted_key",
-           r_man["status"] == "CURRENT" and r_man["latest"] == "2026-08-01")
-        ok("freshness_manifest_error_missing_key",
-           evaluate_freshness_probe(
-               _mk_probe(kind="manifest_date", target={"path": str(fman), "key": "meta.nope"}), "2026-08-05",
-           )["status"] == "ERROR")
-        ok("freshness_manifest_error_missing_file",
-           evaluate_freshness_probe(
-               _mk_probe(kind="manifest_date", target={"path": str(fr_tmp / "no.json"), "key": "k"}), "2026-08-05",
-           )["status"] == "ERROR")
+            _mk_probe(kind="manifest_date", target={"path": str(fman), "key": "meta.asof_date"}), "2026-08-05"
+        )
+        ok("freshness_manifest_current_dotted_key", r_man["status"] == "CURRENT" and r_man["latest"] == "2026-08-01")
+        ok(
+            "freshness_manifest_error_missing_key",
+            evaluate_freshness_probe(
+                _mk_probe(kind="manifest_date", target={"path": str(fman), "key": "meta.nope"}),
+                "2026-08-05",
+            )["status"]
+            == "ERROR",
+        )
+        ok(
+            "freshness_manifest_error_missing_file",
+            evaluate_freshness_probe(
+                _mk_probe(kind="manifest_date", target={"path": str(fr_tmp / "no.json"), "key": "k"}),
+                "2026-08-05",
+            )["status"]
+            == "ERROR",
+        )
 
         # deadline_schedule quarterly (13F shape): Q1 data satisfies until Q2's
         # availability date quarter_end+45+35 = 2026-09-18; warn from 7 days before.
-        q_target = {"db": str(fdb), "sql": "SELECT MAX(p) FROM q",
-                    "cadence": "quarterly", "deadline_days": 45, "publication_lag_days": 35}
+        q_target = {
+            "db": str(fdb),
+            "sql": "SELECT MAX(p) FROM q",
+            "cadence": "quarterly",
+            "deadline_days": 45,
+            "publication_lag_days": 35,
+        }
 
         def _q_eval(t: str) -> dict[str, Any]:
             return evaluate_freshness_probe(
-                _mk_probe(kind="deadline_schedule", target=q_target, tolerance_days=0, warn_lead_days=7), t)
+                _mk_probe(kind="deadline_schedule", target=q_target, tolerance_days=0, warn_lead_days=7), t
+            )
 
         r_q_cur = _q_eval("2026-08-05")
-        ok("freshness_deadline_quarterly_current",
-           r_q_cur["status"] == "CURRENT" and r_q_cur["threshold"] == "period>=2026-03-31")
+        ok(
+            "freshness_deadline_quarterly_current",
+            r_q_cur["status"] == "CURRENT" and r_q_cur["threshold"] == "period>=2026-03-31",
+        )
         ok("freshness_deadline_quarterly_warn", _q_eval("2026-09-12")["status"] == "WARN_APPROACHING")
         r_q_stale = _q_eval("2026-09-20")
-        ok("freshness_deadline_quarterly_stale",
-           r_q_stale["status"] == "STALE" and r_q_stale["threshold"] == "period>=2026-06-30")
+        ok(
+            "freshness_deadline_quarterly_stale",
+            r_q_stale["status"] == "STALE" and r_q_stale["threshold"] == "period>=2026-06-30",
+        )
 
         # deadline_schedule semi_monthly (FINRA shape): cycle 15th/EOM, pub lag 12
         # + 7d grace -> the 07-15 cycle is required from 08-03.
         def _sm_eval(table: str, t: str) -> dict[str, Any]:
             return evaluate_freshness_probe(
-                _mk_probe(kind="deadline_schedule",
-                          target={"db": str(fdb), "sql": f"SELECT MAX(s) FROM {table}",
-                                  "cadence": "semi_monthly", "publication_lag_days": 12},
-                          tolerance_days=7, warn_lead_days=3), t)
+                _mk_probe(
+                    kind="deadline_schedule",
+                    target={
+                        "db": str(fdb),
+                        "sql": f"SELECT MAX(s) FROM {table}",
+                        "cadence": "semi_monthly",
+                        "publication_lag_days": 12,
+                    },
+                    tolerance_days=7,
+                    warn_lead_days=3,
+                ),
+                t,
+            )
 
-        r_sm_stale = _sm_eval("sm", "2026-08-05")   # latest 06-15 < required 07-15
-        ok("freshness_deadline_semimonthly_stale",
-           r_sm_stale["status"] == "STALE" and r_sm_stale["threshold"] == "period>=2026-07-15")
+        r_sm_stale = _sm_eval("sm", "2026-08-05")  # latest 06-15 < required 07-15
+        ok(
+            "freshness_deadline_semimonthly_stale",
+            r_sm_stale["status"] == "STALE" and r_sm_stale["threshold"] == "period>=2026-07-15",
+        )
         ok("freshness_deadline_semimonthly_current", _sm_eval("sm2", "2026-08-05")["status"] == "CURRENT")
-        ok("freshness_deadline_semimonthly_warn",    # 07-31 cycle due 08-19; 2 days out
-           _sm_eval("sm2", "2026-08-17")["status"] == "WARN_APPROACHING")
+        ok(
+            "freshness_deadline_semimonthly_warn",  # 07-31 cycle due 08-19; 2 days out
+            _sm_eval("sm2", "2026-08-17")["status"] == "WARN_APPROACHING",
+        )
 
         # hard probe timeout -> TimeoutError -> ERROR (exercised with a tiny budget)
         try:
@@ -4079,49 +4549,57 @@ def run_selftest() -> int:
         ok("freshness_eval_map_scoped", list(fmap) == ["fsen"] and fmap["fsen"][0]["status"] == "CURRENT")
         ok("freshness_summary_line_logged", any(msg.startswith("freshness: ") for msg in fr_logs))
         no_probe_logs: list[str] = []
-        ok("freshness_eval_empty_without_probes",
-           evaluate_freshness([_sector(name="noprobe")], "2026-08-05", no_probe_logs.append) == {}
-           and no_probe_logs == [])
+        ok(
+            "freshness_eval_empty_without_probes",
+            evaluate_freshness([_sector(name="noprobe")], "2026-08-05", no_probe_logs.append) == {}
+            and no_probe_logs == [],
+        )
 
         # consequences: a required probe that is STALE **or ERROR** forces FAIL with a
         # FRESHNESS_BLOCKING note; everything else (non-required STALE/ERROR, WARN) is
         # surveillance-only, and blocking is scoped to the run's selected sectors.
         fr_state = {
             "defense_x": [{"probe": "13f_period", "required": True, "status": "STALE"}],
-            "mach_x": [{"probe": "finra_cycle", "required": False, "status": "STALE"},
-                       {"probe": "borrow_age", "required": False, "status": "ERROR"}],
+            "mach_x": [
+                {"probe": "finra_cycle", "required": False, "status": "STALE"},
+                {"probe": "borrow_age", "required": False, "status": "ERROR"},
+            ],
         }
         fr_results = {"defense_x": RunResult("defense_x", "PASS")}
         cons_logs: list[str] = []
         overall_fr, blocking_req = apply_freshness_consequences(fr_state, fr_results, "PASS", cons_logs.append)
-        ok("freshness_required_stale_forces_fail",
-           overall_fr == "FAIL" and blocking_req == ["defense_x:13f_period=STALE"])
-        ok("freshness_required_stale_note_marked",
-           "FRESHNESS_BLOCKING: 13f_period=STALE" in fr_results["defense_x"].note)
+        ok(
+            "freshness_required_stale_forces_fail",
+            overall_fr == "FAIL" and blocking_req == ["defense_x:13f_period=STALE"],
+        )
+        ok(
+            "freshness_required_stale_note_marked",
+            "FRESHNESS_BLOCKING: 13f_period=STALE" in fr_results["defense_x"].note,
+        )
         ok("freshness_required_stale_logged_loudly", any("FRESHNESS ERROR" in m for m in cons_logs))
         overall_err, err_req = apply_freshness_consequences(
-            {"defense_x": [{"probe": "13f_period", "required": True, "status": "ERROR"}]},
-            {}, "PASS", cons_logs.append)
-        ok("freshness_required_error_blocks",
-           overall_err == "FAIL" and err_req == ["defense_x:13f_period=ERROR"])
+            {"defense_x": [{"probe": "13f_period", "required": True, "status": "ERROR"}]}, {}, "PASS", cons_logs.append
+        )
+        ok("freshness_required_error_blocks", overall_err == "FAIL" and err_req == ["defense_x:13f_period=ERROR"])
         overall_nr, blocking_nr = apply_freshness_consequences(
-            {"mach_x": fr_state["mach_x"]}, {}, "PASS", cons_logs.append)
+            {"mach_x": fr_state["mach_x"]}, {}, "PASS", cons_logs.append
+        )
         ok("freshness_nonrequired_stale_never_blocks", overall_nr == "PASS" and blocking_nr == [])
         overall_scoped, scoped_req = apply_freshness_consequences(
-            fr_state, {}, "PASS", cons_logs.append, selected_names={"mach_x"})
-        ok("freshness_unselected_sector_never_blocks",
-           overall_scoped == "PASS" and scoped_req == [])
+            fr_state, {}, "PASS", cons_logs.append, selected_names={"mach_x"}
+        )
+        ok("freshness_unselected_sector_never_blocks", overall_scoped == "PASS" and scoped_req == [])
         overall_keep, _ = apply_freshness_consequences(fr_state, {}, "FAIL", cons_logs.append)
         ok("freshness_existing_fail_kept", overall_keep == "FAIL")
 
         # no-probes backward compatibility: manifest rows are byte-identical
         rows_plain = _result_rows({"a": RunResult("a", "PASS")})
         ok("freshness_rows_no_key_without_probes", "freshness" not in rows_plain[0])
-        rows_fr = _result_rows({"a": RunResult("a", "PASS")},
-                               freshness={"a": [{"probe": "p", "status": "CURRENT"}]})
+        rows_fr = _result_rows({"a": RunResult("a", "PASS")}, freshness={"a": [{"probe": "p", "status": "CURRENT"}]})
         ok("freshness_rows_attached_when_present", rows_fr[0]["freshness"][0]["probe"] == "p")
     finally:
         import shutil
+
         shutil.rmtree(fr_tmp, ignore_errors=True)
 
     # --- real registry loads and every entry_script exists ---
@@ -4134,20 +4612,20 @@ def run_selftest() -> int:
         ok("real_registry_all_script_paths_exist", False)
     ok(
         "real_industrials_order",
-        real.group_order.get("industrials")
-        == ["defense", "machinery", "transportation"],
+        real.group_order.get("industrials") == ["defense", "machinery", "transportation"],
     )
     ok("real_portfolio_tier1", real.by_name("portfolio_layer").dependency_tier == 1)
     # M10: publish/health gate on end-of-run artifacts, with the advisory verdict healthy.
     rport = real.by_name("portfolio_layer")
-    ok("m10_real_portfolio_publish_final_manifest",
-       rport.publish_glob.endswith("/final/final_manifest.json"))
-    ok("m10_real_portfolio_health_orchestration_meta",
-       rport.health.manifest is not None
-       and rport.health.manifest.endswith("orchestration_meta.json")
-       and rport.health.status_keys == ["acceptance"]
-       and "PASS_WITH_ADVISORY_WARNINGS" in rport.health.healthy_values
-       and "PASS_WITH_DEFERRED" in rport.health.healthy_values)
+    ok("m10_real_portfolio_publish_final_manifest", rport.publish_glob.endswith("/final/final_manifest.json"))
+    ok(
+        "m10_real_portfolio_health_orchestration_meta",
+        rport.health.manifest is not None
+        and rport.health.manifest.endswith("orchestration_meta.json")
+        and rport.health.status_keys == ["acceptance"]
+        and "PASS_WITH_ADVISORY_WARNINGS" in rport.health.healthy_values
+        and "PASS_WITH_DEFERRED" in rport.health.healthy_values,
+    )
     rdef = real.by_name("defense")
     ok("real_defense_weekly_no_promotion", not rdef.weekly_pre_steps)
     rbio = real.by_name("biotech")
@@ -4156,62 +4634,93 @@ def run_selftest() -> int:
     ok("real_med_devices_require_oos", rmed.require_oos_valid)
     # finding 1: daily self-certifies within the replay window, then script 76 records provenance.
     ok("real_med_oos_score_valid_flag", "--oos-score-valid" in rmed.args_template)
-    ok("real_med_post_step_76",
-       any("76_mark_med_device_oos_provenance" in str(step.get("script", "")) for step in rmed.daily_post_steps))
+    ok(
+        "real_med_post_step_76",
+        any("76_mark_med_device_oos_provenance" in str(step.get("script", "")) for step in rmed.daily_post_steps),
+    )
     # finding 7: 63 rebuild sits in the repair rebuild chain, before the institutional-flow rebuild it feeds.
-    ok("real_med_repair_has_63",
-       rmed.repair is not None and "63_rebuild_sec13f_common_shares" in rmed.repair.rebuild_steps)
-    ok("real_med_63_before_flow",
-       rmed.repair is not None
-       and rmed.repair.rebuild_steps.index("63_rebuild_sec13f_common_shares")
-       < rmed.repair.rebuild_steps.index("58_build_institutional_flow_features"))
+    ok(
+        "real_med_repair_has_63",
+        rmed.repair is not None and "63_rebuild_sec13f_common_shares" in rmed.repair.rebuild_steps,
+    )
+    ok(
+        "real_med_63_before_flow",
+        rmed.repair is not None
+        and rmed.repair.rebuild_steps.index("63_rebuild_sec13f_common_shares")
+        < rmed.repair.rebuild_steps.index("58_build_institutional_flow_features"),
+    )
     rsemi = real.by_name("semiconductors")
-    ok("real_semi_backfill_daily_survivorship",
-       rsemi.backfill is not None
-       and "daily" in rsemi.backfill.args_template
-       and "--include-stage11-survivorship-panel" in rsemi.backfill.args_template)
+    ok(
+        "real_semi_backfill_daily_survivorship",
+        rsemi.backfill is not None
+        and "daily" in rsemi.backfill.args_template
+        and "--include-stage11-survivorship-panel" in rsemi.backfill.args_template,
+    )
     ok("real_semi_repair_rebuild", rsemi.repair is not None and bool(rsemi.repair.rebuild_steps))
     # freshness sentinel seeds: probes parse and carry the intended shape.
-    ok("real_defense_freshness_probe_names",
-       {p.name for p in rdef.freshness_probes}
-       == {"ibkr_borrow_age", "finra_short_interest_cycle", "institutional_13f_period"})
+    ok(
+        "real_defense_freshness_probe_names",
+        {p.name for p in rdef.freshness_probes}
+        == {"ibkr_borrow_age", "finra_short_interest_cycle", "institutional_13f_period"},
+    )
     p13f = next(p for p in rdef.freshness_probes if p.name == "institutional_13f_period")
-    ok("real_defense_13f_probe_required_deadline_aware",
-       p13f.required and p13f.kind == "deadline_schedule"
-       and p13f.target.get("cadence") == "quarterly"
-       and int(p13f.target.get("deadline_days", 0)) == 45
-       and int(p13f.target.get("publication_lag_days", 0)) >= 30
-       and p13f.warn_lead_days == 7)
+    ok(
+        "real_defense_13f_probe_required_deadline_aware",
+        p13f.required
+        and p13f.kind == "deadline_schedule"
+        and p13f.target.get("cadence") == "quarterly"
+        and int(p13f.target.get("deadline_days", 0)) == 45
+        and int(p13f.target.get("publication_lag_days", 0)) >= 30
+        and p13f.warn_lead_days == 7,
+    )
     rborrow = next(p for p in rdef.freshness_probes if p.name == "ibkr_borrow_age")
-    ok("real_defense_borrow_probe_tolerance", rborrow.tolerance_days == 10 and rborrow.warn_lead_days == 3
-       and not rborrow.required)
+    ok(
+        "real_defense_borrow_probe_tolerance",
+        rborrow.tolerance_days == 10 and rborrow.warn_lead_days == 3 and not rborrow.required,
+    )
     rmach = real.by_name("machinery")
-    ok("real_machinery_freshness_probes_not_required",
-       len(rmach.freshness_probes) == 3 and not any(p.required for p in rmach.freshness_probes))
+    ok(
+        "real_machinery_freshness_probes_not_required",
+        len(rmach.freshness_probes) == 3 and not any(p.required for p in rmach.freshness_probes),
+    )
     rtrans = real.by_name("transportation")
     # require_oos_valid: false is authoritative for the sealed zero-overlay shadow
     # lane -- transportation must never be marked OPTIONAL_FAIL for flag=0 tables.
-    ok("real_transportation_oos_not_required",
-       rtrans.oos_column == "oos_score_valid_flag" and not rtrans.require_oos_valid
-       and not _oos_required(rtrans))
+    ok(
+        "real_transportation_oos_not_required",
+        rtrans.oos_column == "oos_score_valid_flag" and not rtrans.require_oos_valid and not _oos_required(rtrans),
+    )
     # Publish-convention epoch: the portfolio's final-manifest convention starts at the
     # first date a final_manifest.json exists on disk (2026-07-02); the repointed glob
     # must not manufacture missing history before it.
     ok("real_portfolio_publish_epoch", rport.publish_epoch == "2026-07-02")
     ok("real_permanent_gap_threshold", real.permanent_gap_after_failures == 3)
     ok("real_no_adhoc_closures_declared", real.market_closures == [])
-    ok("real_transportation_borrow_probe",
-       any(p.name == "ibkr_borrow_age" and p.tolerance_days == 10 for p in rtrans.freshness_probes))
+    ok(
+        "real_transportation_borrow_probe",
+        any(p.name == "ibkr_borrow_age" and p.tolerance_days == 10 for p in rtrans.freshness_probes),
+    )
     rfinra = next(p for p in rtrans.freshness_probes if p.name == "finra_short_interest_cycle")
-    ok("real_transportation_finra_bimonthly",
-       rfinra.kind == "deadline_schedule" and rfinra.target.get("cadence") == "semi_monthly"
-       and rfinra.warn_lead_days == 3)
-    ok("real_portfolio_freshness_probes",
-       {(p.name, p.kind, p.tolerance_days, p.warn_lead_days) for p in rport.freshness_probes}
-       == {("macro_serving_age", "sqlite_max_date", 5, 2), ("holdings_ledger_age", "sqlite_max_date", 7, 2)})
-    ok("real_freshness_probes_never_required_except_defense_13f",
-       all(not p.required for s in real.sectors for p in s.freshness_probes
-           if not (s.name == "defense" and p.name == "institutional_13f_period")))
+    ok(
+        "real_transportation_finra_bimonthly",
+        rfinra.kind == "deadline_schedule"
+        and rfinra.target.get("cadence") == "semi_monthly"
+        and rfinra.warn_lead_days == 3,
+    )
+    ok(
+        "real_portfolio_freshness_probes",
+        {(p.name, p.kind, p.tolerance_days, p.warn_lead_days) for p in rport.freshness_probes}
+        == {("macro_serving_age", "sqlite_max_date", 5, 2), ("holdings_ledger_age", "sqlite_max_date", 7, 2)},
+    )
+    ok(
+        "real_freshness_probes_never_required_except_defense_13f",
+        all(
+            not p.required
+            for s in real.sectors
+            for p in s.freshness_probes
+            if not (s.name == "defense" and p.name == "institutional_13f_period")
+        ),
+    )
 
     # --- timeout consistency: every sector ceiling must dominate its documented
     # per-step ceiling (2026-08-05 biotech post-mortem: the 21600s default killed
@@ -4226,10 +4735,8 @@ def run_selftest() -> int:
             )
     # The two known declarers must stay resolvable so the assertion above cannot
     # silently degrade into a no-op if a config key is renamed/moved.
-    ok("timeout_ceiling_resolvable_biotech",
-       (documented_step_ceiling_sec("biotech") or 0) >= 28800)
-    ok("timeout_ceiling_resolvable_portfolio",
-       (documented_step_ceiling_sec("portfolio_layer") or 0) >= 7200)
+    ok("timeout_ceiling_resolvable_biotech", (documented_step_ceiling_sec("biotech") or 0) >= 28800)
+    ok("timeout_ceiling_resolvable_portfolio", (documented_step_ceiling_sec("portfolio_layer") or 0) >= 7200)
     ok("timeout_ceiling_unknown_sector_none", documented_step_ceiling_sec("nope") is None)
 
     print(f"SELFTEST PASS: {len(checks)} checks")

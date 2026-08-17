@@ -1,0 +1,2 @@
+model_family,ticker,canonical_metric,taxonomy,concept_name,valid_from,valid_to,review_status,reason
+transportation,HTLD,revenue,us-gaap,Revenues,2019-01-02,,ACCEPTED,Prefer the consolidated revenue concept when the same accession also exposes a smaller RevenueFromContractWithCustomerIncludingAssessedTax subset fact.

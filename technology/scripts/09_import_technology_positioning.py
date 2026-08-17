@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
-from technology.core.positioning_window import resolve_positioning_window  # noqa: E402
+from technology.core.positioning_window import resolve_positioning_windows  # noqa: E402
 from technology.core.short_interest_float import (  # noqa: E402
     FloatPolicy,
     enrich_short_interest_float,
@@ -52,16 +52,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--model-family", default="", help="Technology model family to import, e.g. semiconductors.")
     parser.add_argument("--asof", default="", help="Feature as-of date. Defaults to today.")
-    window_group = parser.add_mutually_exclusive_group()
-    window_group.add_argument(
+    parser.add_argument(
         "--history-start",
         default="",
-        help="Earliest raw fact date to refresh. Defaults to a bounded incremental window.",
+        help="Backwards-compatible common raw-fact start override.",
     )
-    window_group.add_argument(
+    parser.add_argument("--form4-history-start", default="")
+    parser.add_argument("--short-interest-history-start", default="")
+    parser.add_argument("--sec-13f-history-start", default="")
+    parser.add_argument("--ibkr-history-start", default="")
+    parser.add_argument("--float-denominator-history-start", default="")
+    parser.add_argument(
         "--full-history",
         action="store_true",
-        help="Refresh raw facts from positioning_import.start_date. Use only for bootstrap/restatement.",
+        help="Refresh all raw facts from positioning_import.start_date. Use only for bootstrap/restatement.",
     )
     parser.add_argument(
         "--features-only",
@@ -893,15 +897,35 @@ def main() -> None:
     mp_db = Path(expand_env_vars(cfg_get(config, "upstream_databases.market_positioning.db_path"))).expanduser()
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, "positioning_import.output_csv"), base_dir=base_dir)
     configured_start = cfg_get(config, "positioning_import.start_date", "2016-01-01")
-    start, feature_asof = resolve_positioning_window(
+    if args.full_history and any(
+        str(value or "").strip()
+        for value in (
+            args.history_start,
+            args.form4_history_start,
+            args.short_interest_history_start,
+            args.sec_13f_history_start,
+            args.ibkr_history_start,
+            args.float_denominator_history_start,
+        )
+    ):
+        raise ValueError("--full-history cannot be combined with history-start overrides")
+    windows = resolve_positioning_windows(
         asof=args.asof,
         configured_start=configured_start,
         requested_start=args.history_start,
+        form4_requested_start=args.form4_history_start,
+        short_interest_requested_start=args.short_interest_history_start,
+        institutional_13f_requested_start=args.sec_13f_history_start,
+        borrow_requested_start=args.ibkr_history_start,
+        float_denominator_requested_start=args.float_denominator_history_start,
         full_history=bool(args.full_history),
-        lookback_days=int(
-            cfg_get(config, "positioning_import.incremental_lookback_days", 550)
-        ),
+        form4_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.form4", 120)),
+        short_interest_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.short_interest", 120)),
+        institutional_13f_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.institutional_13f", 550)),
+        borrow_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.ibkr_borrow", 45)),
+        float_denominator_lookback_days=int(cfg_get(config, "positioning_import.incremental_lookback_days.sec_float_denominator", 550)),
     )
+    feature_asof = windows.end
     form4_source = str(cfg_get(config, "positioning_import.form4_source_id", "sec_insider_upstream"))
     direct_ownership_source = str(cfg_get(config, "positioning_import.direct_ownership_source_id", "sec_ownership_direct"))
     mp_source = str(cfg_get(config, "positioning_import.market_positioning_source_id", "market_positioning_upstream"))
@@ -947,11 +971,15 @@ def main() -> None:
     ):
         raise FileNotFoundError(f"Market positioning upstream DB not found: {mp_db}")
     LOGGER.info(
-        "Positioning mode=%s window=%s..%s model_family=%s",
+        "Positioning mode=%s windows=form4:%s short:%s 13f:%s borrow:%s float:%s end:%s model_family=%s",
         "features_only"
         if args.features_only
         else ("full_history" if args.full_history else "incremental"),
-        start.isoformat(),
+        windows.form4_start.isoformat(),
+        windows.short_interest_start.isoformat(),
+        windows.institutional_13f_start.isoformat(),
+        windows.borrow_start.isoformat(),
+        windows.float_denominator_start.isoformat(),
         feature_asof.isoformat(),
         model_family,
     )
@@ -1044,7 +1072,7 @@ def main() -> None:
                             query_tickers=query_tickers,
                             source_to_internal=source_to_internal,
                             source_id=form4_source,
-                            start=start,
+                            start=windows.form4_start,
                             end=feature_asof,
                         )
                         direct_stats = direct_form4_stats(
@@ -1062,7 +1090,7 @@ def main() -> None:
                                     query_tickers=query_tickers,
                                     source_to_internal=source_to_internal,
                                     source_id=mp_source,
-                                    start=start,
+                                    start=windows.institutional_13f_start,
                                     end=feature_asof,
                                 )
                                 short_stats = import_short_interest(
@@ -1072,7 +1100,7 @@ def main() -> None:
                                     query_tickers=query_tickers,
                                     source_to_internal=source_to_internal,
                                     source_id=mp_source,
-                                    start=start,
+                                    start=windows.short_interest_start,
                                     end=feature_asof,
                                 )
                                 borrow_stats = import_borrow(
@@ -1082,7 +1110,7 @@ def main() -> None:
                                     query_tickers=query_tickers,
                                     source_to_internal=source_to_internal,
                                     source_id=mp_source,
-                                    start=start,
+                                    start=windows.borrow_start,
                                     end=feature_asof,
                                 )
                             except (OSError, sqlite3.OperationalError) as exc:
@@ -1133,14 +1161,14 @@ def main() -> None:
                             fact_tickers,
                             source_id=mp_source,
                             policy=float_policy,
-                            start_date=start,
+                            start_date=windows.float_denominator_start,
                             end_date=feature_asof,
                         )
                         float_errors = validate_float_enrichment(
                             conn,
                             fact_tickers,
                             source_id=mp_source,
-                            start_date=start,
+                            start_date=windows.float_denominator_start,
                             end_date=feature_asof,
                         )
                         if float_errors:

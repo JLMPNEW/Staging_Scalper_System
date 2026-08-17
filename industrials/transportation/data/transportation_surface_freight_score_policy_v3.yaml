@@ -1,0 +1,183 @@
+policy_version: transportation_surface_freight_score_policy_v3
+score_engine_version: transportation_cohort_fixed_denominator_v3
+cohort_id: north_american_surface_freight_and_logistics_v5
+calibration_pool: surface_freight_and_logistics
+required_risk_tier: operating
+required_portfolio_role: core_candidate
+included_economic_peer_groups:
+  - contract_warehousing
+  - freight_brokerage
+  - integrated_freight_and_logistics
+  - intermodal
+  - rail_and_rail_equipment
+  - trucking
+metric_comparison_groups:
+  surface_freight:
+    - contract_warehousing
+    - freight_brokerage
+    - integrated_freight_and_logistics
+    - intermodal
+    - rail_and_rail_equipment
+    - trucking
+comparison_group_tickers:
+  rail_networks: [CNI, CP, CSX, NSC, UNP]
+  ltl_carriers: [ARCB, ODFL, SAIA, TFII, XPO]
+  truckload_intermodal: [HUBG, JBHT, KNX, SNDR, CVLG, HTLD, MRTN, WERN]
+  asset_light_logistics: [CHRW, EXPD, LSTR, FWRD]
+  integrated_parcel: [FDX, UPS]
+metric_comparison_domains:
+  operating_ratio:
+    rail_networks: [CNI, CP, CSX, NSC, UNP]
+    ltl_carriers: [ARCB, ODFL, SAIA, TFII, XPO]
+    truckload_intermodal: [HUBG, JBHT, KNX, SNDR, CVLG, HTLD, MRTN, WERN]
+  purchased_transportation_ratio:
+    truckload_intermodal: [JBHT, KNX, SNDR, CVLG]
+  freight_weight_per_shipment:
+    ltl_carriers: [ARCB, ODFL, SAIA, TFII, XPO]
+  shipment_or_load_growth:
+    ltl_carriers: [ARCB, ODFL, SAIA]
+  pricing_or_yield_growth:
+    ltl_carriers: [ARCB, ODFL, SAIA, XPO]
+eligible_tickers:
+  - CNI
+  - CP
+  - CSX
+  - NSC
+  - UNP
+  - ARCB
+  - ODFL
+  - SAIA
+  - XPO
+  - HUBG
+  - JBHT
+  - KNX
+  - SNDR
+  - TFII
+  - CHRW
+  - EXPD
+  - FDX
+  - LSTR
+  - UPS
+  - CVLG
+  - FWRD
+  - HTLD
+  - MRTN
+  - WERN
+historical_calibration_only:
+  KSU: {comparison_group: rail_networks, effective_from: '2019-01-02', effective_to: '2021-12-13'}
+  GWR: {comparison_group: rail_networks, effective_from: '2019-01-02', effective_to: '2019-12-27'}
+  USX: {comparison_group: truckload_intermodal, effective_from: '2019-01-02', effective_to: '2023-06-30'}
+  CGI: {comparison_group: truckload_intermodal, effective_from: '2019-01-02', effective_to: '2019-12-09'}
+  USAK: {comparison_group: truckload_intermodal, effective_from: '2019-01-02', effective_to: '2022-09-14'}
+  YELL: {comparison_group: ltl_carriers, effective_from: '2019-01-02', effective_to: '2023-07-28'}
+  DSKE: {comparison_group: truckload_intermodal, effective_from: '2019-01-02', effective_to: '2024-04-01'}
+  ECHO: {comparison_group: asset_light_logistics, effective_from: '2019-01-02', effective_to: '2021-11-22'}
+excluded_tickers: {}
+minimum_active_cohort_size: 20
+historical_prebuild_gate:
+  minimum_source_ready_dates: 48
+  rationale: four_non_overlapping_12_month_research_blocks
+score_construction:
+  missing_optional_metric_policy: fixed_slot_neutral_score
+  neutral_missing_score: 50.0
+  retained_specialized_metrics:
+    - operating_ratio
+    - purchased_transportation_ratio
+    - freight_weight_per_shipment
+    - shipment_or_load_growth
+    - pricing_or_yield_growth
+  component_metric_weights:
+    default:
+      market_trend:
+        ret_3m: 0.25
+        ret_6m: 0.25
+        ret_12m_ex_1m: 0.25
+        relative_strength_3m: 0.25
+      quality:
+        operating_margin: 0.40
+        fcf_margin: 0.40
+        fcf_conversion: 0.20
+      growth:
+        revenue_growth: 0.50
+        operating_income_growth: 0.50
+      valuation:
+        fcf_yield: 0.50
+        ev_operating_income: 0.50
+      operating_efficiency:
+        asset_turnover: 1.00
+      capital_risk:
+        realized_volatility_60d: 0.20
+        maximum_drawdown_12m: 0.20
+        average_dollar_volume_60d: 0.10
+        capex_to_revenue: 0.20
+        net_debt_to_ebitda: 0.15
+        interest_coverage: 0.15
+    rail_networks:
+      operating_efficiency:
+        asset_turnover: 0.75
+        operating_ratio: 0.25
+    ltl_carriers:
+      growth:
+        revenue_growth: 0.40
+        operating_income_growth: 0.40
+        shipment_or_load_growth: 0.20
+      operating_efficiency:
+        asset_turnover: 0.40
+        operating_ratio: 0.20
+        freight_weight_per_shipment: 0.15
+        pricing_or_yield_growth: 0.25
+    truckload_intermodal:
+      operating_efficiency:
+        asset_turnover: 0.75
+        operating_ratio: 0.15
+        purchased_transportation_ratio: 0.10
+specialized_metric_dispositions:
+  operating_ratio: CALIBRATION_CANDIDATE
+  purchased_transportation_ratio: CALIBRATION_CANDIDATE
+  freight_weight_per_shipment: CALIBRATION_CANDIDATE
+  shipment_or_load_growth: CALIBRATION_CANDIDATE
+  pricing_or_yield_growth: CALIBRATION_CANDIDATE
+  transport_volume_growth: EXCLUDE_FAILED_STRICT_COVERAGE
+  asset_utilization: EXCLUDE_FAILED_STRICT_COVERAGE
+candidate_component_weights:
+  surface_balanced_v5:
+    market_trend: 0.25
+    quality: 0.15
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.15
+    capital_risk: 0.25
+  surface_quality_efficiency_v5:
+    market_trend: 0.20
+    quality: 0.22
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.23
+    capital_risk: 0.15
+  surface_balanced_positioning_v5:
+    market_trend: 0.20
+    quality: 0.15
+    growth: 0.10
+    valuation: 0.10
+    operating_efficiency: 0.15
+    capital_risk: 0.25
+    positioning: 0.05
+candidate_requirements:
+  surface_balanced_positioning_v5:
+    - positioning_history
+positioning_history_gate:
+  minimum_rebuildable_row_coverage: 0.90
+  minimum_eligible_date_fraction: 0.90
+  minimum_date_cross_section: 20
+governance:
+  membership_selection_uses_outcomes: false
+  membership_basis: v5_liquidity_reporting_quality_operating_status_and_economic_coherence
+  candidate_design_uses_outcomes: false
+  candidate_selection_split: future_untouched_validation
+  revealed_holdout_status: spent_diagnostic_only
+  promotion_from_revealed_holdout_allowed: false
+  specialized_parser_status: frozen_conflict_free_replay_only
+  historical_universe_policy: point_in_time_membership_intersect_frozen_eligible_entities
+  historical_calibration_role: historical_calibration_only_no_portfolio_eligibility
+  historical_membership_selection_uses_outcomes: false
+  historical_membership_basis: economic_comparability_loaded_required_history_and_reviewed_lifecycle

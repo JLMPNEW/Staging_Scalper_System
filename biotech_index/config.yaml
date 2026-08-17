@@ -31,6 +31,12 @@ market_positioning:
   database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/market_positioning.sqlite"
   history_start_date: "2019-01-01"
   fail_on_error: true
+  incremental_windows:
+    short_interest_days: 120
+    institutional_13f_days: 550
+    # Biotech borrow scores use 90-day history; retain a 120-day bootstrap/import window.
+    borrow_days: 120
+    float_denominator_days: 550
   user_agent: "JL, Independent Research, jm.357@hotmail.com"
   timeout_sec: 120.0
   short_interest:
@@ -85,7 +91,7 @@ market_positioning:
     # IBKR FEE_RATE historical bars tested in this account arrive as decimal
     # annualized rates: 0.003 means 0.3%.
     fee_rate_unit: "decimal"
-    fee_rate_initial_duration: "2 Y"
+    fee_rate_initial_duration: "120 D"
     fee_rate_backfill_duration: "7 Y"
     fee_rate_incremental_duration: "45 D"
     snapshot_wait_sec: 4.0
@@ -130,7 +136,8 @@ ctgov:
   max_aliases_per_company: 4
   page_size: 100
   max_pages: 25
-  json_ttl_hours: 168.0
+  # Daily snapshots must revalidate current trial state; unchanged responses remain cache-efficient.
+  json_ttl_hours: 24.0
   sleep_sec: 0.2
   timeout_sec: 45.0
   max_retries: 3
@@ -585,8 +592,9 @@ yahoo_market_data:
   source: "yahoo_adjusted"
   benchmark_ticker: "XBI"
   start_date: "2023-04-24"
-  # 0 reloads the full adjusted history each run so splits/dividends can restate prior bars correctly.
-  refetch_days: 0
+  # Bounded overlap preserves 200d/52w features and catches recent split/dividend restatements.
+  # Explicit historical restatements remain offline and full backfills stay operator-controlled.
+  refetch_days: 550
   market_close_guard: true
   market_timezone: "America/New_York"
   market_close_time: "16:15"
@@ -1316,6 +1324,13 @@ biotech_historical_sequence:
   # rows before this date remain pre-lock research; rows on/after it can be
   # strict OOS only when their source snapshot is same-day and PIT-valid.
   strict_oos_start_date: "2026-07-07"
+
+source_acceptance:
+  output_manifest: "../output/biotech_index_reports/biotech_refresh_acceptance_manifest.json"
+  # The universe screen is expensive and intentionally weekly, not daily.
+  max_universe_age_days: 8
+  # Allows an overnight run while requiring every provider lane to have executed recently.
+  max_provider_run_age_hours: 48.0
 
 biotech_refresh:
   timing_csv: "../output/biotech_index_reports/biotech_refresh_timing.csv"

@@ -114,6 +114,19 @@ def _prepared(tmp_path: Path) -> tuple[ConfigBundle, sqlite3.Connection]:
 def _form4_db(path: Path) -> None:
     conn = sqlite3.connect(path)
     conn.execute(
+        """CREATE TABLE sec_ownership_submission(
+               accession_number TEXT,document_type TEXT,filing_date TEXT,
+               accepted_ts_utc TEXT,issuer_cik TEXT
+           )"""
+    )
+    conn.executemany(
+        "INSERT INTO sec_ownership_submission VALUES (?,?,?,?,?)",
+        [
+            ("0001-24-000001", "4", "2024-01-10", "2024-01-10T16:00:00Z", "21344"),
+            ("0001-25-000001", "4", "2025-01-10", "2025-01-10T16:00:00Z", "21344"),
+        ],
+    )
+    conn.execute(
         """CREATE TABLE form4_events_tier1(
                event_key TEXT,is_current_truth INTEGER,accession_number TEXT,
                document_type TEXT,filing_date TEXT,filing_date_sort TEXT,
@@ -187,15 +200,19 @@ def test_stage5_schema_is_checksummed_and_idempotent(tmp_path: Path) -> None:
         ensure_stage5_schema(conn)
         ensure_stage5_schema(conn)
         row = conn.execute(
-            "SELECT migration_version,migration_sha256 FROM stage5_schema_migrations"
+            """SELECT migration_version,migration_sha256
+               FROM stage5_schema_migrations ORDER BY migration_version DESC LIMIT 1"""
         ).fetchone()
-        assert tuple(row) == (1, STAGE5_MIGRATION_SHA256)
+        assert tuple(row) == (2, STAGE5_MIGRATION_SHA256)
         assert "source_observation_id" in {
             str(item[1]) for item in conn.execute("PRAGMA table_info(fact_short_interest)")
         }
         assert "short_days_to_cover" in {
             str(item[1]) for item in conn.execute("PRAGMA table_info(feature_positioning)")
         }
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='fact_sec_ownership_issuer_coverage'"
+        ).fetchone()
     finally:
         conn.close()
 

@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from industrials.core.financial_filing_lineage import (
+    _document_has_financial_disclosure,
     apply_financial_lineage_gate,
     build_financial_filing_lineage,
     validate_financial_lineage_rank_rows,
@@ -303,10 +304,7 @@ def test_explicit_mismatched_period_blocks_proximity_fallback(
         conn,
         tmp_path,
         accession="earnings-cover",
-        text=(
-            "Item 2.02 Results of Operations and Financial Condition. "
-            "Results for the quarter ended July 31, 2026."
-        ),
+        text=("Item 2.02 Results of Operations and Financial Condition. Results for the quarter ended July 31, 2026."),
     )
 
     lineage = build_financial_filing_lineage(
@@ -411,6 +409,7 @@ def test_nonfinancial_supplemental_filing_does_not_mask_periodic_facts(
     assert lineage["financial_lineage_status"] == "INCORPORATED"
     assert lineage["latest_material_financial_accession"] == "annual"
     assert lineage["incorporated_financial_accession"] == "annual"
+
 
 def test_incidental_financial_results_phrase_does_not_mask_periodic_filing(
     tmp_path: Path,
@@ -573,8 +572,7 @@ def test_comparative_period_does_not_pair_stale_foreign_filing(
         tmp_path,
         accession="latest-results",
         text=(
-            "Financial results for the year ended December 31, 2025, "
-            "compared with the six months ended June 30, 2025."
+            "Financial results for the year ended December 31, 2025, compared with the six months ended June 30, 2025."
         ),
     )
 
@@ -588,7 +586,6 @@ def test_comparative_period_does_not_pair_stale_foreign_filing(
     assert lineage["latest_material_financial_accession"] == "latest-results"
     assert lineage["financial_lineage_gate"] == "0"
     assert lineage["financial_lineage_classification"] == "CANONICALIZATION_GAP"
-
 
 
 def test_acquired_business_statement_reference_in_8k_does_not_mask_issuer_filing(
@@ -729,7 +726,20 @@ def test_no_material_filing_with_feature_has_truthful_diagnostic() -> None:
     assert lineage["financial_lineage_status"] == "NO_MATERIAL_FINANCIAL_FILING"
     assert lineage["financial_lineage_gate"] == "0"
     assert lineage["financial_lineage_classification"] == "NO_MATERIAL_FILING_IDENTIFIED"
-    assert (
-        lineage["financial_lineage_reason"]
-        == "no_material_filing_identified_feature_snapshot_available"
+    assert lineage["financial_lineage_reason"] == "no_material_filing_identified_feature_snapshot_available"
+
+
+def test_future_results_announcement_is_not_a_material_8k(tmp_path: Path) -> None:
+    filing = tmp_path / "cfo_transition.htm"
+    filing.write_text(
+        """
+        <html><body>
+          <p>The company announced a chief financial officer transition.</p>
+          <p>The company will report second quarter 2026 financial results on
+             August 13, 2026.</p>
+        </body></html>
+        """,
+        encoding="utf-8",
     )
+
+    assert not _document_has_financial_disclosure(filing, form_type="8-K")

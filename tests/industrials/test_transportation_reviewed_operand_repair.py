@@ -26,6 +26,25 @@ POLICY_PATH = (
     / "review_policies"
     / "transportation_required_metric_operand_repairs.json"
 )
+REENTRY_POLICY_PATH = (
+    PROJECT_ROOT
+    / "industrials"
+    / "transportation"
+    / "review_policies"
+    / "transportation_surface_reentry_operand_repairs_v1.json"
+)
+REENTRY_POLICY_VERSION = "transportation_surface_reentry_operand_repairs_v1"
+REENTRY_SOURCE_ID = "transportation_surface_reentry_operand_v1"
+TANKER_CAPEX_POLICY_PATH = (
+    PROJECT_ROOT
+    / "industrials"
+    / "transportation"
+    / "review_policies"
+    / "transportation_tanker_capex_operand_repairs_v1.json"
+)
+TANKER_CAPEX_POLICY_VERSION = "transportation_tanker_capex_operand_repairs_v1"
+TANKER_CAPEX_SOURCE_ID = "transportation_tanker_capex_operand_v1"
+ASC_OPERATING_SOURCE_ID = "transportation_asc_operating_bridge_v1"
 
 
 def _policy() -> dict:
@@ -101,6 +120,76 @@ def test_policy_rejects_automatic_extension_promotion() -> None:
         validate_policy_contract(policy)
 
 
+def test_policy_allows_signed_income_but_not_negative_capex() -> None:
+    policy = _policy()
+    asc = next(
+        row for row in policy["fact_repairs"]
+        if row["repair_id"] == "ASC_OPERATING_INCOME_FY2025"
+    )
+    asc["value"] = -1.0
+    validate_policy_contract(policy)
+
+    policy = _policy()
+    capex = next(
+        row for row in policy["fact_repairs"]
+        if row["canonical_metric"] == "capex"
+    )
+    capex["value"] = -1.0
+    with pytest.raises(ValueError, match="must be nonnegative"):
+        validate_policy_contract(policy)
+
+
+def test_surface_reentry_policy_is_narrow_versioned_and_allows_no_status_override() -> None:
+    policy = json.loads(REENTRY_POLICY_PATH.read_text(encoding="utf-8-sig"))
+    validate_policy_contract(
+        policy,
+        policy_version=REENTRY_POLICY_VERSION,
+        source_id=REENTRY_SOURCE_ID,
+        model_family="transportation",
+        require_availability_overrides=False,
+    )
+    repairs = {row["repair_id"]: row for row in policy["fact_repairs"]}
+    assert set(repairs) == {
+        "MRTN_CAPEX_FY2024_REENTRY",
+        "MRTN_DEBT_ZERO_2026Q2_REENTRY",
+    }
+    assert repairs["MRTN_CAPEX_FY2024_REENTRY"]["value"] == 227_838_000 + 5_392_000
+    assert repairs["MRTN_DEBT_ZERO_2026Q2_REENTRY"]["value"] == 0.0
+    assert policy["availability_overrides"] == []
+
+
+def test_tanker_capex_policy_is_point_in_time_complete_and_arithmetically_sealed() -> None:
+    policy = json.loads(TANKER_CAPEX_POLICY_PATH.read_text(encoding="utf-8-sig"))
+    validate_policy_contract(
+        policy,
+        policy_version=TANKER_CAPEX_POLICY_VERSION,
+        source_id=TANKER_CAPEX_SOURCE_ID,
+        model_family="transportation",
+        require_availability_overrides=False,
+    )
+    facts = policy["fact_repairs"]
+    assert len(facts) == 16
+    assert {
+        (row["ticker"], row["period_end"])
+        for row in facts
+    } == {
+        (ticker, f"{year}-12-31")
+        for ticker in ("DHT", "TEN")
+        for year in range(2018, 2026)
+    }
+    for row in facts:
+        assert row["derivation_type"] == "document_line_item_sum"
+        assert sum(
+            component["value"]
+            for component in row["line_item_components"]
+        ) == row["value"]
+        assert row["filing_date"] > row["period_end"]
+        assert int(row["filing_date"][:4]) == int(row["period_end"][:4]) + 1
+    assert policy["controls"]["point_in_time_first_filed_annual_required"] is True
+    assert policy["controls"]["component_imputation_allowed"] is False
+    assert policy["availability_overrides"] == []
+
+
 def test_transportation_build_uses_only_transportation_supplemental_sources() -> None:
     config = load_yaml(PROJECT_ROOT / "industrials" / "config.yaml")
     sources = config["model_families"]["transportation"]["financial"][
@@ -109,6 +198,9 @@ def test_transportation_build_uses_only_transportation_supplemental_sources() ->
     assert sources == [
         "dedicated_parser_transportation_required_metric_repair_v1",
         SOURCE_ID,
+        REENTRY_SOURCE_ID,
+        TANKER_CAPEX_SOURCE_ID,
+        ASC_OPERATING_SOURCE_ID,
     ]
 
 

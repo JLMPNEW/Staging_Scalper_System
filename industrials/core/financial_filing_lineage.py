@@ -72,6 +72,11 @@ FINANCIAL_DISCLOSURE_PATTERNS = (
     *RESULTS_DISCLOSURE_PATTERNS,
     *STATEMENT_DISCLOSURE_PATTERNS,
 )
+FUTURE_RESULTS_ANNOUNCEMENT_PATTERN = re.compile(
+    r"\b(?:will|expects? to|plans? to|is scheduled to)\s+"
+    r"(?:announce|report|release)\b.{0,160}?\bfinancial results\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _availability_date(row: Mapping[str, Any]) -> str:
@@ -102,11 +107,9 @@ def _normalized_document_text(path: Path) -> str:
 
 def _document_has_financial_disclosure(path: Path, *, form_type: str) -> bool:
     text = _normalized_document_text(path)
-    patterns = (
-        RESULTS_DISCLOSURE_PATTERNS
-        if form_type in {"8-K", "8-K/A"}
-        else FINANCIAL_DISCLOSURE_PATTERNS
-    )
+    if form_type in {"8-K", "8-K/A"}:
+        text = FUTURE_RESULTS_ANNOUNCEMENT_PATTERN.sub(" ", text)
+    patterns = RESULTS_DISCLOSURE_PATTERNS if form_type in {"8-K", "8-K/A"} else FINANCIAL_DISCLOSURE_PATTERNS
     return any(pattern.search(text) for pattern in patterns)
 
 
@@ -171,9 +174,7 @@ def _supplemental_financial_evidence(
         if bool(document["is_full_submission"]):
             continue
         source_path = str(document["source_path"] or "").strip()
-        if source_path and _document_has_financial_disclosure(
-            Path(source_path), form_type=form_type
-        ):
+        if source_path and _document_has_financial_disclosure(Path(source_path), form_type=form_type):
             return True, "cached_document_financial_disclosure"
     return False, "no_financial_disclosure_evidence"
 
@@ -181,9 +182,7 @@ def _supplemental_financial_evidence(
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
         raise ValueError(f"Unsafe SQLite table identifier: {table!r}")
-    return {
-        str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")
-    }
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def _normalized_accession(raw: object) -> str:
@@ -279,11 +278,7 @@ def _live_source_discovery_time(
         payload_source = str(metadata.get("payload_source") or "").strip().lower()
         response_kind = str(metadata.get("response_kind") or "").strip().lower()
         request_time = _timestamp(row["request_time_utc"])
-        if (
-            request_time is not None
-            and payload_source.startswith("live")
-            and response_kind == "root_submissions"
-        ):
+        if request_time is not None and payload_source.startswith("live") and response_kind == "root_submissions":
             return request_time
     return None
 
@@ -301,9 +296,7 @@ def _canonical_core_metrics(
     columns = _table_columns(conn, "fact_financial_statement_canonical")
     family_clause = "AND model_family = ?" if "model_family" in columns else ""
     if "accepted_at" in columns:
-        availability_expression = (
-            "COALESCE(NULLIF(SUBSTR(accepted_at, 1, 10), ''), filing_date)"
-        )
+        availability_expression = "COALESCE(NULLIF(SUBSTR(accepted_at, 1, 10), ''), filing_date)"
     else:
         availability_expression = "filing_date"
     params: list[Any] = [*tickers]
@@ -354,17 +347,13 @@ def _filings(
                {cik_column} AS cik
         FROM fact_sec_filing
         WHERE ticker IN ({placeholders})
-          AND form_type IN ({','.join('?' for _ in PERIODIC_FINANCIAL_FORMS | SUPPLEMENTAL_FORMS)})
+          AND form_type IN ({",".join("?" for _ in PERIODIC_FINANCIAL_FORMS | SUPPLEMENTAL_FORMS)})
         ORDER BY ticker, COALESCE(NULLIF({acceptance_column}, ''), filing_date),
                  accession_number
         """,
         (*tickers, *sorted(PERIODIC_FINANCIAL_FORMS | SUPPLEMENTAL_FORMS)),
     ).fetchall()
-    return [
-        dict(row)
-        for row in rows
-        if _valid_asof(_availability_date(dict(row)), asof)
-    ]
+    return [dict(row) for row in rows if _valid_asof(_availability_date(dict(row)), asof)]
 
 
 def _filings_describe_same_financial_event(
@@ -406,9 +395,7 @@ def _filings_describe_same_financial_event(
     if latest_report and candidate_filing == latest_report:
         return True
     try:
-        filing_gap = (
-            date.fromisoformat(latest_filing) - date.fromisoformat(candidate_filing)
-        ).days
+        filing_gap = (date.fromisoformat(latest_filing) - date.fromisoformat(candidate_filing)).days
     except ValueError:
         return False
     return 0 <= filing_gap <= 2
@@ -506,9 +493,7 @@ def build_financial_filing_lineage(
                 "financial_lineage_checked_asof_date": asof,
                 "financial_lineage_status": status,
                 "financial_lineage_gate": "0",
-                "financial_lineage_classification": (
-                    "NO_MATERIAL_FILING_IDENTIFIED" if has_feature else "PARSING_GAP"
-                ),
+                "financial_lineage_classification": ("NO_MATERIAL_FILING_IDENTIFIED" if has_feature else "PARSING_GAP"),
                 "latest_material_financial_filing_date": "",
                 "latest_material_financial_form": "",
                 "latest_material_financial_accession": "",
@@ -548,22 +533,13 @@ def build_financial_filing_lineage(
         lineage_reason = (
             f"latest_material_filing_incorporated:{latest.get('material_evidence')}"
             if incorporated
-            else (
-                "latest_material_filing_has_no_canonical_core_facts:"
-                f"{latest.get('material_evidence')}"
-            )
+            else (f"latest_material_filing_has_no_canonical_core_facts:{latest.get('material_evidence')}")
         )
         if policy.require_score_incorporation:
             score_source = score_sources.get(ticker)
-            source_accession = str(
-                (score_source or {}).get("financial_source_accession") or ""
-            ).strip()
-            source_feature_asof = str(
-                (score_source or {}).get("financial_feature_asof_date") or ""
-            ).strip()
-            source_feature_updated = _timestamp(
-                (score_source or {}).get("financial_source_feature_updated_at")
-            )
+            source_accession = str((score_source or {}).get("financial_source_accession") or "").strip()
+            source_feature_asof = str((score_source or {}).get("financial_feature_asof_date") or "").strip()
+            source_feature_updated = _timestamp((score_source or {}).get("financial_source_feature_updated_at"))
             scoring_updated = _timestamp((score_source or {}).get("updated_at"))
             matched = next(
                 (
@@ -582,24 +558,13 @@ def build_financial_filing_lineage(
                 lineage_reason = "score_input_missing_financial_source_accession"
             elif not _valid_asof(source_feature_asof, asof):
                 incorporated = None
-                lineage_reason = (
-                    "score_input_financial_feature_asof_invalid:"
-                    f"{source_feature_asof or 'missing'}"
-                )
+                lineage_reason = f"score_input_financial_feature_asof_invalid:{source_feature_asof or 'missing'}"
             elif matched is None:
                 incorporated = None
-                lineage_reason = (
-                    "score_input_financial_source_not_latest_material_event:"
-                    f"{source_accession}"
-                )
-            elif source_feature_asof != str(
-                matched.get("filing_date") or ""
-            ).strip()[:10]:
+                lineage_reason = f"score_input_financial_source_not_latest_material_event:{source_accession}"
+            elif source_feature_asof != str(matched.get("filing_date") or "").strip()[:10]:
                 incorporated = None
-                lineage_reason = (
-                    "score_input_financial_feature_date_not_source_filing_date:"
-                    f"{source_feature_asof}"
-                )
+                lineage_reason = f"score_input_financial_feature_date_not_source_filing_date:{source_feature_asof}"
             elif source_feature_updated is None or scoring_updated is None:
                 incorporated = None
                 lineage_reason = "score_input_financial_source_timestamp_missing"
@@ -608,19 +573,14 @@ def build_financial_filing_lineage(
                 lineage_reason = "score_input_precedes_selected_financial_feature"
             else:
                 incorporated = matched
-                lineage_reason = (
-                    "score_input_traced_to_latest_material_financial_event:"
-                    f"{source_accession}"
-                )
+                lineage_reason = f"score_input_traced_to_latest_material_financial_event:{source_accession}"
         if incorporated is not None and policy.require_live_source_discovery:
             discovery_time = _live_source_discovery_time(
                 conn,
                 cik=latest.get("cik"),
                 asof=asof,
             )
-            scoring_updated = _timestamp(
-                (score_sources.get(ticker) or {}).get("updated_at")
-            )
+            scoring_updated = _timestamp((score_sources.get(ticker) or {}).get("updated_at"))
             if discovery_time is None:
                 incorporated = None
                 lineage_reason = "live_sec_submissions_discovery_missing_for_asof"
@@ -628,9 +588,7 @@ def build_financial_filing_lineage(
                 incorporated = None
                 lineage_reason = "score_input_precedes_live_sec_submissions_discovery"
             else:
-                lineage_reason = (
-                    f"{lineage_reason};live_sec_submissions_discovery_confirmed"
-                )
+                lineage_reason = f"{lineage_reason};live_sec_submissions_discovery_confirmed"
         status = "INCORPORATED" if incorporated is not None else "REVIEW_REQUIRED"
         output[ticker] = {
             "ticker": ticker,
@@ -670,9 +628,7 @@ def apply_financial_lineage_gate(
         ticker = normalize_ticker(row.get("ticker"))
         evidence = dict(lineage.get(ticker, {}))
         if not evidence:
-            evidence = {
-                field: "" for field in LINEAGE_REPORT_FIELDS
-            }
+            evidence = {field: "" for field in LINEAGE_REPORT_FIELDS}
             evidence.update(
                 {
                     "ticker": ticker,
@@ -685,10 +641,7 @@ def apply_financial_lineage_gate(
             row[field] = str(evidence.get(field) or "")
         if row["financial_lineage_gate"] == "1":
             continue
-        reason = (
-            "unresolved_material_financial_filing:"
-            f"{row.get('latest_material_financial_accession') or 'unknown'}"
-        )
+        reason = f"unresolved_material_financial_filing:{row.get('latest_material_financial_accession') or 'unknown'}"
         row["portfolio_candidate_gate"] = "0"
         row["portfolio_candidate_status"] = "data_review_required"
         row["portfolio_candidate_reason"] = reason
@@ -704,9 +657,7 @@ def apply_financial_lineage_gate(
     return rows
 
 
-def lineage_rows_from_rank_rows(
-    rows: Iterable[Mapping[str, Any]], *, model_family: str
-) -> list[dict[str, str]]:
+def lineage_rows_from_rank_rows(rows: Iterable[Mapping[str, Any]], *, model_family: str) -> list[dict[str, str]]:
     return [
         {
             "ticker": normalize_ticker(row.get("ticker")),
@@ -748,9 +699,7 @@ def write_financial_lineage_report(
         "path": str(path),
         "sha256": digest,
         **evaluation_manifest(evaluation, policy=policy, context=policy_context),
-        "review_required_count": sum(
-            row["financial_lineage_gate"] != "1" for row in report_rows
-        ),
+        "review_required_count": sum(row["financial_lineage_gate"] != "1" for row in report_rows),
         "investable_unresolved_count": sum(
             str(row.get("portfolio_candidate_gate") or "") == "1"
             and str(row.get("financial_lineage_gate") or "") != "1"

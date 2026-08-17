@@ -1,0 +1,2 @@
+ticker,taxonomy,concept_name,canonical_metric,financial_statement,period_type,sign_policy,priority,review_status,valid_from,reviewed_at,source,notes
+TRMD,ifrs-full,RevenueFromRenderingOfCargoAndMailTransportServices,revenue,income_statement,duration,as_reported,30,reviewed,2019-01-02,2026-08-15,transportation_v5_historical_gap_audit,"TORM is a pure-play tanker freight issuer; SEC CompanyFacts values reconcile to total reported revenue. Ticker scope prevents use as total revenue for passenger issuers where cargo is only a component."

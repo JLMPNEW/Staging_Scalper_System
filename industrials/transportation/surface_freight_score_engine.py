@@ -12,6 +12,10 @@ from industrials.transportation.financial_contract import MetricDefinition
 
 
 SCORE_ENGINE_VERSION = "transportation_surface_freight_fixed_denominator_v2"
+COHORT_SCORE_ENGINE_VERSION = "transportation_cohort_fixed_denominator_v3"
+SUPPORTED_SCORE_ENGINE_VERSIONS = frozenset(
+    {SCORE_ENGINE_VERSION, COHORT_SCORE_ENGINE_VERSION}
+)
 METRIC_SCORE_PREFIX = "metric_score__"
 OBSERVED_STATUSES = frozenset({"REPORTED", "DERIVED", "PROXY"})
 COMPONENT_FIELD = {
@@ -76,7 +80,7 @@ def metric_score_field(metric_id: str) -> str:
     return f"{METRIC_SCORE_PREFIX}{metric_id}"
 
 
-def load_surface_freight_score_policy(path: Path) -> dict[str, Any]:
+def load_cohort_score_policy(path: Path) -> dict[str, Any]:
     payload = load_yaml(path)
     required = {
         "policy_version",
@@ -97,7 +101,7 @@ def load_surface_freight_score_policy(path: Path) -> dict[str, Any]:
     missing = sorted(required - set(payload))
     if missing:
         raise ValueError(f"{path}: missing score-policy fields={missing}")
-    if str(payload["score_engine_version"]) != SCORE_ENGINE_VERSION:
+    if str(payload["score_engine_version"]) not in SUPPORTED_SCORE_ENGINE_VERSIONS:
         raise ValueError(
             f"{path}: unsupported score_engine_version="
             f"{payload['score_engine_version']!r}"
@@ -107,11 +111,68 @@ def load_surface_freight_score_policy(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: duplicate eligible tickers")
     if len(eligible) < int(payload["minimum_active_cohort_size"]):
         raise ValueError(f"{path}: eligible cohort is below its minimum size")
+    comparison_group_tickers = payload.get("comparison_group_tickers") or {}
+    if comparison_group_tickers:
+        assigned: list[str] = []
+        for group, raw_tickers in comparison_group_tickers.items():
+            tickers = [str(item).upper() for item in raw_tickers]
+            if not str(group) or not tickers or len(tickers) != len(set(tickers)):
+                raise ValueError(f"{path}: invalid comparison_group_tickers={group!r}")
+            assigned.extend(tickers)
+        if len(assigned) != len(set(assigned)) or set(assigned) != set(eligible):
+            raise ValueError(
+                f"{path}: comparison_group_tickers must partition eligible_tickers"
+            )
+    historical_only = payload.get("historical_calibration_only") or {}
+    if not isinstance(historical_only, Mapping):
+        raise ValueError(f"{path}: historical_calibration_only must be a mapping")
+    historical_tickers = {str(ticker).upper() for ticker in historical_only}
+    if historical_tickers & set(eligible):
+        raise ValueError(
+            f"{path}: historical-only tickers overlap current eligible tickers"
+        )
+    valid_groups = {str(group) for group in comparison_group_tickers}
+    for raw_ticker, raw_entry in historical_only.items():
+        ticker = str(raw_ticker).upper()
+        if not ticker or not isinstance(raw_entry, Mapping):
+            raise ValueError(f"{path}: invalid historical-only entry={raw_ticker!r}")
+        if str(raw_entry.get("comparison_group") or "") not in valid_groups:
+            raise ValueError(
+                f"{path}: {ticker} has invalid historical comparison group"
+            )
+        effective_from = str(raw_entry.get("effective_from") or "")[:10]
+        effective_to = str(raw_entry.get("effective_to") or "")[:10]
+        if not effective_from or not effective_to or effective_from > effective_to:
+            raise ValueError(f"{path}: {ticker} has invalid historical date bounds")
+    metric_domains = payload.get("metric_comparison_domains") or {}
+    for metric_id, raw_domains in metric_domains.items():
+        assigned: list[str] = []
+        if not str(metric_id) or not isinstance(raw_domains, Mapping):
+            raise ValueError(f"{path}: invalid metric comparison domains")
+        for domain_id, raw_tickers in raw_domains.items():
+            tickers = [str(item).upper() for item in raw_tickers]
+            if not str(domain_id) or not tickers or len(tickers) != len(set(tickers)):
+                raise ValueError(
+                    f"{path}: invalid metric domain={metric_id}/{domain_id}"
+                )
+            if not set(tickers) <= set(eligible):
+                raise ValueError(
+                    f"{path}: metric domain ticker outside eligible set={metric_id}/{domain_id}"
+                )
+            assigned.extend(tickers)
+        if len(assigned) != len(set(assigned)):
+            raise ValueError(f"{path}: overlapping metric domains for {metric_id}")
     governance = payload["governance"]
     if governance.get("membership_selection_uses_outcomes") is not False:
         raise ValueError("surface-freight membership must be outcome blind")
     if governance.get("promotion_from_revealed_holdout_allowed") is not False:
         raise ValueError("revealed holdout must remain promotion-ineligible")
+    if historical_only and governance.get("historical_calibration_role") != (
+        "historical_calibration_only_no_portfolio_eligibility"
+    ):
+        raise ValueError(
+            "historical-only membership requires a no-portfolio-eligibility role"
+        )
 
     construction = payload["score_construction"]
     neutral = float(construction.get("neutral_missing_score"))
@@ -148,10 +209,13 @@ def load_surface_freight_score_policy(path: Path) -> dict[str, Any]:
         str(item)
         for item in construction.get("retained_specialized_metrics", [])
     }
-    if retained != {"operating_ratio"}:
-        raise ValueError("operating_ratio must be the sole retained specialized metric")
-    if disposition.get("operating_ratio") != "CALIBRATION_CANDIDATE":
-        raise ValueError("operating_ratio disposition must be CALIBRATION_CANDIDATE")
+    if not retained:
+        raise ValueError("at least one specialized metric must be retained")
+    if any(
+        disposition.get(metric_id) != "CALIBRATION_CANDIDATE"
+        for metric_id in retained
+    ):
+        raise ValueError("every retained specialized metric must be a calibration candidate")
     if any(
         status == "CALIBRATION_CANDIDATE" and metric_id not in retained
         for metric_id, status in disposition.items()
@@ -164,7 +228,12 @@ def load_surface_freight_score_policy(path: Path) -> dict[str, Any]:
     return payload
 
 
-def surface_freight_score_eligible(
+def load_surface_freight_score_policy(path: Path) -> dict[str, Any]:
+    """Backward-compatible alias for the shared cohort policy loader."""
+    return load_cohort_score_policy(path)
+
+
+def cohort_score_eligible(
     row: Mapping[str, object],
     policy: Mapping[str, Any],
 ) -> bool:
@@ -175,6 +244,18 @@ def surface_freight_score_eligible(
     excluded = {
         str(item).upper() for item in (policy.get("excluded_tickers") or {})
     }
+    historical_entry = (policy.get("historical_calibration_only") or {}).get(ticker)
+    if historical_entry is not None:
+        asof = str(row.get("asof_date") or "")[:10]
+        return (
+            str(row.get("_score_membership_mode") or "current") == "pit"
+            and ticker not in excluded
+            and str(row.get("calibration_use") or "") == "historical_research"
+            and str(row.get("calibration_cohort") or "")
+            == str(policy["calibration_pool"])
+            and str(historical_entry["effective_from"])[:10] <= asof
+            <= str(historical_entry["effective_to"])[:10]
+        )
     return (
         (not eligible_tickers or ticker in eligible_tickers)
         and ticker not in excluded
@@ -189,10 +270,36 @@ def surface_freight_score_eligible(
     )
 
 
+def surface_freight_score_eligible(
+    row: Mapping[str, object],
+    policy: Mapping[str, Any],
+) -> bool:
+    """Backward-compatible alias for the shared cohort eligibility gate."""
+    return cohort_score_eligible(row, policy)
+
+
 def metric_comparison_group(
     row: Mapping[str, object],
     policy: Mapping[str, Any],
 ) -> str:
+    ticker = str(row.get("ticker") or "").upper()
+    historical_entry = (policy.get("historical_calibration_only") or {}).get(ticker)
+    if historical_entry is not None:
+        if str(row.get("_score_membership_mode") or "current") != "pit":
+            raise ValueError(f"{ticker}: historical-only group requested outside PIT mode")
+        return str(historical_entry["comparison_group"])
+    ticker_groups = policy.get("comparison_group_tickers") or {}
+    if ticker_groups:
+        matches = [
+            str(group)
+            for group, tickers in ticker_groups.items()
+            if ticker in {str(item).upper() for item in tickers}
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"{row.get('ticker')}: expected one ticker comparison group"
+            )
+        return matches[0]
     peer = str(row.get("economic_peer_group") or "")
     matches = [
         str(group)
@@ -204,6 +311,27 @@ def metric_comparison_group(
             f"{row.get('ticker')}: expected one metric comparison group for {peer!r}"
         )
     return matches[0]
+
+
+def metric_comparison_group_for_metric(
+    row: Mapping[str, object],
+    policy: Mapping[str, Any],
+    metric_id: str,
+) -> str | None:
+    domains = (policy.get("metric_comparison_domains") or {}).get(metric_id)
+    if not domains:
+        return metric_comparison_group(row, policy)
+    ticker = str(row.get("ticker") or "").upper()
+    matches = [
+        str(domain)
+        for domain, tickers in domains.items()
+        if ticker in {str(item).upper() for item in tickers}
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            f"{ticker}: multiple metric comparison domains for {metric_id}"
+        )
+    return matches[0] if matches else None
 
 
 def _metric_payload(
@@ -231,7 +359,7 @@ def _metric_payload(
     return values, {str(key): str(value) for key, value in statuses.items()}
 
 
-def score_surface_metric_percentiles(
+def score_cohort_metric_percentiles(
     rows: Sequence[Mapping[str, object]],
     *,
     definitions: Sequence[MetricDefinition],
@@ -239,7 +367,7 @@ def score_surface_metric_percentiles(
 ) -> list[dict[str, object]]:
     """One percentile implementation shared by production and research."""
     output = [
-        dict(row) for row in rows if surface_freight_score_eligible(row, policy)
+        dict(row) for row in rows if cohort_score_eligible(row, policy)
     ]
     by_date: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in output:
@@ -269,7 +397,11 @@ def score_surface_metric_percentiles(
                     continue
                 value = finite_float(values.get(definition.metric_id))
                 if value is not None:
-                    group = metric_comparison_group(row, policy)
+                    group = metric_comparison_group_for_metric(
+                        row, policy, definition.metric_id
+                    )
+                    if group is None:
+                        continue
                     values_by_group[group][ticker] = value
             for values in values_by_group.values():
                 scores = percentile_scores(
@@ -282,6 +414,18 @@ def score_surface_metric_percentiles(
                         score if definition.direction == 1 else 100.0 - score
                     )
     return output
+
+
+def score_surface_metric_percentiles(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    definitions: Sequence[MetricDefinition],
+    policy: Mapping[str, Any],
+) -> list[dict[str, object]]:
+    """Backward-compatible alias for shared cohort percentile scoring."""
+    return score_cohort_metric_percentiles(
+        rows, definitions=definitions, policy=policy
+    )
 
 
 def component_metric_recipe(
@@ -304,7 +448,7 @@ def component_metric_recipe(
     return output
 
 
-def build_surface_component_scores(
+def build_cohort_component_scores(
     row: Mapping[str, object],
     *,
     policy: Mapping[str, Any],
@@ -331,6 +475,15 @@ def build_surface_component_scores(
             "applicable": len(weights),
         }
     return values, coverage
+
+
+def build_surface_component_scores(
+    row: Mapping[str, object],
+    *,
+    policy: Mapping[str, Any],
+) -> tuple[dict[str, float], dict[str, dict[str, int]]]:
+    """Backward-compatible alias for shared cohort component construction."""
+    return build_cohort_component_scores(row, policy=policy)
 
 
 def candidate_registry_from_policy(

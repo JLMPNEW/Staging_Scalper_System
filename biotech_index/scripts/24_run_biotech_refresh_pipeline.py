@@ -120,7 +120,9 @@ class Step:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the biotech refresh pipeline with explicit delta/reconcile/backfill modes.")
+    parser = argparse.ArgumentParser(
+        description="Run the biotech refresh pipeline with explicit delta/reconcile/backfill modes."
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--asof", type=str, default="", help="As-of date in YYYY-MM-DD. Defaults to UTC today.")
@@ -135,10 +137,22 @@ def parse_args() -> argparse.Namespace:
         help="Skip FINRA short-interest, SEC 13F, and IBKR borrow positioning refresh/export.",
     )
     parser.add_argument("--skip-analyze", action="store_true", help="Skip SQLite ANALYZE at the end.")
-    parser.add_argument("--skip-final-validation", action="store_true", help="Skip final as-of/coverage validation after a full pipeline run.")
-    parser.add_argument("--skip-form4-refresh", action="store_true", help="Skip the staging Form 4 refresh step before preflight.")
-    parser.add_argument("--skip-form4-preflight", action="store_true", help="Skip the staging Form 4 database freshness preflight.")
-    parser.add_argument("--reuse-unchanged-historical", action="store_true", help="Reuse exact-signature governance rows for historical snapshot runs.")
+    parser.add_argument(
+        "--skip-final-validation",
+        action="store_true",
+        help="Skip final as-of/coverage validation after a full pipeline run.",
+    )
+    parser.add_argument(
+        "--skip-form4-refresh", action="store_true", help="Skip the staging Form 4 refresh step before preflight."
+    )
+    parser.add_argument(
+        "--skip-form4-preflight", action="store_true", help="Skip the staging Form 4 database freshness preflight."
+    )
+    parser.add_argument(
+        "--reuse-unchanged-historical",
+        action="store_true",
+        help="Reuse exact-signature governance rows for historical snapshot runs.",
+    )
     parser.add_argument(
         "--history-restatement",
         action="store_true",
@@ -147,8 +161,15 @@ def parse_args() -> argparse.Namespace:
             "This does not run raw upstream sync steps."
         ),
     )
-    parser.add_argument("--history-start-asof", type=str, default="", help="Earliest YYYY-MM-DD date for --history-restatement.")
-    parser.add_argument("--history-end-asof", type=str, default="", help="Latest YYYY-MM-DD date for --history-restatement. Defaults to --asof.")
+    parser.add_argument(
+        "--history-start-asof", type=str, default="", help="Earliest YYYY-MM-DD date for --history-restatement."
+    )
+    parser.add_argument(
+        "--history-end-asof",
+        type=str,
+        default="",
+        help="Latest YYYY-MM-DD date for --history-restatement. Defaults to --asof.",
+    )
     parser.add_argument(
         "--history-market-start-asof",
         type=str,
@@ -390,9 +411,7 @@ def validate_config(config: dict[str, Any]) -> None:
         watch = float(biotech_buckets.get("watchlist_min", 60.0))
         speculative = float(biotech_buckets.get("speculative_min", 45.0))
         if watch <= speculative:
-            raise RuntimeError(
-                "Invalid biotech_scoring.buckets thresholds: watchlist_min must exceed speculative_min."
-            )
+            raise RuntimeError("Invalid biotech_scoring.buckets thresholds: watchlist_min must exceed speculative_min.")
 
     multibagger = cfg_get(config, "multibagger", {}) or {}
     if multibagger:
@@ -645,13 +664,18 @@ def pipeline_steps(
     )
     sec_filings_args: tuple[str, ...] = ("--allow-partial",) if mode == "daily_delta" else ()
     companyfacts_args: tuple[str, ...] = ("--full-refresh",) if mode == "full_backfill" else ()
+    positioning_args: tuple[str, ...] = ("--full-history", "--ibkr-borrow-backfill") if mode == "full_backfill" else ()
     forward_args: tuple[str, ...] = ("--run-mode", mode)
     governance_reuse = reuse_unchanged_historical or mode == "weekly_reconcile"
     governance_args: tuple[str, ...] = ("--reuse-unchanged-historical",) if governance_reuse else ()
     ib_args: tuple[str, ...] = ("--allow-partial",) if mode in {"weekly_reconcile", "full_backfill"} else ()
     yahoo_args: tuple[str, ...] = ("--allow-partial",) if mode in {"weekly_reconcile", "full_backfill"} else ()
-    commercial_args: tuple[str, ...] = ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
-    multibagger_feature_args: tuple[str, ...] = ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
+    commercial_args: tuple[str, ...] = (
+        ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
+    )
+    multibagger_feature_args: tuple[str, ...] = (
+        ("--allow-missing-market",) if mode in {"weekly_reconcile", "full_backfill"} else ()
+    )
     # 08_scan_ctgov_reactivation_candidates.py is an audit/discovery utility, not a deterministic refresh step.
     #
     # always_rerun marking (resume policy, see Step): every network *_sync /
@@ -670,7 +694,7 @@ def pipeline_steps(
             [
                 Step("ctgov_trials", "03_sync_ctgov_trials.py", always_rerun=True),
                 Step("trial_links", "04_link_trials_to_companies.py", supports_asof=False),
-            Step("ctgov_audit", "05_audit_ctgov_trial_links.py"),
+                Step("ctgov_audit", "05_audit_ctgov_trial_links.py"),
             ]
         )
     steps.extend(
@@ -698,7 +722,7 @@ def pipeline_steps(
         ]
     )
     if not skip_market_positioning:
-        steps.append(Step("market_positioning", "25_update_market_positioning.py", always_rerun=True))
+        steps.append(Step("market_positioning", "25_update_market_positioning.py", positioning_args, always_rerun=True))
     steps.extend(
         [
             Step("fda_adcom_calendar", "14_sync_fda_adcom_calendar.py", always_rerun=True),
@@ -709,6 +733,7 @@ def pipeline_steps(
             Step("multibagger_scores", "22_score_multibagger_candidates.py"),
             Step("multibagger_reports", "23_publish_multibagger_report.py"),
             Step("universe_coverage_audit", "32_audit_biotech_universe_coverage.py"),
+            Step("source_acceptance", "33_validate_biotech_source_acceptance.py"),
         ]
     )
     return steps
@@ -740,13 +765,21 @@ def historical_restatement_steps(
         Step("market_positioning_export", "25_update_market_positioning.py", ("--skip-download",)),
         Step("forward_catalyst_calendar", "09_build_forward_catalyst_calendar.py"),
         Step("financial_survival", "16_build_financial_survival_features.py"),
-        Step("commercial_value", "18_build_commercial_value_features.py", ("--allow-missing-market", "--allow-stale-market")),
+        Step(
+            "commercial_value",
+            "18_build_commercial_value_features.py",
+            ("--allow-missing-market", "--allow-stale-market"),
+        ),
         Step("forward_guidance", "19_parse_forward_guidance.py", ("--run-mode", "weekly_reconcile")),
         Step("governance_events", "20_build_governance_event_features.py", governance_args),
         Step("fda_adcom_calendar", "14_sync_fda_adcom_calendar.py"),
         Step("biotech_features", "10_build_biotech_features.py"),
         Step("biotech_scores", "11_score_biotech_index.py"),
-        Step("multibagger_features", "21_build_multibagger_features.py", ("--allow-missing-market", "--allow-stale-market")),
+        Step(
+            "multibagger_features",
+            "21_build_multibagger_features.py",
+            ("--allow-missing-market", "--allow-stale-market"),
+        ),
         Step("multibagger_scores", "22_score_multibagger_candidates.py"),
     ]
 
@@ -786,7 +819,9 @@ def load_history_date_grid(
         raise ValueError(f"Invalid historical restatement end date: {end_asof or default_end_asof}")
     if not dates:
         table_sql = quote_identifier(source_table)
-        rows = conn.execute(f"SELECT DISTINCT asof_date FROM {table_sql} WHERE asof_date IS NOT NULL ORDER BY asof_date").fetchall()
+        rows = conn.execute(
+            f"SELECT DISTINCT asof_date FROM {table_sql} WHERE asof_date IS NOT NULL ORDER BY asof_date"
+        ).fetchall()
         for row in rows:
             parsed = parse_date(row["asof_date"])
             if parsed is None:
@@ -819,7 +854,17 @@ def load_history_date_grid(
 
 def write_timing_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["run_started_at", "mode", "step", "status", "elapsed_sec", "returncode", "command", "stdout_tail", "stderr_tail"]
+    fieldnames = [
+        "run_started_at",
+        "mode",
+        "step",
+        "status",
+        "elapsed_sec",
+        "returncode",
+        "command",
+        "stdout_tail",
+        "stderr_tail",
+    ]
     payload = [{field: row.get(field, "") for field in fieldnames} for row in rows]
 
     def write_path(target: Path) -> None:
@@ -1046,7 +1091,11 @@ def snapshot_direct_output_files(
     # excluded as stale and their dated snapshot copies removed.
     start = time.monotonic()
     source_dir = resolve_path(
-        cfg_get(config, "biotech_refresh.snapshot_outputs.source_dir", cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports")),
+        cfg_get(
+            config,
+            "biotech_refresh.snapshot_outputs.source_dir",
+            cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"),
+        ),
         base_dir=base_dir,
     )
     snapshot_root = resolve_path(
@@ -1136,7 +1185,9 @@ def snapshot_direct_output_files(
                 "name": target.name,
                 "size_bytes": stat.st_size,
                 "sha256": digest,
-                "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
+                "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+                .replace(microsecond=0)
+                .isoformat(),
                 "snapshot_action": action,
             }
         )
@@ -1171,7 +1222,9 @@ def snapshot_direct_output_files(
             "name": manifest_path.name,
             "size_bytes": stat.st_size,
             "sha256": file_sha256(manifest_path),
-            "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
+            "last_write_time_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
         }
     )
     max_history = int(cfg_get(config, "biotech_refresh.max_snapshot_history", 0) or 0)
@@ -1250,15 +1303,12 @@ def historical_universe_requires_norgate(
     )
     universe_path = output_root / asof.replace("-", "") / "ctgov_final_scoring_universe.csv"
     if not universe_path.exists():
-        raise FileNotFoundError(
-            f"Historical scoring universe must exist before Norgate routing: {universe_path}"
-        )
+        raise FileNotFoundError(f"Historical scoring universe must exist before Norgate routing: {universe_path}")
     with universe_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames or "calibration_only" not in reader.fieldnames:
             raise ValueError(
-                "Historical scoring universe is missing required calibration_only column: "
-                f"{universe_path}"
+                f"Historical scoring universe is missing required calibration_only column: {universe_path}"
             )
         return any(as_bool(row.get("calibration_only"), False) for row in reader)
 
@@ -1435,7 +1485,9 @@ def validate_form4_refresh_config_paths(
             resolved = (relative_base / resolved).resolve()
         validate_form4_staging_boundary(config, base_dir=base_dir, db_path=resolved)
         if not same_path(resolved, expected_db_path):
-            raise RuntimeError(f"Form 4 refresh config {label} must write to staging DB {expected_db_path}, got {resolved}")
+            raise RuntimeError(
+                f"Form 4 refresh config {label} must write to staging DB {expected_db_path}, got {resolved}"
+            )
 
 
 def build_form4_refresh_command(
@@ -1447,7 +1499,9 @@ def build_form4_refresh_command(
     refresh_cfg = cfg_get(config, "biotech_refresh.form4_refresh", {}) or {}
     if not isinstance(refresh_cfg, dict):
         raise ValueError("biotech_refresh.form4_refresh must be a mapping when enabled")
-    python_executable = str(expand_env_vars(refresh_cfg.get("python_executable") or sys.executable)).strip() or sys.executable
+    python_executable = (
+        str(expand_env_vars(refresh_cfg.get("python_executable") or sys.executable)).strip() or sys.executable
+    )
     script_raw = refresh_cfg.get("script_path")
     if not script_raw:
         raise ValueError("biotech_refresh.form4_refresh.script_path is required when Form 4 refresh is enabled")
@@ -1498,7 +1552,9 @@ def run_form4_refresh(
     start = time.monotonic()
     command, script_path, refresh_config_path = build_form4_refresh_command(config, base_dir=base_dir, asof=asof)
     refresh_cfg = cfg_get(config, "biotech_refresh.form4_refresh", {}) or {}
-    timeout_raw = refresh_cfg.get("timeout_sec", refresh_cfg.get("max_runtime_sec", cfg_get(config, "biotech_refresh.step_timeout_sec", 14400.0)))
+    timeout_raw = refresh_cfg.get(
+        "timeout_sec", refresh_cfg.get("max_runtime_sec", cfg_get(config, "biotech_refresh.step_timeout_sec", 14400.0))
+    )
     try:
         timeout_sec = float(timeout_raw)
     except (TypeError, ValueError) as exc:
@@ -1643,7 +1699,9 @@ def validate_form4_preflight(
             cfg_get(config, "biotech_refresh.max_upstream_staleness_days", 2),
         )
     )
-    staleness_day_basis = str(cfg_get(config, "biotech_refresh.form4_preflight.staleness_day_basis", "calendar")).strip().lower()
+    staleness_day_basis = (
+        str(cfg_get(config, "biotech_refresh.form4_preflight.staleness_day_basis", "calendar")).strip().lower()
+    )
     if staleness_day_basis not in {"calendar", "business"}:
         raise ValueError(
             "biotech_refresh.form4_preflight.staleness_day_basis must be 'calendar' or 'business', "
@@ -1666,12 +1724,12 @@ def validate_form4_preflight(
         cfg_get(config, "biotech_refresh.form4_preflight.raw_filing_required", required),
         required,
     )
-    max_raw_filing_lag_days = int(
-        cfg_get(config, "biotech_refresh.form4_preflight.max_raw_filing_lag_days", 5)
+    max_raw_filing_lag_days = int(cfg_get(config, "biotech_refresh.form4_preflight.max_raw_filing_lag_days", 5))
+    raw_filing_lag_day_basis = (
+        str(cfg_get(config, "biotech_refresh.form4_preflight.raw_filing_lag_day_basis", staleness_day_basis))
+        .strip()
+        .lower()
     )
-    raw_filing_lag_day_basis = str(
-        cfg_get(config, "biotech_refresh.form4_preflight.raw_filing_lag_day_basis", staleness_day_basis)
-    ).strip().lower()
     if raw_filing_lag_day_basis not in {"calendar", "business"}:
         raise ValueError(
             "biotech_refresh.form4_preflight.raw_filing_lag_day_basis must be 'calendar' or 'business', "
@@ -1714,7 +1772,9 @@ def validate_form4_preflight(
                     )
                     raw_filing_tables_exist = form4_raw_filing_tables_present(conn, raw_filing_sources)
         except sqlite3.Error as exc:
-            failures.append(f"Form 4 database cannot be opened read-only: {form4_db_path} ({type(exc).__name__}: {exc})")
+            failures.append(
+                f"Form 4 database cannot be opened read-only: {form4_db_path} ({type(exc).__name__}: {exc})"
+            )
 
     if not failures:
         snapshot_date = parse_db_date(snapshot_raw)
@@ -1781,7 +1841,9 @@ def validate_form4_preflight(
 
     elapsed = round(time.monotonic() - start, 3)
     if warnings:
-        LOGGER.warning("Finished form4_preflight status=warning elapsed=%.3fs warnings=%s", elapsed, " | ".join(warnings))
+        LOGGER.warning(
+            "Finished form4_preflight status=warning elapsed=%.3fs warnings=%s", elapsed, " | ".join(warnings)
+        )
         status = "warning"
     else:
         LOGGER.info(
@@ -1874,7 +1936,9 @@ def validate_ibkr_preflight(
             + " | ".join(failures)
         )
     if failures:
-        LOGGER.warning("Finished ibkr_preflight status=warning elapsed=%.3fs warnings=%s", elapsed, " | ".join(failures))
+        LOGGER.warning(
+            "Finished ibkr_preflight status=warning elapsed=%.3fs warnings=%s", elapsed, " | ".join(failures)
+        )
         status = "warning"
         returncode = 0
     else:
@@ -1966,10 +2030,7 @@ def validate_table_required_columns(
     required_columns: list[str],
 ) -> None:
     table_sql = quote_identifier(table)
-    columns = {
-        str(row["name"])
-        for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
-    }
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()}
     failures: list[str] = []
     missing_columns = [column for column in required_columns if column not in columns]
     if missing_columns:
@@ -2180,13 +2241,23 @@ def validate_final_outputs(
     start = time.monotonic()
     LOGGER.info("Starting final_output_validation")
     universe_csv = resolve_path(
-        cfg_get(config, "biotech_features.final_scoring_universe_csv", "../output/biotech_index_reports/ctgov_final_scoring_universe.csv"),
+        cfg_get(
+            config,
+            "biotech_features.final_scoring_universe_csv",
+            "../output/biotech_index_reports/ctgov_final_scoring_universe.csv",
+        ),
         base_dir=base_dir,
     )
     expected_tickers = read_final_scoring_tickers(universe_csv)
-    biotech_output_dir = resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
-    biotech_reports_output_dir = resolve_path(cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
-    multibagger_output_dir = resolve_path(cfg_get(config, "multibagger.output_dir", "../output/biotech_index_reports"), base_dir=base_dir)
+    biotech_output_dir = resolve_path(
+        cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir
+    )
+    biotech_reports_output_dir = resolve_path(
+        cfg_get(config, "biotech_reports.output_dir", "../output/biotech_index_reports"), base_dir=base_dir
+    )
+    multibagger_output_dir = resolve_path(
+        cfg_get(config, "multibagger.output_dir", "../output/biotech_index_reports"), base_dir=base_dir
+    )
     biotech_scores_csv = output_file_with_dated_fallback(
         biotech_output_dir,
         asof,
@@ -2197,8 +2268,12 @@ def validate_final_outputs(
         asof,
         str(cfg_get(config, "biotech_reports.top_candidates_csv", "biotech_top_candidates.csv")),
     )
-    multibagger_scores_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.scores_csv", "biotech_multibagger_scores.csv"))
-    multibagger_candidates_csv = multibagger_output_dir / str(cfg_get(config, "multibagger.candidates_csv", "biotech_multibagger_candidates.csv"))
+    multibagger_scores_csv = multibagger_output_dir / str(
+        cfg_get(config, "multibagger.scores_csv", "biotech_multibagger_scores.csv")
+    )
+    multibagger_candidates_csv = multibagger_output_dir / str(
+        cfg_get(config, "multibagger.candidates_csv", "biotech_multibagger_candidates.csv")
+    )
     scoring_sources = [source for source in scoring_market_sources(config) if source]
     # Only require coverage from sources this run could actually have refreshed:
     # with --skip-yahoo the primary source is legitimately absent for the asof and
@@ -2284,7 +2359,11 @@ def validate_final_outputs(
         allow_empty_rows=True,
     )
     elapsed = round(time.monotonic() - start, 3)
-    LOGGER.info("Finished final_output_validation status=success elapsed=%.3fs expected_tickers=%d", elapsed, len(expected_tickers))
+    LOGGER.info(
+        "Finished final_output_validation status=success elapsed=%.3fs expected_tickers=%d",
+        elapsed,
+        len(expected_tickers),
+    )
     return {
         "run_started_at": run_started_at,
         "mode": mode,
@@ -2501,21 +2580,17 @@ def run_selftest() -> int:
         )
         ok(
             "already_complete_row_shape",
-            row["status"] == ALREADY_COMPLETE_STATUS
-            and row["returncode"] == 0
-            and str(marker_path) in row["command"],
+            row["status"] == ALREADY_COMPLETE_STATUS and row["returncode"] == 0 and str(marker_path) in row["command"],
         )
 
         # snapshot freshness epoch widens back to the sealed attempt's start
         ok(
             "epoch_min_marker_earlier",
-            earliest_epoch("2026-08-06T01:00:00+00:00", "2026-08-05T18:00:00+00:00")
-            == "2026-08-05T18:00:00+00:00",
+            earliest_epoch("2026-08-06T01:00:00+00:00", "2026-08-05T18:00:00+00:00") == "2026-08-05T18:00:00+00:00",
         )
         ok(
             "epoch_min_marker_later",
-            earliest_epoch("2026-08-05T18:00:00+00:00", "2026-08-06T01:00:00+00:00")
-            == "2026-08-05T18:00:00+00:00",
+            earliest_epoch("2026-08-05T18:00:00+00:00", "2026-08-06T01:00:00+00:00") == "2026-08-05T18:00:00+00:00",
         )
         ok(
             "epoch_min_garbage_keeps_current",
@@ -2541,7 +2616,11 @@ def main() -> None:
     config = load_yaml(config_path)
     validate_config(config)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     if args.asof:
         parsed_asof = parse_date(args.asof)
         if parsed_asof is None:
@@ -2718,11 +2797,18 @@ def main() -> None:
         elif form4_preflight_needed and args.skip_form4_refresh:
             LOGGER.warning("Form 4 refresh skipped via --skip-form4-refresh.")
         elif form4_preflight_needed and args.history_restatement:
-            LOGGER.info("Form 4 refresh skipped for historical restatement; source DB freshness is validated separately.")
+            LOGGER.info(
+                "Form 4 refresh skipped for historical restatement; source DB freshness is validated separately."
+            )
         elif form4_preflight_needed and not form4_refresh_enabled:
             LOGGER.warning("Form 4 refresh skipped because biotech_refresh.form4_refresh.enabled=false.")
 
-        if form4_preflight_needed and form4_preflight_enabled and not args.skip_form4_preflight and not args.history_restatement:
+        if (
+            form4_preflight_needed
+            and form4_preflight_enabled
+            and not args.skip_form4_preflight
+            and not args.history_restatement
+        ):
             preflight_start = time.monotonic()
             timing_rows.append(
                 {
@@ -2808,9 +2894,7 @@ def main() -> None:
                     )
                     write_timing_csv(timing_csv, timing_rows)
                     continue
-                marker_path = (
-                    step_marker_path(state_dir, run_asof, step.name) if resume_tracking else None
-                )
+                marker_path = step_marker_path(state_dir, run_asof, step.name) if resume_tracking else None
                 if resume_enabled and marker_path is not None:
                     marker = load_step_marker(marker_path)
                     if step_resume_skip(marker, step, asof=run_asof, mode=effective_mode):

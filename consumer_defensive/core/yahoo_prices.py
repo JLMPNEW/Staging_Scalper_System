@@ -495,7 +495,18 @@ def load_yahoo_prices(
         ),
         key=lambda row: str(row["ticker"]),
     )
-    manifest_payload = json.dumps(manifest_entries, sort_keys=True, separators=(",", ":"))
+    manifest_identity = [
+        {
+            key: row[key]
+            for key in ("ticker", "symbol", "bytes", "sha256", "status_code")
+        }
+        for row in manifest_entries
+    ]
+    manifest_payload = json.dumps(
+        manifest_identity,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return {
         "source_id": YAHOO_SOURCE_ID,
         "tickers_requested": len(universe),

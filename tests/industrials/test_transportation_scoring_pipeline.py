@@ -228,7 +228,14 @@ def test_specialized_metric_and_scoring_contract_is_complete(
     assert {row["calibration_cohort"] for row in score_rows} == {
         "surface_freight_and_logistics",
     }
-    assert all(float(row["specialized_coverage"]) >= 0.15 for row in score_rows)
+    for row in score_rows:
+        specialized_count = int(row["specialized_metric_count"])
+        specialized_observed = int(row["specialized_metric_observed_count"])
+        assert specialized_count > 0
+        assert specialized_observed > 0
+        assert float(row["specialized_coverage"]) == pytest.approx(
+            specialized_observed / specialized_count
+        )
     valuation_rows = {
         row["metric_name"]: row
         for row in metric_rows

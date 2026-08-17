@@ -97,6 +97,7 @@ def test_explicit_interim_table_uses_current_period_column_not_note(
         <html><body>
           <p>Unaudited condensed consolidated interim financial statements</p>
           <p>(Unaudited in thousands of US dollars)</p>
+          <p>Results for the three months ended December 31, 2025</p>
           <table>
             <tr><th></th><th></th><th>Three month periods ended</th><th></th>
                 <th>Six month periods ended</th></tr>
@@ -127,6 +128,35 @@ def test_explicit_interim_table_uses_current_period_column_not_note(
     assert values["ProfitLoss"].value == pytest.approx(-1_996_000.0)
     assert values["Revenue"].start_date == "2025-10-01"
     assert values["Revenue"].end_date == "2025-12-31"
+
+
+def test_explicit_statement_table_does_not_use_6k_event_date_as_period(
+    tmp_path: Path,
+) -> None:
+    filing = tmp_path / "event_date_only.htm"
+    filing.write_text(
+        """
+        <html><body>
+          <p>Fourth quarter financial results</p>
+          <table>
+            <tr><th></th><th>Three Months Ended</th></tr>
+            <tr><th></th><th>Current Period</th></tr>
+            <tr><td>Revenue</td><td>744.9</td></tr>
+            <tr><td>Net income</td><td>304.5</td></tr>
+          </table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    recovered = parse_explicit_statement_tables(
+        [filing],
+        report_date="2026-02-12",
+        taxonomy="us-gaap",
+        fallback_currency="USD",
+    )
+
+    assert recovered == []
 
 
 def test_explicit_statement_table_recognizes_us_dollar_000_scale(

@@ -30,11 +30,11 @@ from industrials.transportation.classification import (
 )
 from industrials.transportation.financial_contract import MetricDefinition
 from industrials.transportation.surface_freight_score_engine import (
-    build_surface_component_scores,
+    build_cohort_component_scores,
+    cohort_score_eligible,
     metric_comparison_group,
     metric_score_field,
-    score_surface_metric_percentiles,
-    surface_freight_score_eligible,
+    score_cohort_metric_percentiles,
 )
 
 
@@ -81,6 +81,16 @@ def _days_between(asof: str, earlier: str) -> int | None:
         ).days
     except ValueError:
         return None
+
+
+def _member_scoring_context(
+    member: dict[str, Any], *, asof: str, membership_mode: str
+) -> dict[str, Any]:
+    """Attach the observation date required by PIT-only cohort policies."""
+    enriched = dict(member)
+    enriched["asof_date"] = asof
+    enriched["_score_membership_mode"] = membership_mode
+    return enriched
 
 
 def load_members(
@@ -401,6 +411,7 @@ def build_scoring_rows(
     specialized_overlay_weights: dict[str, float] | None = None,
     classification_overlays_path: Path | None = None,
     surface_score_policy: dict[str, Any] | None = None,
+    cohort_score_policies: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     members = load_members(
         conn,
@@ -454,7 +465,7 @@ def build_scoring_rows(
     ]
     if not generic_definitions:
         raise ValueError("generic scoring definition set is empty")
-    policies = load_eligibility_policy(
+    eligibility_policies = load_eligibility_policy(
         policy_path,
         asof=policy_asof or asof,
     )
@@ -466,24 +477,50 @@ def build_scoring_rows(
     # Use the same direction-adjusted percentile engine for the frozen generic
     # baseline and any explicitly activated bounded overlay. Optional
     # specialized metrics with zero weights never enter component averages.
-    retained_surface_metrics = {
+    active_cohort_policies = list(cohort_score_policies or [])
+    if surface_score_policy is not None:
+        if active_cohort_policies:
+            raise ValueError(
+                "surface_score_policy and cohort_score_policies are mutually exclusive"
+            )
+        active_cohort_policies = [surface_score_policy]
+    policy_versions = [
+        str(policy.get("policy_version") or "") for policy in active_cohort_policies
+    ]
+    if len(policy_versions) != len(set(policy_versions)) or any(
+        not value for value in policy_versions
+    ):
+        raise ValueError("cohort score policies require unique nonblank versions")
+    retained_specialized_metrics = {
         str(item)
+        for policy in active_cohort_policies
         for item in (
-            (surface_score_policy or {})
-            .get("score_construction", {})
-            .get("retained_specialized_metrics", [])
+            policy.get("score_construction", {}).get(
+                "retained_specialized_metrics", []
+            )
         )
     }
-    retained_surface_definitions = [
+    unknown_retained = sorted(retained_specialized_metrics - set(definitions_by_id))
+    if unknown_retained:
+        raise ValueError(f"unknown retained specialized metrics={unknown_retained}")
+    nonspecialized_retained = sorted(
+        metric_id
+        for metric_id in retained_specialized_metrics
+        if not definitions_by_id[metric_id].specialized
+    )
+    if nonspecialized_retained:
+        raise ValueError(
+            f"retained cohort metrics must be specialized={nonspecialized_retained}"
+        )
+    retained_specialized_definitions = [
         definitions_by_id[metric_id]
-        for metric_id in sorted(retained_surface_metrics)
-        if metric_id in definitions_by_id
+        for metric_id in sorted(retained_specialized_metrics)
     ]
     percentile_definitions = generic_definitions + [
         definitions_by_id[metric_id]
         for metric_id, weight in overlay_weights.items()
         if weight > 0.0
-    ] + retained_surface_definitions
+    ] + retained_specialized_definitions
     percentiles = metric_percentiles(
         members,
         list(dict.fromkeys(percentile_definitions)),
@@ -505,7 +542,9 @@ def build_scoring_rows(
             overlays=classification_overlays,
         )
         classification_by_ticker[ticker] = classification
-        enriched = dict(member)
+        enriched = _member_scoring_context(
+            member, asof=asof, membership_mode=membership_mode
+        )
         enriched.update(
             {
                 "calibration_cohort": member["calibration_cohort_id"],
@@ -516,22 +555,26 @@ def build_scoring_rows(
             }
         )
         scoring_members.append(enriched)
-    surface_members = (
-        [
+    cohort_members: list[dict[str, Any]] = []
+    score_policy_by_ticker: dict[str, dict[str, Any]] = {}
+    cohort_scored_by_ticker: dict[str, dict[str, object]] = {}
+    for score_policy in active_cohort_policies:
+        policy_members = [
             member
             for member in scoring_members
-            if surface_freight_score_eligible(member, surface_score_policy)
+            if cohort_score_eligible(member, score_policy)
         ]
-        if surface_score_policy is not None
-        else []
-    )
-    surface_scored_by_ticker: dict[str, dict[str, object]] = {}
-    if surface_score_policy is not None:
-        surface_payload_rows: list[dict[str, object]] = []
-        for member in surface_members:
+        payload_rows: list[dict[str, object]] = []
+        for member in policy_members:
             ticker = str(member["ticker"])
+            if ticker in score_policy_by_ticker:
+                raise ValueError(
+                    f"{ticker}: eligible for multiple cohort score policies"
+                )
+            score_policy_by_ticker[ticker] = score_policy
+            cohort_members.append(member)
             rows_for_ticker = metric_rows.get(ticker, {})
-            surface_payload_rows.append(
+            payload_rows.append(
                 {
                     **member,
                     "asof_date": asof,
@@ -545,15 +588,16 @@ def build_scoring_rows(
                     },
                 }
             )
-        surface_scored_by_ticker = {
+        policy_scored = {
             str(row["ticker"]): row
-            for row in score_surface_metric_percentiles(
-                surface_payload_rows,
+            for row in score_cohort_metric_percentiles(
+                payload_rows,
                 definitions=list(dict.fromkeys(percentile_definitions)),
-                policy=surface_score_policy,
+                policy=score_policy,
             )
         }
-        for ticker, scored in surface_scored_by_ticker.items():
+        cohort_scored_by_ticker.update(policy_scored)
+        for ticker, scored in policy_scored.items():
             for definition in percentile_definitions:
                 score = _number(scored.get(metric_score_field(definition.metric_id)))
                 if score is not None:
@@ -567,24 +611,27 @@ def build_scoring_rows(
         members,
         positioning_rows,
     )
-    if surface_score_policy is not None:
-        surface_groups = {
-            str(member["ticker"]): metric_comparison_group(
-                member, surface_score_policy
-            )
-            for member in surface_members
+    for score_policy in active_cohort_policies:
+        policy_members = [
+            member
+            for member in cohort_members
+            if score_policy_by_ticker[str(member["ticker"])] is score_policy
+        ]
+        policy_groups = {
+            str(member["ticker"]): metric_comparison_group(member, score_policy)
+            for member in policy_members
         }
-        surface_positioning_scores, surface_positioning_coverage = (
+        policy_positioning_scores, policy_positioning_coverage = (
             positioning_component_scores(
-                surface_members,
+                policy_members,
                 positioning_rows,
-                comparison_group_by_ticker=surface_groups,
+                comparison_group_by_ticker=policy_groups,
             )
         )
-        positioning_scores.update(surface_positioning_scores)
-        positioning_coverage.update(surface_positioning_coverage)
+        positioning_scores.update(policy_positioning_scores)
+        positioning_coverage.update(policy_positioning_coverage)
     output: list[dict[str, str]] = []
-    output_members = surface_members if surface_score_policy is not None else scoring_members
+    output_members = cohort_members if active_cohort_policies else scoring_members
     for member in output_members:
         ticker = str(member["ticker"])
         cohort = str(member["calibration_cohort_id"])
@@ -604,12 +651,16 @@ def build_scoring_rows(
             else financial.get("financial_confidence")
         )
         stage = str(member.get("development_stage") or "operating")
-        policy = resolve_policy(policies, reporting_profile, stage)
-        if policy is None:
+        eligibility_policy = resolve_policy(
+            eligibility_policies, reporting_profile, stage
+        )
+        if eligibility_policy is None:
             raise ValueError(
                 f"Missing scoring policy ticker={ticker} profile={reporting_profile} stage={stage}"
             )
-        minimum_financial_confidence = _number(policy.get("minimum_financial_confidence"))
+        minimum_financial_confidence = _number(
+            eligibility_policy.get("minimum_financial_confidence")
+        )
         if minimum_financial_confidence is None:
             raise ValueError(f"Policy has invalid financial confidence: {reporting_profile}:{stage}")
         rows_for_ticker = metric_rows.get(ticker, {})
@@ -651,11 +702,12 @@ def build_scoring_rows(
         required_observed = [definition for definition in required if definition.metric_id in values]
         specialized_observed = [definition for definition in specialized if definition.metric_id in values]
         specialized_coverage = len(specialized_observed) / len(specialized) if specialized else 1.0
-        surface_scored = surface_scored_by_ticker.get(ticker)
-        if surface_scored is not None and surface_score_policy is not None:
-            component_values, component_coverage = build_surface_component_scores(
-                surface_scored,
-                policy=surface_score_policy,
+        cohort_scored = cohort_scored_by_ticker.get(ticker)
+        score_policy = score_policy_by_ticker.get(ticker)
+        if cohort_scored is not None and score_policy is not None:
+            component_values, component_coverage = build_cohort_component_scores(
+                cohort_scored,
+                policy=score_policy,
             )
         else:
             component_values = {}
@@ -705,7 +757,7 @@ def build_scoring_rows(
             definition
             for definition in specialized
             if overlay_weights.get(definition.metric_id, 0.0) > 0.0
-            and definition.metric_id not in retained_surface_metrics
+            and definition.metric_id not in retained_specialized_metrics
         ]
         if len(active_overlay_metrics) > 1:
             raise ValueError(
@@ -722,7 +774,7 @@ def build_scoring_rows(
                     + weight * overlay_percentile
                 )
         positioning_active = component_weights["positioning"] > 0.0
-        if surface_scored is not None:
+        if cohort_scored is not None:
             score_input_total_count = sum(
                 item["applicable"]
                 for component, item in component_coverage.items()
@@ -773,7 +825,9 @@ def build_scoring_rows(
             )
         if score_confidence < minimum_score_confidence:
             reasons.append(f"score_confidence_below_{minimum_score_confidence:.2f}")
-        rank_ready_policy = str(policy.get("rank_ready_policy") or "")
+        rank_ready_policy = str(
+            eligibility_policy.get("rank_ready_policy") or ""
+        )
         financial_quality = str(financial.get("data_quality_status") or "")
         if not rank_ready_policy.startswith("eligible"):
             reasons.append("financial_policy_not_rank_ready")
@@ -836,7 +890,7 @@ def build_scoring_rows(
             "specialized_coverage": _fmt(specialized_coverage),
             "rank_ready_policy": rank_ready_policy,
             "minimum_financial_confidence": _fmt(minimum_financial_confidence),
-            "policy_valid_from": policy.get("valid_from", ""),
+            "policy_valid_from": eligibility_policy.get("valid_from", ""),
             "policy_gate_status": "pass" if policy_pass else "blocked",
             "score_input_available_count": score_input_available_count,
             "score_input_total_count": score_input_total_count,

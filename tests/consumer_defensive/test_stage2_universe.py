@@ -7,7 +7,7 @@ import pytest
 
 from consumer_defensive.core.config import cfg_get, load_config, resolve_path
 from consumer_defensive.core.db import connect, init_db
-from consumer_defensive.core.norgate_membership import Candidate, load_candidates, load_historical_ciks, load_norgate_membership, resolve_candidate
+from consumer_defensive.core.norgate_membership import Candidate, load_candidates, load_current_provider_symbols, load_historical_ciks, load_norgate_membership, resolve_candidate
 from consumer_defensive.core.source_registry import load_source_registry, upsert_source_registry
 from consumer_defensive.core.universe import (
     load_current_universe,
@@ -62,6 +62,21 @@ def test_historical_sec_identifier_mapping_is_complete_and_reviewed() -> None:
     assert mapping["WBA"] == "0001618921"
 
 
+def test_current_provider_symbol_override_is_reviewed_and_asset_bound(
+    tmp_path: Path,
+) -> None:
+    policy = load_policy(POLICY_PATH)
+    assert load_current_provider_symbols(policy) == {"FDP": ("DMC", "132283")}
+
+    with connect(tmp_path / "provider_override.sqlite") as conn:
+        initialize_stage2(conn)
+        load_current_universe(conn, policy)
+        candidates, _ = load_candidates(conn, policy)
+        fdp = next(candidate for candidate in candidates if candidate.ticker == "FDP")
+        assert fdp.explicit_price_symbol == "DMC"
+        assert fdp.explicit_provider_asset_id == "132283"
+
+
 def test_delisted_candidates_are_exact_terminal_scope_and_use_terminal_eligibility(tmp_path: Path) -> None:
     with connect(tmp_path / "scope.sqlite") as conn:
         _, policy = initialize_stage2(conn)
@@ -84,6 +99,107 @@ def test_explicit_provider_symbol_is_fail_closed() -> None:
     resolved = resolve_candidate(object(), candidate, {"DF"}, {"DF-202106"})
     assert resolved.symbol == ""
     assert resolved.method == "explicit_price_source_symbol_not_found"
+
+
+def test_reviewed_provider_asset_mismatch_is_fail_closed(tmp_path: Path) -> None:
+    pytest.importorskip("pandas")
+    with connect(tmp_path / "asset_mismatch.sqlite") as conn:
+        _, policy = initialize_stage2(conn)
+        load_current_universe(conn, policy)
+        candidates, _ = load_candidates(conn, policy)
+        active_symbols = {
+            candidate.explicit_price_symbol or candidate.ticker
+            for candidate in candidates
+            if candidate.source_set == "current"
+        }
+        provider = FakeNorgate(active_symbols, asset_ids={"DMC": "wrong-asset"})
+        with pytest.raises(RuntimeError, match="reviewed Norgate asset mismatch"):
+            load_norgate_membership(
+                conn,
+                policy,
+                provider=provider,
+                as_of="2026-08-10",
+                output_dir=tmp_path / "report",
+            )
+
+
+def test_reviewed_provider_asset_rebinds_from_superseded_identity(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("pandas")
+    with connect(tmp_path / "asset_reassignment.sqlite") as conn:
+        _, policy = initialize_stage2(conn)
+        load_current_universe(conn, policy)
+        conn.execute(
+            "UPDATE dim_company SET primary_ticker='DMC' WHERE primary_ticker='FDP'"
+        )
+        conn.execute(
+            """UPDATE dim_security
+               SET ticker='DMC', provider_price_symbol='DMC'
+               WHERE ticker='FDP' AND listing_status='active'"""
+        )
+        conn.execute(
+            """UPDATE dim_consumer_defensive_taxonomy
+               SET ticker='DMC' WHERE ticker='FDP' AND model_family='consumer_defensive'"""
+        )
+        legacy = conn.execute(
+            """SELECT c.company_id, s.security_id
+               FROM dim_company c JOIN dim_security s ON s.company_id=c.company_id
+               WHERE c.primary_ticker='DMC' AND s.ticker='DMC'"""
+        ).fetchone()
+        assert legacy is not None
+        conn.execute(
+            """INSERT INTO dim_identifier(
+                   company_id, security_id, identifier_type, identifier_value,
+                   source_id, valid_from, confidence, created_at, updated_at
+               ) VALUES (?, ?, 'norgate_assetid', '132283',
+                   'norgate_us_equities_pit_membership', '2017-11-28', 1.0, ?, ?)""",
+            (int(legacy[0]), int(legacy[1]), "2026-08-10T00:00:00Z", "2026-08-10T00:00:00Z"),
+        )
+
+        result = load_current_universe(conn, policy)
+        assert result["stale_taxonomy_rows_removed"] == 1
+        candidates, _ = load_candidates(conn, policy)
+        active_symbols = {
+            candidate.explicit_price_symbol or candidate.ticker
+            for candidate in candidates
+            if candidate.source_set == "current"
+        }
+        historical_symbols = {
+            candidate.explicit_price_symbol or candidate.ticker
+            for candidate in candidates
+            if candidate.source_set == "delisted"
+        }
+        load_norgate_membership(
+            conn,
+            policy,
+            provider=FakeNorgate(active_symbols, historical_symbols),
+            as_of="2026-08-10",
+            output_dir=tmp_path / "report",
+        )
+
+        owner = conn.execute(
+            """SELECT c.primary_ticker, s.ticker
+               FROM dim_identifier i
+               JOIN dim_company c ON c.company_id=i.company_id
+               JOIN dim_security s ON s.security_id=i.security_id
+               WHERE i.identifier_type='norgate_assetid' AND i.identifier_value='132283'"""
+        ).fetchone()
+        assert tuple(owner) == ("FDP", "FDP")
+        assert conn.execute(
+            "SELECT listing_status FROM dim_security WHERE ticker='DMC'"
+        ).fetchone()[0] == "superseded"
+        assert conn.execute(
+            "SELECT is_active FROM dim_company WHERE primary_ticker='DMC'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            """SELECT COUNT(*) FROM dim_universe_membership
+               WHERE ticker='DMC' AND membership_source_id='norgate_us_equities_pit_membership'"""
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            """SELECT COUNT(*) FROM dim_universe_membership
+               WHERE membership_source_id='norgate_us_equities_pit_membership'"""
+        ).fetchone()[0] == 119
 
 
 def test_stage2_current_load_is_exact_and_aliases_do_not_create_securities(tmp_path: Path) -> None:
@@ -136,9 +252,11 @@ class FakeNorgate:
         self,
         active_symbols: set[str],
         delisted_symbols: set[str] | None = None,
+        asset_ids: dict[str, str] | None = None,
     ) -> None:
         self.active_symbols = active_symbols
         self.delisted_symbols = delisted_symbols or set()
+        self.asset_ids = {"DMC": "132283", **(asset_ids or {})}
 
     def database_symbols(self, database: str) -> list[str]:
         if database == "US Equities":
@@ -151,7 +269,7 @@ class FakeNorgate:
         return "2026-08-10T17:30:14-05:00"
 
     def assetid(self, symbol: str) -> str:
-        return f"fake-{symbol}"
+        return self.asset_ids.get(symbol, f"fake-{symbol}")
 
     def security_name(self, symbol: str) -> str:
         return symbol
@@ -216,11 +334,11 @@ def test_norgate_fingerprint_drift_publishes_neither_database_rows_nor_reports(
     with connect(db_path) as conn:
         _, policy = initialize_stage2(conn)
         load_current_universe(conn, policy)
+        candidates, _ = load_candidates(conn, policy)
         active_symbols = {
-            str(row[0])
-            for row in conn.execute(
-                "SELECT ticker FROM dim_security WHERE listing_status='active'"
-            ).fetchall()
+            candidate.explicit_price_symbol or candidate.ticker
+            for candidate in candidates
+            if candidate.source_set == "current"
         }
         before = {
             "major_exchange": conn.execute(
@@ -286,13 +404,12 @@ def test_stage2_norgate_contract_persists_four_series_and_union_membership(tmp_p
     with connect(db_path) as conn:
         _, policy = initialize_stage2(conn)
         load_current_universe(conn, policy)
-        active_symbols = {
-            str(row[0])
-            for row in conn.execute(
-                "SELECT ticker FROM dim_security WHERE listing_status='active'"
-            ).fetchall()
-        }
         candidates, _ = load_candidates(conn, policy)
+        active_symbols = {
+            candidate.explicit_price_symbol or candidate.ticker
+            for candidate in candidates
+            if candidate.source_set == "current"
+        }
         historical_candidates = {
             candidate.ticker: candidate
             for candidate in candidates
@@ -347,7 +464,7 @@ def test_stage2_norgate_contract_rejects_one_missing_historical_candidate(
         load_current_universe(conn, policy)
         candidates, _ = load_candidates(conn, policy)
         active_symbols = {
-            candidate.ticker
+            candidate.explicit_price_symbol or candidate.ticker
             for candidate in candidates
             if candidate.source_set == "current"
         }

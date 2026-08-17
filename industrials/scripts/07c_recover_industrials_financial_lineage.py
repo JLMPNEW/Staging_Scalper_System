@@ -18,6 +18,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from dedicated_parser.contracts import FilingRef  # noqa: E402
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.core.financial_filing_lineage import (  # noqa: E402
     PERIODIC_FINANCIAL_FORMS,
@@ -25,6 +26,9 @@ from industrials.core.financial_filing_lineage import (  # noqa: E402
 )
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from orchestration_contracts.financial_lineage import policy_for_model_family  # noqa: E402
+from technology.core.financial_filing_recovery import (  # noqa: E402
+    recover_cached_filing,
+)
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -40,10 +44,7 @@ SCOPE_FIELDS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Run bounded exact-accession recovery for unresolved industrial "
-            "financial-filing lineage."
-        )
+        description=("Run bounded exact-accession recovery for unresolved industrial financial-filing lineage.")
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
@@ -165,7 +166,10 @@ def build_recovery_scope(
             same_report = bool(latest_report and candidate_report == latest_report)
             same_filing = bool(latest_filing and candidate_filing == latest_filing)
             bounded_periodic = False
-            if latest_form in {"8-K", "8-K/A"} and str(filing.get("form_type") or "").upper() in PERIODIC_FINANCIAL_FORMS:
+            if (
+                latest_form in {"8-K", "8-K/A"}
+                and str(filing.get("form_type") or "").upper() in PERIODIC_FINANCIAL_FORMS
+            ):
                 try:
                     gap_days = (date.fromisoformat(latest_filing) - date.fromisoformat(candidate_filing)).days
                 except ValueError:
@@ -196,15 +200,100 @@ def build_recovery_scope(
     return scope
 
 
-def classification_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    return dict(
-        sorted(
-            Counter(
-                str(row.get("financial_lineage_classification") or "UNKNOWN")
-                for row in rows
-            ).items()
+def _profile_taxonomy(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    model_family: str,
+    asof: str,
+) -> str:
+    row = conn.execute(
+        """
+        SELECT primary_taxonomy
+        FROM dim_issuer_reporting_profile_history
+        WHERE ticker = ? AND model_family = ? AND profile_asof_date <= ?
+        ORDER BY profile_asof_date DESC
+        LIMIT 1
+        """,
+        (ticker, model_family, asof),
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            """
+            SELECT primary_taxonomy
+            FROM dim_issuer_reporting_profile
+            WHERE ticker = ? AND model_family = ?
+            """,
+            (ticker, model_family),
+        ).fetchone()
+    taxonomy = str(row[0] if row is not None else "").strip()
+    return taxonomy if taxonomy in {"us-gaap", "ifrs-full"} else "us-gaap"
+
+
+def recover_cached_scope(
+    conn: sqlite3.Connection,
+    *,
+    scope_rows: Iterable[Mapping[str, str]],
+    model_family: str,
+    asof: str,
+    cache_dir: Path,
+    facts_source_id: str,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for scope in scope_rows:
+        accession = str(scope.get("accession_number") or "").strip()
+        ticker = str(scope.get("ticker") or "").strip().upper()
+        row = conn.execute(
+            """
+            SELECT ticker, cik, accession_number, form_type, filing_date,
+                   accepted_at, report_date, primary_document
+            FROM fact_sec_filing
+            WHERE ticker = ? AND accession_number = ?
+            LIMIT 1
+            """,
+            (ticker, accession),
+        ).fetchone()
+        if row is None:
+            results.append(
+                {
+                    "ticker": ticker,
+                    "accession_number": accession,
+                    "status": "FILING_MISSING",
+                }
+            )
+            continue
+        filing = FilingRef(
+            ticker=ticker,
+            cik=str(row["cik"] or ""),
+            accession_number=accession,
+            form_type=str(row["form_type"] or ""),
+            filing_date=str(row["filing_date"] or ""),
+            accepted_at=str(row["accepted_at"] or ""),
+            report_date=str(row["report_date"] or row["filing_date"] or ""),
+            primary_document=str(row["primary_document"] or ""),
+            source_id=facts_source_id,
+            company_currency="USD",
         )
-    )
+        results.append(
+            recover_cached_filing(
+                conn,
+                cache_dir=cache_dir,
+                filing=filing,
+                facts_source_id=facts_source_id,
+                primary_taxonomy=_profile_taxonomy(
+                    conn,
+                    ticker=ticker,
+                    model_family=model_family,
+                    asof=asof,
+                ),
+                fallback_currency="USD",
+            )
+        )
+    return results
+
+
+def classification_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    return dict(sorted(Counter(str(row.get("financial_lineage_classification") or "UNKNOWN") for row in rows).items()))
 
 
 def write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
@@ -232,6 +321,11 @@ def main() -> int:
         else resolve_path(cfg_get(config, "paths.database_path"), base_dir=config_path.parent)
     )
     output_root = PROJECT_ROOT / "output" / "industrials" / family / "stage4"
+    cache_dir = resolve_path(
+        cfg_get(config, "sec_fundamentals.cache_dir"),
+        base_dir=config_path.parent,
+    )
+    facts_source_id = str(cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts"))
     scope_path = (
         args.scope_output_csv.expanduser().resolve()
         if args.scope_output_csv is not None
@@ -293,6 +387,49 @@ def main() -> int:
         result = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
         return_code = int(result.returncode)
 
+    cached_recovery_rows: list[dict[str, Any]] = []
+    feature_return_code = 0
+    if scope_rows and return_code == 0:
+        with sqlite3.connect(db_path, timeout=120.0) as conn:
+            conn.row_factory = sqlite3.Row
+            with conn:
+                cached_recovery_rows = recover_cached_scope(
+                    conn,
+                    scope_rows=scope_rows,
+                    model_family=family,
+                    asof=asof,
+                    cache_dir=cache_dir,
+                    facts_source_id=facts_source_id,
+                )
+        recovered_tickers = sorted(
+            {
+                str(row.get("ticker") or "")
+                for row in cached_recovery_rows
+                if str(row.get("status") or "") == "RECOVERED"
+            }
+        )
+        if recovered_tickers:
+            feature_command = [
+                sys.executable,
+                str(PACKAGE_ROOT / "scripts" / "08_build_industrials_financial_features.py"),
+                "--config",
+                str(config_path),
+                "--db",
+                str(db_path),
+                "--model-family",
+                family,
+                "--tickers",
+                ",".join(recovered_tickers),
+                "--asof",
+                asof,
+                "--output-csv",
+                str(output_root / "financial_lineage_recovery_features.csv"),
+                "--availability-output-csv",
+                str(output_root / "financial_lineage_recovery_availability.csv"),
+            ]
+            feature_result = subprocess.run(feature_command, cwd=PROJECT_ROOT, check=False)
+            feature_return_code = int(feature_result.returncode)
+
     with sqlite3.connect(db_path, timeout=120.0) as conn:
         conn.row_factory = sqlite3.Row
         after = build_financial_filing_lineage(
@@ -305,22 +442,21 @@ def main() -> int:
     before_gaps = sum(row["financial_lineage_gate"] != "1" for row in before_rows)
     after_gaps = sum(row["financial_lineage_gate"] != "1" for row in after_rows)
     manifest = {
-        "acceptance": "PASS" if return_code == 0 else "FAIL",
+        "acceptance": ("PASS" if return_code == 0 and feature_return_code == 0 else "FAIL"),
         "asof_date": asof,
         "before_classification_counts": classification_counts(before_rows),
         "before_unresolved_count": before_gaps,
         "after_classification_counts": classification_counts(after_rows),
         "after_unresolved_count": after_gaps,
+        "cached_recovery_results": cached_recovery_rows,
+        "cached_recovered_filing_count": sum(
+            str(row.get("status") or "") == "RECOVERED" for row in cached_recovery_rows
+        ),
         "database_path": str(db_path),
+        "feature_return_code": feature_return_code,
         "model_family": family,
         "policy_version": policy.policy_version,
-        "recovery_status": (
-            "NO_WORK"
-            if not scope_rows
-            else "RECOVERED_ALL"
-            if after_gaps == 0
-            else "REMAINING_GAPS"
-        ),
+        "recovery_status": ("NO_WORK" if not scope_rows else "RECOVERED_ALL" if after_gaps == 0 else "REMAINING_GAPS"),
         "scope_accession_count": len(scope_rows),
         "scope_path": str(scope_path),
         "scope_ticker_count": len({row["ticker"] for row in scope_rows}),
@@ -328,7 +464,7 @@ def main() -> int:
     }
     write_json_atomic(manifest_path, manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True))
-    return return_code
+    return return_code or feature_return_code
 
 
 if __name__ == "__main__":

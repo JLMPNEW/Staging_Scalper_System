@@ -1,0 +1,153 @@
+model_family: transportation
+policy_version: transportation_investable_universe_v5
+effective_from: "2026-08-15"
+
+research_catalog:
+  authoritative_csv: ../../../ticker_mapping/transportation_tickers.csv
+  implementation_csv: ../system_csvs/transportation_tickers.csv
+  expected_count: 120
+  required_investability_status: investable
+  required_listing_status: active
+  required_primary_listing: true
+
+production_eligibility:
+  status: shadow_precalibration
+  expected_count: 35
+  exclusions_csv: ../system_csvs/transportation_investable_exclusions_v5.csv
+  positioning_universe_csv: ../system_csvs/transportation_investable_tickers_v5.csv
+  architecture: cohort_isolated_calibration_and_promotion
+  selection_fraction: 0.20
+  expected_selected_names: 7
+  benchmark_ticker: IYT
+  groups:
+    surface_freight_core:
+      calibration_pool: surface_freight_and_logistics
+      metric_pack: surface
+      economic_driver: north_american_freight_volume_pricing_and_network_efficiency
+      expected_count: 24
+      minimum_specialized_breadth: 3
+      specialized_breadth_scope: metric_comparison_domain_only
+      metric_comparison_policy: transportation_surface_metric_domains_v2
+      tickers:
+        - CNI
+        - CP
+        - CSX
+        - NSC
+        - UNP
+        - ARCB
+        - ODFL
+        - SAIA
+        - XPO
+        - HUBG
+        - JBHT
+        - KNX
+        - SNDR
+        - TFII
+        - CHRW
+        - EXPD
+        - FDX
+        - LSTR
+        - UPS
+        - CVLG
+        - FWRD
+        - HTLD
+        - MRTN
+        - WERN
+    oil_tanker_operators:
+      calibration_pool: marine_shipping_and_maritime
+      metric_pack: marine
+      economic_driver: crude_and_product_tanker_rates_utilization_and_fleet_supply
+      expected_count: 11
+      minimum_specialized_breadth: 8
+      tickers:
+        - DHT
+        - ECO
+        - FRO
+        - NAT
+        - ASC
+        - HAFN
+        - STNG
+        - TRMD
+        - INSW
+        - TNK
+        - TEN
+
+specialized_metric_gates:
+  minimum_median_periods: 4
+  minimum_median_history_years: 3.0
+  diagnostic_minimum_breadth: 5
+  prohibit_missingness_rank_advantage: true
+  require_unit_contract_validation: true
+  require_point_in_time_availability: true
+  require_golden_fixture_validation: true
+
+surface_metric_comparison_policy:
+  policy_version: transportation_surface_metric_domains_v2
+  mapping_csv: transportation_surface_metric_comparison_domains_v2.csv
+  source_map_csv: transportation_surface_metric_source_map_v2.csv
+  minimum_accepted_fraction: 0.75
+  minimum_absolute_breadth: 3
+  minimum_calibratable_domain_size: 3
+  normalization_scope: within_metric_domain
+  comparison_domains:
+    rail_networks:
+      tickers: [CNI, CP, CSX, NSC, UNP]
+    ltl_carriers:
+      tickers: [ARCB, ODFL, SAIA, TFII, XPO]
+    truckload_intermodal:
+      tickers: [HUBG, JBHT, KNX, SNDR, CVLG, HTLD, MRTN, WERN]
+    asset_light_logistics:
+      tickers: [CHRW, EXPD, HUBG, LSTR, FWRD]
+    integrated_parcel:
+      tickers: [FDX, UPS]
+  governance:
+    portfolio_membership_remains_unique: true
+    metric_domain_membership_may_overlap: true
+    candidate_weights_are_pooled_across_surface_group: true
+    independent_small_domain_model_fitting_allowed: false
+    membership_selection_uses_outcomes: false
+
+tanker_delta:
+  newly_added_tickers: [FRO, DHT, TNK, STNG, INSW, TEN, NAT, TRMD]
+  reusable_existing_tickers: [ECO, ASC, HAFN]
+  direct_parser_metrics:
+    - vessel_count
+    - fleet_capacity
+    - tce_day_rate
+    - spot_or_charter_day_rate
+    - fleet_utilization
+    - charter_coverage_next_12m
+    - contracted_revenue_backlog
+    - weighted_average_charter_term
+    - fleet_age
+    - newbuild_capacity_commitments
+    - capex_commitments
+    - vessel_opex_per_day
+    - cash_breakeven_per_day
+    - offhire_or_drydock_ratio
+    - revenue_days
+    - spot_exposure_ratio
+  derived_metrics:
+    - fleet_capacity_growth
+  source_order:
+    - cached_sec_filings
+    - 20-F
+    - 6-K_EX-99
+    - 10-K_10-Q
+    - investor_relations_earnings_presentations
+    - historical_fleet_and_chartering_tables
+    - approved_international_exchange_filings
+
+governance:
+  membership_selection_uses_outcomes: false
+  selection_basis: liquidity_reporting_quality_operating_status_economic_coherence_and_model_comparability
+  passenger_airlines_disposition: airline_satellite_research
+  passenger_airlines_production_eligible: false
+  production_cohort_isolation_required: true
+  cohort_promotion_independent: true
+  revealed_pre_freeze_windows_status: spent_research_only
+  promotion_from_revealed_windows_allowed: false
+  parser_batch_policy: one_document_many_metrics_single_bounded_delta
+  historical_reconstruction_authorized: false
+  calibration_authorized: false
+  production_promotion_authorized: false

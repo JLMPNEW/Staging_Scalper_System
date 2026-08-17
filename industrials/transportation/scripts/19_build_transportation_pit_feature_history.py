@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sqlite3
@@ -27,6 +28,7 @@ from industrials.transportation.scripts._shared import DEFAULT_CONFIG, MODEL_FAM
 
 FIELDS = [
     "asof_date",
+    "ticker_scope_sha256",
     "expected_ticker_count",
     "market_feature_count",
     "financial_feature_count",
@@ -64,6 +66,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", default="")
     parser.add_argument("--end-date", required=True)
     parser.add_argument(
+        "--tickers",
+        default="",
+        help="Optional comma-separated governed rebuild scope; omitted preserves the full PIT universe.",
+    )
+    parser.add_argument(
+        "--stage-tickers",
+        default="",
+        help=(
+            "Optional comma-separated subset to execute through the selected stages "
+            "while --tickers remains the full governed validation scope."
+        ),
+    )
+    parser.add_argument(
         "--dates",
         default="",
         help="Optional comma-separated explicit as-of dates; bypasses cadence selection.",
@@ -78,6 +93,14 @@ def parse_args() -> argparse.Namespace:
         "--rebuild-existing",
         action="store_true",
         help="Rebuild dates whose exact database coverage already passes.",
+    )
+    parser.add_argument(
+        "--stages",
+        default=",".join(STAGES),
+        help=(
+            "Comma-separated stage subset. Use financial_features,"
+            "specialized_metrics for a bounded financial-only repair."
+        ),
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
@@ -117,6 +140,21 @@ def explicit_dates(raw: str) -> list[str]:
             if item.strip()
         }
     )
+
+
+def explicit_tickers(raw: str) -> list[str]:
+    return sorted(
+        {
+            item.strip().upper()
+            for item in str(raw or "").split(",")
+            if item.strip()
+        }
+    )
+
+
+def ticker_scope_sha256(tickers: list[str]) -> str:
+    payload = "\n".join(tickers) if tickers else "ALL_PIT_MEMBERS"
+    return hashlib.sha256((payload + "\n").encode("utf-8")).hexdigest()
 
 
 def validated_date(value: str, *, label: str) -> str:
@@ -167,64 +205,85 @@ def coverage_counts(
     *,
     asof: str,
     metric_count: int,
+    tickers: list[str] | None = None,
 ) -> dict[str, int]:
+    ticker_list = list(tickers or [])
+    ticker_clause = (
+        f" AND ticker IN ({','.join('?' for _ in ticker_list)})"
+        if ticker_list
+        else ""
+    )
     expected = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT ticker)
             FROM dim_universe_membership
             WHERE model_family=?
               AND start_date<=?
               AND COALESCE(end_date, '9999-12-31')>=?
+              {ticker_clause}
             """,
-            (MODEL_FAMILY, asof, asof),
+            (MODEL_FAMILY, asof, asof, *ticker_list),
         ).fetchone()[0]
     )
     market = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT ticker)
             FROM feature_market_technical
             WHERE model_family=? AND asof_date=?
+              {ticker_clause}
             """,
-            (MODEL_FAMILY, asof),
+            (MODEL_FAMILY, asof, *ticker_list),
         ).fetchone()[0]
     )
     financial = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT ticker)
             FROM feature_financial_statement
             WHERE model_family=? AND asof_date=?
+              {ticker_clause}
             """,
-            (MODEL_FAMILY, asof),
+            (MODEL_FAMILY, asof, *ticker_list),
         ).fetchone()[0]
     )
     availability = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(*)
             FROM feature_financial_metric_availability
             WHERE model_family=? AND asof_date=?
+              {ticker_clause}
             """,
-            (MODEL_FAMILY, asof),
+            (MODEL_FAMILY, asof, *ticker_list),
         ).fetchone()[0]
     )
     profiles = int(
         connection.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT ticker)
             FROM dim_issuer_reporting_profile_history
             WHERE model_family=? AND profile_asof_date<=?
+              {ticker_clause}
               AND ticker IN (
                 SELECT ticker
                 FROM dim_universe_membership
                 WHERE model_family=?
                   AND start_date<=?
                   AND COALESCE(end_date, '9999-12-31')>=?
+                  {ticker_clause}
               )
             """,
-            (MODEL_FAMILY, asof, MODEL_FAMILY, asof, asof),
+            (
+                MODEL_FAMILY,
+                asof,
+                *ticker_list,
+                MODEL_FAMILY,
+                asof,
+                asof,
+                *ticker_list,
+            ),
         ).fetchone()[0]
     )
     return {
@@ -253,11 +312,17 @@ def snapshot_is_complete(
     counts: dict[str, int],
     report_row: dict[str, Any] | None,
     output_root: Path,
+    scope_sha256: str = "",
 ) -> bool:
     output_dir = output_root / asof
     return (
         coverage_passes(counts)
         and str((report_row or {}).get("status") or "") == "PASS"
+        and (
+            not scope_sha256
+            or str((report_row or {}).get("ticker_scope_sha256") or "")
+            == scope_sha256
+        )
         and all(
             (output_dir / filename).is_file()
             and (output_dir / filename).stat().st_size > 0
@@ -295,9 +360,11 @@ def stage_commands(
     config_path: Path,
     db_path: Path,
     output_dir: Path,
+    tickers: list[str] | None = None,
 ) -> list[tuple[str, list[str]]]:
     python = sys.executable
     common = ["--config", str(config_path), "--db", str(db_path)]
+    ticker_args = ["--tickers", ",".join(tickers)] if tickers else []
     return [
         (
             "reporting_profiles",
@@ -310,6 +377,7 @@ def stage_commands(
                     / "07_sync_industrials_sec_fundamentals.py"
                 ),
                 *common,
+                *ticker_args,
                 "--model-family",
                 MODEL_FAMILY,
                 "--include-historical",
@@ -331,6 +399,7 @@ def stage_commands(
                     / "05_build_industrials_market_features.py"
                 ),
                 *common,
+                *ticker_args,
                 "--model-family",
                 MODEL_FAMILY,
                 "--benchmark-tickers",
@@ -355,6 +424,7 @@ def stage_commands(
                     / "08_build_transportation_financial_features.py"
                 ),
                 *common,
+                *ticker_args,
                 "--model-family",
                 MODEL_FAMILY,
                 "--asof",
@@ -376,6 +446,7 @@ def stage_commands(
                     / "08a_build_transportation_specialized_metrics.py"
                 ),
                 *common,
+                *ticker_args,
                 "--include-historical",
                 "--asof",
                 asof,
@@ -390,6 +461,16 @@ def main() -> int:
     args = parse_args()
     if args.max_dates < 0:
         raise ValueError("--max-dates cannot be negative")
+    selected_stages = tuple(
+        item.strip()
+        for item in str(args.stages or "").split(",")
+        if item.strip()
+    )
+    unknown_stages = sorted(set(selected_stages) - set(STAGES))
+    if not selected_stages or unknown_stages:
+        raise ValueError(
+            f"--stages must select from {list(STAGES)}; unknown={unknown_stages}"
+        )
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     family = family_config(config, MODEL_FAMILY)
@@ -407,6 +488,19 @@ def main() -> int:
         label="start date",
     )
     end_date = validated_date(str(args.end_date), label="end date")
+    tickers = explicit_tickers(args.tickers)
+    stage_tickers = explicit_tickers(args.stage_tickers)
+    if stage_tickers and not tickers:
+        raise ValueError("--stage-tickers requires an explicit full --tickers scope")
+    unknown_stage_tickers = sorted(set(stage_tickers) - set(tickers))
+    if unknown_stage_tickers:
+        raise ValueError(
+            "--stage-tickers must be a subset of --tickers; "
+            f"unknown={unknown_stage_tickers}"
+        )
+    execution_tickers = stage_tickers or tickers
+    scope_sha256 = ticker_scope_sha256(tickers)
+    execution_scope_sha256 = ticker_scope_sha256(execution_tickers)
     if start_date > end_date:
         raise ValueError("--start-date cannot be after --end-date")
     output_root = resolve_path(historical["output_root"], base_dir=base_dir)
@@ -458,7 +552,12 @@ def main() -> int:
         if invalid_dates:
             raise ValueError(f"Snapshot dates outside requested range={invalid_dates}")
         initial_counts = {
-            asof: coverage_counts(connection, asof=asof, metric_count=metric_count)
+            asof: coverage_counts(
+                connection,
+                asof=asof,
+                metric_count=metric_count,
+                tickers=tickers,
+            )
             for asof in dates
         }
     report_by_date = read_existing_report(output_csv)
@@ -471,6 +570,7 @@ def main() -> int:
             counts=initial_counts[asof],
             report_row=report_by_date.get(asof),
             output_root=output_root,
+            scope_sha256=scope_sha256,
         )
     ]
     if args.max_dates:
@@ -486,6 +586,12 @@ def main() -> int:
             "selected_date_count": len(dates),
             "pending_date_count": len(pending),
             "pending_dates": pending,
+            "ticker_scope_count": len(tickers),
+            "ticker_scope_sha256": scope_sha256,
+            "execution_ticker_count": len(execution_tickers),
+            "execution_tickers": execution_tickers,
+            "execution_ticker_scope_sha256": execution_scope_sha256,
+            "executed_stages": list(selected_stages),
         }
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
@@ -497,6 +603,14 @@ def main() -> int:
         started = time.monotonic()
         output_dir = output_root / asof
         output_dir.mkdir(parents=True, exist_ok=True)
+        stage_output_dir = output_dir
+        if stage_tickers:
+            stage_output_dir = (
+                output_dir
+                / "targeted_repairs"
+                / execution_scope_sha256[:12]
+            )
+            stage_output_dir.mkdir(parents=True, exist_ok=True)
         status = "PASS"
         message = ""
         try:
@@ -504,8 +618,11 @@ def main() -> int:
                 asof=asof,
                 config_path=config_path,
                 db_path=db_path,
-                output_dir=output_dir,
+                output_dir=stage_output_dir,
+                tickers=execution_tickers,
             ):
+                if stage not in selected_stages:
+                    continue
                 run_stage(
                     command=command,
                     output_dir=output_dir,
@@ -517,6 +634,7 @@ def main() -> int:
                     connection,
                     asof=asof,
                     metric_count=metric_count,
+                    tickers=tickers,
                 )
             if not coverage_passes(counts):
                 raise ValueError(f"incomplete exact-date feature coverage={counts}")
@@ -527,6 +645,7 @@ def main() -> int:
             counts = initial_counts[asof]
         report_by_date[asof] = {
             "asof_date": asof,
+            "ticker_scope_sha256": scope_sha256,
             "expected_ticker_count": counts["expected"],
             "market_feature_count": counts["market"],
             "financial_feature_count": counts["financial"],
@@ -555,8 +674,11 @@ def main() -> int:
     completed_dates = sorted(
         asof
         for asof, row in report_by_date.items()
-        if str(row.get("status") or "") == "PASS"
+        if asof in dates
+        and str(row.get("status") or "") == "PASS"
+        and str(row.get("ticker_scope_sha256") or "") == scope_sha256
     )
+    remaining_dates = sorted(set(dates) - set(completed_dates))
     result = {
         "acceptance": "PASS" if not failures else "FAIL",
         "model_family": MODEL_FAMILY,
@@ -566,10 +688,19 @@ def main() -> int:
             "explicit_dates" if args.dates else historical["observation_cadence"]
         ),
         "selected_date_count": len(dates),
+        "ticker_scope_count": len(tickers),
+        "ticker_scope_sha256": scope_sha256,
+        "execution_ticker_count": len(execution_tickers),
+        "execution_tickers": execution_tickers,
+        "execution_ticker_scope_sha256": execution_scope_sha256,
         "attempted_date_count": len(pending),
         "completed_date_count": len(completed_dates),
         "completed_dates": completed_dates,
+        "pending_date_count": len(remaining_dates),
+        "pending_dates": remaining_dates,
+        "completion_status": "COMPLETE" if not remaining_dates else "PARTIAL",
         "metric_count": metric_count,
+        "executed_stages": list(selected_stages),
         "output_csv": str(output_csv),
         "errors": failures,
     }

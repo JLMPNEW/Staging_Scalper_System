@@ -11,6 +11,7 @@ from industrials.core.config import load_yaml
 
 POLICY_VERSION = "transportation_investable_universe_v3"
 LATEST_POLICY_VERSION = "transportation_investable_universe_v4"
+CANDIDATE_POLICY_VERSION = "transportation_investable_universe_v5"
 SUPPORTED_POLICY_GROUP_IDS = {
     POLICY_VERSION: (
         "surface_freight_core",
@@ -21,8 +22,18 @@ SUPPORTED_POLICY_GROUP_IDS = {
         "surface_freight_core",
         "oil_tanker_operators",
     ),
+    CANDIDATE_POLICY_VERSION: (
+        "surface_freight_core",
+        "oil_tanker_operators",
+    ),
 }
 SURFACE_DOMAIN_POLICY_VERSION = "transportation_surface_metric_domains_v1"
+SURFACE_DOMAIN_POLICY_VERSION_V2 = "transportation_surface_metric_domains_v2"
+SURFACE_DOMAIN_POLICY_BY_UNIVERSE = {
+    POLICY_VERSION: SURFACE_DOMAIN_POLICY_VERSION,
+    LATEST_POLICY_VERSION: SURFACE_DOMAIN_POLICY_VERSION,
+    CANDIDATE_POLICY_VERSION: SURFACE_DOMAIN_POLICY_VERSION_V2,
+}
 SURFACE_DOMAIN_IDS = (
     "rail_networks",
     "ltl_carriers",
@@ -189,7 +200,10 @@ def load_investable_universe_policy(path: Path) -> InvestableUniversePolicy:
                 tickers=tickers,
             )
         )
-    if surface_policy.get("policy_version") != SURFACE_DOMAIN_POLICY_VERSION:
+    expected_surface_policy_version = SURFACE_DOMAIN_POLICY_BY_UNIVERSE[
+        policy_version
+    ]
+    if surface_policy.get("policy_version") != expected_surface_policy_version:
         raise ValueError("unsupported surface comparison-domain policy version")
     raw_domains = surface_policy.get("comparison_domains")
     if not isinstance(raw_domains, Mapping) or tuple(raw_domains) != SURFACE_DOMAIN_IDS:
@@ -223,7 +237,7 @@ def load_investable_universe_policy(path: Path) -> InvestableUniversePolicy:
     seen_rule_keys: set[tuple[str, str]] = set()
     mapped_tickers_by_metric: dict[str, set[str]] = {}
     for row in _read_csv(mapping_path):
-        if row.get("policy_version") != SURFACE_DOMAIN_POLICY_VERSION:
+        if row.get("policy_version") != expected_surface_policy_version:
             raise ValueError("surface metric-domain row has the wrong policy version")
         metric_id = row.get("metric_id", "")
         domain_id = row.get("comparison_domain_id", "")
@@ -316,7 +330,7 @@ def load_investable_universe_policy(path: Path) -> InvestableUniversePolicy:
         diagnostic_minimum_breadth=int(
             gates.get("diagnostic_minimum_breadth") or 0
         ),
-        surface_domain_policy_version=SURFACE_DOMAIN_POLICY_VERSION,
+        surface_domain_policy_version=expected_surface_policy_version,
         surface_metric_domain_mapping_path=mapping_path,
         surface_metric_source_map_path=source_map_path,
         surface_minimum_accepted_fraction=minimum_fraction,
