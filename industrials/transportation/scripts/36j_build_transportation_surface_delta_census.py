@@ -27,8 +27,8 @@ from industrials.transportation.scripts._shared import (  # noqa: E402
 
 
 DATA_ROOT = PROJECT_ROOT / "industrials" / "transportation" / "data"
-SOURCE_MAP = DATA_ROOT / "transportation_surface_metric_source_map_v1.csv"
-FILING_PROFILES = DATA_ROOT / "transportation_surface_filing_profiles_v1.csv"
+SOURCE_MAP = DATA_ROOT / "transportation_surface_metric_source_map_v2.csv"
+FILING_PROFILES = DATA_ROOT / "transportation_surface_filing_profiles_v2.csv"
 DEFAULT_OUTPUT_ROOT = (
     PROJECT_ROOT
     / "output"
@@ -43,7 +43,7 @@ DERIVED_METRICS = ("surface_volume_growth",)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build a read-only, versioned source census for the 19-name "
+            "Build a read-only, versioned source census for the 24-name "
             "surface-freight cohort and every applicable direct surface KPI."
         )
     )
@@ -99,7 +99,7 @@ def _surface_contract(
                 raise ValueError(f"{metric_id}: unknown surface ticker={ticker}")
             scope_rows.append(
                 {
-                    "scope_version": "transportation_surface_delta_scope_v1",
+                    "scope_version": "transportation_surface_delta_scope_v2",
                     "registry_version": "transportation_metrics_v3_discovery",
                     "policy_version": SOURCE_MAP.stem,
                     "input_contract_hash": input_hash,
@@ -114,7 +114,7 @@ def _surface_contract(
                     "metric_pack": metric["metric_pack"],
                     "source_lane": metric["source_lane"],
                     "applicability_status": "APPLICABLE",
-                    "applicability_reason": "v3_surface_metric_source_map",
+                    "applicability_reason": "v3_surface_metric_source_map_v2",
                     "unit_contract": metric["unit_contract"],
                     "period_type": metric["period_type"],
                     "max_staleness_days": metric["max_staleness_days"],
@@ -151,6 +151,8 @@ def main() -> int:
     decisions_path = output_dir / "transportation_surface_delta_source_decisions.csv"
     gaps_path = output_dir / "transportation_surface_delta_cache_gaps.csv"
     manifest_path = output_dir / "transportation_surface_delta_census_manifest.json"
+    event_audit_path = output_dir / "transportation_surface_excluded_event_anchor_audit.csv"
+    event_audit_manifest_path = output_dir / "transportation_surface_excluded_event_anchor_audit.json"
 
     tickers, direct_metrics, scope_rows = _surface_contract(
         resolve_path(parser_cfg["discovery_registry_csv"], base_dir=base_dir)
@@ -163,7 +165,7 @@ def main() -> int:
         json.dumps(
             {
                 "model_family": MODEL_FAMILY,
-                "contract_version": "transportation_surface_delta_dp0_v1",
+                "contract_version": "transportation_surface_delta_dp0_v2",
                 "identity_count": len(tickers),
                 "direct_metric_count": len(direct_metrics),
                 "hashes": {
@@ -182,6 +184,34 @@ def main() -> int:
     original_members = source_census._members
     original_registry = source_census.get_registry
     full_registry = original_registry()
+    event_metric_anchor_accessions: frozenset[tuple[str, str]] = frozenset()
+    event_audit_sha256 = ""
+    if event_audit_path.is_file() or event_audit_manifest_path.is_file():
+        if not event_audit_path.is_file() or not event_audit_manifest_path.is_file():
+            raise ValueError("surface event anchor audit CSV/manifest must exist together")
+        event_audit_manifest = json.loads(
+            event_audit_manifest_path.read_text(encoding="utf-8")
+        )
+        if (
+            event_audit_manifest.get("acceptance") != "PASS"
+            or event_audit_manifest.get("asof_date") != args.asof
+            or event_audit_manifest.get("adapter_version") != full_registry.adapter_version
+            or event_audit_manifest.get("cohort") != "surface"
+            or int(event_audit_manifest.get("network_requests", -1)) != 0
+        ):
+            raise ValueError(
+                "surface event anchor audit does not match the sealed offline census context"
+            )
+        event_rows = _rows(event_audit_path)
+        event_metric_anchor_accessions = frozenset(
+            (str(row["ticker"]).upper(), str(row["accession_number"]))
+            for row in event_rows
+        )
+        if len(event_metric_anchor_accessions) != int(
+            event_audit_manifest.get("positive_accession_count", -1)
+        ):
+            raise ValueError("surface event anchor audit accession count does not reconcile")
+        event_audit_sha256 = file_sha256(event_audit_path)
     direct_requests = tuple(
         request
         for request in full_registry.parser_metrics
@@ -218,7 +248,7 @@ def main() -> int:
         ),
         "dp0_manifest_path": dp0_path,
         "gap_override_path": gap_override_path,
-        "manifest_version": "transportation_surface_delta_census_v1",
+        "manifest_version": "transportation_surface_delta_census_v2",
         "source_id": str(cfg_get(config, "sec_fundamentals.submissions_source_id")),
         "active_source_id": foundation.seed_source_id,
         "historical_source_id": foundation.historical_source_id,
@@ -226,7 +256,7 @@ def main() -> int:
         "legacy_inactive_start_date": "2000-01-01",
         "asof_date": args.asof,
         "expected_identity_count": len(tickers),
-        "event_metric_anchor_accessions": frozenset(),
+        "event_metric_anchor_accessions": event_metric_anchor_accessions,
     }
     try:
         with source_census.read_only_connection(
@@ -257,6 +287,12 @@ def main() -> int:
         gaps_path=gaps_path,
         manifest_path=manifest_path,
     )
+    payload["excluded_event_anchor_audit"] = {
+        "used": bool(event_audit_sha256),
+        "csv_sha256": event_audit_sha256,
+        "positive_accession_count": len(event_metric_anchor_accessions),
+        "selection_rule": "supplemental_event_metric_anchor_audit",
+    }
     payload["execution_scope"] = {
         "tickers": list(tickers),
         "direct_metric_ids": list(direct_metrics),

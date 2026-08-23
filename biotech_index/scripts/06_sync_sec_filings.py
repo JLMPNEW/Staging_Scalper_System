@@ -31,6 +31,7 @@ from biotech_index.core.pipeline_guards import (
     validate_nonempty_selection,
     validate_requested_tickers,
 )
+from biotech_index.core.security_identity import SecurityIdentityRule, load_security_identity_rules
 from biotech_index.core.text_norm import normalize_ticker
 
 
@@ -120,9 +121,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=None, help="Override SEC filing sync output CSV.")
     parser.add_argument("--lookback-days", type=int, default=0, help="Override sec_filings.lookback_days.")
     parser.add_argument(
+        "--max-filings-per-company",
+        type=int,
+        default=0,
+        help="Override sec_filings.max_filings_per_company. Use 0 for the configured daily default.",
+    )
+    parser.add_argument(
         "--include-delisted-calibration",
         action="store_true",
         help="Allow inactive companies with universe_status=delisted_calibration when the supplied universe CSV names them.",
+    )
+    parser.add_argument(
+        "--include-historical-ciks",
+        action="store_true",
+        help="Also backfill approved predecessor/successor CIKs from active_biotech_history.registry_csv.",
     )
     parser.add_argument("--skip-text", action="store_true", help="Only sync filing metadata; do not fetch filing text.")
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if company or filing-text fetches fail.")
@@ -230,6 +242,29 @@ def load_companies(
         if max_companies > 0 and len(out) >= max_companies:
             break
     return out
+
+
+def expand_company_cik_history(
+    companies: list[Company],
+    rules: dict[str, SecurityIdentityRule],
+) -> list[Company]:
+    """Add reviewed historical issuer CIK jobs while retaining the current issuer job."""
+    expanded: list[Company] = []
+    for company in companies:
+        rule = rules.get(company.ticker)
+        historical_ciks = rule.historical_ciks if rule is not None else ()
+        for historical_cik in historical_ciks:
+            if historical_cik and historical_cik != company.cik:
+                expanded.append(
+                    Company(
+                        company_id=company.company_id,
+                        ticker=company.ticker,
+                        company_name=company.company_name,
+                        cik=historical_cik,
+                    )
+                )
+        expanded.append(company)
+    return expanded
 
 
 def parse_recent_filings(
@@ -657,6 +692,13 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = (
+        load_security_identity_rules(identity_registry_path) if args.include_historical_ciks else {}
+    )
 
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     universe_csv = (
@@ -683,7 +725,11 @@ def main() -> None:
     if asof is None:
         raise ValueError("--asof must be a valid YYYY-MM-DD date.")
     cutoff = asof - timedelta(days=max(1, lookback_days))
-    max_filings = int(cfg_get(config, "sec_filings.max_filings_per_company", 40))
+    max_filings = (
+        int(args.max_filings_per_company)
+        if int(args.max_filings_per_company) > 0
+        else int(cfg_get(config, "sec_filings.max_filings_per_company", 40))
+    )
     fetch_text = as_bool(cfg_get(config, "sec_filings.fetch_text", True), True) and not bool(args.skip_text)
     max_workers = max(1, int(cfg_get(config, "sec_filings.max_workers", 1)))
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
@@ -700,6 +746,7 @@ def main() -> None:
             max_companies=int(args.max_companies),
             include_delisted_calibration=bool(args.include_delisted_calibration),
         )
+        companies = expand_company_cik_history(companies, security_identity_rules)
         subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
         output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
         validate_nonempty_selection(count=len(companies), context="SEC filings sync", subset_mode=subset_mode)
@@ -762,10 +809,11 @@ def main() -> None:
                         existing_documents_lock=existing_documents_lock,
                     )
                     LOGGER.info(
-                        "[%d/%d] %s filings=%d text_errors=%d",
+                        "[%d/%d] %s cik=%s filings=%d text_errors=%d",
                         idx,
                         len(companies),
                         company.ticker,
+                        company.cik,
                         len(result.filings),
                         result.text_errors,
                     )
@@ -793,11 +841,12 @@ def main() -> None:
                             existing_documents_lock=existing_documents_lock,
                         )
                         LOGGER.info(
-                            "[%d/%d complete=%d] %s filings=%d text_errors=%d",
+                            "[%d/%d complete=%d] %s cik=%s filings=%d text_errors=%d",
                             idx,
                             len(companies),
                             done_count,
                             company.ticker,
+                            company.cik,
                             len(result.filings),
                             result.text_errors,
                         )

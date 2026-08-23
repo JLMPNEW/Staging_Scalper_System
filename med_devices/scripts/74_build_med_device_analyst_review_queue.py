@@ -107,7 +107,7 @@ def priority_for(
         return "P1"
     # Near-universal categories carry no per-ticker escalation signal, so they
     # are excluded from the P2 mapping (queue membership is unaffected).
-    escalation_categories = {"high_score_blocked", "tier1_safety_failed", "unknown_reimbursement"}
+    escalation_categories = {"high_score_blocked", "unknown_reimbursement"}
     if saturated_categories:
         escalation_categories -= saturated_categories
     if escalation_categories.intersection(categories):
@@ -394,6 +394,10 @@ def main() -> int:
                 "classification_reason": row.get("classification_reason", ""),
                 "tier1_safety_status": row.get("tier1_safety_status", ""),
                 "tier1_safety_reason": row.get("tier1_safety_reason", ""),
+                "tier1_safety_policy_version": row.get("tier1_safety_policy_version", ""),
+                "tier1_safety_strict_pass_flag": row.get("tier1_safety_strict_pass_flag", ""),
+                "tier1_safety_balanced_pass_flag": row.get("tier1_safety_balanced_pass_flag", ""),
+                "tier1_safety_tolerated_reason": row.get("tier1_safety_tolerated_reason", ""),
                 "fda_review_state": row.get("fda_review_state", ""),
                 "hard_red_flag": row.get("hard_red_flag", ""),
                 "hard_red_flag_reasons": row.get("hard_red_flag_reasons", ""),

@@ -144,6 +144,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=30.0,
     )
+    parser.add_argument('--max-ocr-pages', type=int, default=12)
+    parser.add_argument('--ocr-dpi', type=int, default=144)
+    parser.add_argument('--ocr-page-timeout-seconds', type=float, default=8.0)
+    parser.add_argument(
+        '--max-ocr-pixels-per-page', type=int, default=20_000_000
+    )
     parser.add_argument(
         '--expected-ingestion-config-sha256',default='',
         help=(
@@ -151,6 +157,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             'for Consumer Defensive catalog planning.'
         ),
     )
+    parser.set_defaults(max_pdf_bytes=50_000_000)
     return parser.parse_args(argv)
 
 
@@ -369,6 +376,21 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--workers must be at least 1")
     if args.write_batch_size < 1:
         raise ValueError("--write-batch-size must be at least 1")
+    if args.max_pdf_pages < 1 or args.max_pdf_bytes < 1:
+        raise ValueError('--max-pdf-pages and --max-pdf-bytes must be positive')
+    if args.pdf_extraction_timeout_seconds <= 0:
+        raise ValueError('--pdf-extraction-timeout-seconds must be positive')
+    if not 1 <= args.max_ocr_pages <= args.max_pdf_pages:
+        raise ValueError('--max-ocr-pages must be in [1, --max-pdf-pages]')
+    if not 72 <= args.ocr_dpi <= 600:
+        raise ValueError('--ocr-dpi must be in [72, 600]')
+    if not 0 < args.ocr_page_timeout_seconds <= args.pdf_extraction_timeout_seconds:
+        raise ValueError(
+            '--ocr-page-timeout-seconds must be positive and no greater than '
+            '--pdf-extraction-timeout-seconds'
+        )
+    if args.max_ocr_pixels_per_page < 1:
+        raise ValueError('--max-ocr-pixels-per-page must be positive')
     if args.reassess_run_id:
         incompatible = {
             "--plan-only": args.plan_only,
@@ -525,6 +547,10 @@ def main(argv: list[str] | None = None) -> int:
             max_pdf_pages=args.max_pdf_pages,
             max_pdf_bytes=args.max_pdf_bytes,
             pdf_extraction_timeout_seconds=(args.pdf_extraction_timeout_seconds),
+            max_ocr_pages=args.max_ocr_pages,
+            ocr_dpi=args.ocr_dpi,
+            ocr_page_timeout_seconds=args.ocr_page_timeout_seconds,
+            max_ocr_pixels_per_page=args.max_ocr_pixels_per_page,
             document_scope=(source_manifest.documents if source_manifest is not None else None),
             direct_filings=(
                 source_manifest.direct_filings
@@ -557,6 +583,10 @@ def main(argv: list[str] | None = None) -> int:
             "max_pdf_pages": int(args.max_pdf_pages),
             "max_pdf_bytes": int(args.max_pdf_bytes),
             "pdf_extraction_timeout_seconds": float(args.pdf_extraction_timeout_seconds),
+            'max_ocr_pages': int(args.max_ocr_pages),
+            'ocr_dpi': int(args.ocr_dpi),
+            'ocr_page_timeout_seconds': float(args.ocr_page_timeout_seconds),
+            'max_ocr_pixels_per_page': int(args.max_ocr_pixels_per_page),
             "source_manifest": (
                 {
                     "path": str(source_manifest.path),
@@ -583,6 +613,12 @@ def main(argv: list[str] | None = None) -> int:
             validate_provider_dependencies(
                 enable_arelle=not args.disable_arelle,
                 enable_edgartools=not args.disable_edgartools,
+                require_pdf_native=any(
+                    Path(document.name).suffix.casefold() == '.pdf'
+                    for item in work
+                    for document in item.documents
+                    if not document.is_full_submission
+                ),
             )
 
         run_id = start_run(

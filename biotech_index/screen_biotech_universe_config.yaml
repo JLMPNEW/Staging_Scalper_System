@@ -88,6 +88,8 @@ screen:
     - "ADR/ADS"
   allowed_listing_statuses:
     - "active"
+    - "active_financial_status_D"
+    - "active_financial_status_E"
   require_primary_listing: true
   disable_identity_gate: false
   allow_missing_identity_fields: false

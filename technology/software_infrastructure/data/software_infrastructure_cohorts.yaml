@@ -39,6 +39,15 @@ cohorts:
       - NOW
       - PD
       - IBM
+      - AMPL
+      - CRM
+      - FRSH
+      - OCTV
+      - OOMA
+      - PEGA
+      - RNG
+      - SOUN
+      - ZM
   - cohort_id: software_infra_security_identity_edge
     cohort_name: Security, Identity, Edge & Resilience
     calibration_use: core
@@ -72,3 +81,7 @@ cohorts:
       - VRSN
       - CVLT
       - FSLY
+      - ALRM
+      - DMRC
+      - MITK
+      - RDVT

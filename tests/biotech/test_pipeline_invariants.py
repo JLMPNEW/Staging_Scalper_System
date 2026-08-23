@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import os
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -149,6 +150,35 @@ def test_final_validation_table_coverage_rejects_extra_score_ticker() -> None:
         )
 
 
+def test_final_validation_market_snapshot_uses_latest_nonfuture_trading_date() -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_market_snapshot_regression")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE market_features_daily(asof_date TEXT NOT NULL, source TEXT NOT NULL);
+        INSERT INTO market_features_daily VALUES ('2026-08-21', 'yahoo_adjusted');
+        INSERT INTO market_features_daily VALUES ('2026-08-23', 'yahoo_adjusted');
+        """
+    )
+
+    snapshot = module.validated_market_feature_snapshot_asof(
+        conn,
+        source="yahoo_adjusted",
+        report_asof="2026-08-22",
+        max_lag_calendar_days=4,
+    )
+
+    assert snapshot == "2026-08-21"
+    with pytest.raises(RuntimeError, match="maximum=0"):
+        module.validated_market_feature_snapshot_asof(
+            conn,
+            source="yahoo_adjusted",
+            report_asof="2026-08-22",
+            max_lag_calendar_days=0,
+        )
+
+
 def test_weekly_reconcile_does_not_force_sec_event_full_rescan() -> None:
     module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_weekly_sec_events_args")
 
@@ -173,6 +203,26 @@ def test_historical_restatement_rebuilds_ctgov_before_scoring_universe() -> None
     names = [step.name for step in module.historical_restatement_steps()]
 
     assert names[:2] == ["ctgov_audit", "historical_scoring_universe"]
+
+
+def test_historical_restatement_never_refetches_live_adcom_calendar() -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_historical_adcom_freeze")
+
+    names = [step.name for step in module.historical_restatement_steps()]
+
+    assert "fda_adcom_calendar" not in names
+    assert "biotech_features" in names
+
+
+def test_partial_historical_feature_restatement_requires_positioning_export() -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_historical_dependencies")
+
+    with pytest.raises(ValueError, match="requires market_positioning_export"):
+        module.validate_historical_step_selection({"financial_survival", "biotech_features"})
+
+    module.validate_historical_step_selection(
+        {"market_positioning_export", "financial_survival", "biotech_features"}
+    )
 
 
 def test_historical_norgate_routing_requires_calibration_only_member(tmp_path: Path) -> None:
@@ -341,3 +391,157 @@ def test_form4_preflight_historical_run_ignores_future_database_rows(tmp_path: P
     assert row["status"] == "success"
     assert "snapshot_date=2026-07-20" in row["command"]
     assert "raw_filing_date=20-JUL-2026" in row["command"]
+
+
+def test_resume_marker_output_current_rejects_stale_universe_coverage(tmp_path: Path) -> None:
+    module = load_script_module(
+        "24_run_biotech_refresh_pipeline.py",
+        "pipeline_resume_output_coverage_regression",
+    )
+    universe_csv = tmp_path / "universe.csv"
+    write_csv(
+        universe_csv,
+        [
+            {"ticker": "AAA", "scoring_include": "1"},
+            {"ticker": "BBB", "scoring_include": "1"},
+        ],
+        ["ticker", "scoring_include"],
+    )
+    db_path = tmp_path / "biotech.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE companies(company_id INTEGER PRIMARY KEY, ticker TEXT)")
+        conn.executemany(
+            "INSERT INTO companies(company_id, ticker) VALUES (?, ?)",
+            [(1, "AAA"), (2, "BBB")],
+        )
+        conn.execute(
+            "CREATE TABLE financial_survival_features(asof_date TEXT, company_id INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO financial_survival_features(asof_date, company_id) VALUES (?, ?)",
+            ("2026-08-21", 1),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    config = {
+        "biotech_features": {"final_scoring_universe_csv": str(universe_csv)}
+    }
+    step = module.Step(
+        "financial_survival",
+        "16_build_financial_survival_features.py",
+    )
+    assert not module.step_marker_output_current(
+        config=config,
+        base_dir=tmp_path,
+        db_path=db_path,
+        step=step,
+        asof="2026-08-21",
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO financial_survival_features(asof_date, company_id) VALUES (?, ?)",
+            ("2026-08-21", 2),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert module.step_marker_output_current(
+        config=config,
+        base_dir=tmp_path,
+        db_path=db_path,
+        step=step,
+        asof="2026-08-21",
+    )
+
+def test_resume_marker_uses_dated_universe_not_newer_root_membership(tmp_path: Path) -> None:
+    module = load_script_module(
+        "24_run_biotech_refresh_pipeline.py",
+        "pipeline_resume_dated_universe_regression",
+    )
+    report_root = tmp_path / "reports"
+    root_universe = report_root / "ctgov_final_scoring_universe.csv"
+    dated_universe = report_root / "20260821" / root_universe.name
+    dated_universe.parent.mkdir(parents=True)
+    write_csv(
+        root_universe,
+        [
+            {"ticker": "AAA", "scoring_include": "1"},
+            {"ticker": "NEW", "scoring_include": "1"},
+        ],
+        ["ticker", "scoring_include"],
+    )
+    write_csv(
+        dated_universe,
+        [{"ticker": "AAA", "scoring_include": "1"}],
+        ["ticker", "scoring_include"],
+    )
+    db_path = tmp_path / "biotech.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE companies(company_id INTEGER PRIMARY KEY, ticker TEXT)")
+        conn.execute("INSERT INTO companies(company_id, ticker) VALUES (1, 'AAA')")
+        conn.execute("CREATE TABLE financial_survival_features(asof_date TEXT, company_id INTEGER)")
+        conn.execute(
+            "INSERT INTO financial_survival_features(asof_date, company_id) VALUES (?, ?)",
+            ("2026-08-21", 1),
+        )
+
+    assert module.step_marker_output_current(
+        config={"biotech_features": {"final_scoring_universe_csv": str(root_universe)}},
+        base_dir=tmp_path,
+        db_path=db_path,
+        step=module.Step("financial_survival", "16_build_financial_survival_features.py"),
+        asof="2026-08-21",
+    )
+
+def test_explicit_weekend_asof_normalizes_to_prior_market_date(tmp_path: Path) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_weekend_asof_regression")
+
+    normalized = module.normalize_requested_pipeline_asof(
+        datetime(2026, 8, 22).date(),
+        db_path=tmp_path / "missing.sqlite",
+        config={},
+    )
+
+    assert normalized.isoformat() == "2026-08-21"
+
+def test_sec_filing_backfill_cap_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_script_module("06_sync_sec_filings.py", "sec_filing_backfill_cap_override")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["06_sync_sec_filings.py", "--max-filings-per-company", "500"],
+    )
+
+    args = module.parse_args()
+
+    assert args.max_filings_per_company == 500
+
+def test_sec_event_backfill_lookback_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_script_module("07_parse_sec_biotech_events.py", "sec_event_backfill_lookback_override")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["07_parse_sec_biotech_events.py", "--lookback-days", "3000"],
+    )
+
+    args = module.parse_args()
+
+    assert args.lookback_days == 3000
+
+def test_earliest_ctgov_snapshot_date_is_database_driven(tmp_path: Path) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_ctgov_snapshot_floor")
+    db_path = tmp_path / "ctgov.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE trial_snapshot_daily(asof_date TEXT)")
+        conn.executemany(
+            "INSERT INTO trial_snapshot_daily(asof_date) VALUES (?)",
+            [("2026-05-02",), ("2026-04-19",)],
+        )
+
+    assert module.earliest_ctgov_snapshot_date(db_path) == "2026-04-19"

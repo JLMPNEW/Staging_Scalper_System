@@ -41,6 +41,8 @@ FIELDNAMES = [
     "company_name",
     "source_id",
     "status",
+    "listing_start_date",
+    "prelisting_bars_removed",
     "bars_upserted",
     "first_bar_date",
     "last_bar_date",
@@ -57,6 +59,7 @@ class PriceJob:
     ticker: str
     company_name: str
     is_benchmark: bool = False
+    listing_start_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,7 @@ class PriceFetchResult:
     payload: dict[str, Any]
     bars: list[YahooBar]
     error: str = ""
+    skip_reason: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -202,7 +206,19 @@ def read_jobs(input_csv: Path, *, ticker_filter: set[str], max_tickers: int) -> 
             continue
         if ticker_filter and ticker not in ticker_filter:
             continue
-        out.append(PriceJob(ticker=ticker, company_name=row_get(row, "Company_Name", "CompanyName")))
+        listing_start_text = row_get(row, "listing_start_date", "ListingStartDate")
+        listing_start_date = parse_date(listing_start_text)
+        if listing_start_text and listing_start_date is None:
+            raise ValueError(
+                f"Invalid listing_start_date for {ticker}: {listing_start_text!r}; expected YYYY-MM-DD"
+            )
+        out.append(
+            PriceJob(
+                ticker=ticker,
+                company_name=row_get(row, "company_name", "Company_Name", "CompanyName"),
+                listing_start_date=listing_start_date,
+            )
+        )
         seen.add(ticker)
         if max_tickers > 0 and len(out) >= max_tickers:
             break
@@ -307,15 +323,31 @@ def fetch_price_job(
     policy: YahooPolicy,
 ) -> PriceFetchResult:
     endpoint = policy.chart_url_template.format(ticker=job.ticker)
-    query_params = yahoo_query_params(start_date, asof_date, policy)
+    effective_start = max(start_date, job.listing_start_date) if job.listing_start_date else start_date
+    query_params = yahoo_query_params(effective_start, asof_date, policy)
+    if effective_start > asof_date:
+        return PriceFetchResult(
+            idx=idx,
+            job=job,
+            endpoint=endpoint,
+            query_params=query_params,
+            status_code=0,
+            payload_text="",
+            payload={},
+            bars=[],
+            skip_reason="not_listed_asof",
+        )
     try:
         status_code, payload_text, payload = fetch_chart_payload(
             job.ticker,
-            start_date=start_date,
+            start_date=effective_start,
             asof_date=asof_date,
             policy=policy,
         )
         bars = parse_bars(job.ticker, payload, source_id=policy.source_id) if status_code == 200 else []
+        if job.listing_start_date is not None:
+            listing_start_iso = job.listing_start_date.isoformat()
+            bars = [bar for bar in bars if bar.bar_date >= listing_start_iso]
         return PriceFetchResult(
             idx=idx,
             job=job,
@@ -544,6 +576,24 @@ def store_raw_response(
     )
 
 
+def purge_prelisting_price_rows(conn: Any, jobs: list[PriceJob]) -> dict[str, int]:
+    removed: dict[str, int] = {}
+    for job in jobs:
+        if job.is_benchmark or job.listing_start_date is None:
+            continue
+        cursor = conn.execute(
+            """
+            DELETE FROM fact_price_ohlcv
+            WHERE ticker = ? AND bar_date < ?
+            """,
+            (job.ticker, job.listing_start_date.isoformat()),
+        )
+        row_count = max(0, int(cursor.rowcount or 0))
+        if row_count:
+            removed[job.ticker] = row_count
+    return removed
+
+
 def upsert_price_bars(conn: Any, bars: list[YahooBar]) -> int:
     if not bars:
         return 0
@@ -589,12 +639,14 @@ def upsert_price_bars(conn: Any, bars: list[YahooBar]) -> int:
 
 
 def coverage_row(job: PriceJob, source_id: str, status: str, bars: list[YahooBar], review_reason: str = "") -> dict[str, Any]:
+    listing_start_date = job.listing_start_date.isoformat() if job.listing_start_date else ""
     if not bars:
         return {
             "ticker": job.ticker,
             "company_name": job.company_name,
             "source_id": source_id,
             "status": status,
+            "listing_start_date": listing_start_date,
             "bars_upserted": 0,
             "review_reason": review_reason,
         }
@@ -605,6 +657,7 @@ def coverage_row(job: PriceJob, source_id: str, status: str, bars: list[YahooBar
         "company_name": job.company_name,
         "source_id": source_id,
         "status": status,
+        "listing_start_date": listing_start_date,
         "bars_upserted": len(ordered),
         "first_bar_date": ordered[0].bar_date,
         "last_bar_date": latest.bar_date,
@@ -632,6 +685,14 @@ def process_price_result(
     asof_date: date,
     ingestion_run_id: int,
 ) -> tuple[dict[str, Any], int, bool]:
+    if result.skip_reason:
+        return coverage_row(
+            result.job,
+            policy.source_id,
+            "skipped",
+            [],
+            result.skip_reason,
+        ), 0, False
     if result.payload_text:
         store_raw_response(
             conn,
@@ -717,6 +778,13 @@ def main() -> None:
         run_id = start_run(conn, run_type="sync_med_device_yahoo_adjusted_prices", input_path=input_csv)
         ingestion_run_id = start_ingestion_run(conn, policy.source_id)
         try:
+            prelisting_bars_removed = purge_prelisting_price_rows(conn, jobs)
+            if prelisting_bars_removed:
+                LOGGER.warning(
+                    "Removed pre-listing price rows before sync: rows=%d tickers=%s",
+                    sum(prelisting_bars_removed.values()),
+                    ",".join(sorted(prelisting_bars_removed)),
+                )
             if policy.parallel_workers > 1 and len(jobs) > 1:
                 LOGGER.info("Fetching Yahoo prices in parallel: jobs=%d workers=%d", len(jobs), policy.parallel_workers)
                 with ThreadPoolExecutor(max_workers=policy.parallel_workers) as executor:
@@ -746,6 +814,7 @@ def main() -> None:
                             asof_date=asof_date,
                             ingestion_run_id=ingestion_run_id,
                         )
+                        row["prelisting_bars_removed"] = prelisting_bars_removed.get(result.job.ticker, 0)
                         coverage_rows.append(row)
                         total_bars += upserted
                         if failed:
@@ -773,6 +842,7 @@ def main() -> None:
                         asof_date=asof_date,
                         ingestion_run_id=ingestion_run_id,
                     )
+                    row["prelisting_bars_removed"] = prelisting_bars_removed.get(result.job.ticker, 0)
                     coverage_rows.append(row)
                     total_bars += upserted
                     if failed:
@@ -785,7 +855,10 @@ def main() -> None:
                         LOGGER.info("Committed Yahoo price sync progress: %d/%d", idx, len(jobs))
                     time.sleep(max(0.0, policy.sleep_sec))
             status = "partial" if failed_tickers else "success"
-            message = f"jobs={len(jobs)} bars={total_bars} output={output_csv}"
+            message = (
+                f"jobs={len(jobs)} bars={total_bars} "
+                f"prelisting_bars_removed={sum(prelisting_bars_removed.values())} output={output_csv}"
+            )
             if failed_tickers:
                 message += " failed_tickers=" + ",".join(failed_tickers)
             finish_ingestion_run(

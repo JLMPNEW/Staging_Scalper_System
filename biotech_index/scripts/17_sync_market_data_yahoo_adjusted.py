@@ -32,7 +32,8 @@ from biotech_index.core.pipeline_guards import (
     validate_nonempty_selection,
     validate_requested_tickers,
 )
-from biotech_index.core.report_inputs import resolve_dated_report_input_csv
+from biotech_index.core.report_inputs import resolve_market_snapshot_universe_csv
+from biotech_index.core.security_identity import load_security_identity_rules, security_history_start
 
 
 LOGGER = logging.getLogger("sync_market_data_yahoo_adjusted")
@@ -1026,6 +1027,11 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = load_security_identity_rules(identity_registry_path)
     configured_final_universe_csv = resolve_path(
         cfg_get(config, "yahoo_market_data.final_scoring_universe_csv", cfg_get(config, "ib_market_data.final_scoring_universe_csv")),
         base_dir=base_dir,
@@ -1066,10 +1072,11 @@ def main() -> None:
             asof_decision.reason,
         )
     asof_date = asof_decision.effective_asof
-    final_universe_csv = resolve_dated_report_input_csv(
+    final_universe_csv = resolve_market_snapshot_universe_csv(
         configured_final_universe_csv,
         base_output_dir=resolve_path(cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir),
-        asof_date=asof_date.isoformat(),
+        requested_asof_date=asof_decision.requested_asof.isoformat(),
+        effective_market_asof_date=asof_date.isoformat(),
         logger=LOGGER,
     )
     if explicit_start_date is not None and explicit_start_date > asof_date:
@@ -1205,8 +1212,11 @@ def main() -> None:
             reused_existing_tickers: list[str] = []
             for idx, company in enumerate(companies, start=1):
                 try:
+                    company_history_start = security_history_start(
+                        security_identity_rules, company.ticker, default=history_start_date
+                    )
                     fetch_start = compute_fetch_start(
-                        history_start_date,
+                        company_history_start,
                         asof_date,
                         latest_bar_dates.get(company.price_ticker),
                         refetch_days,
@@ -1231,26 +1241,26 @@ def main() -> None:
                         conn,
                         ticker=company.price_ticker,
                         source=source,
-                        start_date=history_start_date,
+                        start_date=company_history_start,
                         asof_date=asof_date,
                     )
                     if (
                         fetched
                         and existing
-                        and fetch_start > history_start_date
+                        and fetch_start > company_history_start
                         and adjustment_discontinuity(existing, fetched)
                     ):
                         LOGGER.info(
                             "Adjustment basis changed for %s; refetching full history from %s",
                             company.ticker,
-                            history_start_date.isoformat(),
+                            company_history_start.isoformat(),
                         )
                         # Never splice re-adjusted bars onto the stale stored series.
                         fetched = []
                         try:
                             fetched = fetch_yahoo_bars(
                                 company.price_ticker,
-                                start_date=history_start_date,
+                                start_date=company_history_start,
                                 asof_date=asof_date,
                                 source=source,
                                 provisional_asof=asof_decision.provisional_asof,

@@ -140,6 +140,14 @@ def load_short_interest(conn: Any, *, asof: str, config: dict[str, Any]) -> dict
         LEFT JOIN dim_company dc ON dc.ticker = si.ticker
         WHERE si.settlement_date <= ?
           AND si.source_id IN ({source_placeholders})
+          AND NOT EXISTS (
+                SELECT 1
+                FROM dim_security identity_security
+                WHERE identity_security.company_id = COALESCE(si.company_id, dc.company_id)
+                  AND COALESCE(identity_security.is_primary_listing, 0) = 1
+                  AND COALESCE(TRIM(identity_security.listing_start_date), '') <> ''
+                  AND si.settlement_date < identity_security.listing_start_date
+              )
           AND COALESCE(
                 NULLIF(SUBSTR(si.publication_date, 1, 10), ''),
                 date(si.settlement_date, '+' || ? || ' days')
@@ -195,6 +203,14 @@ def load_short_volume_stats(
         WHERE v.trade_date <= ?
           AND v.trade_date > ?
           AND v.source_id IN ({source_placeholders})
+          AND NOT EXISTS (
+                SELECT 1
+                FROM dim_security identity_security
+                WHERE identity_security.company_id = COALESCE(v.company_id, dc.company_id)
+                  AND COALESCE(identity_security.is_primary_listing, 0) = 1
+                  AND COALESCE(TRIM(identity_security.listing_start_date), '') <> ''
+                  AND v.trade_date < identity_security.listing_start_date
+              )
         """,
         (available_end, prior_start, *source_ids),
     ).fetchall()

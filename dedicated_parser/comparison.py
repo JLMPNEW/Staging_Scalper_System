@@ -134,6 +134,10 @@ def compare_shadow_run(
         """,
         work_scope,
     )
+    has_legacy_candidates = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') "
+        "AND name='fact_sec_metric_disclosure_candidate'"
+    ).fetchone() is not None
     legacy_rows = conn.execute(
         """
         SELECT candidate.ticker, candidate.metric_name,
@@ -156,7 +160,11 @@ def compare_shadow_run(
           ) <= ?
         """,
         (model_family, asof_date),
-    ).fetchall()
+    ).fetchall() if has_legacy_candidates else []
+    has_legacy_facts = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') "
+        "AND name='fact_sec_xbrl_fact'"
+    ).fetchone() is not None
     legacy_fact_rows = conn.execute(
         """
         SELECT fact.ticker, fact.canonical_metric AS metric_name,
@@ -182,7 +190,7 @@ def compare_shadow_run(
           ) <= ?
         """,
         (asof_date,),
-    ).fetchall()
+    ).fetchall() if has_legacy_facts else []
     conn.execute("DROP TABLE temp_sec_parser_work_scope")
     legacy: dict[tuple[str, str], set[tuple[Any, ...]]] = defaultdict(set)
     legacy_accessions: dict[

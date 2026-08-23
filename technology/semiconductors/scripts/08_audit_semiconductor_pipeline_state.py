@@ -27,6 +27,7 @@ from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E40
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.scoring_features import cfg_ticker_set, parse_date  # noqa: E402
 from technology.core.text_norm import normalize_ticker  # noqa: E402
+from technology.core.universe_validator import expected_current_ticker_count  # noqa: E402
 
 
 LOGGER = logging.getLogger("audit_semiconductor_pipeline_state")
@@ -243,7 +244,11 @@ def main() -> int:
     model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors"))
     baseline_source = str(cfg_get(config, "semiconductor_scoring_features.source_id", "semiconductor_scoring_contract"))
     calibrated_source = str(cfg_get(config, "semiconductor_calibrated_scoring.source_id", "semiconductor_calibrated_score_v1"))
-    expected_universe = int(cfg_get(config, "technology_universe.expected_ticker_count", 99))
+    expected_universe = expected_current_ticker_count(
+        config,
+        base_dir=base_dir,
+        effective_date=date.today(),
+    )
     financial_exempt = cfg_ticker_set(
         cfg_get(
             config,

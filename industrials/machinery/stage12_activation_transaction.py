@@ -76,6 +76,8 @@ REUSABLE_PORTFOLIO_PREFIX_GROUPS = frozenset(
 )
 PORTFOLIO_RESUME_GROUPS = (
     "ledger",
+    "bootstrap_final",
+    "earnings",
     "monitor",
     "monitor_filter",
     "rotation",
@@ -208,6 +210,41 @@ def validate_completed_session(
             f"Activation date {asof} is not a completed session before "
             f"{MARKET_FINAL_TIME_ET.isoformat(timespec='minutes')} ET"
         )
+
+
+def requires_historical_catchup(
+    asof: str,
+    *,
+    now_et: datetime | None = None,
+) -> bool:
+    """Return whether provider event cycles must be suppressed for this replay."""
+    target = parse_date(asof, field="activation_asof")
+    current = now_et or datetime.now(MARKET_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=MARKET_TIMEZONE)
+    else:
+        current = current.astimezone(MARKET_TIMEZONE)
+    return target < current.date()
+
+
+def portfolio_smoke_runtime_flags(
+    *,
+    asof: str,
+    resume_portfolio_smoke: bool,
+    reuse_risk_price_data: bool,
+    now_et: datetime | None = None,
+) -> list[str]:
+    """Return fail-closed smoke flags without forcing reusable replay work."""
+    flags: list[str] = []
+    if requires_historical_catchup(asof, now_et=now_et):
+        flags.append("--historical-catchup")
+    if resume_portfolio_smoke:
+        flags.extend(("--groups", ",".join(PORTFOLIO_RESUME_GROUPS)))
+        return flags
+    flags.append("--force")
+    if reuse_risk_price_data:
+        flags.append("--reuse-risk-price-data")
+    return flags
 
 
 def _replace_family_required(
@@ -1007,7 +1044,6 @@ def run_activation_transaction(  # noqa: C901
                 asof,
                 "--cadence",
                 "strategic",
-                "--force",
             ]
             reused_groups = frozenset()
             if resume_portfolio_smoke:
@@ -1018,9 +1054,13 @@ def run_activation_transaction(  # noqa: C901
                     evidence_path=resume_evidence_path,
                 )
                 reused_groups = frozenset(str(value) for value in resume_evidence["groups"])
-                portfolio_command.extend(["--groups", ",".join(PORTFOLIO_RESUME_GROUPS)])
-            elif reuse_risk_price_data:
-                portfolio_command.append("--reuse-risk-price-data")
+            portfolio_command.extend(
+                portfolio_smoke_runtime_flags(
+                    asof=asof,
+                    resume_portfolio_smoke=resume_portfolio_smoke,
+                    reuse_risk_price_data=reuse_risk_price_data,
+                )
+            )
             portfolio = run_logged_command(
                 portfolio_command,
                 log_path=logs_root / "portfolio_strategic_smoke.log",

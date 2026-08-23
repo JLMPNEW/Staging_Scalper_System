@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 import hashlib
 import json
 import shutil
@@ -12,6 +13,12 @@ import consumer_defensive.core.stage4 as stage4_module
 
 from consumer_defensive.core.config import ConfigBundle, load_config
 from consumer_defensive.core.db import connect, init_db
+from consumer_defensive.core.historical_filing_inventory import (
+    hydrate_event_document_snapshot,
+    hydrate_historical_document_snapshot,
+)
+from consumer_defensive.core.stage6b_schema import ensure_stage6b_schema
+from consumer_defensive.core.specialized_metrics import build_stage6b_source_manifest
 from consumer_defensive.core.stage4 import (
     STAGE4_MIGRATION_HISTORY,
     bootstrap_stage4,
@@ -35,12 +42,56 @@ from dedicated_parser.planner import (
     build_plan,
 )
 from dedicated_parser.promotion import _filing_metadata, promote_run
+from dedicated_parser.source_manifest import load_source_manifest
 from dedicated_parser.path_io import (
     filesystem_path,
     mkdir_path,
     open_path,
     read_bytes,
 )
+
+
+def test_http_fetcher_retries_transient_503_and_honors_retry_after(monkeypatch) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return b"validated"
+
+    def urlopen(request, *, timeout):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise stage4_module.urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                {"Retry-After": "2"},
+                None,
+            )
+        return Response()
+
+    monkeypatch.setattr(stage4_module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(stage4_module.time, "sleep", sleeps.append)
+    fetch = stage4_module.http_fetcher(
+        stage4_module.HttpPolicy(
+            user_agent="test@example.com",
+            timeout_sec=1.0,
+            retries=3,
+            sleep_sec=0.0,
+        )
+    )
+
+    assert fetch("https://example.test/payload") == b"validated"
+    assert calls == 3
+    assert sleeps == [2.0, 2.0]
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1022,6 +1073,347 @@ def test_direct_documents_bind_to_exact_stage4_seal_before_planning(
                     **{**vars(filing), 'company_currency': 'EUR'}
                 )}, asof_date='2025-12-31',
             )
+    finally:
+        conn.close()
+
+
+def test_stage6b_historical_document_seal_adds_old_filing_without_stage4_mutation(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared_db(tmp_path, 'historical-document-seal')
+    conn.execute("DELETE FROM dim_consumer_defensive_taxonomy WHERE ticker<>'KO'")
+    bundle.payload['sec_fundamentals']['documents_per_issuer'] = 1
+    old_accession = '0001193125-23-111111'
+    old_document = 'old10k.htm'
+    recent = _submissions(
+        form='10-K', accepted='2024-04-30T12:00:00Z', document='new10k.htm'
+    )
+    recent['filings']['recent'] = {
+        'accessionNumber': [SHARED, old_accession],
+        'filingDate': ['2024-04-30', '2023-04-30'],
+        'acceptanceDateTime': [
+            '2024-04-30T12:00:00Z', '2023-04-30T12:00:00Z',
+        ],
+        'reportDate': ['2024-03-31', '2023-03-31'],
+        'form': ['10-K', '10-K'],
+        'primaryDocument': ['new10k.htm', old_document],
+    }
+    provider = Provider({'KO': recent})
+    try:
+        result = sync_sec_fundamentals(
+            conn, bundle, as_of='2025-12-31', force_refresh=True, fetch=provider,
+        )
+        assert result['full_scope_reconciled'] is True
+        assert conn.execute(
+            '''SELECT COUNT(*) FROM bridge_sec_filing_document_company
+               WHERE accession_number=?''', (old_accession,)
+        ).fetchone()[0] == 0
+        ensure_stage6b_schema(conn)
+        now = '2025-12-31T23:59:59Z'
+        with conn:
+            cursor = conn.execute(
+                '''INSERT INTO stage6b_historical_inventory_run(
+                       generated_asof,history_start,history_end,
+                       maximum_documents_per_issuer,selection_policy_sha256,
+                       status,replay_cutoff_count,target_filing_count,
+                       uncovered_target_count,metadata_json,created_at)
+                   VALUES(?,?,?,?,?,'PASS',1,1,0,'{}',?)''',
+                ('2025-12-31', '2023-01-01', '2025-12-31', 1, 'p' * 64, now),
+            )
+            inventory_run_id = int(cursor.lastrowid)
+            conn.execute(
+                '''INSERT INTO stage6b_historical_filing_inventory(
+                       inventory_run_id,ticker,accession_number,form_type,
+                       form_family,filing_date,accepted_at,report_date,
+                       primary_document,replay_sequence,replay_asof_date,
+                       capture_rank,target_reason,existing_hydration_status,
+                       inventory_status,requires_index_discovery,
+                       requested_metrics_json,created_at)
+                   VALUES(?,? ,?,'10-K','annual','2023-04-30',
+                          '2023-04-30T12:00:00Z','2023-03-31',?,1,
+                          '2023-04-30',1,'periodic_financial_filing','missing',
+                          'planned_chronological_replay',0,'[]',?)''',
+                (inventory_run_id, 'KO', old_accession, old_document, now),
+            )
+        stage4_before = tuple(conn.execute(
+            '''SELECT
+                 (SELECT COUNT(*) FROM fact_sec_filing),
+                 (SELECT COUNT(*) FROM fact_sec_xbrl_fact_raw),
+                 (SELECT COUNT(*) FROM bridge_sec_filing_document_company),
+                 (SELECT COUNT(*) FROM consumer_defensive_sec_reconciliation_state)'''
+        ).fetchone())
+        cache_dir = Path(bundle.payload['sec_fundamentals']['cache_dir'])
+        hydrated = hydrate_historical_document_snapshot(
+            conn, bundle, as_of='2025-12-31',
+            inventory_run_id=inventory_run_id, cache_dir=cache_dir,
+            fetch=provider,
+        )
+        assert hydrated['status'] == 'PASS'
+        assert hydrated['document_count'] == 1
+        assert tuple(conn.execute(
+            '''SELECT
+                 (SELECT COUNT(*) FROM fact_sec_filing),
+                 (SELECT COUNT(*) FROM fact_sec_xbrl_fact_raw),
+                 (SELECT COUNT(*) FROM bridge_sec_filing_document_company),
+                 (SELECT COUNT(*) FROM consumer_defensive_sec_reconciliation_state)'''
+        ).fetchone()) == stage4_before
+        bundle.payload['specialized_disclosure_census'][
+            'expected_applicability_rows'
+        ] = 1
+        source_manifest_path = tmp_path / 'stage6b-source-manifest.csv'
+        source_manifest = build_stage6b_source_manifest(
+            conn, bundle, as_of='2025-12-31', cache_dir=cache_dir,
+            output_path=source_manifest_path,
+        )
+        assert source_manifest['document_count'] == 2
+        with source_manifest_path.open('r', encoding='utf-8', newline='') as handle:
+            source_rows = list(csv.DictReader(handle))
+        old_source = next(
+            row for row in source_rows if row['accession_number'] == old_accession
+        )
+        assert old_source['source_kind'] == 'stage6b_historical_sealed_cas'
+        historical = conn.execute(
+            '''SELECT h.*,r.seal_relative_path
+               FROM stage6b_historical_document_snapshot h
+               JOIN stage6b_historical_document_snapshot_run r
+                 USING(snapshot_run_id)'''
+        ).fetchone()
+        sealed = (
+            cache_dir / str(historical['seal_relative_path'])
+            / str(historical['object_path'])
+        ).resolve()
+        stat = sealed.stat()
+        filing = FilingRef(
+            ticker='KO', cik=CIKS['KO'], archive_cik=CIKS['KO'],
+            accession_number=old_accession, form_type='10-K',
+            filing_date='2023-04-30', accepted_at='2023-04-30T12:00:00Z',
+            report_date='2023-03-31', primary_document=old_document,
+            source_id='sec_submissions', company_currency='USD',
+        )
+        document = DocumentRef(
+            name=old_document, path=str(sealed),
+            content_sha256=str(historical['content_sha256']),
+            file_size=int(historical['bytes']), modified_ns=stat.st_mtime_ns,
+            is_primary=True, is_full_submission=False,
+        )
+        rebound = _validate_consumer_defensive_direct_documents(
+            conn, direct_filings={('KO', old_accession): filing},
+            direct_documents={('KO', old_accession): (document,)},
+            asof_date='2025-12-31', cache_dir=cache_dir,
+        )
+        assert rebound[('KO', old_accession)][0].source_kind == (
+            'stage6b_historical_sealed_cas'
+        )
+        replay = hydrate_historical_document_snapshot(
+            conn, bundle, as_of='2025-12-31',
+            inventory_run_id=inventory_run_id, cache_dir=cache_dir,
+            cache_only=True, fetch=lambda _url: (_ for _ in ()).throw(AssertionError()),
+        )
+        assert replay['immutable_replay'] is True
+    finally:
+        conn.close()
+
+
+def test_stage6b_event_exhibit_seal_adds_results_document_and_rebinds_exactly(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared_db(tmp_path, 'event-document-seal')
+    conn.execute("DELETE FROM dim_consumer_defensive_taxonomy WHERE ticker<>'KO'")
+    event_accession = SHARED
+    primary = 'event8k.htm'
+    exhibit = 'earnings99.htm'
+
+    class EventProvider(Provider):
+        def __call__(self, url: str) -> bytes:
+            if url.endswith('/index.json'):
+                return json.dumps({'directory': {'item': [
+                    {'name': f'{event_accession}-index.html', 'type': 'text.gif'},
+                    {'name': primary, 'type': 'text.gif'},
+                    {'name': exhibit, 'type': 'text.gif'},
+                    {'name': 'contract.htm', 'type': 'text.gif'},
+                ]}}).encode()
+            if url.endswith(f'/{event_accession}-index.html'):
+                return f'''<html><body><table class="tableFile">
+                  <tr><th>Seq</th><th>Description</th><th>Document</th>
+                      <th>Type</th><th>Size</th></tr>
+                  <tr><td>1</td><td>Current report</td><td>{primary}</td>
+                      <td>8-K</td><td>100</td></tr>
+                  <tr><td>2</td><td>Earnings release</td><td>{exhibit}</td>
+                      <td>EX-99.1</td><td>200</td></tr>
+                  <tr><td>3</td><td>Material contract</td><td>contract.htm</td>
+                      <td>EX-10.1</td><td>300</td></tr>
+                </table></body></html>'''.encode()
+            if url.endswith('/' + exhibit):
+                return b'<html><body>Organic revenue growth was 5.0%.</body></html>'
+            return super().__call__(url)
+
+    provider = EventProvider({'KO': _submissions(
+        form='8-K', accepted='2024-04-30T12:00:00Z', document=primary,
+    )})
+    try:
+        synced = sync_sec_fundamentals(
+            conn, bundle, as_of='2025-12-31', force_refresh=True, fetch=provider,
+        )
+        assert synced['full_scope_reconciled'] is True
+        ensure_stage6b_schema(conn)
+        now = '2025-12-31T23:59:59Z'
+        with conn:
+            cursor = conn.execute(
+                '''INSERT INTO stage6b_historical_inventory_run(
+                       generated_asof,history_start,history_end,
+                       maximum_documents_per_issuer,selection_policy_sha256,
+                       status,replay_cutoff_count,target_filing_count,
+                       uncovered_target_count,metadata_json,created_at)
+                   VALUES(?,?,?,?,?,'PASS',0,0,0,'{}',?)''',
+                ('2025-12-31', '2024-01-01', '2025-12-31', 1, 'e' * 64, now),
+            )
+            inventory_run_id = int(cursor.lastrowid)
+            conn.execute(
+                '''INSERT INTO stage6b_historical_filing_inventory(
+                       inventory_run_id,ticker,accession_number,form_type,
+                       form_family,filing_date,accepted_at,report_date,
+                       primary_document,target_reason,existing_hydration_status,
+                       inventory_status,requires_index_discovery,
+                       requested_metrics_json,created_at)
+                   VALUES(?,? ,?,'8-K','event_report','2024-04-30',
+                          '2024-04-30T12:00:00Z','2024-03-31',?,
+                          'event_filing_requires_index_and_exhibit_classification',
+                          'hydrated','requires_filing_index_discovery',1,'[]',?)''',
+                (inventory_run_id, 'KO', event_accession, primary, now),
+            )
+        cache_dir = Path(bundle.payload['sec_fundamentals']['cache_dir'])
+        snapshot = hydrate_event_document_snapshot(
+            conn, bundle, as_of='2025-12-31',
+            inventory_run_id=inventory_run_id, cache_dir=cache_dir,
+            fetch=provider,
+        )
+        assert snapshot['indexed_filing_count'] == 1
+        assert snapshot['document_count'] == 2
+        roles = [tuple(row) for row in conn.execute(
+            '''SELECT document_name,document_role
+               FROM stage6b_event_document_snapshot
+               ORDER BY document_role DESC,document_name'''
+        )]
+        assert set(roles) == {
+            (primary, 'primary_event_filing'),
+            (exhibit, 'earnings_exhibit'),
+        }
+        bundle.payload['specialized_disclosure_census'][
+            'expected_applicability_rows'
+        ] = 1
+        manifest_path = tmp_path / 'event-source-manifest.csv'
+        result = build_stage6b_source_manifest(
+            conn, bundle, as_of='2025-12-31', cache_dir=cache_dir,
+            output_path=manifest_path,
+        )
+        assert result['document_count'] == 2
+        loaded = load_source_manifest(manifest_path)
+        key = ('KO', event_accession)
+        assert len(loaded.direct_documents[key]) == 2
+        rebound = _validate_consumer_defensive_direct_documents(
+            conn,
+            direct_filings=loaded.direct_filings,
+            direct_documents=loaded.direct_documents,
+            asof_date='2025-12-31', cache_dir=cache_dir,
+        )
+        assert {document.source_kind for document in rebound[key]} == {
+            'stage6b_event_sealed_cas'
+        }
+        replay = hydrate_event_document_snapshot(
+            conn, bundle, as_of='2025-12-31',
+            inventory_run_id=inventory_run_id, cache_dir=cache_dir,
+            cache_only=True,
+            fetch=lambda _url: (_ for _ in ()).throw(AssertionError()),
+        )
+        assert replay['immutable_replay'] is True
+        with pytest.raises(RuntimeError, match='different selection policy'):
+            hydrate_event_document_snapshot(
+                conn, bundle, as_of='2025-12-31',
+                inventory_run_id=inventory_run_id, cache_dir=cache_dir,
+                maximum_documents_per_filing=3, cache_only=True,
+            )
+    finally:
+        conn.close()
+
+
+def test_stage6b_historical_seal_canonicalizes_nonlexical_target_order(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared_db(tmp_path, 'historical-seal-order')
+    conn.execute("DELETE FROM dim_consumer_defensive_taxonomy WHERE ticker<>'KO'")
+    bundle.payload['sec_fundamentals']['documents_per_issuer'] = 1
+    older_accession = '0001193125-23-222222'
+    newer_accession = '0001193125-24-111111'
+    payload = _submissions(
+        form='10-K', accepted='2024-04-30T12:00:00Z',
+        document='z-current.htm', accession=newer_accession,
+    )
+    payload['filings']['recent'] = {
+        'accessionNumber': [newer_accession, older_accession],
+        'filingDate': ['2024-04-30', '2023-04-30'],
+        'acceptanceDateTime': [
+            '2024-04-30T12:00:00Z', '2023-04-30T12:00:00Z',
+        ],
+        'reportDate': ['2024-03-31', '2023-03-31'],
+        'form': ['10-K', '10-K'],
+        'primaryDocument': ['z-current.htm', 'a-history.htm'],
+    }
+    provider = Provider({'KO': payload})
+    try:
+        assert sync_sec_fundamentals(
+            conn, bundle, as_of='2025-12-31', force_refresh=True, fetch=provider,
+        )['full_scope_reconciled'] is True
+        ensure_stage6b_schema(conn)
+        now = '2025-12-31T23:59:59Z'
+        with conn:
+            cursor = conn.execute(
+                '''INSERT INTO stage6b_historical_inventory_run(
+                       generated_asof,history_start,history_end,
+                       maximum_documents_per_issuer,selection_policy_sha256,
+                       status,replay_cutoff_count,target_filing_count,
+                       uncovered_target_count,metadata_json,created_at)
+                   VALUES(?,?,?,?,?,'PASS',1,2,0,'{}',?)''',
+                ('2025-12-31', '2023-01-01', '2025-12-31', 1, 'q' * 64, now),
+            )
+            inventory_run_id = int(cursor.lastrowid)
+            conn.executemany(
+                '''INSERT INTO stage6b_historical_filing_inventory(
+                       inventory_run_id,ticker,accession_number,form_type,
+                       form_family,filing_date,accepted_at,report_date,
+                       primary_document,replay_sequence,replay_asof_date,
+                       capture_rank,target_reason,existing_hydration_status,
+                       inventory_status,requires_index_discovery,
+                       requested_metrics_json,created_at)
+                   VALUES(?, 'KO',?,'10-K','annual',?,?,?, ?,1,?,1,
+                          'periodic_financial_filing','missing',
+                          'planned_chronological_replay',0,'[]',?)''',
+                [
+                    (
+                        inventory_run_id, newer_accession, '2024-04-30',
+                        '2024-04-30T12:00:00Z', '2024-03-31', 'z-current.htm',
+                        '2024-04-30', now,
+                    ),
+                    (
+                        inventory_run_id, older_accession, '2023-04-30',
+                        '2023-04-30T12:00:00Z', '2023-03-31', 'a-history.htm',
+                        '2023-04-30', now,
+                    ),
+                ],
+            )
+        result = hydrate_historical_document_snapshot(
+            conn, bundle, as_of='2025-12-31',
+            inventory_run_id=inventory_run_id,
+            cache_dir=Path(bundle.payload['sec_fundamentals']['cache_dir']),
+            fetch=provider,
+        )
+        assert result['status'] == 'PASS'
+        manifest = json.loads(conn.execute(
+            '''SELECT manifest_json
+               FROM stage6b_historical_document_snapshot_run
+               WHERE snapshot_run_id=?''', (result['snapshot_run_id'],)
+        ).fetchone()[0])
+        logical_paths = [row['logical_path'] for row in manifest]
+        assert logical_paths == sorted(logical_paths)
     finally:
         conn.close()
 

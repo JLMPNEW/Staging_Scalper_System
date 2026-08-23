@@ -163,7 +163,7 @@ Acceptance tests:
 - SEC seals use a global immutable SHA-256 CAS plus contained date-local `sealed/YYYY-MM-DD` objects. Mutable acquisition aliases are never the immutable hardlink source. Canonical relative paths, nested document names, quoted URL segments, reserved names, symlinks, hashes, sizes, and resolved containment all fail closed on mismatch.
 - Cache-only SEC reuse requires an exact current config, scope, complete reconciliation, lifecycle state, and verified date seal. The census reads only selected bytes from that seal, never a mutable alias or documents accumulated outside the snapshot.
 - Before Stage 5, the stratified review in `CENSUS_TERMINOLOGY_AUDIT_2026-08-11.md` checks obvious census false positives and false negatives across cohorts/subtypes; this is terminology QA, not parser promotion.
-- The shared parser's Consumer Defensive fail-closed catalog/direct-document intake boundary is implemented, but it is not a Consumer Defensive specialized-metric implementation. The sector adapter, historical filing/document inventory, shadow extraction, census reconciliation, golden corpus, and any promotion decision remain Stage 6B work. Production promotion is disabled.
+- The shared parser's Consumer Defensive fail-closed catalog/direct-document intake boundary and the sector-owned measurement-only adapter are implemented. Historical filing/document inventory, additional golden-corpus review, and any production promotion decision remain Stage 6B work. Production promotion is disabled.
 - Stage 4 must be run across the complete loaded active/historical taxonomy before Stage 5 begins; the limited KO smoke test verifies plumbing only and is not the Stage 4 completion gate.
 
 The `2026-08-11` report is retained only as a legacy pre-hardening baseline. The fresh isolated chronological v5 replay completed under schema migration v9, SEC ingestion-config v8, and issuer-scope v3 without writing the production database. SEC reconciliation covered all 119 issuers with zero failures: 209,111 associations, 208,705 unique accessions, 406 shared accessions, 2,149,695 raw facts, and 952 selected sealed documents. The 1,287-file SEC cache manifest is 947,150,199 bytes with SHA-256 `caf6d962f05485aa46a123bc488d32f53b851dc3b7f0e338e7adea3af6fd669c`; the association SHA-256 is `d1300f5fd1eb15b3dd1431b2f9312c4f5658df9689c5c2a9f8c6fd31437fa540`.
@@ -172,7 +172,7 @@ A fresh chronological migration-v10 replay began from an empty database and cons
 
 The official `2010-01-01` through `2026-08-10` FX cache-only replay accepted 12 currencies and published 49,867 rates, including 49,815 usable and 52 quarantined. Its exact 12-file, 5,694,168-byte range manifest has SHA-256 `99deee8510b8e10b4ed581930fe1ad7f06fa01c67f9532563809126f19e486f6`. CLF is the sole source gap: its preserved payload has only an observation after the cutoff, so the sync correctly exits nonzero with partial status. CLF is not required by any selected canonical fact; all five required currencies are covered and `canonical_fx_missing` is zero. This upstream gap is disclosed but does not add a validator failure.
 
-The Companyfacts/inline-XBRL code gate and generated 10-row stratified terminology adjudication are resolved. Census parser v3 removes standalone `sales leaders`, retains the representative-specific triggers, and the accepted `2026-08-10` sample remains bound to its exact seal. The explicitly approved production rollout completed at the existing `2026-08-11` watermark after a verified pre-change backup and backup-only rehearsal. Migrations v2-v10 are complete; production has 2,153,234 raw facts, 231,066 canonical facts, 49,879 FX rows, 119 features, 4,522 current census-v3 summaries, and 778 census-v3 evidence rows. Its exact reconciliation covers 119 issuers, 209,031 active associations, 208,625 active accessions, and 406 shared accessions, with 131 associations retired non-destructively. The live Stage 4 validator passes 40/40, `integrity_check=ok`, and the full code suite is 402 passed with 6 platform-specific skips. Stage 4 is closed for production; current-date seal completeness still does not satisfy Stage 6B's separate historical filing/document inventory requirement.
+The Companyfacts/inline-XBRL code gate and generated 10-row stratified terminology adjudication are resolved. Census parser v3 removes standalone `sales leaders`, retains the representative-specific triggers, and the accepted `2026-08-10` sample remains bound to its exact seal. The explicitly approved production rollout completed at the existing `2026-08-11` watermark after a verified pre-change backup and backup-only rehearsal. Migrations v2-v10 are complete; production has 2,153,234 raw facts, 231,066 canonical facts, 49,879 FX rows, 119 features, 4,522 current census-v3 summaries, and 778 census-v3 evidence rows. Its exact reconciliation covers 119 issuers, 209,031 active associations, 208,625 active accessions, and 406 shared accessions, with 131 associations retired non-destructively. The live Stage 4 validator passes 40/40 and `integrity_check=ok`. Stage 4 is closed for production; Stage 6B's separate historical document requirement is now satisfied by its immutable v3 snapshot without reverse-mutating production.
 
 The pre-fix production rerun was aborted after more than 18 minutes because issuer replacement lacked an index on the canonical foreign-key child, used a raw index that did not exactly match the ticker/source/accepted-time delete, and inserted raw facts row by row. The implemented `idx_stage4_canonical_raw_fact_id`, exact `idx_stage4_raw_ticker_source_accepted`, and per-issuer bulk insert fix that query shape. The historical 48.2-second isolated result predates the current full reconciliation/sealing contract and is not a current end-to-end performance claim. Query-plan regression tests must continue to prove both delete paths use their intended indexes.
 
@@ -229,28 +229,64 @@ Acceptance tests:
 - Missing values are not converted to neutral observations.
 - Required core components have sufficient cross-sectional variance.
 
+Implemented run order:
+
+```powershell
+python consumer_defensive\scripts\12_build_consumer_defensive_scoring_features.py --as-of YYYY-MM-DD
+python consumer_defensive\scripts\12a_validate_consumer_defensive_scoring_features.py --as-of YYYY-MM-DD
+```
+
+Isolated acceptance at `2026-08-11` is PASS, 20/20 checks. The exact PIT matrix has 108 inputs and 5,940 components: 17 common and 38 specialized identities per issuer. Ninety-four inputs are rank-ready and 14 retain explicit financial-evidence review reasons (`87.04%`, above the frozen `85%` floor). Every component has deterministic contract/observation lineage, every specialized row remains `not_loaded` or `not_applicable`, and all model outputs, ranks, portfolio gates, and nonzero weights are absent. Contract SHA-256: `6ed3217de16d0f5d15fd2c8226ec696ac5e92744ea85d175d9a2c731e80a804d`.
+
 ## Stage 6B - Specialized Cohort Overlays And Dedicated Parser
 
 Goal: determine which registered candidate metrics are technically usable and apply valid overlays without changing the Stage 6A table shape.
 
-Planned order:
+Implemented current-date order:
 
 1. freeze the Consumer Defensive metric definitions, cohort/subtype applicability, unit, period, scope, and plausibility policies;
 2. implement the Consumer Defensive-owned dedicated-parser adapter without importing another sector adapter;
-3. build the complete PIT historical filing/document inventory required from `2019-01-02`, reconcile it to exact Stage 4 date seals, then run plan-only completeness and hydrate missing eligible documents through Stage 4;
+3. generate the adaptive filing inventory from `2019-01-02`, hydrate its governed primary documents into the Stage 6B-owned immutable CAS, then classify each 8-K/6-K index and seal only the primary and role-qualified results exhibits without reverse-mutating Stage 4;
 4. run dedicated-parser shadow extraction and reconcile parser results to Stage 4 census hits and misses;
 5. build and pass a reviewed Consumer Defensive golden corpus containing positive and prohibited expectations;
 6. adjudicate evidence and implement PIT numeric extraction only for technically viable metrics;
 7. build specialized features and apply only validated zero-to-nonzero overlay candidates; and
 8. re-run the unchanged Stage 6A/6B scoring-contract validation.
 
+The `2026-08-14` isolated evidence now exercises schema v5 end to end. The 3,061-document annual/quarterly core seal remains `f909e150f351fa011ea86e522da7dd64902719b5cc8ab21018a9aa53cb4282cf`. The event snapshot classifies all 11,596 candidates and seals 20,001 documents (11,596 primaries plus 8,405 results exhibits) as 43,193 immutable objects totaling 4,096,674,161 bytes. Its manifest is `d2647c2ec17a8aab901aa9d33bd77a183571d2791406ef5a1c73fb54e404d94e`, and cache-only replay reproduces the exact document count and hash without network access.
+
+The retained v1.9/terms-v3 run remains the comparison baseline at 355/1,079 all-taxonomy pairs (`32.90%`). The final adapter-v3.6/terms-v6 run reuses the exact 14,673-filing/23,078-document manifest (`dc0089866889a0a09e567fa4eb725539bdaa98c806f2e82017ba7b55672e9b6b`). Parser run 26 completed 14,673/14,673 work items with zero failures, linked 14,606 unchanged non-PDF items, and executed only 67 PDF-bearing items. Bounded Tesseract 5.3.4 OCR produced 29 review-required rows across six DEO/STZ metric pairs and reduced evidence-level PDF failures from 72 to 32; 26 non-OCR pairs remain explicitly ambiguous. Measurement run 23 remains the idempotent accepted result at 3,820 observations (3,587 parser plus 233 exact financial derivations), zero conflict groups, and 478/1,079 all-taxonomy pairs (`44.30%`). SEC-addressable coverage is 477/1,022 (`46.67%`), current-live coverage is 457/971 (`47.06%`), and current-live SEC-addressable coverage is 456/916 (`49.78%`). OCR does not change those counts before review. All ten Stage 6B validation checks pass; the policy hash is `c616a5a630ccf9720773fcfcfb01490c4acdf14622d82ee1d6a0a439821845d3`; all measurements remain zero-weight.
+
+The review gate is executable rather than manual-file plumbing. Script `13i` emits the exact 26-pair/263-row ambiguity pack plus a separate 29-row/six-pair OCR pack with policy-ready fields and immutable provenance; script `13j` replays enabled exact decisions into a standard zero-provider parser run before calling the unchanged Stage 6B measurement builder. OCR work is bounded by document/page/byte/pixel/time limits, OCR evidence is always review-only, and OCR contract v2 invalidates only OCR-enabled PDF work keys. The governed Conda runtime is Tesseract 5.3.4 with explicit English language-data binding. Four PDFs remain blocked by the unchanged byte/page caps and are not authorized by simply enabling OCR.
+
+The latest measured implementation is schema v6, adapter v3.18, and terms v8. Isolated parser run 42 completed 14,673 filings and 23,078 documents with zero failed work; measurement run 37 passed 10/10 checks with zero conflicts. Coverage is 542/1,079 (50.23%) for all taxonomy pairs, 541/1,022 (52.94%) for SEC-addressable pairs, 505/971 (52.01%) for current-live pairs, and 504/916 (55.02%) for current-live SEC-addressable pairs. Historical depth is 8,816 accepted observations, 7,008 issuer-periods, and 461 multi-period issuer/metric pairs. Relative to v3.17, the run adds 30 all-taxonomy pairs, 30 SEC-addressable pairs, 17 current-live SEC-addressable pairs, and 4,438 observations. The remaining SEC-addressable denominator is partitioned into 423 metric-targeted corpus/no-candidate pairs, 54 selective disclosures not confirmed, zero review-required pairs, and 4 parser-failure pairs. The optional `13k` recovery manifest remains restricted to those exact sealed-PDF parser failures; its maximum breadth gain is four pairs and OCR remains review-required.
+
+Historical planning and recall commands:
+
+```powershell
+python consumer_defensive\scripts\13d_build_consumer_defensive_historical_inventory.py --db <planning-db> --as-of 2026-08-14 --history-start 2019-01-02
+python consumer_defensive\scripts\13g_hydrate_consumer_defensive_historical_documents.py --db <stage6b-db> --inventory-run-id <run-id> --sec-cache-dir <dedicated-sec-cache> --as-of 2026-08-14 --output-dir <stage6b-output>
+python consumer_defensive\scripts\13h_hydrate_consumer_defensive_event_documents.py --db <stage6b-db> --inventory-run-id <run-id> --sec-cache-dir <dedicated-sec-cache> --as-of 2026-08-14 --output-dir <stage6b-output>
+python consumer_defensive\scripts\13_build_consumer_defensive_specialized_parser_manifest.py --db <stage6b-db> --as-of 2026-08-14 --cache-dir <dedicated-sec-cache> --output-dir <stage6b-output>
+python consumer_defensive\scripts\13a_run_consumer_defensive_specialized_parser.py --db <stage6b-db> --as-of 2026-08-14 --source-manifest <stage6b-source-manifest.csv> --output-dir <parser-output>
+python consumer_defensive\scripts\13b_build_consumer_defensive_specialized_metrics.py --db <stage6b-db> --as-of 2026-08-14 --cache-dir <dedicated-sec-cache> --source-manifest <stage6b-source-manifest.csv> --output-dir <stage6b-output>
+python consumer_defensive\scripts\13e_audit_consumer_defensive_specialized_recall.py --db <stage6b-db> --as-of 2026-08-14 --matrix consumer_staples_distribution_retail=<reviewed-retail.csv> --matrix packaged_foods_agricultural_products=<reviewed-food.csv>
+```
+
+The planner and hydrators coordinate with existing filing metadata but do not authorize reverse writes to the populated canonical Stage 4 tables or watermark. The retained inventory covers all 3,061 governed core filings with zero uncovered targets and all 11,596 event candidates. The v5 `13h` path is now executed and cache-only replayed; both primary and event seals are reusable for incremental snapshots. The older 100-cutoff `13f` executor remains available only as a diagnostic/full-rebuild fallback.
+
 Acceptance tests:
 
 - Coverage and attrition are reported by cohort, subtype, metric, form, and extraction channel.
+- Coverage reports preserve the all-registered denominator and separately identify SEC-addressable and non-SEC expectations.
+- Every core historical filing has a proven replay cutoff/capture rank or the inventory gate fails; an event filing remains unavailable unless its index and selected documents validate, its primary is present exactly once, and its policy-bound event seal is complete.
+- Reviewed expectation matrices are recall labels only and cannot promote an observation without filing evidence.
 - The parser is supplied an independently computed expected ingestion-config hash plus paired direct filings/documents. The filing set must match the current PIT parser view; every supplied document must match an active PIT bridge row and immutable seal; and the filing/document keysets must be exact.
 - Direct document paths remain inside the sealed accession root and match manifest hash/size identity; traversal, absolute paths, reserved names, case collisions, and symlink escape fail closed.
 - Applicability, units, definitions, amendments, and acceptance timestamps are versioned.
 - Definition conflicts and insufficient coverage remain review or measurement-only.
+- Reviewed replay preserves the immutable base run, performs zero provider/OCR invocations, and materializes an idempotent parser run whose evidence count matches the completed evaluation.
+- OCR-derived evidence cannot qualify automatically and must retain engine, page, DPI, document-hash, and extraction-method provenance.
 - Stage 6B cannot add a nonzero production weight.
 - The Stage 6A contract still validates after overlay application.
 
@@ -259,11 +295,13 @@ Acceptance tests:
 
 Goal: after Stage 6A and Stage 6B are fixed, build and validate the exact point-in-time feature panel that signal diagnostics, factor validation, calibration, and eventual dated-file backfill will use.
 
-Planned run order:
+Implemented run order:
 
 ```powershell
-python consumer_defensive\scripts\14_build_consumer_defensive_historical_feature_panel.py
-python consumer_defensive\scripts\14a_validate_consumer_defensive_historical_feature_panel.py
+python consumer_defensive\scripts\14_build_consumer_defensive_stage6c_panel.py --as-of YYYY-MM-DD
+python consumer_defensive\scripts\14a_validate_consumer_defensive_stage6c_panel.py --stage6c-run-id <run-id>
+python consumer_defensive\scripts\15_run_consumer_defensive_factor_validation.py --stage6c-run-id <run-id> --stage6c-dir <stage6c-output-dir>
+python consumer_defensive\scripts\15a_validate_consumer_defensive_factor_validation.py --campaign-id <campaign-id>
 ```
 
 Acceptance tests:
@@ -275,6 +313,14 @@ Acceptance tests:
 - Daily overall and cohort breadth, per-feature coverage, attrition reasons, and the earliest reproducible date are published.
 - Rebuilding with identical inputs produces identical row counts and content hashes.
 - The audit creates research-panel artifacts only. It does not create final scores, ranks, Portfolio Layer candidates, or claim strict OOS history.
+- Selective SEC disclosures such as market-share changes remain in the measurement panel but are excluded from factor validation until a separate coverage-bias policy is validated.
+- The Consumer Defensive adapter uses the shared top-level `factor_validation` statistical kernel; it does not import Technology scripts or write production scores.
+
+Measured acceptance at `2026-08-14` is PASS. Stage 6C run 1 contains 81,221 rows, 30,309 numeric rows, 86 monthly evaluation dates, all 38 metrics, and exact panel SHA-256 `1c83868c680e5cb9e5a5533760c25a03df3824dfdc22abd2eb946c188dc5e479`; all 10 checks pass. Shared campaign `cdfv_20260814_1c83868c680e_0b1ba11163e0` validates cleanly with 276 sector/cohort cells and 77 evidence-eligible cells, but none passes the sealed 5% family FDR gate (best raw p-value `0.155087`). This is a valid negative research result: production weights stay zero, and Stage 7 cannot infer or optimize nonzero specialized weights from coverage alone.
+
+Scoring-feature definition v2 makes the missing-data policy explicit. A metric that is not applicable to a ticker's reviewed cohort/subtype is excluded from that ticker's specialized completeness denominator. A missing applicable metric remains null, contributes zero, and does not cause the weights of available metrics to be increased. Full-data confidence counts accepted specialized observations, and cohort overlay weights can activate only from shared factor-validation evidence accepted for that cohort.
+
+The retained Stage 6B replay database contains no Stage 5 positioning rows. A fresh scoring-feature v2 rebuild there passes 19/20 structural checks but is 0/108 rank-ready, correctly failing the 85% readiness floor. It is suitable for sealed specialized Stage 6C research, not Stage 7 scoring. The Stage 7 rehearsal must use a full-stack isolated clone with Stage 5 positioning present, then rebuild Stage 6A v2 and reapply the Stage 6B measurement overlay.
 
 This is the definitive historical-readiness audit. The Stage 5 audit is only a foundation-coverage checkpoint.
 

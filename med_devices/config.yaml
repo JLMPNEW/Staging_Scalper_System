@@ -11,6 +11,7 @@ med_devices_refresh_pipeline:
   enable_financial_baseline_qa_step: true  # post-scoring QA publisher (script 07)
   enable_share_count_qa_step: true  # post-scoring QA publisher (script 19)
   optional_external_steps:
+    - 82_sync_clinical_trials
     - 53_sync_ibkr_borrow
     - 55_sync_finra_short_volume
     - 65_update_finra_short_interest
@@ -25,6 +26,10 @@ med_devices_refresh_pipeline:
     - ticker
     - portfolio_candidate_gate
     - portfolio_candidate_score
+    - tier1_safety_policy_version
+    - tier1_safety_strict_pass_flag
+    - tier1_safety_balanced_pass_flag
+    - tier1_safety_tolerated_reason
     - composite_score
     - safe_core_score
     - ic_tilted_composite_score
@@ -155,6 +160,67 @@ universe_validation:
       listing_status: active
       reviewed_at: "2026-08-15"
       reason: "former_nasdaq_listing_delisted_active_otc_security_is_research_only_and_non_investable"
+  security_identity_overrides:
+    ALMR:
+      cik: "0002104204"
+      cusip: "010911105"
+      listing_start_date: "2026-04-17"
+      reviewed_at: "2026-08-21"
+      reason: "audited_ipo_identity_and_listing_start"
+    LMRI:
+      cik: "0002071288"
+      cusip: "550249106"
+      listing_start_date: "2025-12-11"
+      reviewed_at: "2026-08-21"
+      reason: "audited_ipo_identity_and_listing_start"
+    MOBI:
+      cik: "0001489993"
+      cusip: "60705V103"
+      listing_start_date: "2026-05-08"
+      reviewed_at: "2026-08-21"
+      reason: "audited_ipo_identity_and_listing_start"
+    SI:
+      cik: "0001699350"
+      cusip: "82537J108"
+      listing_start_date: "2025-07-31"
+      reviewed_at: "2026-08-21"
+      reason: "ticker_reuse_guard_shoulder_innovations_not_silvergate_capital"
+    BBNX:
+      cik: "0001674632"
+      cusip: "08659B102"
+      listing_start_date: "2025-01-30"
+      reviewed_at: "2026-08-22"
+      reason: "audited_ipo_identity_and_listing_start"
+    BLLN:
+      cik: "0002070849"
+      cusip: "090168105"
+      listing_start_date: "2025-11-06"
+      reviewed_at: "2026-08-22"
+      reason: "audited_ipo_identity_and_listing_start"
+    FLGT:
+      cik: "0001674930"
+      cusip: "359664109"
+      listing_start_date: "2016-09-29"
+      reviewed_at: "2026-08-22"
+      reason: "audited_ipo_identity_and_listing_start"
+    FRNM:
+      cik: "0002017526"
+      cusip: "35661P100"
+      listing_start_date: "2026-07-21"
+      reviewed_at: "2026-08-22"
+      reason: "ticker_transition_guard_freenome_not_precombination_pcsc_history"
+    LNSR:
+      cik: "0001320350"
+      cusip: "52634L108"
+      listing_start_date: "2020-10-01"
+      reviewed_at: "2026-08-22"
+      reason: "audited_spin_off_identity_and_listing_start"
+    PRPO:
+      cik: "0001043961"
+      cusip: "74019L602"
+      listing_start_date: "2017-06-30"
+      reviewed_at: "2026-08-22"
+      reason: "ticker_transition_guard_precipio_not_premerger_transgenomic_history"
   non_investable_listing_statuses:
     - active_financial_status_d
     - active_financial_status_e
@@ -520,6 +586,11 @@ financial_features:
   winsor_high_pct: 0.90
   ttm_sanity_min_annual_ratio: 0.20
   ttm_sanity_max_annual_ratio: 3.00
+  financial_history_start_by_ticker:
+    FRNM: "2026-07-21"
+    PRPO: "2017-06-30"
+  expected_precommercial_missing_revenue:
+    FRNM: "precommercial_no_reported_revenue_history"
   fundamental_component_weights:
     gross_margin: 0.13
     operating_margin: 0.13
@@ -672,6 +743,15 @@ fda_entity_linking:
   max_candidate_summary: 5
   high_volume_unmapped_record_threshold: 50
   update_fact_company_ids: true
+
+clinical_trial_ingestion:
+  source_id: "clinicaltrials_v2"
+  base_url: "https://clinicaltrials.gov/api/v2/studies"
+  mapping_reviews_csv: "data/clinical_trial_mapping_reviews.csv"
+  output_csv: "../output/med_devices_reports/med_device_clinical_trial_audit.csv"
+  timeout_sec: 30.0
+  max_retries: 3
+  user_agent: "${MED_DEVICES_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
 
 fda_mapping_governance:
   run_after_linking: true
@@ -1316,6 +1396,19 @@ scoring:
     min_safe_core_cohort_percentile: 50.0
     safe_core_watchlist_min_score: 58.0
     allow_safe_core_gate_substitution: false
+    # Effective-dated balanced path: one bounded quality/valuation/growth/value-trap
+    # miss may pass only when the independent safe-core surface is strong. Structural,
+    # regulatory, liquidity, reimbursement, template, and technical-breakdown vetoes
+    # remain hard. This expands consideration without lowering the hard-risk perimeter.
+    allow_balanced_soft_miss: true
+    balanced_soft_miss_effective_from: "2026-08-21"
+    balanced_soft_miss_reviewed_at: "2026-08-21"
+    balanced_policy_version: "tier1_balanced_safe_core_v1_20260821"
+    balanced_min_composite_score: 55.0
+    balanced_max_fundamental_shortfall: 12.0
+    balanced_max_valuation_shortfall: 12.0
+    balanced_max_durable_growth_shortfall: 10.0
+    balanced_max_value_trap_excess: 5.0
     require_explicit_template_tier1_eligibility: true
     disallow_pullback_templates: true
     disallow_inverse_core_templates: true
@@ -1326,6 +1419,19 @@ scoring:
       - "risk_only"
       - "binary"
       - "special_situation"
+  # Portfolio candidates are broader than Tier 1. This bounded path admits only
+  # high-confidence rows that pass every ordinary production gate and use a
+  # Tier-1-eligible cohort template; Tier-1 and safe-core labels remain unchanged.
+  portfolio_candidate_policy:
+    enabled: true
+    effective_from: "2026-08-24"
+    reviewed_at: "2026-08-22"
+    policy_version: "allocation_candidate_v1_20260824"
+    min_composite_score: 50.0
+    high_confidence_composite_score: 55.0
+    min_score_confidence: 0.75
+    min_listing_history_calendar_days: 180
+    require_tier1_eligible_template: true
   pullback_candidate_tags:
     enabled: true
     report_only: true

@@ -21,7 +21,7 @@ review-policy registry. Completed keys are skipped.
 
 ### Consumer Defensive sealed-input boundary
 
-Consumer Defensive does not let the shared parser discover documents from a mutable archive. Its Stage 4 integration supplies a PIT filing list and a paired direct-document binding from the Consumer Defensive filing/company and document/company bridges. The filing set must match the active Consumer Defensive parser view for the requested date; every supplied document must be an active hydrated PIT bridge row whose metadata and bytes match the exact seal, and the filing/document keysets must be identical.
+Consumer Defensive does not let the shared parser discover documents from a mutable archive. Its Stage 4/Stage 6B integration supplies a PIT filing list and a paired direct-document binding. The filing set must match the active Consumer Defensive parser view for the requested date. A Stage 4 primary must match its active hydrated document/company bridge and exact Stage 4 seal; a historical primary must match the governed historical snapshot; and an 8-K/6-K primary or exhibit must match the role-classified Stage 6B event snapshot and its exact seal. Filing/document keysets remain identical.
 
 Planning fails closed unless all of the following agree:
 
@@ -33,9 +33,9 @@ Planning fails closed unless all of the following agree:
 - complete append-only filing/company lifecycle events and their deterministic hashes; and
 - the exact direct filing/document keysets, metadata, primary-document identity, byte counts, and SHA-256 values.
 
-Consumer Defensive documents are read only from the verified immutable `sealed/YYYY-MM-DD` snapshot. Stage 4 builds each date seal from a global immutable `objects/sha256/<digest>` content-addressed store, never directly from a mutable acquisition alias. The parser requires canonical seal-relative paths, resolves every source beneath the configured cache and accession roots, and rejects traversal, absolute paths, URL query/fragment tricks, Windows reserved names, case-insensitive collisions, unsupported hydration suffixes, and symlink escape. Safe nested SEC archive paths remain supported.
+Consumer Defensive documents are read only from verified immutable Stage 4 or Stage 6B snapshot roots. Stage 4 and Stage 6B build date/run seals from immutable `objects/sha256/<digest>` content-addressed objects, never directly from mutable acquisition aliases. The parser requires canonical seal-relative paths, resolves every source beneath the configured cache roots, and rejects traversal, absolute paths, URL query/fragment tricks, Windows reserved names, case-insensitive collisions, unsupported hydration suffixes, and symlink escape. Safe nested SEC archive paths remain supported.
 
-These controls implement the shared-kernel intake boundary only. They do not implement a Consumer Defensive specialized-metric adapter, approve evidence, or make Stage 4 census phrase hits numeric observations. Consumer Defensive production promotion is hard-disabled. Stage 6B must still freeze metric policies, implement the sector-owned adapter, build the complete PIT historical filing/document inventory from `2019-01-02`, run shadow extraction and census reconciliation, pass a reviewed golden corpus, and satisfy explicit promotion governance. A current-date seal is not proof of historical document readiness.
+These controls implement the shared-kernel intake boundary. Consumer Defensive now supplies its own Stage 6B adapter and measurement-only shadow workflow; Stage 4 census phrase hits still never become numeric observations by themselves. Production promotion remains hard-disabled. The complete PIT filing/document inventory from `2019-01-02`, expanded reviewed golden corpus, and explicit promotion governance are still required. A current-date seal and measurement-only run are not proof of historical document readiness.
 
 ## Provider Roles
 
@@ -63,6 +63,23 @@ PDFs use native text extraction first. Optional OCR requires PyMuPDF,
 Pytesseract, Pillow, and a host Tesseract executable. If OCR is unavailable or
 conversion fails, the affected observation is classified `PARSER_FAILURE`; it
 is not mislabeled as issuer non-disclosure.
+
+OCR execution is explicitly bounded by total PDF pages/bytes/time, a separate
+OCR page limit, DPI, per-page Tesseract timeout, and maximum rendered pixels.
+The engine is preflighted before page rendering. Every OCR candidate carries
+engine/version/page/DPI provenance and is forced to `REVIEW_REQUIRED` with
+confidence at most `0.80`; OCR text can never become accepted evidence without
+an enabled exact review policy. Policy replay may optionally materialize its
+completed evaluation as an idempotent standard parser run. That run links the
+base work and normalized facts, stores evaluated evidence under new immutable
+keys, and records zero document/provider/OCR activity so downstream sector
+measurement builders can consume it without reparsing.
+
+On Windows Conda deployments the adapter resolves both the environment-owned
+Tesseract executable and `eng.traineddata`; only portable binding labels are
+stored in provenance. OCR contract v2 is included only in OCR-enabled PDF work
+keys, so runtime-contract corrections reprocess PDF work without invalidating
+completed HTML/XML work.
 
 Neither provider is allowed to fetch a filing during the current cache-first
 pilot. Network acquisition remains the responsibility of the existing SEC

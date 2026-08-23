@@ -30,6 +30,7 @@ from biotech_index.core.db import (  # noqa: E402
     start_run,
     utc_now,
 )
+from biotech_index.core.financial_survival import cash_runway_is_reliable  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.market_policy import scoring_market_sources, select_latest_rows_by_source_priority  # noqa: E402
 from biotech_index.core.pipeline_guards import (  # noqa: E402
@@ -39,6 +40,10 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     validate_nonempty_selection,
 )
 from biotech_index.core.report_inputs import resolve_dated_report_input_csv  # noqa: E402
+from biotech_index.core.security_identity import (  # noqa: E402
+    identity_start_dates_by_company,
+    load_security_identity_rules,
+)
 from biotech_index.core.scoring_math import (  # noqa: E402
     decomposed_risk_penalty_input,
     weighted_predictive_risk_penalty_input,
@@ -491,8 +496,8 @@ def apply_trial_status_overrides(
                 return 3.0
 
             for idx, row in out.loc[mask].iterrows():
-                current = pd.to_numeric(pd.Series([row.get("trial_score")]), errors="coerce").fillna(0.0).iloc[0]
-                out.at[idx, "trial_score"] = str(round(max(float(current), score_floor(row)), 4))
+                current = to_float(row.get("trial_score"), 0.0)
+                out.at[idx, "trial_score"] = str(round(max(current, score_floor(row)), 4))
         elif status.lower() in NON_ACTIVE_MILESTONE_OUTCOME_STATUSES:
             out.loc[mask, "is_therapeutic"] = "True"
             out.loc[mask, "qualifying_trial"] = "True"
@@ -522,8 +527,8 @@ def apply_trial_status_overrides(
                 return 0.5
 
             for idx, row in out.loc[mask].iterrows():
-                current = pd.to_numeric(pd.Series([row.get("trial_score")]), errors="coerce").fillna(0.0).iloc[0]
-                out.at[idx, "trial_score"] = str(round(max(float(current), milestone_score_floor(row)), 4))
+                current = to_float(row.get("trial_score"), 0.0)
+                out.at[idx, "trial_score"] = str(round(max(current, milestone_score_floor(row)), 4))
     return out
 
 
@@ -743,6 +748,11 @@ def load_forward_catalyst_calendar(path: Path | None, asof_date: date, *, lookah
         ticker = normalize_ticker(record.get("ticker") or record.get("symbol"))
         event_date = parse_date(record.get("event_date") or record.get("catalyst_date") or record.get("date"))
         if not ticker or event_date is None:
+            continue
+        source_asof = parse_date(
+            record.get("filing_date") or record.get("snapshot_asof") or record.get("asof_date")
+        )
+        if source_asof is not None and source_asof > asof_date:
             continue
         days_until = (event_date - asof_date).days
         if days_until < 0 or days_until > lookahead_days:
@@ -1551,29 +1561,45 @@ def load_latest_governance_features(conn: sqlite3.Connection, asof_date: date) -
     return {int(row["company_id"]): dict(row) for row in rows}
 
 
-def load_recent_sec_filing_summary(conn: sqlite3.Connection, asof_date: date, *, lookback_days: int = 730) -> dict[int, dict[str, int]]:
+def load_recent_sec_filing_summary(
+    conn: sqlite3.Connection,
+    asof_date: date,
+    *,
+    lookback_days: int = 730,
+    identity_start_dates: dict[int, date] | None = None,
+) -> dict[int, dict[str, int]]:
     cutoff = (asof_date - timedelta(days=max(1, lookback_days))).isoformat()
     rows = conn.execute(
         """
-        SELECT company_id, form, COUNT(*) AS n
+        SELECT company_id, form, filing_date
         FROM sec_filings
         WHERE filing_date >= ?
           AND filing_date <= ?
-        GROUP BY company_id, form
         """,
         (cutoff, asof_date.isoformat()),
     ).fetchall()
+    floors = identity_start_dates or {}
     out: dict[int, dict[str, int]] = {}
     for row in rows:
         company_id = int(row["company_id"])
+        filing_date = parse_date(row["filing_date"])
+        identity_start = floors.get(company_id)
+        if identity_start is not None and (filing_date is None or filing_date < identity_start):
+            continue
         form = str(row["form"] or "").upper()
-        bucket = out.setdefault(company_id, {"recent_sec_filing_count_2y": 0, "recent_current_report_count_2y": 0, "recent_nt_filing_count_2y": 0})
-        count = int(row["n"] or 0)
-        bucket["recent_sec_filing_count_2y"] += count
+        bucket = out.setdefault(
+            company_id,
+            {
+                "recent_sec_filing_count_2y": 0,
+                "recent_current_report_count_2y": 0,
+                "recent_nt_filing_count_2y": 0,
+            },
+        )
+        bucket["recent_sec_filing_count_2y"] += 1
         if form in {"8-K", "8-K/A", "6-K", "6-K/A"}:
-            bucket["recent_current_report_count_2y"] += count
+            bucket["recent_current_report_count_2y"] += 1
         if form.startswith("NT "):
-            bucket["recent_nt_filing_count_2y"] += count
+            bucket["recent_nt_filing_count_2y"] += 1
     return out
 
 
@@ -1668,6 +1694,7 @@ def load_recent_sec_event_summary(
     lookback_days: int = 730,
     sec_catalyst_half_life_days: float = 90.0,
     sec_catalyst_event_weights: dict[str, float] | None = None,
+    identity_start_dates: dict[int, date] | None = None,
 ) -> dict[int, dict[str, Any]]:
     event_weights = sec_catalyst_event_weights or SEC_CATALYST_EVENT_WEIGHTS
     cutoff = (asof_date - timedelta(days=max(1, lookback_days))).isoformat()
@@ -1684,12 +1711,17 @@ def load_recent_sec_event_summary(
     summary: dict[int, dict[str, Any]] = {}
     per_company_seen: dict[int, int] = {}
     seen_count_keys: set[tuple[int, str, str, str]] = set()
+    floors = identity_start_dates or {}
     for row in event_rows:
+        company_id = int(row["company_id"])
+        filing_date_value = parse_date(row["filing_date"])
+        identity_start = floors.get(company_id)
+        if identity_start is not None and (filing_date_value is None or filing_date_value < identity_start):
+            continue
         event_type = str(row["event_type"] or "")
         excerpt = str(row["extracted_text"] or "")
         if not is_actionable_sec_event(event_type, excerpt):
             continue
-        company_id = int(row["company_id"])
         filing_date = str(row["filing_date"] or "")
         polarity = str(row["polarity"] or "neutral")
         accession = str(row["accession_nodash"] or "")
@@ -2053,6 +2085,7 @@ def compute_feature_row(
     survival_score_for_calc = survival_score if math.isfinite(survival_score) else 45.0
     survival_quality = str(survival.get("data_quality") if survival else "").strip().lower()
     cash_runway_months = to_float(survival.get("cash_runway_months") if survival else None, math.nan)
+    cash_runway_reliable_flag = cash_runway_is_reliable(survival)
     severe_runway_raw = survival.get("severe_runway_flag") if survival else None
     short_runway_raw = survival.get("short_runway_flag") if survival else None
     severe_runway_flag = (
@@ -2305,10 +2338,14 @@ def compute_feature_row(
             filing_risk += 30.0
         elif short_runway_flag:
             filing_risk += 18.0
-        elif math.isfinite(cash_runway_months) and 0 < cash_runway_months < 12:
+        elif cash_runway_reliable_flag and math.isfinite(cash_runway_months) and 0 < cash_runway_months < 12:
             filing_risk += 10.0
         if dilution_pressure_score > 0:
-            if (math.isfinite(cash_runway_months) and cash_runway_months >= 24) or survival_score_for_calc >= 80:
+            if (
+                cash_runway_reliable_flag
+                and math.isfinite(cash_runway_months)
+                and cash_runway_months >= 24
+            ) or survival_score_for_calc >= 80:
                 filing_risk += min(10.0, dilution_pressure_score * 0.25)
             else:
                 filing_risk += min(18.0, dilution_pressure_score * 0.45)
@@ -2371,10 +2408,14 @@ def compute_feature_row(
             financing_survival_risk += 55.0
         elif short_runway_flag:
             financing_survival_risk += 32.0
-        elif math.isfinite(cash_runway_months) and 0 < cash_runway_months < 12:
+        elif cash_runway_reliable_flag and math.isfinite(cash_runway_months) and 0 < cash_runway_months < 12:
             financing_survival_risk += 18.0
         if dilution_pressure_score > 0:
-            if (math.isfinite(cash_runway_months) and cash_runway_months >= 24) or survival_score_for_calc >= 80:
+            if (
+                cash_runway_reliable_flag
+                and math.isfinite(cash_runway_months)
+                and cash_runway_months >= 24
+            ) or survival_score_for_calc >= 80:
                 financing_survival_risk += min(8.0, dilution_pressure_score * 0.20)
                 dilution_optional_risk += min(20.0, dilution_pressure_score * 0.25)
             else:
@@ -2618,6 +2659,7 @@ def compute_feature_row(
             "quarterly_cash_burn": to_float(survival.get("quarterly_cash_burn") if survival else None, 0.0),
             "ttm_cash_burn": to_float(survival.get("ttm_cash_burn") if survival else None, 0.0),
             "cash_runway_months": finite_or_none(cash_runway_months),
+            "cash_runway_reliable_flag": cash_runway_reliable_flag,
             "working_capital_ratio": to_float(survival.get("working_capital_ratio") if survival else None, 0.0),
             "debt_to_cash": to_float(survival.get("debt_to_cash") if survival else None, 0.0),
             "cash_yoy_change_pct": to_float(survival.get("cash_yoy_change_pct") if survival else None, 0.0),
@@ -3031,6 +3073,11 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = load_security_identity_rules(identity_registry_path)
     asof_date = parse_date(args.asof) if args.asof else datetime.now(timezone.utc).date()
     if asof_date is None:
         raise ValueError(f"Invalid --asof date: {args.asof}")
@@ -3062,9 +3109,19 @@ def main() -> None:
         cfg_get(config, "biotech_features.company_strategy_overrides_csv"),
         base_dir=base_dir,
     )
-    forward_catalyst_calendar_csv = resolve_optional_path(
+    configured_forward_catalyst_calendar_csv = resolve_optional_path(
         cfg_get(config, "biotech_features.forward_catalyst_calendar_csv"),
         base_dir=base_dir,
+    )
+    forward_catalyst_calendar_csv = (
+        resolve_dated_report_input_csv(
+            configured_forward_catalyst_calendar_csv,
+            base_output_dir=output_dir,
+            asof_date=asof_date.isoformat(),
+            logger=LOGGER,
+        )
+        if configured_forward_catalyst_calendar_csv is not None
+        else None
     )
     short_interest_csv = resolve_optional_path(
         cfg_get(config, "biotech_features.short_interest_csv"),
@@ -3177,6 +3234,7 @@ def main() -> None:
             run_id = start_run(conn, run_type="build_biotech_features", input_path=universe_csv)
             active_company_ids = load_company_ids(conn)
             all_company_ids = load_company_ids(conn, include_inactive=True)
+            identity_start_dates = identity_start_dates_by_company(security_identity_rules, all_company_ids)
             inactive_company_tickers = load_inactive_company_tickers(conn)
             inactive_expected_tickers = {
                 ticker
@@ -3215,6 +3273,7 @@ def main() -> None:
                 conn,
                 asof_date,
                 lookback_days=int(cfg_get(config, "sec_event_parser.lookback_days", 730)),
+                identity_start_dates=identity_start_dates,
             )
             sec_event_summary = load_recent_sec_event_summary(
                 conn,
@@ -3222,6 +3281,7 @@ def main() -> None:
                 lookback_days=int(cfg_get(config, "sec_event_parser.lookback_days", 730)),
                 sec_catalyst_half_life_days=sec_catalyst_half_life_days,
                 sec_catalyst_event_weights=sec_catalyst_event_weights,
+                identity_start_dates=identity_start_dates,
             )
             adcom_lookahead_days = int(cfg_get(config, "fda_adcom_calendar.lookahead_days", 120))
             adcom_by_company = load_fda_adcom_events(conn, asof_date, lookahead_days=adcom_lookahead_days)

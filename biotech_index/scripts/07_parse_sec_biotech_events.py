@@ -404,6 +404,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-filings", type=int, default=0, help="Limit filing texts for smoke tests. 0 means all.")
     parser.add_argument("--offset", type=int, default=0, help="Offset into the eligible filing list for chunked parsing.")
     parser.add_argument("--asof", type=str, default="", help="Parser as-of date in YYYY-MM-DD. Defaults to UTC today.")
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Override sec_event_parser.lookback_days for an explicit historical backfill.",
+    )
     parser.add_argument("--export-only", action="store_true", help="Only export current sec_events table to CSV.")
     parser.add_argument("--full-rescan", action="store_true", help="Parse all eligible filing texts, not just new/changed documents.")
     parser.add_argument(
@@ -1510,7 +1516,11 @@ def main() -> None:
         cfg_get(config, "sec_filings.final_scoring_universe_csv"),
     )
     final_universe_csv = resolve_path(final_universe_value, base_dir=base_dir) if final_universe_value else None
-    lookback_days = int(cfg_get(config, "sec_event_parser.lookback_days", 730))
+    lookback_days = (
+        int(args.lookback_days)
+        if int(args.lookback_days) > 0
+        else int(cfg_get(config, "sec_event_parser.lookback_days", 730))
+    )
     asof_str = asof.isoformat()
     cutoff = (asof - timedelta(days=max(1, lookback_days))).isoformat()
     min_confidence = float(cfg_get(config, "sec_event_parser.min_confidence", 0.65))

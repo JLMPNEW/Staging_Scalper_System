@@ -216,6 +216,7 @@ CABA,platform_partnered_modality_pipeline,platform partnered modality pipeline c
 CADL,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 CAMP,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 CCCC,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
+CUE,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 CRBU,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 CRSP,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 DNLI,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
@@ -234,6 +235,7 @@ INBX,platform_partnered_modality_pipeline,platform partnered modality pipeline c
 INKT,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 IVVD,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 JANX,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
+KRRO,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 KYMR,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 KYTX,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
 LCTX,platform_partnered_modality_pipeline,platform partnered modality pipeline calibration cohort
@@ -337,6 +339,7 @@ IRON,early_clinical_speculative_or_single_asset_pipeline,early clinical speculat
 IVA,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
 JBIO,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
 JSPR,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
+KYNB,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
 KURA,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
 LENZ,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
 LRMR,early_clinical_speculative_or_single_asset_pipeline,early clinical speculative or single asset calibration cohort
@@ -508,3 +511,25 @@ MLNT,commercial_turnaround_or_unprofitable_growth,verified distressed/delisted c
 OMGA,platform_partnered_modality_pipeline,verified distressed/delisted calibration candidate; source=user_attachment_3fad7fd2_20260627; exit_type=bankruptcy_wind_down_likely_wipeout; recovery_type=wipeout
 SYBX,platform_partnered_modality_pipeline,verified distressed/delisted calibration candidate; source=user_attachment_3fad7fd2_20260627; exit_type=wind_down_likely_wipeout; recovery_type=wipeout
 TTPH,commercial_turnaround_or_unprofitable_growth,verified distressed/delisted calibration candidate; source=user_attachment_3fad7fd2_20260627; exit_type=distressed_acquisition_cash_cvr; recovery_type=cash_cvr
+ETON,commercial_turnaround_or_unprofitable_growth,user-approved active issuer intake 2026-08-22
+RPRX,commercial_profitable_quality_or_mature,user-approved active issuer intake 2026-08-22
+ACOG,commercial_turnaround_or_unprofitable_growth,user-approved active issuer intake 2026-08-22
+GYRE,commercial_turnaround_or_unprofitable_growth,user-approved active issuer intake 2026-08-22
+KLRA,late_clinical_pivotal_or_registrational,user-approved active issuer intake 2026-08-22
+KARD,late_clinical_pivotal_or_registrational,user-approved active issuer intake 2026-08-22
+BRVE,late_clinical_pivotal_or_registrational,user-approved active issuer intake 2026-08-22
+ATAI,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+OBX,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+TRAX,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+ATTO,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+PBLS,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+ODTX,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+SCTX,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+SRZN,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+BLSM,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+SPTX,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+ACET,platform_partnered_modality_pipeline,user-approved active issuer intake 2026-08-22
+VOGX,early_clinical_speculative_or_single_asset_pipeline,user-approved active issuer intake 2026-08-22
+LTGO,late_clinical_pivotal_or_registrational,user-approved active issuer intake 2026-08-22
+DMRA,early_clinical_speculative_or_single_asset_pipeline,user-approved active issuer intake 2026-08-22
+AVLN,late_clinical_pivotal_or_registrational,user-approved active issuer intake 2026-08-22

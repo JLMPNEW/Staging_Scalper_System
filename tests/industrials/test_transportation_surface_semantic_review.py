@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import json
 
 from industrials.transportation.surface_semantic_review import (
     candidate_key,
     definition_id,
+    definition_signature,
     review_candidate,
 )
 
@@ -91,6 +93,11 @@ def test_true_operating_kpis_and_candidate_identity_are_stable() -> None:
         "rail_network_velocity", 18.9, "distance_per_time",
         "Train Velocity (Miles Per Hour) | 18.9 | 18.6 | 2 | %", "18.9",
     )
+    velocity["provenance_json"] = json.dumps({
+        "raw_value_text": "18.9",
+        "raw_currency": "",
+        "definition_basis": "train_speed_mph",
+    })
 
     assert review_candidate(length).approved
     assert review_candidate(velocity).approved
@@ -189,3 +196,77 @@ def test_revenue_per_power_unit_is_annualized_or_rejected_when_period_is_unknown
     assert review_candidate(weekly).reviewed_value == 5190.0 * 52.0
     assert review_candidate(quarterly).reviewed_value == 93627.0 * 4.0
     assert not review_candidate(unknown).approved
+
+def test_contract_derivations_require_recalculation_and_exact_comparability() -> None:
+    exact = _parser(
+        "freight_weight_per_shipment",
+        1200.0,
+        "weight_per_shipment",
+        "Pounds per day=1,200,000; shipments per day=1,000",
+        "1200",
+    )
+    exact["concept_name"] = "DerivedFreightWeightPerShipment"
+    exact["provenance_json"] = json.dumps({
+        "formula": "numerator/denominator",
+        "numerator_value": 1_200_000.0,
+        "denominator_value": 1_000.0,
+        "comparability_class": "exact_ltl",
+    })
+    proxy = _parser(
+        "purchased_transportation_ratio",
+        0.7,
+        "ratio",
+        "Directly related transportation costs=700; revenue=1,000",
+        "0.7",
+    )
+    proxy["concept_name"] = "DerivedSurfacePurchasedTransportationRatio"
+    proxy["provenance_json"] = json.dumps({
+        "formula": "numerator/denominator",
+        "numerator_value": 700.0,
+        "denominator_value": 1_000.0,
+        "comparability_class": "broad_proxy",
+    })
+
+    assert review_candidate(exact).approved
+    assert not review_candidate(proxy).approved
+    assert review_candidate(proxy).reason == "broad_proxy_is_diagnostic_only"
+
+
+def test_rail_car_velocity_and_train_speed_keep_separate_definition_bases() -> None:
+    car = _parser(
+        "rail_network_velocity",
+        215.0,
+        "distance_per_time",
+        "Freight car velocity | 215 car miles per day",
+        "215",
+    )
+    car["provenance_json"] = json.dumps({
+        "raw_value_text": "215",
+        "raw_currency": "",
+        "definition_basis": "car_velocity_miles_per_day",
+    })
+    unresolved = dict(car)
+    unresolved["provenance_json"] = json.dumps({"raw_value_text": "215"})
+
+    assert review_candidate(car).approved
+    assert not review_candidate(unresolved).approved
+
+def test_queue_and_reviewer_share_the_canonical_definition_signature() -> None:
+    queue_module = importlib.import_module(
+        "industrials.transportation.scripts.36p_build_transportation_surface_semantic_review_queue"
+    )
+    row = _parser(
+        "rail_fuel_efficiency",
+        0.992,
+        "fuel_per_gross_ton_mile",
+        "Fuel efficiency (U.S. gallons / 1,000 GTMs) | 0.992",
+        "0.992",
+    )
+    row["provenance_json"] = json.dumps({
+        "definition_basis": "reported_gallons_per_1000_gtm",
+        "comparability_class": "exact_normalized_unit",
+        "denominator_basis": "1000_gtm",
+        "segment_id": "rail_network",
+    })
+
+    assert queue_module._signature(row) == definition_signature(row)

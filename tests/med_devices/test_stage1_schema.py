@@ -51,6 +51,45 @@ def table_names(conn: sqlite3.Connection) -> set[str]:
     return {str(row["name"]) for row in rows}
 
 
+def test_fda_linker_treats_imaging_and_innovations_as_generic_tokens() -> None:
+    module = load_script_module(
+        "09_link_med_device_fda_to_companies.py",
+        "med_device_fda_generic_token_test",
+    )
+
+    def tokens(name: str) -> set[str]:
+        return module.name_tokens(module.strip_suffixes(module.normalize_org_name(name)))
+
+    assert tokens("Lumexa Imaging Holdings") == {"LUMEXA"}
+    assert tokens("Shoulder Innovations, Inc.") == {"SHOULDER"}
+    assert tokens("Ziehm Imaging GmbH") == {"ZIEHM"}
+    assert not (tokens("Lumexa Imaging Holdings") & tokens("Ziehm Imaging GmbH"))
+
+
+def test_fda_linker_does_not_escalate_below_threshold_ties_as_ambiguous() -> None:
+    module = load_script_module(
+        "09_link_med_device_fda_to_companies.py",
+        "med_device_fda_below_threshold_tie_test",
+    )
+    aliases = [
+        module.CompanyAlias(1, "GEHC", "GE HealthCare", "GE", "GE", "GE", {"GE"}, "extra_alias_csv"),
+        module.CompanyAlias(2, "ABT", "Abbott", "ST", "ST", "ST", {"ST"}, "extra_alias_csv"),
+    ]
+
+    match = module.best_match(
+        "GE Medical Systems Israel, Functional Imaging 4, Hayozma St",
+        aliases,
+        token_score_weight=80.0,
+        min_confidence=75.0,
+        edit_distance_max_normalized=0.12,
+        edit_distance_score=74.0,
+    )
+
+    assert match.method == "unmapped"
+    assert match.review_reason.startswith("below_threshold:")
+    assert match.company_id is None
+
+
 def test_fda_mapping_governance_ignores_zero_reference_ambiguous_dimensions() -> None:
     orphan = {
         "fda_manufacturer_id": "11270",
@@ -907,18 +946,18 @@ def test_dxcm_and_rmd_postmarket_decisions_are_same_day_exclusive_and_scheduled(
         asof=date(2026, 7, 25),
     )
     assert rmd is not None
-    assert rmd.expires_at == ""
-    assert rmd.next_review_at == "2026-08-24"
+    assert rmd.expires_at == "2026-08-20"
+    assert rmd.next_review_at == ""
     assert decision_expiration_status(
         rmd,
         asof=date(2026, 7, 25),
         warning_days=7,
-    ) == ("active_no_expiration", None, 0)
+    ) == ("current", 26, 0)
     assert decision_review_cadence_status(
         rmd,
         asof=date(2026, 8, 18),
         warning_days=7,
-    ) == ("review_due_soon", 6, 1)
+    ) == ("not_scheduled", None, 0)
 
 
 def test_abt_product_family_governance_is_effective_dated_and_complete() -> None:
@@ -1153,6 +1192,7 @@ def test_stage1_schema_creates_independent_med_device_tables(tmp_path: Path) -> 
         init_db(conn)
         names = table_names(conn)
         price_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(fact_price_ohlcv)").fetchall()}
+        security_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(dim_security)").fetchall()}
         fda_columns = {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(feature_fda_product_risk)").fetchall()
         }
@@ -1169,6 +1209,7 @@ def test_stage1_schema_creates_independent_med_device_tables(tmp_path: Path) -> 
     assert "daily_scores" not in names
     assert "trials" not in names
     assert "price_adjustment" in price_columns
+    assert "listing_start_date" in security_columns
     assert "fda_event_risk_product_family_adjusted_score" in fda_columns
     assert "fda_safety_product_family_adjusted_score" in fda_columns
     assert "fda_product_family_shadow_status" in fda_columns
@@ -1426,6 +1467,177 @@ def test_august_15_capital_platform_governance_decisions_preserve_pit_history(
     assert after.allow_portfolio_candidate_override is False
 
 
+def test_security_identity_contract_prevents_si_ticker_reuse(tmp_path: Path) -> None:
+    module = load_script_module("01_load_med_device_universe.py", "med_device_security_identity_test")
+    universe_csv = tmp_path / "universe.csv"
+    universe_csv.write_text(
+        "\n".join(
+            [
+                "ticker,investability_status,company_name,cik,exchange,sector,industry,medtech_subsector,country,currency,security_type,listing_status,is_primary_listing,cusip,listing_start_date",
+                'SI,investable,"Shoulder Innovations, Inc.",0001699350,NYSE,Healthcare,Healthcare,medical_devices,United States,USD,Common Stock,active,1,82537J108,2025-07-31',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = {
+        "universe_validation": {
+            "security_identity_overrides": {
+                "SI": {
+                    "cik": "0001699350",
+                    "cusip": "82537J108",
+                    "listing_start_date": "2025-07-31",
+                    "reviewed_at": "2026-08-21",
+                    "reason": "ticker_reuse_guard",
+                }
+            }
+        }
+    }
+
+    company = module.parse_universe_rows(universe_csv, config=config)[0]
+    assert company.cik == "0001699350"
+    assert company.cusip == "82537J108"
+    assert company.listing_start_date == "2025-07-31"
+
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        module.upsert_universe(conn, [company], source_id=None)
+        security = conn.execute(
+            "SELECT listing_start_date FROM dim_security WHERE ticker = 'SI'"
+        ).fetchone()
+        cusip = conn.execute(
+            """
+            SELECT identifier_value
+            FROM dim_identifier
+            WHERE identifier_type = 'CUSIP'
+              AND company_id = (SELECT company_id FROM dim_company WHERE ticker = 'SI')
+            """
+        ).fetchone()
+
+    assert security is not None and security["listing_start_date"] == "2025-07-31"
+    assert cusip is not None and cusip["identifier_value"] == "82537J108"
+
+    bad_text = universe_csv.read_text(encoding="utf-8").replace("0001699350", "0001312109")
+    universe_csv.write_text(bad_text, encoding="utf-8")
+    with pytest.raises(ValueError, match="Security identity mismatch for SI"):
+        module.parse_universe_rows(universe_csv, config=config)
+
+
+def test_yahoo_price_job_enforces_listing_start_and_purges_legacy_ticker_rows(tmp_path: Path) -> None:
+    module = load_script_module(
+        "04_sync_med_device_yahoo_adjusted_prices.py",
+        "med_device_yahoo_listing_start_test",
+    )
+    job = module.PriceJob(
+        ticker="SI",
+        company_name="Shoulder Innovations, Inc.",
+        listing_start_date=date(2025, 7, 31),
+    )
+    policy = module.YahooPolicy(
+        source_id="yahoo_finance_backup",
+        chart_url_template="https://example.test/{ticker}",
+        interval="1d",
+        events="div,splits",
+        include_adjusted_close=True,
+        timeout_sec=1.0,
+        max_retries=1,
+        parallel_workers=1,
+        sleep_sec=0.0,
+        user_agent="test",
+        retry_status_codes=set(),
+    )
+    observed: dict[str, Any] = {}
+
+    def fake_fetch(
+        ticker: str,
+        *,
+        start_date: date,
+        asof_date: date,
+        policy: Any,
+    ) -> tuple[int, str, dict[str, Any]]:
+        observed["ticker"] = ticker
+        observed["start_date"] = start_date
+        observed["asof_date"] = asof_date
+        return 200, "{}", {"chart": {"result": []}}
+
+    setattr(module, "fetch_chart_payload", fake_fetch)
+    result = module.fetch_price_job(
+        1,
+        job,
+        start_date=date(2000, 1, 1),
+        asof_date=date(2026, 8, 20),
+        policy=policy,
+    )
+    assert result.error == ""
+    assert observed["start_date"] == date(2025, 7, 31)
+    assert result.query_params["period1"] == module.unix_timestamp(date(2025, 7, 31))
+
+    skipped = module.fetch_price_job(
+        1,
+        job,
+        start_date=date(2000, 1, 1),
+        asof_date=date(2025, 7, 30),
+        policy=policy,
+    )
+    assert skipped.skip_reason == "not_listed_asof"
+
+    db_path = tmp_path / "med_devices.sqlite"
+    with connect(db_path) as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO source_registry(
+                source_id, stage, source_name, source_type, base_url,
+                priority, status, created_at, updated_at
+            )
+            VALUES ('yahoo_finance_backup', 'stage_3', 'Yahoo', 'api', 'https://example.test',
+                    1, 'active', '2026-08-21', '2026-08-21')
+            """
+        )
+        module.upsert_price_bars(
+            conn,
+            [
+                module.YahooBar(
+                    ticker="SI",
+                    bar_date="2023-01-03",
+                    source_id="yahoo_finance_backup",
+                    open=10.0,
+                    high=10.0,
+                    low=10.0,
+                    close=10.0,
+                    adj_close=10.0,
+                    volume=100.0,
+                    dividend_amount=None,
+                    split_factor=None,
+                    price_adjustment="adjusted",
+                    is_adjusted=1,
+                ),
+                module.YahooBar(
+                    ticker="SI",
+                    bar_date="2025-07-31",
+                    source_id="yahoo_finance_backup",
+                    open=20.0,
+                    high=20.0,
+                    low=20.0,
+                    close=20.0,
+                    adj_close=20.0,
+                    volume=100.0,
+                    dividend_amount=None,
+                    split_factor=None,
+                    price_adjustment="adjusted",
+                    is_adjusted=1,
+                ),
+            ],
+        )
+        removed = module.purge_prelisting_price_rows(conn, [job])
+        remaining = conn.execute(
+            "SELECT bar_date FROM fact_price_ohlcv WHERE ticker = 'SI' ORDER BY bar_date"
+        ).fetchall()
+
+    assert removed == {"SI": 1}
+    assert [row["bar_date"] for row in remaining] == ["2025-07-31"]
+
+
 def test_yahoo_adjusted_parser_builds_adjusted_price_rows() -> None:
     module = load_script_module("04_sync_med_device_yahoo_adjusted_prices.py", "med_device_yahoo_sync_test")
     payload = {
@@ -1655,6 +1867,19 @@ def test_avns_delisting_is_effective_dated_and_non_investable() -> None:
         row["source_id"] for row in load_source_registry(REPO_ROOT / "med_devices/data/free_source_registry.yaml")
     }
     assert "sec_inline_xbrl_filing" in source_ids
+
+
+def test_inactive_terminal_tickers_have_no_active_analyst_decisions() -> None:
+    decisions_path = REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    with decisions_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    terminal_rows = [row for row in rows if row["ticker"] in {"AVNS", "PEN"}]
+    assert {row["ticker"] for row in terminal_rows} == {"AVNS", "PEN"}
+    assert all(row["active"].strip().lower() == "false" for row in terminal_rows)
+    assert all(
+        "closure=orphaned_inactive_ticker_no_substantive_review" in row["source_reference"] for row in terminal_rows
+    )
 
 
 def test_sec_ingestion_derives_reviewed_gross_profit_with_provenance() -> None:
@@ -3343,6 +3568,78 @@ def test_fda_canonical_recalls_collapse_product_rows_by_event_family(tmp_path: P
     assert len(payload["source_fda_recall_ids"]) == 3
 
 
+def _insert_pit_taxonomy_test_companies(conn: Any) -> None:
+    conn.executemany(
+        """
+        INSERT INTO dim_company(
+            company_id, ticker, cik, company_name, exchange, subsector, country, currency,
+            universe_status, is_active, first_seen_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'NASDAQ', 'diagnostics', 'United States', 'USD',
+                'active', 1, '2025-01-01', '2026-08-21')
+        """,
+        [
+            (1, "EVENT", "0000000001", "Event Dated Devices"),
+            (2, "REVIEW", "0000000002", "Review Dated Devices"),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO dim_company_model_taxonomy(
+            company_id, model_family, ticker, company_name, calibration_cohort,
+            valid_from, reviewed_at, updated_at
+        )
+        VALUES (?, 'med_devices', ?, ?, 'diagnostics_clinical_tests', ?, ?, '2026-08-21')
+        """,
+        [
+            (1, "EVENT", "Event Dated Devices", "2025-01-01", "2026-08-21"),
+            (2, "REVIEW", "Review Dated Devices", None, "2026-08-20"),
+        ],
+    )
+
+
+def test_reimbursement_feature_company_scope_uses_central_pit_semantics(tmp_path: Path) -> None:
+    module = load_script_module(
+        "11_build_med_device_reimbursement_features.py",
+        "med_device_reimbursement_company_scope_pit_test",
+    )
+    with connect(tmp_path / "features.sqlite") as conn:
+        init_db(conn)
+        _insert_pit_taxonomy_test_companies(conn)
+        same_day_rows = module.load_companies(
+            conn,
+            asof="2026-08-20",
+            ticker_filter=set(),
+            max_tickers=0,
+            include_historical_members=False,
+        )
+        next_day_rows = module.load_companies(
+            conn,
+            asof="2026-08-21",
+            ticker_filter=set(),
+            max_tickers=0,
+            include_historical_members=False,
+        )
+
+    assert {row.ticker for row in same_day_rows} == {"EVENT"}
+    assert {row.ticker for row in next_day_rows} == {"EVENT", "REVIEW"}
+
+
+def test_reimbursement_linker_company_scope_uses_central_pit_semantics(tmp_path: Path) -> None:
+    module = load_script_module(
+        "15_link_med_device_reimbursement_to_companies.py",
+        "med_device_reimbursement_linker_scope_pit_test",
+    )
+    with connect(tmp_path / "linker.sqlite") as conn:
+        init_db(conn)
+        _insert_pit_taxonomy_test_companies(conn)
+        same_day_rows = module.load_linkable_company_rows(conn, asof="2026-08-20")
+        next_day_rows = module.load_linkable_company_rows(conn, asof="2026-08-21")
+
+    assert {str(row["ticker"]) for row in same_day_rows} == {"EVENT"}
+    assert {str(row["ticker"]) for row in next_day_rows} == {"EVENT", "REVIEW"}
+
+
 def test_reimbursement_feature_builder_is_conservative_without_cms_data(tmp_path: Path) -> None:
     module = load_script_module(
         "11_build_med_device_reimbursement_features.py", "med_device_reimbursement_features_test"
@@ -3739,3 +4036,219 @@ def test_daily_score_tier1_safety_gate_routes_special_situations() -> None:
     assert "template_not_safe_core" in row.tier1_safety_reason
     assert "single_product_risk" in row.tier1_safety_reason
     assert "ticker_denylist" in row.tier1_safety_reason
+
+
+def test_balanced_tier1_policy_allows_one_bounded_soft_miss_after_effective_date() -> None:
+    module = load_script_module(
+        "13_build_med_device_daily_scores.py",
+        "med_device_balanced_tier1_policy_test",
+    )
+    gates = {
+        "composite_min": 60.0,
+        "cohort_percentile_min": 0.0,
+        "fundamental_quality_min": 65.0,
+        "durable_growth_min": 45.0,
+        "fda_product_min": 0.0,
+        "reimbursement_min": 45.0,
+        "valuation_min": 55.0,
+        "technical_entry_min": 0.0,
+        "data_completeness_min": 85.0,
+        "min_avg_dollar_volume_60d": 1_000_000.0,
+        "watchlist_min": 55.0,
+        "value_trap_max": 35.0,
+        "value_trap_hard_max": 85.0,
+    }
+    policy = module.Tier1SafetyPolicy(
+        allow_balanced_soft_miss=True,
+        balanced_soft_miss_effective_from="2026-08-21",
+        balanced_soft_miss_reviewed_at="2026-08-21",
+        balanced_policy_version="tier1_balanced_test_v1",
+        balanced_min_composite_score=55.0,
+        balanced_max_fundamental_shortfall=12.0,
+    )
+    row = module.ScoreRow(
+        asof_date="2026-08-21",
+        ticker="BAL",
+        composite_score=70.0,
+        cohort_percentile=90.0,
+        fundamental_quality_score=55.0,
+        durable_growth_score=70.0,
+        fda_product_score=70.0,
+        fda_event_risk_score=10.0,
+        reimbursement_score=70.0,
+        reimbursement_status="direct_code_no_payment_rate",
+        unknown_reimbursement_flag=0,
+        direct_code_evidence=1,
+        valuation_score=70.0,
+        technical_entry_score=70.0,
+        technical_entry_status_score=70.0,
+        value_trap_score=5.0,
+        data_completeness_score=100.0,
+        avg_dollar_volume_60d=10_000_000.0,
+        market_cap=2_000_000_000.0,
+        safe_core_score=70.0,
+        safe_core_percentile=90.0,
+        safe_core_cohort_percentile=90.0,
+    )
+
+    module.classify(row, gates=gates, tier1_policy=policy)
+
+    assert row.tier1_safety_strict_pass_flag == 0
+    assert row.tier1_safety_balanced_pass_flag == 1
+    assert row.passed_tier1_safety_gate == 1
+    assert row.tier1_safety_reason == ""
+    assert row.tier1_safety_tolerated_reason == "fundamental_below_tier1_safety_min"
+    assert row.tier1_safety_policy_version == "tier1_balanced_test_v1"
+    assert row.passed_safe_core_gate == 1
+    assert row.final_investability_gate == 1
+    assert row.classification == "tier_1_long_candidate"
+    assert "balanced_tier1_soft_miss=fundamental_below_tier1_safety_min" in row.classification_reason
+
+
+def test_balanced_tier1_policy_is_pit_effective_and_never_waives_hard_risk() -> None:
+    module = load_script_module(
+        "13_build_med_device_daily_scores.py",
+        "med_device_balanced_tier1_hard_gate_test",
+    )
+    policy = module.Tier1SafetyPolicy(
+        allow_balanced_soft_miss=True,
+        balanced_soft_miss_effective_from="2026-08-21",
+        balanced_soft_miss_reviewed_at="2026-08-21",
+        balanced_max_fundamental_shortfall=12.0,
+    )
+    base = dict(
+        ticker="BAL",
+        fundamental_quality_score=55.0,
+        valuation_score=70.0,
+        durable_growth_score=70.0,
+        value_trap_score=5.0,
+        fda_event_risk_score=10.0,
+        market_cap=2_000_000_000.0,
+        avg_dollar_volume_60d=10_000_000.0,
+        composite_score=70.0,
+        safe_core_score=70.0,
+        safe_core_percentile=90.0,
+        safe_core_cohort_percentile=90.0,
+        passed_data_quality_gate=1,
+        passed_liquidity_gate=1,
+        passed_reimbursement_gate=1,
+        passed_fda_manual_review_gate=1,
+    )
+
+    pre_effective = module.ScoreRow(asof_date="2026-08-20", **base)
+    reasons = module.tier1_safety_reasons(pre_effective, policy)
+    assert module.tier1_balanced_soft_miss_reason(
+        pre_effective,
+        policy,
+        reasons,
+        tier1_restricted=False,
+    ) == ""
+
+    hard_risk = module.ScoreRow(asof_date="2026-08-21", **{**base, "fda_event_risk_score": 90.0})
+    reasons = module.tier1_safety_reasons(hard_risk, policy)
+    assert "fda_event_risk_above_tier1_safety_max" in reasons
+    assert module.tier1_balanced_soft_miss_reason(
+        hard_risk,
+        policy,
+        reasons,
+        tier1_restricted=False,
+    ) == ""
+
+
+def test_tier1_failure_alone_is_not_an_analyst_review_category() -> None:
+    from med_devices.core.analyst_review import review_categories_for_item
+
+    categories = review_categories_for_item(
+        {
+            "ticker": "AAA",
+            "portfolio_candidate_score": 60.0,
+            "portfolio_candidate_gate": 0,
+            "passed_tier1_safety_gate": 0,
+            "classification": "watchlist",
+        },
+        high_score_threshold=70.0,
+    )
+    assert categories == []
+
+    high_score_categories = review_categories_for_item(
+        {
+            "ticker": "AAA",
+            "portfolio_candidate_score": 75.0,
+            "portfolio_candidate_gate": 0,
+            "passed_tier1_safety_gate": 0,
+            "classification": "watchlist",
+        },
+        high_score_threshold=70.0,
+    )
+    assert high_score_categories == ["high_score_blocked"]
+def test_dxcm_rmd_review_renewals_preserve_non_overlapping_pit_windows() -> None:
+    decisions, issues = load_analyst_review_decisions(
+        REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
+    )
+    assert not [issue for issue in issues if issue["severity"] == "CRITICAL"]
+
+    dxcm_prior = effective_decision(
+        decisions,
+        ticker="DXCM",
+        cohort="home_chronic_care_devices_dme_drug_delivery",
+        asof=date(2026, 8, 19),
+    )
+    rmd_prior = effective_decision(
+        decisions,
+        ticker="RMD",
+        cohort="home_chronic_care_devices_dme_drug_delivery",
+        asof=date(2026, 8, 19),
+    )
+    assert dxcm_prior is not None and dxcm_prior.decision == "defer"
+    assert dxcm_prior.reviewed_at == "2026-07-24"
+    assert rmd_prior is not None and rmd_prior.decision == "watchlist"
+    assert rmd_prior.reviewed_at == "2026-07-24"
+
+    assert effective_decision(
+        decisions,
+        ticker="DXCM",
+        cohort="home_chronic_care_devices_dme_drug_delivery",
+        asof=date(2026, 8, 21),
+    ) is None
+    assert effective_decision(
+        decisions,
+        ticker="RMD",
+        cohort="home_chronic_care_devices_dme_drug_delivery",
+        asof=date(2026, 8, 21),
+    ) is None
+
+    dxcm_current = effective_decision(
+        decisions,
+        ticker="DXCM",
+        cohort="home_chronic_care_devices_dme_drug_delivery",
+        asof=date(2026, 8, 22),
+    )
+    rmd_current = effective_decision(
+        decisions,
+        ticker="RMD",
+        cohort="home_chronic_care_devices_dme_drug_delivery",
+        asof=date(2026, 8, 22),
+    )
+    assert dxcm_current is not None and dxcm_current.decision == "defer"
+    assert dxcm_current.reviewed_at == "2026-08-21"
+    assert rmd_current is not None and rmd_current.decision == "defer"
+    assert rmd_current.reviewed_at == "2026-08-21"
+
+
+def test_irvine_biomedical_legacy_entities_are_governed_to_abbott() -> None:
+    overrides_path = REPO_ROOT / "med_devices" / "data" / "fda_manufacturer_overrides.csv"
+    with overrides_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        overrides = {row["fda_manufacturer_id"]: row for row in csv.DictReader(handle)}
+    for manufacturer_id in {"970", "957"}:
+        row = overrides[manufacturer_id]
+        assert row["ticker"] == "ABT"
+        assert row["company_id"] == "3"
+        assert row["mapping_method"] == "manual_override"
+        assert row["valid_from"] == "2019-01-04"
+        assert row["reviewed_at"] == "2026-08-21"
+
+    regression_path = REPO_ROOT / "med_devices" / "data" / "fda_mapping_regression_cases.csv"
+    with regression_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        cases = {row["case_id"]: row for row in csv.DictReader(handle)}
+    assert cases["irvine_biomedical_970"]["expected_ticker"] == "ABT"
+    assert cases["irvine_biomedical_957"]["expected_ticker"] == "ABT"

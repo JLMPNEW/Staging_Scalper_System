@@ -41,6 +41,7 @@ CONFIG_KEY = "med_devices_refresh_pipeline"
 PROTECTED_CRITICAL_STEPS = {
     "00_init_db",
     "01_load_universe",
+    "22_bootstrap_calibration_cohorts",
     "06_build_financial_features",
     "09_link_fda",
     "70_audit_fda_mapping",
@@ -52,6 +53,7 @@ PROTECTED_CRITICAL_STEPS = {
     # explicit promotion event that would move the shadow into the composite.
     "15_link_reimbursement",
     "11_build_reimbursement_features",
+    "22_build_calibration_cohorts",
     "12_build_technical_features",
     "54_build_borrow_features",
     "56_build_short_interest_features",
@@ -184,6 +186,13 @@ def build_steps(
             py_script("med_devices/scripts/01_load_med_device_universe.py"),
         ),
         Step(
+            "22_bootstrap_calibration_cohorts",
+            "stage_2",
+            "Bootstrap governed calibration cohorts for newly onboarded issuers",
+            py_script("med_devices/scripts/22_build_med_device_calibration_cohorts.py"),
+            [*asof_args, "--active-universe"],
+        ),
+        Step(
             "04_sync_yahoo_prices",
             "stage_3",
             "Sync Yahoo adjusted prices",
@@ -284,6 +293,22 @@ def build_steps(
             "Sync governed company legal/risk events",
             py_script("med_devices/scripts/80_sync_med_device_company_risk_events.py"),
             asof_args,
+        ),
+        Step(
+            "82_sync_clinical_trials",
+            "stage_5",
+            "Sync governed ClinicalTrials.gov records",
+            py_script("med_devices/scripts/82_sync_med_device_clinical_trials.py"),
+            [*asof_args, "--allow-partial"],
+            network=True,
+            optional=True,
+        ),
+        Step(
+            "22_build_calibration_cohorts",
+            "stage_5",
+            "Build governed calibration cohorts and exposure tags",
+            py_script("med_devices/scripts/22_build_med_device_calibration_cohorts.py"),
+            [*asof_args, "--active-universe"],
         ),
         Step(
             "12_build_technical_features",

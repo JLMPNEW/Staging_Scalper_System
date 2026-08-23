@@ -200,6 +200,41 @@ def test_work_key_is_deterministic(tmp_path: Path) -> None:
         requested_metrics=(MetricRequest("reported_backlog", ("Backlog",)),),
     )
     assert non_usd.work_key != first.work_key
+    disabled_with_other_ocr_limits = WorkItem(**{
+        **vars(first),
+        'max_ocr_pages': 3,
+        'ocr_dpi': 300,
+        'ocr_page_timeout_seconds': 1.0,
+        'max_ocr_pixels_per_page': 10_000,
+    })
+    assert disabled_with_other_ocr_limits.work_key == first.work_key
+    html_with_other_pdf_limits = WorkItem(**{
+        **vars(first),
+        'max_pdf_pages': 999,
+        'max_pdf_bytes': 99_000_000,
+        'pdf_extraction_timeout_seconds': 480.0,
+    })
+    assert html_with_other_pdf_limits.work_key == first.work_key
+    html_ocr_enabled = WorkItem(**{
+        **vars(first),
+        'enable_pdf_ocr': True,
+    })
+    assert html_ocr_enabled.work_key == first.work_key
+    pdf_document = DocumentRef(**{
+        **vars(document),
+        'name': 'filing.pdf',
+    })
+    ocr_enabled = WorkItem(**{
+        **vars(first),
+        'documents': (pdf_document,),
+        'enable_pdf_ocr': True,
+    })
+    ocr_enabled_other_dpi = WorkItem(**{
+        **vars(ocr_enabled),
+        'ocr_dpi': 300,
+    })
+    assert ocr_enabled.work_key != first.work_key
+    assert ocr_enabled_other_dpi.work_key != ocr_enabled.work_key
 
 
 def test_planner_is_database_and_cache_first(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parents[1]
-ENRICHER = PROJECT_ROOT / "ticker_mapping" / "enrich_technology_tickers.py"
+ENRICHER = PROJECT_ROOT / "ticker_mapping" / "enrich_newtickers_main.py"
 SEED = PACKAGE_ROOT / "system_csvs" / "machinery_tickers.csv"
 AUDIT = PROJECT_ROOT / "output" / "industrials" / "machinery" / "universe" / "machinery_tickers_enrichment_audit.csv"
 

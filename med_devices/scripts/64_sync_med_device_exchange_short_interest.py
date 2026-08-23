@@ -116,9 +116,12 @@ def ensure_source(conn: Any, source_id: str) -> None:
 def load_company_map(conn: Any) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT company_id, ticker
-        FROM dim_company
-        WHERE is_active = 1
+        SELECT c.company_id, c.ticker, s.listing_start_date
+        FROM dim_company c
+        LEFT JOIN dim_security s
+          ON s.company_id = c.company_id
+         AND COALESCE(s.is_primary_listing, 0) = 1
+        WHERE c.is_active = 1
         """
     ).fetchall()
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
@@ -196,6 +199,9 @@ def parse_short_interest_text(
             first_value(raw, ["publication_date", "publication date", "dissemination_date", "date"])
         ) or default_publication_date
         company = company_by_ticker[ticker]
+        listing_start = str(company.get("listing_start_date") or "")[:10]
+        if not settlement_date or (listing_start and settlement_date < listing_start):
+            continue
         rows.append(
             {
                 "ticker": ticker,

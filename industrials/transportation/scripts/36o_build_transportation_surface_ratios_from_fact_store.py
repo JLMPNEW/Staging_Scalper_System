@@ -28,7 +28,7 @@ from industrials.transportation.scripts._shared import DEFAULT_CONFIG  # noqa: E
 
 
 DATA_ROOT = PROJECT_ROOT / "industrials" / "transportation" / "data"
-FILING_PROFILES = DATA_ROOT / "transportation_surface_filing_profiles_v1.csv"
+FILING_PROFILES = DATA_ROOT / "transportation_surface_filing_profiles_v2.csv"
 DEFAULT_OUTPUT_ROOT = (
     PROJECT_ROOT
     / "output"

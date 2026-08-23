@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import pandas as pd
 import requests
@@ -90,6 +90,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT_CSV)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_CSV)
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    parser.add_argument(
+        "--identity-fallback-csv",
+        type=Path,
+        default=None,
+        help="Optional prior verified identity CSV used only to fill provider-missing fields.",
+    )
     parser.add_argument("--overwrite-existing", action="store_true", help="Overwrite populated enrichment fields.")
     parser.add_argument("--disable-ib", action="store_true", help="Skip Interactive Brokers contract-detail enrichment.")
     parser.add_argument("--ib-host", default="127.0.0.1")
@@ -104,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         help="Do not infer Country=United States and Currency=USD from confirmed US exchange listings.",
     )
     parser.add_argument("--http-timeout-sec", type=float, default=30.0)
+    parser.add_argument(
+        "--directory-cache-ttl-hours",
+        type=float,
+        default=24.0,
+        help="Maximum age of cached Nasdaq symbol directories before refresh.",
+    )
     return parser.parse_args()
 
 
@@ -153,6 +165,13 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "CIK": ("cik",),
         "CompanyName": ("companyname", "company", "name", "securityname"),
         "Exchange": ("exchange",),
+        "SecurityType": ("securitytype", "security_type"),
+        "IsPrimaryListing": ("isprimarylisting", "is_primary_listing"),
+        "ListingStatus": ("listingstatus", "listing_status"),
+        "Country": ("country",),
+        "Currency": ("currency",),
+        "IdentityDataSources": ("identitydatasources", "identity_data_sources"),
+        "MissingIdentityFields": ("missingidentityfields", "missing_identity_fields"),
     }
     for target, candidates in aliases.items():
         if target in df.columns:
@@ -175,17 +194,96 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def cache_get_text(cache_dir: Path, name: str, url: str, timeout_sec: float) -> str:
+IDENTITY_FALLBACK_COLUMNS = (
+    "CompanyName",
+    "Exchange",
+    "SecurityType",
+    "IsPrimaryListing",
+    "ListingStatus",
+    "Country",
+    "Currency",
+)
+
+
+def apply_identity_fallback_fields(
+    df: pd.DataFrame,
+    fallback_df: pd.DataFrame,
+    *,
+    source_label: str,
+) -> pd.DataFrame:
+    """Fill provider-missing identity fields without overriding fresher values."""
+    out = df.copy()
+    fallback = standardize_columns(fallback_df)
+    ticker_values = cast(pd.Series, fallback["Ticker"]).astype(str).str.strip()
+    fallback = cast(pd.DataFrame, fallback.loc[ticker_values != ""])
+    fallback = cast(
+        pd.DataFrame, fallback.drop_duplicates(subset=["Ticker"], keep="first")
+    ).set_index("Ticker")
+    for idx, row in out.iterrows():
+        ticker = normalize_ticker(row.get("Ticker"))
+        if not ticker or ticker not in fallback.index:
+            continue
+        prior = fallback.loc[ticker]
+        if isinstance(prior, pd.DataFrame):
+            prior = prior.iloc[0]
+        changed = False
+        for column in IDENTITY_FALLBACK_COLUMNS:
+            current = str(out.at[idx, column] or "").strip()
+            prior_value = str(prior.get(column) or "").strip()
+            if not current and prior_value:
+                out.at[idx, column] = prior_value
+                changed = True
+        if changed:
+            out.at[idx, "IdentityDataSources"] = append_source(
+                out.at[idx, "IdentityDataSources"], source_label
+            )
+    return out
+
+
+def finalize_unresolved_identity_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert unresolved provider gaps into explicit fail-closed identities."""
+    out = df.copy()
+    for idx, row in out.iterrows():
+        exchange = str(row.get("Exchange") or "").strip().upper()
+        if not str(row.get("SecurityType") or "").strip():
+            out.at[idx, "SecurityType"] = "Unknown"
+        if not str(row.get("ListingStatus") or "").strip():
+            out.at[idx, "ListingStatus"] = "unknown"
+        if any(token in exchange for token in ("NASDAQ", "NYSE", "AMEX", "ARCA", "CBOE", "IEX")):
+            if not str(row.get("Country") or "").strip():
+                out.at[idx, "Country"] = "United States"
+            if not str(row.get("Currency") or "").strip():
+                out.at[idx, "Currency"] = "USD"
+    return out
+
+
+def cache_get_text(
+    cache_dir: Path,
+    name: str,
+    url: str,
+    timeout_sec: float,
+    cache_ttl_hours: float = 24.0,
+) -> str:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / name
     if cache_path.exists():
-        return cache_path.read_text(encoding="utf-8", errors="replace")
+        age_seconds = max(0.0, time.time() - cache_path.stat().st_mtime)
+        if age_seconds <= max(0.0, float(cache_ttl_hours)) * 3600.0:
+            return cache_path.read_text(encoding="utf-8", errors="replace")
     headers = {"User-Agent": "JL, Independent Research, jm.357@hotmail.com"}
-    resp = requests.get(url, headers=headers, timeout=timeout_sec)
-    resp.raise_for_status()
-    text = resp.text
-    cache_path.write_text(text, encoding="utf-8")
-    return text
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout_sec)
+        resp.raise_for_status()
+        response_text = resp.text
+        temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        temp_path.write_text(response_text, encoding="utf-8")
+        temp_path.replace(cache_path)
+        return response_text
+    except Exception:
+        if cache_path.exists():
+            LOGGER.warning("Nasdaq directory refresh failed; using stale cache: %s", cache_path)
+            return cache_path.read_text(encoding="utf-8", errors="replace")
+        raise
 
 
 def parse_pipe_directory(text: str, *, source: str) -> list[dict[str, str]]:
@@ -205,13 +303,21 @@ def parse_pipe_directory(text: str, *, source: str) -> list[dict[str, str]]:
     return rows
 
 
-def load_nasdaq_directories(cache_dir: Path, timeout_sec: float) -> dict[str, DirectoryEntry]:
+def load_nasdaq_directories(
+    cache_dir: Path,
+    timeout_sec: float,
+    cache_ttl_hours: float = 24.0,
+) -> dict[str, DirectoryEntry]:
     listed = parse_pipe_directory(
-        cache_get_text(cache_dir, "nasdaqlisted.txt", NASDAQ_LISTED_URL, timeout_sec),
+        cache_get_text(
+            cache_dir, "nasdaqlisted.txt", NASDAQ_LISTED_URL, timeout_sec, cache_ttl_hours
+        ),
         source="nasdaqtrader:nasdaqlisted",
     )
     other = parse_pipe_directory(
-        cache_get_text(cache_dir, "otherlisted.txt", OTHER_LISTED_URL, timeout_sec),
+        cache_get_text(
+            cache_dir, "otherlisted.txt", OTHER_LISTED_URL, timeout_sec, cache_ttl_hours
+        ),
         source="nasdaqtrader:otherlisted",
     )
     entries: dict[str, DirectoryEntry] = {}
@@ -305,8 +411,10 @@ def apply_nasdaq_fields(df: pd.DataFrame, directory: dict[str, DirectoryEntry], 
             continue
         if should_fill(row.get("SecurityType"), overwrite_existing):
             df.at[idx, "SecurityType"] = infer_security_type(entry.security_name, entry.etf)
-        if should_fill(row.get("ListingStatus"), overwrite_existing):
-            df.at[idx, "ListingStatus"] = infer_listing_status(entry)
+        # Listing status is dynamic source data, not immutable identity metadata.
+        # Refresh it whenever Nasdaq still publishes the symbol so remediated or
+        # newly deficient issuers cannot remain stuck at a stale status.
+        df.at[idx, "ListingStatus"] = infer_listing_status(entry)
         if should_fill(row.get("Exchange"), overwrite_existing) and entry.exchange:
             df.at[idx, "Exchange"] = entry.exchange
         if should_fill(row.get("CompanyName"), overwrite_existing) and entry.security_name:
@@ -576,9 +684,11 @@ def derive_primary_listing(df: pd.DataFrame, overwrite_existing: bool) -> pd.Dat
             continue
         eligible = group[group["_primary_score"] > -10_000]
         if eligible.empty:
-            selected_idx = group["_primary_score"].idxmax()
+            group_scores = cast(pd.Series, group["_primary_score"])
+            selected_idx = group_scores.idxmax()
         else:
-            selected_idx = eligible["_primary_score"].idxmax()
+            eligible_scores = cast(pd.Series, eligible["_primary_score"])
+            selected_idx = eligible_scores.idxmax()
         for idx in group.index:
             if should_fill(df.at[idx, "IsPrimaryListing"], overwrite_existing):
                 df.at[idx, "IsPrimaryListing"] = "True" if idx == selected_idx else "False"
@@ -622,7 +732,7 @@ def order_columns(df: pd.DataFrame) -> pd.DataFrame:
     first = BASE_COLUMNS + REQUIRED_IDENTITY_COLUMNS + AUDIT_COLUMNS
     present_first = [col for col in first if col in df.columns]
     rest = [col for col in df.columns if col not in present_first]
-    return df[present_first + rest]
+    return cast(pd.DataFrame, df.loc[:, present_first + rest])
 
 
 def main() -> None:
@@ -630,6 +740,7 @@ def main() -> None:
     args = parse_args()
 
     input_csv = args.input.expanduser().resolve()
+
     output_csv = args.output.expanduser().resolve()
     cache_dir = args.cache_dir.expanduser().resolve()
 
@@ -637,10 +748,32 @@ def main() -> None:
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")
 
     df = standardize_columns(read_csv_flexible(input_csv))
+
+    fallback_paths: list[tuple[Path, str]] = []
+    if output_csv.exists() and output_csv.resolve() != input_csv.resolve():
+        fallback_paths.append((output_csv, "prior_enriched_identity"))
+    if args.identity_fallback_csv is not None:
+        fallback_path = args.identity_fallback_csv.expanduser().resolve()
+        fallback_paths.append((fallback_path, "explicit_identity_fallback"))
+    seen_fallbacks: set[Path] = set()
+    for fallback_path, source_label in fallback_paths:
+        if fallback_path in seen_fallbacks or not fallback_path.exists():
+            continue
+        seen_fallbacks.add(fallback_path)
+        try:
+            fallback_frame = read_csv_flexible(fallback_path)
+            df = apply_identity_fallback_fields(df, fallback_frame, source_label=source_label)
+            LOGGER.info("Applied identity fallback from %s", fallback_path)
+        except Exception as exc:
+            LOGGER.warning("Identity fallback failed for %s: %s", fallback_path, exc)
     LOGGER.info("Loaded %d rows from %s", len(df), input_csv)
 
     try:
-        directory = load_nasdaq_directories(cache_dir, float(args.http_timeout_sec))
+        directory = load_nasdaq_directories(
+            cache_dir,
+            float(args.http_timeout_sec),
+            float(args.directory_cache_ttl_hours),
+        )
         LOGGER.info("Loaded %d Nasdaq Trader symbol directory entries", len(directory))
         df = apply_nasdaq_fields(df, directory, bool(args.overwrite_existing))
     except Exception as exc:
@@ -660,6 +793,7 @@ def main() -> None:
     if not bool(args.disable_us_listing_fallback):
         df = apply_us_listing_fallback_fields(df, bool(args.overwrite_existing))
     df = derive_primary_listing(df, bool(args.overwrite_existing))
+    df = finalize_unresolved_identity_fields(df)
     df = update_missing_fields(df)
     df = order_columns(df)
 

@@ -99,3 +99,14 @@ SYK,Wright Medical,acquired_subsidiary,Acquired by Stryker,2020-11-11,2026-06-25
 TMO,Life Technologies,acquired_subsidiary,Acquired by Thermo Fisher Scientific,2014-02-03,2026-06-25,
 ZBH,Biomet,merged_predecessor,Zimmer Biomet predecessor entity,2015-06-24,2026-06-25,
 VCYT,NanoString Technologies,legacy_applicant,Legacy Prosigna 510(k) applicant retained for governed FDA event matching,2026-07-24,2026-08-11,
+ALMR,"Alamar Biosciences, Inc.",operating_unit,Audited SEC legal issuer name,2026-04-17,2026-08-21,
+MOBI,"Mobia Medical, Inc.",operating_unit,Current FDA PMA applicant and SEC legal issuer name,2026-05-08,2026-08-21,
+SI,"Shoulder Innovations, Inc.",operating_unit,Verified FDA 510k applicant and SEC legal issuer name,2025-07-31,2026-08-21,
+MOBI,"MicroTransponder, Inc.",legacy_operating_name,Legacy Vivistim PMA applicant before Mobia Medical rename,2021-08-27,2026-08-21,
+"BBNX","Beta Bionics, Inc.","operating_unit","Verified iLet 510k applicant and FDA manufacturer name","2023-05-19","2026-08-22",""
+"BLLN","BillionToOne, Inc.","operating_unit","Audited SEC legal issuer and centralized laboratory name","2025-11-06","2026-08-22",""
+"FLGT","Fulgent Genetics, Inc.","operating_unit","Audited SEC legal issuer and centralized laboratory name","2016-09-29","2026-08-22",""
+"FRNM","Freenome, Inc.","operating_unit","Audited post-combination SEC legal issuer name","2026-07-21","2026-08-22",""
+"LNSR","LENSAR, Inc.","operating_unit","Verified ophthalmic-laser 510k applicant and SEC legal issuer name","2020-10-01","2026-08-22",""
+"PRPO","Precipio, Inc.","operating_unit","Audited post-merger SEC legal issuer and centralized laboratory name","2017-06-30","2026-08-22",""
+"PRPO","Precipio Diagnostics, LLC","legacy_operating_name","Precipio diagnostic laboratory operating entity before the 2017 public-company merger","2017-06-30","2026-08-22",""

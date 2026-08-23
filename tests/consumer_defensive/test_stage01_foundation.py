@@ -80,7 +80,7 @@ def test_source_and_metric_registries_are_independent_and_zero_weight() -> None:
     )
     sources = load_source_registry(source_path)
     version, metrics = load_metric_registry(metric_path)
-    assert version == "consumer_defensive_specialized_metrics_v1"
+    assert version == "consumer_defensive_specialized_metrics_v2"
     assert len(sources) >= 10
     assert all(row.subsector_scope == "consumer_defensive" for row in sources)
     assert len(metrics) >= 30

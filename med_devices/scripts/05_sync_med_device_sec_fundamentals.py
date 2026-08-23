@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1630,7 +1630,7 @@ def main() -> None:
     config = load_yaml(config_path)
     policy = sec_ingestion_policy(config)
     base_dir = config_path.parent
-    sec_asof = str(args.asof or "").strip() or datetime.utcnow().date().isoformat()
+    sec_asof = str(args.asof or "").strip() or datetime.now(timezone.utc).date().isoformat()
     try:
         datetime.strptime(sec_asof, "%Y-%m-%d")
     except ValueError as exc:
@@ -1707,6 +1707,7 @@ def main() -> None:
         try:
             for idx, company in enumerate(companies, start=1):
                 reasons: list[str] = []
+                warnings: list[str] = []
                 filing_count = 0
                 financial_count = 0
                 inline_xbrl_count = 0
@@ -1846,48 +1847,54 @@ def main() -> None:
 
                     if policy.inline_xbrl_fallback_enabled:
                         for filing in unrepresented_financial_filings(filing_rows, financial_rows, policy):
-                            filing_url = str(filing.get("archive_url") or "").strip()
-                            document_name = Path(str(filing.get("primary_document") or "")).name
-                            accession = accession_nodash(filing.get("accession_nodash"))
-                            if not filing_url or not document_name or not accession:
-                                raise ValueError(f"Incomplete SEC filing fallback metadata for {company.ticker}.")
-                            document_text, document_source, document_status = fetch_text(
-                                session,
-                                filing_url,
-                                cache_path=(
-                                    cache_dir / "sec_inline_xbrl" / f"CIK{company.cik}" / accession / document_name
-                                ),
-                                refresh_cache=args.refresh_cache,
-                                cache_ttl_hours=cache_ttl_hours,
-                                timeout_sec=timeout_sec,
-                                max_retries=max_retries,
-                                sleep_sec=sleep_sec,
-                                user_agent=user_agent,
-                            )
-                            if document_source == "fetched":
-                                inline_xbrl_request_count += 1
-                                time.sleep(max(0.0, sleep_sec))
-                            if inline_xbrl_ingestion_id is None:
-                                raise RuntimeError("Inline XBRL ingestion run was not initialized.")
-                            store_raw_response(
-                                conn,
-                                source_id=policy.inline_xbrl_source_id,
-                                endpoint=filing_url,
-                                payload_text=document_text,
-                                response_status=document_status,
-                                ingestion_run_id=inline_xbrl_ingestion_id,
-                                asof_date=sec_asof,
-                                payload_source=document_source,
-                                response_kind="inline_xbrl_document",
-                            )
-                            fallback_rows = build_inline_fallback_rows(
-                                company,
-                                filing,
-                                document_text,
-                                policy,
-                            )
-                            inline_xbrl_count += upsert_financial_rows(conn, fallback_rows)
-                            financial_rows.extend(fallback_rows)
+                            try:
+                                filing_url = str(filing.get("archive_url") or "").strip()
+                                document_name = Path(str(filing.get("primary_document") or "")).name
+                                accession = accession_nodash(filing.get("accession_nodash"))
+                                if not filing_url or not document_name or not accession:
+                                    raise ValueError(f"Incomplete SEC filing fallback metadata for {company.ticker}.")
+                                document_text, document_source, document_status = fetch_text(
+                                    session,
+                                    filing_url,
+                                    cache_path=(
+                                        cache_dir / "sec_inline_xbrl" / f"CIK{company.cik}" / accession / document_name
+                                    ),
+                                    refresh_cache=args.refresh_cache,
+                                    cache_ttl_hours=cache_ttl_hours,
+                                    timeout_sec=timeout_sec,
+                                    max_retries=max_retries,
+                                    sleep_sec=sleep_sec,
+                                    user_agent=user_agent,
+                                )
+                                if document_source == "fetched":
+                                    inline_xbrl_request_count += 1
+                                    time.sleep(max(0.0, sleep_sec))
+                                if inline_xbrl_ingestion_id is None:
+                                    raise RuntimeError("Inline XBRL ingestion run was not initialized.")
+                                store_raw_response(
+                                    conn,
+                                    source_id=policy.inline_xbrl_source_id,
+                                    endpoint=filing_url,
+                                    payload_text=document_text,
+                                    response_status=document_status,
+                                    ingestion_run_id=inline_xbrl_ingestion_id,
+                                    asof_date=sec_asof,
+                                    payload_source=document_source,
+                                    response_kind="inline_xbrl_document",
+                                )
+                                fallback_rows = build_inline_fallback_rows(
+                                    company,
+                                    filing,
+                                    document_text,
+                                    policy,
+                                )
+                                inline_xbrl_count += upsert_financial_rows(conn, fallback_rows)
+                                financial_rows.extend(fallback_rows)
+                            except Exception as exc:
+                                accession = accession_nodash(filing.get("accession_nodash")) or "unknown"
+                                warning = f"inline_xbrl_fallback:{accession}:{type(exc).__name__}:{exc}"
+                                warnings.append(warning)
+                                LOGGER.warning("%s %s", company.ticker, warning)
 
                     financial_count += inline_xbrl_count
                     total_inline_xbrl_rows += inline_xbrl_count
@@ -1934,7 +1941,7 @@ def main() -> None:
                         "latest_period_end": latest_period,
                         "latest_financial_filing_date": latest_financial_filing_date,
                         "latest_parsed_filed_date": latest_parsed_filed_date,
-                        "review_reason": ";".join(reasons),
+                        "review_reason": ";".join([*reasons, *warnings]),
                     }
                 )
                 LOGGER.info(

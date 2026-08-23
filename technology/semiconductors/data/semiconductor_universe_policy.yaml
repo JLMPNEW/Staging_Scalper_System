@@ -1,7 +1,7 @@
 model_family: semiconductors
 source_csv: "../../../ticker_mapping/semiconductor_tickers.csv"
 source_of_truth: true
-expected_ticker_count: 99
+expected_ticker_count: 100
 allow_missing_cik_for_foreign_otc: true
 default_unassigned_calibration_use: review
 default_unassigned_cohort_id: semi_unassigned
@@ -36,3 +36,12 @@ required_non_cik_fields:
   - security_type
   - listing_status
   - is_primary_listing
+lifecycle_overrides:
+  - ticker: SKYT
+    start_date: "2021-04-21"
+    last_tradable_date: "2026-07-30"
+    event_type: acquired_and_delisted
+    successor_ticker: IONQ
+    confidence: 1.0
+    source_url: "https://www.sec.gov/Archives/edgar/data/1819974/000119312526327137/d49031d8k.htm"
+    reason: "IonQ completed the acquisition on 2026-07-31; Nasdaq halted SKYT before the 2026-07-31 market open."

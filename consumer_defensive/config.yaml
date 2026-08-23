@@ -33,9 +33,9 @@ sec_fundamentals:
   documents_per_issuer: 8
   companyfacts_lag_days: 120
   user_agent: "JL, Independent Research, jm.357@hotmail.com"
-  sleep_sec: 0.12
+  sleep_sec: 0.15
   timeout_sec: 30
-  retries: 3
+  retries: 6
 
 fx_rates:
   source_id: "yahoo_fx_rates"
@@ -90,6 +90,18 @@ positioning:
     institutional_13f: 'sec_13f_data_sets'
     short_interest: 'finra_equity_short_interest_files'
     borrow: 'interactive_brokers'
+
+scoring_features:
+  source_id: 'consumer_defensive_scoring_contract'
+  definition_version: 'consumer_defensive_scoring_features_v2'
+  minimum_normalization_peer_count: 5
+  normalize_within_cohort: true
+  minimum_rank_ready_fraction: 0.85
+  accepted_market_quality_statuses: [full]
+  accepted_financial_quality_statuses: [complete, partial]
+  accepted_positioning_quality_statuses: [complete]
+  specialized_default_availability: 'not_loaded'
+  component_weight_default: 0.0
 
 specialized_disclosure_census:
   applicability_csv: "data/consumer_defensive_metric_applicability.csv"
@@ -181,6 +193,28 @@ dedicated_parser:
   model_family: "consumer_defensive"
   parser_schema_owner: "dedicated_parser.schema"
   forms: [10-K, 10-Q, 8-K, 20-F, 6-K]
+  production_promotion_enabled: false
+
+stage6b:
+  adapter_path: "consumer_defensive.adapters.dedicated_parser_adapter:extract_metric_evidence"
+  parser_source_id: "shared_dedicated_sec_parser"
+  measurement_source_id: "consumer_defensive_stage6b_specialized_measurement"
+  definition_version: "consumer_defensive_specialized_measurements_v1"
+  minimum_parser_confidence: 0.85
+  maximum_filings_per_ticker: 96
+  maximum_documents_per_filing: 4
+  maximum_event_documents_per_filing: 4
+  event_hydration_workers: 6
+  enable_pdf_ocr: false
+  maximum_pdf_pages: 300
+  maximum_pdf_bytes: 50000000
+  pdf_extraction_timeout_seconds: 60.0
+  maximum_ocr_pages: 12
+  ocr_dpi: 144
+  ocr_page_timeout_seconds: 8.0
+  maximum_ocr_pixels_per_page: 20000000
+  historical_inventory_start: "2019-01-02"
+  production_weight: 0.0
   production_promotion_enabled: false
 
 factor_validation:

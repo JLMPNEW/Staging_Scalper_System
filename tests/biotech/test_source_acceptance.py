@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,25 @@ def test_score_lineage_rejects_stale_candidate_price() -> None:
     assert result.evidence["stale_candidate_tickers"] == ["AAA"]
 
 
+def test_score_lineage_accepts_latest_market_date_for_weekend_report() -> None:
+    module = load_script_module(
+        "33_validate_biotech_source_acceptance.py",
+        "biotech_source_acceptance_weekend_price_test",
+    )
+    checks: list[Any] = []
+
+    module.validate_score_lineage(
+        [score_row(price_date="2026-08-21")],
+        checks,
+        asof=date(2026, 8, 22),
+        expected_market_asof=date(2026, 8, 21),
+    )
+
+    result = next(check for check in checks if check.name == "candidate_price_freshness")
+    assert result.status == "PASS"
+    assert result.evidence["expected_market_asof_date"] == "2026-08-21"
+
+
 def test_financial_lineage_requires_features_to_use_latest_core_period() -> None:
     module = load_script_module(
         "33_validate_biotech_source_acceptance.py",
@@ -133,6 +152,7 @@ def test_form4_freshness_parses_non_sortable_date_text(tmp_path: Path) -> None:
             CREATE TABLE sec_form4_daily_state(last_index_date TEXT);
             CREATE TABLE sec_ownership_submission(filing_date TEXT);
             INSERT INTO sec_form4_daily_state VALUES ('2026-08-14');
+            INSERT INTO sec_form4_daily_state VALUES ('2026-08-15');
             INSERT INTO sec_ownership_submission VALUES ('31-OCT-2025');
             INSERT INTO sec_ownership_submission VALUES ('14-AUG-2026');
             """
@@ -153,3 +173,133 @@ def test_form4_freshness_parses_non_sortable_date_text(tmp_path: Path) -> None:
     result = next(check for check in checks if check.name == "form4_source_freshness")
     assert result.status == "PASS"
     assert result.evidence["latest_raw_filing_date"] == "2026-08-14"
+
+
+def test_form4_freshness_uses_current_signal_snapshot_when_index_lags(
+    tmp_path: Path,
+) -> None:
+    module = load_script_module(
+        "33_validate_biotech_source_acceptance.py",
+        "biotech_source_acceptance_form4_signal_snapshot_test",
+    )
+    db_path = tmp_path / "sec_insider.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sec_form4_daily_state(last_index_date TEXT);
+            CREATE TABLE stock_signal_snapshot_tier1(as_of_date TEXT);
+            CREATE TABLE sec_ownership_submission(filing_date TEXT);
+            INSERT INTO sec_form4_daily_state VALUES ('2026-08-20');
+            INSERT INTO stock_signal_snapshot_tier1 VALUES ('2026-08-21');
+            INSERT INTO sec_ownership_submission VALUES ('2026-08-21');
+            """
+        )
+    checks: list[Any] = []
+    config = {
+        "governance_events": {"form4_db_path": str(db_path)},
+        "biotech_refresh": {"form4_preflight": {"max_raw_filing_lag_days": 5}},
+    }
+
+    module.validate_form4_source(
+        config,
+        base_dir=tmp_path,
+        checks=checks,
+        asof=date(2026, 8, 21),
+    )
+
+    result = next(check for check in checks if check.name == "form4_source_freshness")
+    assert result.status == "PASS"
+    assert result.evidence["snapshot_date"] == "2026-08-21"
+    assert result.evidence["snapshot_source"] == "stock_signal_snapshot_tier1.as_of_date"
+
+
+def test_form4_freshness_accepts_latest_market_snapshot_for_weekend_report(tmp_path: Path) -> None:
+    module = load_script_module(
+        "33_validate_biotech_source_acceptance.py",
+        "biotech_source_acceptance_form4_weekend_test",
+    )
+    db_path = tmp_path / "sec_insider.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE stock_signal_snapshot_tier1(as_of_date TEXT);
+            CREATE TABLE sec_ownership_submission(filing_date TEXT);
+            INSERT INTO stock_signal_snapshot_tier1 VALUES ('2026-08-21');
+            INSERT INTO sec_ownership_submission VALUES ('2026-08-21');
+            """
+        )
+    checks: list[Any] = []
+    config = {
+        "governance_events": {"form4_db_path": str(db_path)},
+        "biotech_refresh": {"form4_preflight": {"max_raw_filing_lag_days": 5}},
+    }
+
+    module.validate_form4_source(
+        config,
+        base_dir=tmp_path,
+        checks=checks,
+        asof=date(2026, 8, 22),
+        expected_snapshot_date=date(2026, 8, 21),
+    )
+
+    result = next(check for check in checks if check.name == "form4_source_freshness")
+    assert result.status == "PASS"
+    assert result.evidence["expected_snapshot_date"] == "2026-08-21"
+
+
+def test_trial_snapshot_lookup_is_bounded_by_requested_asof() -> None:
+    module = load_script_module(
+        "33_validate_biotech_source_acceptance.py",
+        "biotech_source_acceptance_snapshot_test",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE trial_snapshot_daily(asof_date TEXT)")
+    conn.executemany(
+        "INSERT INTO trial_snapshot_daily VALUES (?)",
+        [("2026-08-16",), ("2026-08-17",), ("2026-08-18",)],
+    )
+
+    assert module.latest_trial_snapshot_asof(conn, asof=date(2026, 8, 17)) == "2026-08-17"
+    assert module.latest_trial_snapshot_asof(conn, asof=date(2026, 8, 15)) is None
+
+
+def test_acceptance_manifests_preserve_each_same_date_attempt(tmp_path: Path) -> None:
+    module = load_script_module(
+        "33_validate_biotech_source_acceptance.py",
+        "biotech_source_acceptance_archive_test",
+    )
+    latest = tmp_path / "biotech_refresh_acceptance_manifest.json"
+    archive_root = tmp_path / "orchestration" / "source_acceptance"
+    asof = date(2026, 8, 17)
+    first = {
+        "status": "FAIL",
+        "asof_date": asof.isoformat(),
+        "checks": [{"name": "candidate_price_freshness", "evidence": {"stale_candidate_tickers": ["AAA"]}}],
+    }
+    second = {
+        "status": "PASS",
+        "asof_date": asof.isoformat(),
+        "checks": [{"name": "candidate_price_freshness", "evidence": {"stale_candidate_tickers": []}}],
+    }
+
+    first_paths = module.persist_acceptance_manifests(
+        latest_path=latest,
+        archive_root=archive_root,
+        asof=asof,
+        created_at_utc=datetime(2026, 8, 18, 4, 0, 0, 1, tzinfo=timezone.utc),
+        payload=first,
+    )
+    second_paths = module.persist_acceptance_manifests(
+        latest_path=latest,
+        archive_root=archive_root,
+        asof=asof,
+        created_at_utc=datetime(2026, 8, 18, 4, 1, 0, 2, tzinfo=timezone.utc),
+        payload=second,
+    )
+
+    assert first_paths["archive"].read_text(encoding="utf-8").find('"AAA"') >= 0
+    assert first_paths["archive"] != second_paths["archive"]
+    assert len(list((archive_root / "20260817").glob("*.json"))) == 2
+    assert '"status": "PASS"' in latest.read_text(encoding="utf-8")
+    assert second_paths["dated"] == tmp_path / "20260817" / latest.name
+    assert '"status": "PASS"' in second_paths["dated"].read_text(encoding="utf-8")

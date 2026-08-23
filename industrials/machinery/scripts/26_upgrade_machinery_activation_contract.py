@@ -16,6 +16,7 @@ from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from industrials.machinery.stage12_contract_upgrade import (  # noqa: E402
     migrate_active_adapter_semantic_seal,
     upgrade_active_contract,
+    upgrade_mapped_fact_idempotency_contract,
     upgrade_financial_lineage_contract,
 )
 
@@ -44,6 +45,14 @@ def parse_args() -> argparse.Namespace:
             "reproduction and strict effective-date lineage validation."
         ),
     )
+    operation.add_argument(
+        "--upgrade-mapped-fact-idempotency-contract",
+        action="store_true",
+        help=(
+            "Reseal the exact mapped-fact conflict guard after proving the "
+            "active machinery universe and sealed rank are unchanged."
+        ),
+    )
     parser.add_argument(
         "--db",
         type=Path,
@@ -65,7 +74,15 @@ def main() -> int:
             base_dir=config_path.parent,
         )
     )
-    if args.upgrade_financial_lineage_contract:
+    if args.upgrade_mapped_fact_idempotency_contract:
+        result = upgrade_mapped_fact_idempotency_contract(
+            config,
+            config_path=config_path,
+            governance_root=governance_root,
+            asof=args.asof,
+            db_path=args.db,
+        )
+    elif args.upgrade_financial_lineage_contract:
         result = upgrade_financial_lineage_contract(
             config,
             config_path=config_path,

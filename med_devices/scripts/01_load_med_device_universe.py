@@ -6,6 +6,7 @@ import csv
 import logging
 import sys
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,8 @@ class UniverseCompany:
     investability_status: str
     company_name: str
     cik: str
+    cusip: str
+    listing_start_date: str
     exchange: str
     sector: str
     industry: str
@@ -102,6 +105,82 @@ def row_get(row: dict[str, str], *keys: str) -> str:
         if value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def normalize_cusip(raw: object) -> str:
+    value = "".join(str(raw or "").strip().upper().split())
+    if not value:
+        return ""
+    if len(value) != 9 or any(not (char.isdigit() or "A" <= char <= "Z" or char in "*@#") for char in value):
+        raise ValueError(f"Invalid CUSIP: {raw!r}")
+
+    def cusip_value(char: str) -> int:
+        if char.isdigit():
+            return int(char)
+        if "A" <= char <= "Z":
+            return ord(char) - ord("A") + 10
+        return {"*": 36, "@": 37, "#": 38}[char]
+
+    total = 0
+    for idx, char in enumerate(value[:8]):
+        weighted = cusip_value(char) * (2 if idx % 2 else 1)
+        total += weighted // 10 + weighted % 10
+    expected_check_digit = (10 - total % 10) % 10
+    if not value[-1].isdigit() or int(value[-1]) != expected_check_digit:
+        raise ValueError(f"Invalid CUSIP check digit: {raw!r}")
+    return value
+
+
+def normalize_iso_date(raw: object, *, field_name: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"Invalid {field_name}: {raw!r}; expected YYYY-MM-DD") from exc
+    return parsed.isoformat()
+
+
+def validate_security_identity(
+    company: UniverseCompany,
+    security_identity_overrides: dict[str, Any],
+) -> None:
+    spec = security_identity_overrides.get(company.ticker)
+    if spec is None:
+        return
+    if not isinstance(spec, dict):
+        raise ValueError(f"Security identity override for {company.ticker} must be a mapping")
+    reviewed_at = normalize_iso_date(spec.get("reviewed_at"), field_name=f"{company.ticker} reviewed_at")
+    reason = str(spec.get("reason") or "").strip()
+    if not reviewed_at or not reason:
+        raise ValueError(f"Security identity override for {company.ticker} requires reviewed_at and reason")
+
+    expected = {
+        "cik": normalize_cik(spec.get("cik")),
+        "cusip": normalize_cusip(spec.get("cusip")),
+        "listing_start_date": normalize_iso_date(
+            spec.get("listing_start_date"),
+            field_name=f"{company.ticker} listing_start_date",
+        ),
+    }
+    observed = {
+        "cik": company.cik,
+        "cusip": company.cusip,
+        "listing_start_date": company.listing_start_date,
+    }
+    missing_expected = [field for field, value in expected.items() if not value]
+    if missing_expected:
+        raise ValueError(
+            f"Security identity override for {company.ticker} is incomplete: {','.join(missing_expected)}"
+        )
+    mismatches = [
+        f"{field}: expected={expected[field]!r} observed={observed[field]!r}"
+        for field in expected
+        if observed[field] != expected[field]
+    ]
+    if mismatches:
+        raise ValueError(f"Security identity mismatch for {company.ticker}: {'; '.join(mismatches)}")
 
 
 def universe_status_from_flags(row: dict[str, str]) -> str:
@@ -208,6 +287,12 @@ def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> 
     ticker_listing_overrides = {
         normalize_ticker(ticker): spec for ticker, spec in raw_listing_overrides.items()
     }
+    raw_security_identity_overrides = cfg_get(config, "universe_validation.security_identity_overrides", {})
+    if not isinstance(raw_security_identity_overrides, dict):
+        raise ValueError("universe_validation.security_identity_overrides must be a mapping")
+    security_identity_overrides = {
+        normalize_ticker(ticker): spec for ticker, spec in raw_security_identity_overrides.items()
+    }
     for raw in rows:
         ticker = normalize_ticker(row_get(raw, "ticker", "Ticker", "Name", "MatchedTicker"))
         matched_ticker = normalize_ticker(row_get(raw, "MatchedTicker", "ticker", "Ticker", "Name"))
@@ -252,7 +337,7 @@ def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> 
             alias
             for alias in {
                 ticker,
-                row_get(raw, "Company_Name"),
+                row_get(raw, "company_name", "Company_Name"),
                 row_get(raw, "CompanyName"),
                 row_get(raw, "MatchedTicker"),
             }
@@ -263,6 +348,11 @@ def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> 
             investability_status=investability_status,
             company_name=company_name,
             cik=normalize_cik(row_get(raw, "cik", "CIK")),
+            cusip=normalize_cusip(row_get(raw, "cusip", "CUSIP")),
+            listing_start_date=normalize_iso_date(
+                row_get(raw, "listing_start_date", "ListingStartDate"),
+                field_name=f"{ticker} listing_start_date",
+            ),
             exchange=exchange,
             sector=sector,
             industry=industry,
@@ -278,6 +368,7 @@ def parse_universe_rows(path: Path, *, config: dict[str, Any] | None = None) -> 
             source_aliases=source_aliases,
             data_quality_status="",
         )
+        validate_security_identity(company, security_identity_overrides)
         companies.append(replace(company, data_quality_status=data_quality_status(company)))
     return companies
 
@@ -356,15 +447,16 @@ def upsert_universe(conn: Any, companies: list[UniverseCompany], *, source_id: s
             """
             INSERT INTO dim_security(
                 company_id, ticker, exchange, security_type, listing_status, is_primary_listing,
-                currency, created_at, updated_at
+                currency, listing_start_date, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, exchange) DO UPDATE SET
                 company_id = excluded.company_id,
                 security_type = excluded.security_type,
                 listing_status = excluded.listing_status,
                 is_primary_listing = excluded.is_primary_listing,
                 currency = excluded.currency,
+                listing_start_date = excluded.listing_start_date,
                 updated_at = excluded.updated_at
             """,
             (
@@ -375,6 +467,7 @@ def upsert_universe(conn: Any, companies: list[UniverseCompany], *, source_id: s
                 company.listing_status,
                 company.is_primary_listing,
                 company.currency,
+                company.listing_start_date,
                 now,
                 now,
             ),
@@ -393,6 +486,33 @@ def upsert_universe(conn: Any, companies: list[UniverseCompany], *, source_id: s
                     updated_at = excluded.updated_at
                 """,
                 (company_id, company.cik, active_source_id, now, now),
+            )
+        if company.cusip:
+            existing_cusip = conn.execute(
+                """
+                SELECT company_id
+                FROM dim_identifier
+                WHERE identifier_type = 'CUSIP' AND identifier_value = ?
+                """,
+                (company.cusip,),
+            ).fetchone()
+            if existing_cusip is not None and int(existing_cusip["company_id"]) != company_id:
+                raise ValueError(
+                    f"CUSIP {company.cusip} is already assigned to company_id={existing_cusip['company_id']}; "
+                    f"refusing reassignment to {company.ticker}"
+                )
+            conn.execute(
+                """
+                INSERT INTO dim_identifier(
+                    company_id, identifier_type, identifier_value, source_id, confidence, created_at, updated_at
+                )
+                VALUES (?, 'CUSIP', ?, NULL, 1.0, ?, ?)
+                ON CONFLICT(identifier_type, identifier_value) DO UPDATE SET
+                    company_id = excluded.company_id,
+                    confidence = excluded.confidence,
+                    updated_at = excluded.updated_at
+                """,
+                (company_id, company.cusip, now, now),
             )
         for alias in company.source_aliases:
             alias_norm = normalize_org_name(alias)

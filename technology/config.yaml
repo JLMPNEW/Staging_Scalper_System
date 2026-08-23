@@ -11,7 +11,7 @@ source_registry:
 
 technology_universe:
   initial_subsector: "semiconductors"
-  expected_ticker_count: 99
+  expected_ticker_count: 100
   seed_csv: "../ticker_mapping/semiconductor_tickers.csv"
   policy_path: "semiconductors/data/semiconductor_universe_policy.yaml"
   cohort_path: "semiconductors/data/semiconductor_cohorts.yaml"

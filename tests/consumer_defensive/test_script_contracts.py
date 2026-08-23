@@ -74,7 +74,7 @@ def _current_only_db(tmp_path: Path):
 
 def test_all_consumer_defensive_scripts_import_and_expose_help() -> None:
     scripts = sorted(SCRIPTS.glob("*.py"))
-    assert len(scripts) == 25
+    assert len(scripts) == 43
     for script in scripts:
         completed = subprocess.run(
             [sys.executable, str(script), "--help"],

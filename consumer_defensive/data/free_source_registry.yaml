@@ -262,6 +262,21 @@ sources:
     priority: 71
     status: active
 
+  - source_id: consumer_defensive_scoring_contract
+    stage: scoring_features
+    source_name: Consumer Defensive PIT scoring-feature contract
+    source_owner: consumer_defensive
+    source_type: normalized_internal_feature
+    base_url: 'consumer_defensive://stage6a/scoring-features'
+    refresh_frequency: on_feature_refresh
+    data_owner: consumer_defensive
+    raw_schema: consumer_defensive_scoring_features_v2
+    canonical_tables: [feature_scoring_input, feature_scoring_component]
+    feature_stages: [scoring_features, factor_validation]
+    subsector_scope: consumer_defensive
+    priority: 72
+    status: active
+
   - source_id: recognized_etf_index_membership_history
     stage: security_master
     source_name: Retired generic ETF/index membership contract
@@ -308,5 +323,22 @@ sources:
     feature_stages: [specialized_metrics]
     subsector_scope: consumer_defensive
     priority: 175
-    status: planned
-    notes: Stage 6B future source; Stage 4 census rows must never use this source ID.
+    status: active
+    notes: Stage 6B shadow-evidence source. Consumer Defensive promotion remains measurement-only and Stage 4 census rows must never use this source ID.
+
+  - source_id: consumer_defensive_stage6b_specialized_measurement
+    stage: specialized_metrics
+    source_name: Consumer Defensive governed specialized measurement builder
+    source_owner: consumer_defensive
+    source_type: normalized_internal_feature
+    base_url: "consumer_defensive://stage6b/specialized-measurements"
+    refresh_frequency: on_parser_or_financial_refresh
+    data_owner: consumer_defensive
+    raw_schema: consumer_defensive_specialized_measurements_v1
+    staging_tables: [stage6b_metric_policy, stage6b_metric_coverage]
+    canonical_tables: [fact_specialized_metric_observation, feature_scoring_component]
+    feature_stages: [specialized_metrics, scoring_features]
+    subsector_scope: consumer_defensive
+    priority: 176
+    status: active
+    notes: Measurement-only derived and parser observations; normalized scores remain null and production weight is fixed at zero.

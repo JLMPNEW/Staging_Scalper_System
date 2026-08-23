@@ -235,6 +235,10 @@ FIELDNAMES = [
     "tier1_safety_status",
     "tier1_safety_reason",
     "passed_tier1_safety_gate",
+    "tier1_safety_policy_version",
+    "tier1_safety_strict_pass_flag",
+    "tier1_safety_balanced_pass_flag",
+    "tier1_safety_tolerated_reason",
     "portfolio_candidate_gate",
     "portfolio_candidate_status",
     "portfolio_candidate_reason",
@@ -519,6 +523,10 @@ class ScoreRow:
     tier1_safety_status: str = TIER1_SAFETY_STATUS_PASS
     tier1_safety_reason: str = ""
     passed_tier1_safety_gate: int = 1
+    tier1_safety_policy_version: str = "tier1_strict_v1"
+    tier1_safety_strict_pass_flag: int = 1
+    tier1_safety_balanced_pass_flag: int = 0
+    tier1_safety_tolerated_reason: str = ""
     portfolio_candidate_gate: int = 0
     portfolio_candidate_status: str = ""
     portfolio_candidate_reason: str = ""
@@ -2072,6 +2080,15 @@ class Tier1SafetyPolicy:
     min_safe_core_cohort_percentile: float = 50.0
     safe_core_watchlist_min_score: float = 58.0
     allow_safe_core_gate_substitution: bool = False
+    allow_balanced_soft_miss: bool = False
+    balanced_soft_miss_effective_from: str = ""
+    balanced_soft_miss_reviewed_at: str = ""
+    balanced_policy_version: str = "tier1_strict_v1"
+    balanced_min_composite_score: float = 55.0
+    balanced_max_fundamental_shortfall: float = 12.0
+    balanced_max_valuation_shortfall: float = 12.0
+    balanced_max_durable_growth_shortfall: float = 10.0
+    balanced_max_value_trap_excess: float = 5.0
     require_explicit_template_tier1_eligibility: bool = True
     disallow_pullback_templates: bool = True
     disallow_inverse_core_templates: bool = True
@@ -3768,6 +3785,13 @@ def _policy_float(raw: object, default: float, *, context: str) -> float:
     return default if value is None else value
 
 
+def _policy_date_string(raw: object, default: str, *, context: str) -> str:
+    value = str(default if raw is None else raw).strip()
+    if value and parse_date(value) is None:
+        raise ValueError(f"{context} must be an ISO date")
+    return value
+
+
 def parse_tier1_safety_policy(raw: object, *, default: Tier1SafetyPolicy, context: str) -> Tier1SafetyPolicy:
     if raw is None:
         return default
@@ -3833,6 +3857,48 @@ def parse_tier1_safety_policy(raw: object, *, default: Tier1SafetyPolicy, contex
         allow_safe_core_gate_substitution=bool_from_raw(
             raw.get("allow_safe_core_gate_substitution"),
             default.allow_safe_core_gate_substitution,
+        ),
+        allow_balanced_soft_miss=bool_from_raw(
+            raw.get("allow_balanced_soft_miss"),
+            default.allow_balanced_soft_miss,
+        ),
+        balanced_soft_miss_effective_from=_policy_date_string(
+            raw.get("balanced_soft_miss_effective_from"),
+            default.balanced_soft_miss_effective_from,
+            context=f"{context}.balanced_soft_miss_effective_from",
+        ),
+        balanced_soft_miss_reviewed_at=_policy_date_string(
+            raw.get("balanced_soft_miss_reviewed_at"),
+            default.balanced_soft_miss_reviewed_at,
+            context=f"{context}.balanced_soft_miss_reviewed_at",
+        ),
+        balanced_policy_version=str(
+            raw.get("balanced_policy_version", default.balanced_policy_version) or default.balanced_policy_version
+        ).strip(),
+        balanced_min_composite_score=_policy_float(
+            raw.get("balanced_min_composite_score"),
+            default.balanced_min_composite_score,
+            context=f"{context}.balanced_min_composite_score",
+        ),
+        balanced_max_fundamental_shortfall=_policy_float(
+            raw.get("balanced_max_fundamental_shortfall"),
+            default.balanced_max_fundamental_shortfall,
+            context=f"{context}.balanced_max_fundamental_shortfall",
+        ),
+        balanced_max_valuation_shortfall=_policy_float(
+            raw.get("balanced_max_valuation_shortfall"),
+            default.balanced_max_valuation_shortfall,
+            context=f"{context}.balanced_max_valuation_shortfall",
+        ),
+        balanced_max_durable_growth_shortfall=_policy_float(
+            raw.get("balanced_max_durable_growth_shortfall"),
+            default.balanced_max_durable_growth_shortfall,
+            context=f"{context}.balanced_max_durable_growth_shortfall",
+        ),
+        balanced_max_value_trap_excess=_policy_float(
+            raw.get("balanced_max_value_trap_excess"),
+            default.balanced_max_value_trap_excess,
+            context=f"{context}.balanced_max_value_trap_excess",
         ),
         require_explicit_template_tier1_eligibility=bool_from_raw(
             raw.get("require_explicit_template_tier1_eligibility"),
@@ -4080,6 +4146,59 @@ def calibrated_baseline_candidate_status(
     return status, reason
 
 
+def allocation_candidate_status(
+    row: ScoreRow,
+    *,
+    config: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Return a bounded non-Tier-1 candidate status for rows that pass ordinary gates."""
+    raw_policy = cfg_get(config, "scoring.portfolio_candidate_policy", {}) or {}
+    if not isinstance(raw_policy, dict):
+        raise ValueError("scoring.portfolio_candidate_policy must be a mapping")
+    if not bool_from_raw(raw_policy.get("enabled"), False):
+        return None
+
+    asof_date = parse_date(row.asof_date)
+    effective_from = parse_date(raw_policy.get("effective_from"))
+    reviewed_at = parse_date(raw_policy.get("reviewed_at"))
+    if asof_date is None or effective_from is None or reviewed_at is None:
+        raise ValueError("scoring.portfolio_candidate_policy requires ISO asof/effective_from/reviewed_at dates")
+    if asof_date < max(effective_from, reviewed_at):
+        return None
+    if not row.legacy_all_gates_gate:
+        return None
+    if bool_from_raw(raw_policy.get("require_tier1_eligible_template"), True) and (
+        not row.cohort_score_template_id or not row.cohort_score_template_tier1_eligible
+    ):
+        return None
+
+    min_score = to_float(raw_policy.get("min_composite_score"))
+    high_confidence_score = to_float(raw_policy.get("high_confidence_composite_score"))
+    min_score_confidence = to_float(raw_policy.get("min_score_confidence"))
+    min_history_days = int(to_float(raw_policy.get("min_listing_history_calendar_days")) or 0)
+    min_score = 50.0 if min_score is None else min_score
+    high_confidence_score = 55.0 if high_confidence_score is None else high_confidence_score
+    min_score_confidence = 0.75 if min_score_confidence is None else min_score_confidence
+
+    if row.composite_score < min_score or row.score_confidence < min_score_confidence:
+        return None
+    price_start = parse_date(row.price_start_date)
+    if price_start is None or (asof_date - price_start).days < min_history_days:
+        return None
+
+    status = (
+        "high_confidence_allocation_candidate"
+        if row.composite_score >= high_confidence_score
+        else "allocation_candidate"
+    )
+    policy_version = str(raw_policy.get("policy_version") or "allocation_candidate_unversioned")
+    reason = (
+        f"policy={policy_version};legacy_all_gates_pass;score={row.composite_score:.2f};"
+        f"confidence={row.score_confidence:.4f};history_days={(asof_date - price_start).days}"
+    )
+    return status, reason
+
+
 def portfolio_candidate_hard_exclusion(
     row: ScoreRow,
     *,
@@ -4087,6 +4206,8 @@ def portfolio_candidate_hard_exclusion(
     waived_exclusions: set[str] | None = None,
 ) -> str | None:
     waivers = waived_exclusions or set()
+    if row.calibration_only:
+        return "calibration_only_security"
     if row.drop_otc_tape:
         return "otc_security_non_investable"
     if row.classification in {
@@ -4126,6 +4247,7 @@ def apply_portfolio_candidate_policy(
         asof=row.asof_date,
     )
     baseline_status = calibrated_baseline_candidate_status(row, config=config, gates=gates)
+    allocation_status = allocation_candidate_status(row, config=config)
     sources: list[str] = []
     if row.final_investability_gate:
         sources.append("final_investability")
@@ -4133,6 +4255,8 @@ def apply_portfolio_candidate_policy(
         sources.append("safe_core")
     if baseline_status is not None:
         sources.append(baseline_status[0])
+    if allocation_status is not None:
+        sources.append("allocation_policy")
 
     hard_exclusion = portfolio_candidate_hard_exclusion(
         row,
@@ -4159,11 +4283,15 @@ def apply_portfolio_candidate_policy(
         row.portfolio_candidate_status = baseline_status[0]
     elif row.passed_safe_core_gate or row.final_investability_gate:
         row.portfolio_candidate_status = "safe_core"
+    elif allocation_status is not None:
+        row.portfolio_candidate_status = allocation_status[0]
     else:
         row.portfolio_candidate_status = "portfolio_candidate"
     reason_parts = [f"sources={','.join(sources)}"]
     if baseline_status is not None:
         reason_parts.append(f"baseline_reason={baseline_status[1]}")
+    if allocation_status is not None:
+        reason_parts.append(f"allocation_reason={allocation_status[1]}")
     if hard_exclusion_waivers:
         reason_parts.append(f"ticker_governance_waivers={','.join(sorted(hard_exclusion_waivers))}")
     row.portfolio_candidate_reason = ";".join(reason_parts)
@@ -4333,6 +4461,69 @@ def tier1_safety_reasons(row: ScoreRow, policy: Tier1SafetyPolicy) -> list[str]:
         reasons.append("technical_breakdown")
 
     return list(dict.fromkeys(reasons))
+
+
+TIER1_BALANCED_SOFT_REASONS = frozenset(
+    {
+        "fundamental_below_tier1_safety_min",
+        "valuation_below_tier1_safety_min",
+        "durable_growth_below_tier1_safety_min",
+        "value_trap_above_tier1_safety_max",
+    }
+)
+
+
+def tier1_balanced_policy_is_effective(row: ScoreRow, policy: Tier1SafetyPolicy) -> bool:
+    if not policy.allow_balanced_soft_miss:
+        return False
+    asof_date = parse_date(row.asof_date)
+    effective_from = parse_date(policy.balanced_soft_miss_effective_from)
+    reviewed_at = parse_date(policy.balanced_soft_miss_reviewed_at)
+    if asof_date is None or effective_from is None or reviewed_at is None:
+        return False
+    return asof_date >= max(effective_from, reviewed_at)
+
+
+def tier1_balanced_soft_miss_reason(
+    row: ScoreRow,
+    policy: Tier1SafetyPolicy,
+    strict_reasons: list[str],
+    *,
+    tier1_restricted: bool,
+) -> str:
+    """Return the single bounded soft miss that a strong safe-core row may tolerate."""
+    if not tier1_balanced_policy_is_effective(row, policy):
+        return ""
+    if tier1_restricted or len(strict_reasons) != 1:
+        return ""
+    reason = strict_reasons[0]
+    if reason not in TIER1_BALANCED_SOFT_REASONS:
+        return ""
+    if (
+        row.composite_score < policy.balanced_min_composite_score
+        or row.safe_core_score < policy.min_safe_core_score
+        or row.safe_core_percentile < policy.min_safe_core_percentile
+        or row.safe_core_cohort_percentile < policy.min_safe_core_cohort_percentile
+        or not row.passed_data_quality_gate
+        or not row.passed_liquidity_gate
+        or not row.passed_reimbursement_gate
+        or not row.passed_fda_manual_review_gate
+        or row.hard_red_flag
+    ):
+        return ""
+    if reason == "fundamental_below_tier1_safety_min":
+        shortfall = policy.min_fundamental_quality - row.fundamental_quality_score
+        return reason if shortfall <= policy.balanced_max_fundamental_shortfall else ""
+    if reason == "valuation_below_tier1_safety_min":
+        shortfall = policy.min_valuation - row.valuation_score
+        return reason if shortfall <= policy.balanced_max_valuation_shortfall else ""
+    if reason == "durable_growth_below_tier1_safety_min":
+        shortfall = policy.min_durable_growth - row.durable_growth_score
+        return reason if shortfall <= policy.balanced_max_durable_growth_shortfall else ""
+    if reason == "value_trap_above_tier1_safety_max":
+        excess = row.value_trap_score - policy.max_value_trap
+        return reason if excess <= policy.balanced_max_value_trap_excess else ""
+    return ""
 
 
 def classify(
@@ -4527,10 +4718,25 @@ def classify(
     if tier1_restricted:
         reasons.append(row.calibration_status)
     tier1_safety = tier1_safety_reasons(row, tier1_policy)
-    row.passed_tier1_safety_gate = int(not tier1_safety)
+    tolerated_tier1_reason = tier1_balanced_soft_miss_reason(
+        row,
+        tier1_policy,
+        tier1_safety,
+        tier1_restricted=tier1_restricted,
+    )
+    row.tier1_safety_strict_pass_flag = int(not tier1_safety)
+    row.tier1_safety_balanced_pass_flag = int(bool(tolerated_tier1_reason))
+    row.passed_tier1_safety_gate = int(bool(row.tier1_safety_strict_pass_flag or row.tier1_safety_balanced_pass_flag))
     row.tier1_safety_status = TIER1_SAFETY_STATUS_PASS if row.passed_tier1_safety_gate else TIER1_SAFETY_STATUS_FAIL
-    row.tier1_safety_reason = ";".join(tier1_safety)
-    reasons.extend(f"tier1_safety_{reason}" for reason in tier1_safety)
+    row.tier1_safety_reason = "" if tolerated_tier1_reason else ";".join(tier1_safety)
+    row.tier1_safety_tolerated_reason = tolerated_tier1_reason
+    row.tier1_safety_policy_version = (
+        tier1_policy.balanced_policy_version
+        if tier1_balanced_policy_is_effective(row, tier1_policy)
+        else "tier1_strict_v1"
+    )
+    if not row.passed_tier1_safety_gate:
+        reasons.extend(f"tier1_safety_{reason}" for reason in tier1_safety)
 
     safe_core_reasons: list[str] = []
     if tier1_restricted:
@@ -4619,7 +4825,10 @@ def classify(
     if tier1_restricted:
         legacy_misses.append("restricted_cohort")
     row.legacy_gate_misses = ";".join(dict.fromkeys(legacy_misses))
-    safe_core_investability_gate = bool(tier1_policy.allow_safe_core_gate_substitution and row.passed_safe_core_gate)
+    safe_core_investability_gate = bool(
+        row.passed_safe_core_gate
+        and (tier1_policy.allow_safe_core_gate_substitution or row.tier1_safety_balanced_pass_flag)
+    )
     row.final_investability_gate = int(
         (row.legacy_all_gates_gate and row.passed_tier1_safety_gate) or safe_core_investability_gate
     )
@@ -4676,7 +4885,14 @@ def classify(
     elif row.final_investability_gate:
         row.classification = "tier_1_long_candidate"
         if safe_core_investability_gate and not row.legacy_all_gates_gate:
-            row.classification_reason = f"safe_core_gate_passed;legacy_misses={row.legacy_gate_misses or 'none'}"
+            balanced_reason = (
+                f";balanced_tier1_soft_miss={row.tier1_safety_tolerated_reason}"
+                if row.tier1_safety_tolerated_reason
+                else ""
+            )
+            row.classification_reason = (
+                f"safe_core_gate_passed;legacy_misses={row.legacy_gate_misses or 'none'}{balanced_reason}"
+            )
         else:
             overlay_reasons = []
             if row.durable_growth_gate_excluded:
@@ -5776,6 +5992,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
         "tier1_safety_status",
         "tier1_safety_reason",
         "passed_tier1_safety_gate",
+        "tier1_safety_policy_version",
+        "tier1_safety_strict_pass_flag",
+        "tier1_safety_balanced_pass_flag",
+        "tier1_safety_tolerated_reason",
         "portfolio_candidate_gate",
         "portfolio_candidate_status",
         "portfolio_candidate_reason",
@@ -6071,6 +6291,10 @@ def upsert_rows(conn: Any, rows: list[ScoreRow], *, replace_asof: bool = False) 
                 row.tier1_safety_status,
                 row.tier1_safety_reason,
                 row.passed_tier1_safety_gate,
+                row.tier1_safety_policy_version,
+                row.tier1_safety_strict_pass_flag,
+                row.tier1_safety_balanced_pass_flag,
+                row.tier1_safety_tolerated_reason,
                 row.portfolio_candidate_gate,
                 row.portfolio_candidate_status,
                 row.portfolio_candidate_reason,

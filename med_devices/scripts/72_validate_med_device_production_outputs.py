@@ -354,6 +354,197 @@ def main() -> int:
             expected=0,
             details="Inactive/delisted tickers cannot remain in the production score surface.",
         )
+        security_columns = table_columns(conn, "dim_security")
+        add_check(
+            checks,
+            check_id="security_master_listing_start_date_present",
+            severity="CRITICAL",
+            passed="listing_start_date" in security_columns,
+            observed="listing_start_date" if "listing_start_date" in security_columns else "missing",
+            expected="listing_start_date",
+            details="Security master must persist issuer-specific listing starts to control ticker reuse.",
+        )
+        prelisting_price_rows = (
+            count_rows(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM fact_price_ohlcv p
+                JOIN dim_security s
+                  ON s.ticker = p.ticker
+                 AND COALESCE(s.is_primary_listing, 0) = 1
+                WHERE COALESCE(TRIM(s.listing_start_date), '') <> ''
+                  AND p.bar_date < s.listing_start_date
+                """,
+            )
+            if "listing_start_date" in security_columns
+            else -1
+        )
+        add_check(
+            checks,
+            check_id="no_price_rows_before_security_listing_start",
+            severity="CRITICAL",
+            passed=prelisting_price_rows == 0,
+            observed=prelisting_price_rows,
+            expected=0,
+            details="No price row may predate the governed issuer listing start; this prevents ticker-reuse contamination.",
+        )
+
+        prelisting_13f_rows = (
+            count_rows(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM fact_sec_13f_holding h
+                JOIN dim_security s
+                  ON s.company_id = h.company_id
+                 AND COALESCE(s.is_primary_listing, 0) = 1
+                WHERE COALESCE(TRIM(s.listing_start_date), '') <> ''
+                  AND h.report_date < s.listing_start_date
+                """,
+            )
+            if "listing_start_date" in security_columns
+            else -1
+        )
+        add_check(
+            checks,
+            check_id="no_13f_rows_before_security_listing_start",
+            severity="CRITICAL",
+            passed=prelisting_13f_rows == 0,
+            observed=prelisting_13f_rows,
+            expected=0,
+            details="No SEC 13F report period may predate the governed issuer listing start.",
+        )
+
+        identity_fact_dates = {
+            "fact_market_snapshot": "asof_date",
+            "fact_short_interest": "settlement_date",
+            "fact_finra_short_volume": "trade_date",
+            "fact_ibkr_borrow_snapshot": "asof_date",
+            "fact_sec_form4_transaction": "transaction_date",
+        }
+        for fact_table, date_column in identity_fact_dates.items():
+            fact_columns = table_columns(conn, fact_table) if table_exists(conn, fact_table) else set()
+            if date_column not in fact_columns:
+                continue
+            if "company_id" in fact_columns:
+                identity_join = "s.company_id = f.company_id"
+            elif "ticker" in fact_columns:
+                identity_join = "s.ticker = f.ticker"
+            else:
+                continue
+            prelisting_fact_rows = count_rows(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM {fact_table} f
+                JOIN dim_security s
+                  ON {identity_join}
+                 AND COALESCE(s.is_primary_listing, 0) = 1
+                WHERE COALESCE(TRIM(s.listing_start_date), '') <> ''
+                  AND f.{date_column} < s.listing_start_date
+                """,
+            )
+            add_check(
+                checks,
+                check_id=f"no_{fact_table}_rows_before_security_listing_start",
+                severity="CRITICAL",
+                passed=prelisting_fact_rows == 0,
+                observed=prelisting_fact_rows,
+                expected=0,
+                details=f"{fact_table}.{date_column} must respect the governed issuer listing start.",
+            )
+
+        financial_history_boundaries = cfg_get(config, "financial_features.financial_history_start_by_ticker", {})
+        invalid_financial_boundaries: list[str] = []
+        if not isinstance(financial_history_boundaries, dict):
+            invalid_financial_boundaries.append("financial_history_start_by_ticker_not_mapping")
+        else:
+            for raw_ticker, raw_start in financial_history_boundaries.items():
+                ticker = str(raw_ticker or "").strip().upper()
+                start_date = str(raw_start or "").strip()[:10]
+                if not ticker or len(start_date) != 10:
+                    invalid_financial_boundaries.append(f"{ticker or '<blank>'}:invalid_start")
+                    continue
+                identity_row = conn.execute(
+                    """
+                    SELECT s.listing_start_date
+                    FROM dim_company c
+                    JOIN dim_security s
+                      ON s.company_id = c.company_id
+                     AND COALESCE(s.is_primary_listing, 0) = 1
+                    WHERE c.ticker = ?
+                    ORDER BY s.security_id DESC
+                    LIMIT 1
+                    """,
+                    (ticker,),
+                ).fetchone()
+                if identity_row is None:
+                    invalid_financial_boundaries.append(f"{ticker}:missing_identity")
+                elif start_date < str(identity_row["listing_start_date"] or "")[:10]:
+                    invalid_financial_boundaries.append(f"{ticker}:boundary_before_listing_start")
+        add_check(
+            checks,
+            check_id="financial_history_identity_boundaries_valid",
+            severity="CRITICAL",
+            passed=not invalid_financial_boundaries,
+            observed=";".join(invalid_financial_boundaries),
+            expected="configured financial history boundaries are valid and not before listing start",
+            details="Ticker-transition issuers must not consume predecessor-company financial statements.",
+        )
+
+        raw_identity_overrides = cfg_get(config, "universe_validation.security_identity_overrides", {})
+        identity_mismatches: list[str] = []
+        if not isinstance(raw_identity_overrides, dict):
+            identity_mismatches.append("security_identity_overrides_not_mapping")
+        else:
+            for raw_ticker, raw_spec in raw_identity_overrides.items():
+                ticker = str(raw_ticker or "").strip().upper()
+                spec = raw_spec if isinstance(raw_spec, dict) else {}
+                row = conn.execute(
+                    """
+                    SELECT
+                        c.company_id,
+                        c.cik,
+                        s.listing_start_date,
+                        EXISTS(
+                            SELECT 1
+                            FROM dim_identifier i
+                            WHERE i.company_id = c.company_id
+                              AND i.identifier_type = 'CUSIP'
+                              AND i.identifier_value = ?
+                        ) AS cusip_match
+                    FROM dim_company c
+                    LEFT JOIN dim_security s
+                      ON s.company_id = c.company_id
+                     AND COALESCE(s.is_primary_listing, 0) = 1
+                    WHERE c.ticker = ?
+                    ORDER BY s.security_id DESC
+                    LIMIT 1
+                    """,
+                    (str(spec.get("cusip") or "").strip().upper(), ticker),
+                ).fetchone()
+                if row is None:
+                    identity_mismatches.append(f"{ticker}:missing_company")
+                    continue
+                expected_cik = str(spec.get("cik") or "").strip()
+                expected_start = str(spec.get("listing_start_date") or "").strip()
+                if str(row["cik"] or "") != expected_cik:
+                    identity_mismatches.append(f"{ticker}:cik")
+                if str(row["listing_start_date"] or "") != expected_start:
+                    identity_mismatches.append(f"{ticker}:listing_start_date")
+                if int(row["cusip_match"] or 0) != 1:
+                    identity_mismatches.append(f"{ticker}:cusip")
+        add_check(
+            checks,
+            check_id="governed_security_identities_match_db",
+            severity="CRITICAL",
+            passed=not identity_mismatches,
+            observed=";".join(identity_mismatches),
+            expected="all configured CIK/CUSIP/listing-start identities match",
+            details="Configured ticker-reuse and IPO identity contracts must match the canonical security master.",
+        )
+
         explicit_asof = str(args.asof or "").strip()
         max_score_asof = scalar(conn, "SELECT MAX(asof_date) FROM med_device_daily_scores")
         add_check(
@@ -892,6 +1083,38 @@ def main() -> int:
             expected=0,
             details="Production CSV cannot contain duplicate ticker rows.",
         )
+        tier1_policy_fields = {
+            "passed_tier1_safety_gate",
+            "tier1_safety_policy_version",
+            "tier1_safety_strict_pass_flag",
+            "tier1_safety_balanced_pass_flag",
+            "tier1_safety_tolerated_reason",
+        }
+        if tier1_policy_fields.issubset(fields):
+            invalid_tier1_rows: list[str] = []
+            for row in rows:
+                ticker = str(row.get("ticker") or "").strip().upper() or "<blank>"
+                passed = truthy_flag(row.get("passed_tier1_safety_gate"))
+                strict = truthy_flag(row.get("tier1_safety_strict_pass_flag"))
+                balanced = truthy_flag(row.get("tier1_safety_balanced_pass_flag"))
+                tolerated = str(row.get("tier1_safety_tolerated_reason") or "").strip()
+                policy_version = str(row.get("tier1_safety_policy_version") or "").strip()
+                if (
+                    passed != (strict or balanced)
+                    or (strict and balanced)
+                    or balanced != bool(tolerated)
+                    or not policy_version
+                ):
+                    invalid_tier1_rows.append(ticker)
+            add_check(
+                checks,
+                check_id=f"{label}_tier1_policy_consistency",
+                severity="CRITICAL",
+                passed=not invalid_tier1_rows,
+                observed=",".join(invalid_tier1_rows[:25]),
+                expected="strict/balanced/pass flags and tolerated reason are internally consistent",
+                details="Balanced Tier-1 admission must be explicit, mutually exclusive with strict pass, and auditable.",
+            )
 
     top_level_fields, top_level_rows = parsed_csvs["top_level"]
     dated_daily_fields, dated_daily_rows = parsed_csvs["dated_review"]

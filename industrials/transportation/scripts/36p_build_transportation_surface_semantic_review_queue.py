@@ -23,11 +23,12 @@ from industrials.transportation.investable_universe import (  # noqa: E402
     load_investable_universe_policy,
 )
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG  # noqa: E402
+from industrials.transportation.surface_semantic_review import definition_signature  # noqa: E402
 
 
 DATA_ROOT = PROJECT_ROOT / "industrials" / "transportation" / "data"
-SOURCE_MAP = DATA_ROOT / "transportation_surface_metric_source_map_v1.csv"
-POLICY = DATA_ROOT / "transportation_investable_universe_v3.yaml"
+SOURCE_MAP = DATA_ROOT / "transportation_surface_metric_source_map_v2.csv"
+POLICY = DATA_ROOT / "transportation_investable_universe_v5.yaml"
 DEFAULT_OUTPUT_ROOT = (
     PROJECT_ROOT
     / "output"
@@ -162,18 +163,7 @@ def _domain_priority(
 
 
 def _signature(row: Mapping[str, object]) -> tuple[str, ...]:
-    return (
-        str(row.get("source_lane") or ""),
-        str(row.get("ticker") or ""),
-        str(row.get("metric_id") or ""),
-        _normalized(row.get("concept_name")),
-        _normalized(row.get("unit")),
-        _normalized(row.get("extraction_method")),
-        _normalized(row.get("status_reason")),
-        _normalized(row.get("formula")),
-        _normalized(row.get("numerator_concept")),
-        _normalized(row.get("denominator_concept")),
-    )
+    return definition_signature(row)
 
 
 def _representatives(rows: list[dict[str, object]]) -> list[dict[str, object]]:

@@ -291,6 +291,38 @@ def _normalize_metric_value(
                 value /= 100.0
             return value, "ratio", {"raw_value_text": parsed.raw}
         return None
+    if metric_id == "rail_fuel_efficiency":
+        if re.search(r"\b(?:gtm|gross\s+ton[- ]?miles?)\s+per\s+gallon\b", normalized_context):
+            if value <= 0:
+                return None
+            value = 1000.0 / value
+            basis = "converted_from_gtm_per_gallon"
+        elif re.search(
+            r"gallons?.{0,30}(?:per|/).{0,20}(?:1,?000|thousand).{0,20}(?:gtm|gross\s+ton)",
+            normalized_context,
+        ):
+            basis = "reported_gallons_per_1000_gtm"
+        elif re.search(r"gallons?.{0,20}(?:per|/).{0,20}(?:gtm|gross\s+ton)", normalized_context):
+            value *= 1000.0
+            basis = "converted_from_gallons_per_gtm"
+        else:
+            basis = "issuer_reported_fuel_efficiency"
+        return value, "fuel_per_gross_ton_mile", {
+            "raw_value_text": parsed.raw,
+            "definition_basis": basis,
+            "normalized_unit": "gallons_per_1000_gtm",
+        }
+    if metric_id == "rail_network_velocity":
+        if re.search(r"\b(?:car|freight\s+car)\s+(?:velocity|miles?\s+per\s+day)\b", normalized_context):
+            basis = "car_velocity_miles_per_day"
+        elif re.search(r"\b(?:train\s+speed|train\s+velocity)\b", normalized_context):
+            basis = "train_speed_mph"
+        else:
+            basis = "network_velocity_unresolved"
+        return value, "distance_per_time", {
+            "raw_value_text": parsed.raw,
+            "definition_basis": basis,
+        }
     unit = _UNIT_BY_METRIC.get(metric_id)
     if not unit:
         return None
@@ -629,6 +661,148 @@ def _strict_surface_ratio_evidence(
     )
 
 
+def _pipe_values(value: object) -> tuple[str, ...]:
+    return tuple(
+        item.strip() for item in str(value or "").split("|") if item.strip()
+    )
+
+
+def _operand_from_aliases(
+    rows: Sequence[SemanticBlock],
+    aliases: object,
+) -> tuple[float, SemanticBlock, str] | None:
+    patterns = tuple(_phrase_pattern(alias) for alias in _pipe_values(aliases))
+    if not patterns:
+        return None
+    for row in rows:
+        for index, cell in enumerate(row.cells):
+            label = normalize_space(cell)
+            if len(label) > 180 or not any(pattern.search(label) for pattern in patterns):
+                continue
+            parsed = _value_after_label(row.cells, index, patterns)
+            if parsed is not None and parsed.value >= 0:
+                return parsed.value, row, label
+    return None
+
+
+def _surface_contract_evidence(
+    item: WorkItem,
+    rows: Sequence[SemanticBlock],
+    *,
+    contract: Mapping[str, str],
+    source_document: str,
+    document_sha256: str,
+    source_kind: str,
+    source_contract: Mapping[str, str],
+    filing_profile: Mapping[str, str] | None,
+) -> MetricEvidence | None:
+    ticker = item.filing.ticker.upper()
+    if ticker not in _pipe_values(contract.get("applicable_tickers", "")):
+        return None
+    table_text = " | ".join(row.search_text for row in rows)
+    segment_aliases = _pipe_values(contract.get("segment_aliases", ""))
+    matched_segment = next(
+        (
+            alias
+            for alias in segment_aliases
+            if _phrase_pattern(alias).search(table_text)
+        ),
+        "",
+    )
+    if segment_aliases and not matched_segment:
+        return None
+    numerator = _operand_from_aliases(rows, contract.get("numerator_aliases", ""))
+    denominator = _operand_from_aliases(rows, contract.get("denominator_aliases", ""))
+    alternate = _operand_from_aliases(
+        rows, contract.get("alternate_numerator_aliases", "")
+    )
+    if denominator is None or denominator[0] <= 0:
+        return None
+    denominator_value, denominator_row, denominator_label = denominator
+    formula_contract = str(contract.get("formula") or "")
+    if numerator is not None:
+        numerator_value, numerator_row, numerator_label = numerator
+        if formula_contract.startswith("1-"):
+            value = 1.0 - numerator_value / denominator_value
+            formula = "1-numerator/denominator"
+        else:
+            value = numerator_value / denominator_value
+            formula = "numerator/denominator"
+    elif alternate is not None and "alternate" in formula_contract:
+        numerator_value, numerator_row, numerator_label = alternate
+        value = 1.0 - numerator_value / denominator_value
+        formula = "1-alternate/denominator"
+    else:
+        return None
+    metric_id = str(contract["metric_id"])
+    upper_bound = {
+        "freight_weight_per_shipment": 10_000.0,
+        "operating_ratio": 1.5,
+    }.get(metric_id, 1.0)
+    if not math.isfinite(value) or not 0 <= value <= upper_bound:
+        return None
+    concept_by_metric = {
+        "freight_weight_per_shipment": "DerivedFreightWeightPerShipment",
+        "operating_ratio": "DerivedSurfaceSegmentOperatingRatio",
+        "purchased_transportation_ratio": "DerivedSurfacePurchasedTransportationRatio",
+        "logistics_net_revenue_margin": "DerivedSurfaceLogisticsNetRevenueMargin",
+    }
+    concept_name = concept_by_metric.get(metric_id)
+    if concept_name is None:
+        return None
+    source_context = _section_context(
+        item,
+        numerator_row,
+        source_contract,
+        source_kind=source_kind,
+        filing_profile=filing_profile,
+    )
+    scope = _scope(table_text)
+    comparability = str(contract.get("comparability_class") or "")
+    return MetricEvidence(
+        metric_name=metric_id,
+        concept_name=concept_name,
+        value=value,
+        unit=str(contract.get("unit_contract") or ""),
+        period_start="",
+        period_end=_date_value(table_text, item.filing.report_date),
+        scope=scope,
+        confidence=0.94 if comparability.startswith("exact") else 0.82,
+        status="REJECTED_POLICY" if scope == "nonissuer" else "REVIEW_REQUIRED",
+        reason=(
+            "nonissuer_or_proforma_scope"
+            if scope == "nonissuer"
+            else "contract_derived_surface_metric_requires_semantic_replay"
+        ),
+        evidence_text=(
+            f"{numerator_label}={numerator_value:g}; "
+            f"{denominator_label}={denominator_value:g}; "
+            f"formula={formula}; segment={matched_segment}; {table_text}"
+        )[:2000],
+        source_document=source_document,
+        extraction_method="dedicated_parser:transportation_surface_contract_v1",
+        provenance={
+            "surface_parser_version": "transportation_surface_contract_v1",
+            "derivation_contract_version": contract.get("contract_version", ""),
+            "derivation_id": contract.get("derivation_id", ""),
+            "formula": formula,
+            "numerator_value": numerator_value,
+            "numerator_label": numerator_label,
+            "numerator_row_index": numerator_row.row_index,
+            "denominator_value": denominator_value,
+            "denominator_label": denominator_label,
+            "denominator_row_index": denominator_row.row_index,
+            "segment_id": matched_segment,
+            "definition_basis": contract.get("definition_basis", ""),
+            "comparability_class": comparability,
+            "unit_contract": contract.get("unit_contract", ""),
+            "document_sha256": document_sha256,
+            "semantic_table_id": numerator_row.table_id,
+            **source_context,
+        },
+    )
+
+
 def derive_surface_strict_evidence(
     item: WorkItem,
     blocks: Sequence[SemanticBlock],
@@ -638,6 +812,7 @@ def derive_surface_strict_evidence(
     document_sha256: str,
     source_kind: str,
     source_contracts: Mapping[str, Mapping[str, str]],
+    derivation_contracts: Sequence[Mapping[str, str]] = (),
     filing_profiles: Mapping[str, Mapping[str, str]] | None = None,
     document_extraction_method: str = "",
     document_extraction_warning: str = "",
@@ -726,6 +901,22 @@ def derive_surface_strict_evidence(
         ),
     )
     for rows in by_table.values():
+        for contract in derivation_contracts:
+            metric_id = str(contract.get("metric_id") or "")
+            if metric_id not in requested_metrics or metric_id not in source_contracts:
+                continue
+            evidence = _surface_contract_evidence(
+                item,
+                rows,
+                contract=contract,
+                source_document=source_document,
+                document_sha256=document_sha256,
+                source_kind=source_kind,
+                source_contract=source_contracts[metric_id],
+                filing_profile=profile,
+            )
+            if evidence is not None:
+                output.append(evidence)
         for metric_id, numerator, denominator, numerator_concept, denominator_concept, formula in ratio_rules:
             if metric_id not in requested_metrics or metric_id not in source_contracts:
                 continue
@@ -758,6 +949,7 @@ def derive_surface_table_evidence(
     document_sha256: str,
     source_kind: str,
     source_contracts: Mapping[str, Mapping[str, str]],
+    derivation_contracts: Sequence[Mapping[str, str]] = (),
     filing_profiles: Mapping[str, Mapping[str, str]] | None = None,
     document_extraction_method: str = "",
     document_extraction_warning: str = "",
@@ -775,6 +967,7 @@ def derive_surface_table_evidence(
             document_sha256=document_sha256,
             source_kind=source_kind,
             source_contracts=source_contracts,
+            derivation_contracts=derivation_contracts,
             filing_profiles=filing_profiles,
             document_extraction_method=document_extraction_method,
             document_extraction_warning=document_extraction_warning,

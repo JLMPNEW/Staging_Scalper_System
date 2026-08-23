@@ -32,6 +32,7 @@ def validate_provider_dependencies(
     *,
     enable_arelle: bool,
     enable_edgartools: bool,
+    require_pdf_native: bool = False,
 ) -> None:
     required_modules = {
         "Arelle": ("arelle.Cntlr", enable_arelle, "--disable-arelle"),
@@ -51,6 +52,20 @@ def validate_provider_dependencies(
             missing.append(
                 f"{provider} ({module_name}; explicitly disable with "
                 f"{disable_flag})"
+            )
+    if require_pdf_native:
+        native_pdf_available = False
+        for module_name in ('pypdf', 'fitz'):
+            try:
+                import_module(module_name)
+            except ImportError:
+                continue
+            native_pdf_available = True
+            break
+        if not native_pdf_available:
+            missing.append(
+                'PDF native text extraction (pypdf or PyMuPDF/fitz; '
+                'required by planned PDF documents)'
             )
     if missing:
         raise RuntimeError(

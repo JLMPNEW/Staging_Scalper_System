@@ -213,3 +213,83 @@ The legal next gate is future-only shadow evidence after 2026-07-30 using the
 frozen cohorts, features, candidates, and verdict criteria. The revealed
 historical panel must not be used for further membership selection, weight
 optimization, or production promotion.
+
+## V7 forensic decision and accepted-fact proof (2026-08-21)
+
+The recommended audit-first sequence has now been implemented. It did not
+reparse filings, fetch data, rebuild the historical feature panel, recalibrate
+production weights, or alter the sealed v6 evidence.
+
+Script 38y_audit_transportation_v5_model_forensics.py independently rebuilt
+candidate scores, ranking, top/bottom selections, turnover, costs, IC, and
+point-in-time controls from the frozen v6 panel. It also re-hashed the outcome
+panel and both pinned price slices, checked all source-lineage fields, evaluated
+non-overlapping samples, ran within-date permutation nulls, decomposed every
+score component, and measured specialized metrics inside their true comparison
+domains.
+
+The result is PASS_MECHANICS_FAIL_MODEL_SPECIFICATION:
+
+- 7,860 independent checks passed; zero failed.
+- Surface surface_balanced_v5: mean IC +0.0387, non-overlap IC +0.0219,
+  permutation p-value 0.1049, top-minus-cohort net -0.46%.
+- Tanker tanker_quality_fleet_v1: mean IC -0.0175, non-overlap IC +0.0803,
+  permutation p-value 0.7363, top-minus-cohort net -0.30%.
+- Surface operating-ratio levels are directionally negative in rail, LTL, and
+  truckload domains. Expanding that level metric would amplify a
+  mis-specified signal.
+- Tanker valuation IC is -0.1175 and operating-efficiency IC is -0.0744.
+  The generic valuation/asset-turnover design is not cycle-aware.
+- The existing 63-session diagnostic gate uses overlapping monthly IC while
+  checking only the non-overlapping observation count. This did not cause the
+  failed result, but it could create a false future pass. V7 therefore makes
+  non-overlapping outcomes primary and HAC-adjusted monthly evidence secondary.
+
+Script 38z_build_transportation_v7_research_decision.py freezes the
+research-only architecture and future gates. It cannot authorize production.
+It requires separate surface/tanker evidence, within-domain normalization,
+fixed missing-value slots, 12 non-overlapping 21-session future outcomes, four
+non-overlapping 63-session future outcomes, positive IC and rank spreads, and a
+55% hit rate. Because the design used revealed diagnostic evidence, its first
+untouched signal date is 2026-08-24.
+
+Before authorizing any new parse, script
+38za_replay_transportation_v7_accepted_metric_proof.py used the already
+accepted, conflict-free semantic facts and the frozen outcome panel to test
+incremental value. It materialized and hash-bound the exact tanker fact slice.
+The result is DENY_TARGETED_PARSING_NO_INCREMENTAL_PROOF:
+
+| Cohort | Candidate metric | Dates | Mean IC increment | Non-overlap IC increment | Rank-spread increment | Gate |
+|---|---|---:|---:|---:|---:|---|
+| LTL | pricing_or_yield_growth | 38 | +0.0789 | -0.0455 | 0.00% | FAIL |
+| LTL | shipment_or_load_growth | 28 | +0.0357 | 0.0000 | +0.29% | FAIL |
+| Tankers | tce_rate_yoy_growth | 50 | -0.0220 | -0.0308 | +0.28% | FAIL |
+| Tankers | revenue_days_yoy_growth | 21 | +0.0190 | 0.0000 | +0.44% | FAIL |
+
+The level freight_weight_per_shipment screen is not an extraction target
+because its economically correct direction is unresolved. Fleet age remains a
+do-not-expand metric because its directional IC is approximately zero.
+
+Consequently:
+
+1. no broad or targeted parser run is authorized for the current definitions;
+2. no second historical feature rebuild is authorized;
+3. no historical recalibration can support promotion;
+4. transportation stays outside portfolio-layer Stage 1, so it cannot
+   freshness-block production-ready families;
+5. any next model candidate must be frozen before 2026-08-24 data is evaluated
+   and must earn promotion only from the new future-only gates.
+
+The transportation regression selection completes with 520 passing tests.
+The portfolio-layer test now matches the active isolation contract:
+transportation shadow evidence is owned by its independent orchestrator lane,
+while Stage 1 remains disabled until separate production activation.
+
+## V8 subgroup-specific scoring correction (2026-08-21)
+
+The exhaustive parser and semantic-review cycle is complete. The follow-on v8
+implementation freezes group-specific component weights, issuer-stable change/spread
+definitions, a 30% tanker-cycle pack, group-first calibration gates, and fixed
+outcome-blind group aggregation weights. Historical scores were regenerated once
+without another financial reparse; group calibration ran once and did not authorize
+surface aggregation or production. See `TRANSPORTATION_V8_SUBGROUP_MODEL_RESULT_2026-08-21.md`.

@@ -16,6 +16,8 @@ ENV_DEFAULT_RE = re.compile(
 ALLOWED_ROOT_KEYS = frozenset(
     {
         'positioning',
+        'scoring_features',
+        'stage6b',
         "paths",
         "runtime",
         "source_registry",
@@ -41,6 +43,26 @@ ALLOWED_SECTION_KEYS = {
         'source_identifier_map',
         'start_date', 'source_birthdates', 'maximum_age_days',
         'minimum_current_coverage', 'lookback_days', 'upstream_source_names',
+    },
+    'scoring_features': {
+        'source_id', 'definition_version', 'minimum_normalization_peer_count',
+        'normalize_within_cohort', 'minimum_rank_ready_fraction',
+        'accepted_market_quality_statuses', 'accepted_financial_quality_statuses',
+        'accepted_positioning_quality_statuses', 'specialized_default_availability',
+        'component_weight_default',
+    },
+    'stage6b': {
+        'adapter_path', 'parser_source_id', 'measurement_source_id',
+        'definition_version', 'minimum_parser_confidence',
+        'maximum_filings_per_ticker', 'maximum_documents_per_filing',
+        'maximum_event_documents_per_filing',
+        'event_hydration_workers',
+        'enable_pdf_ocr', 'maximum_pdf_pages', 'maximum_pdf_bytes',
+        'pdf_extraction_timeout_seconds',
+        'maximum_ocr_pages', 'ocr_dpi', 'ocr_page_timeout_seconds',
+        'maximum_ocr_pixels_per_page',
+        'historical_inventory_start', 'production_weight',
+        'production_promotion_enabled',
     },
     "paths": {"database_path", "output_dir", "authoritative_input_manifest"},
     "runtime": {"sqlite_timeout_sec", "model_family", "internal_sector", "portfolio_sector", "timezone"},
@@ -232,6 +254,113 @@ def _validate_positioning_contract(config: dict[str, Any]) -> None:
         raise ValueError('positioning.source_identifier_map must be a nonblank path.')
 
 
+def _validate_scoring_feature_contract(config: dict[str, Any]) -> None:
+    source_id = cfg_get(config, 'scoring_features.source_id')
+    version = cfg_get(config, 'scoring_features.definition_version')
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ValueError('scoring_features.source_id must be nonblank.')
+    if version != 'consumer_defensive_scoring_features_v2':
+        raise ValueError(
+            'scoring_features.definition_version must be '
+            "'consumer_defensive_scoring_features_v2'."
+        )
+    if int(cfg_get(config, 'scoring_features.minimum_normalization_peer_count', 0)) < 2:
+        raise ValueError('scoring_features.minimum_normalization_peer_count must be at least 2.')
+    if cfg_get(config, 'scoring_features.normalize_within_cohort') is not True:
+        raise ValueError('scoring_features.normalize_within_cohort must be true.')
+    rank_fraction = float(cfg_get(config, 'scoring_features.minimum_rank_ready_fraction', -1))
+    if not 0.0 <= rank_fraction <= 1.0:
+        raise ValueError('scoring_features.minimum_rank_ready_fraction must be in [0,1].')
+    expected_statuses = {
+        'accepted_market_quality_statuses': ['full'],
+        'accepted_financial_quality_statuses': ['complete', 'partial'],
+        'accepted_positioning_quality_statuses': ['complete'],
+    }
+    for key, expected in expected_statuses.items():
+        if cfg_get(config, f'scoring_features.{key}') != expected:
+            raise ValueError(f'scoring_features.{key} must be exactly {expected!r}.')
+    if cfg_get(config, 'scoring_features.specialized_default_availability') != 'not_loaded':
+        raise ValueError('Specialized scoring components must default to not_loaded.')
+    if float(cfg_get(config, 'scoring_features.component_weight_default', 1.0)) != 0.0:
+        raise ValueError('Stage 6A scoring component weights must remain zero.')
+
+
+def _validate_stage6b_contract(config: dict[str, Any]) -> None:
+    expected = {
+        'adapter_path': (
+            'consumer_defensive.adapters.dedicated_parser_adapter:'
+            'extract_metric_evidence'
+        ),
+        'parser_source_id': 'shared_dedicated_sec_parser',
+        'measurement_source_id': (
+            'consumer_defensive_stage6b_specialized_measurement'
+        ),
+        'definition_version': 'consumer_defensive_specialized_measurements_v1',
+        'historical_inventory_start': '2019-01-02',
+        'production_weight': 0.0,
+        'production_promotion_enabled': False,
+    }
+    for key, required in expected.items():
+        actual = cfg_get(config, f'stage6b.{key}')
+        if actual != required:
+            raise ValueError(
+                f'stage6b.{key} must be {required!r}; got {actual!r}'
+            )
+    confidence = float(
+        cfg_get(config, 'stage6b.minimum_parser_confidence', -1.0)
+    )
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError('stage6b.minimum_parser_confidence must be in [0,1].')
+    if int(cfg_get(config, 'stage6b.maximum_filings_per_ticker', 0)) < 1:
+        raise ValueError('stage6b.maximum_filings_per_ticker must be positive.')
+    if int(cfg_get(config, 'stage6b.maximum_documents_per_filing', 0)) < 1:
+        raise ValueError(
+            'stage6b.maximum_documents_per_filing must be positive.'
+        )
+    event_limit = int(
+        cfg_get(config, 'stage6b.maximum_event_documents_per_filing', 0)
+    )
+    if not 1 <= event_limit <= 8:
+        raise ValueError(
+            'stage6b.maximum_event_documents_per_filing must be in [1,8].'
+        )
+    event_workers = int(cfg_get(config, 'stage6b.event_hydration_workers', 0))
+    if not 1 <= event_workers <= 16:
+        raise ValueError('stage6b.event_hydration_workers must be in [1,16].')
+    if int(cfg_get(config, 'stage6b.maximum_pdf_pages', 0)) < 1:
+        raise ValueError('stage6b.maximum_pdf_pages must be positive.')
+    if int(cfg_get(config, 'stage6b.maximum_pdf_bytes', 0)) < 1:
+        raise ValueError('stage6b.maximum_pdf_bytes must be positive.')
+    if float(cfg_get(config, 'stage6b.pdf_extraction_timeout_seconds', 0)) <= 0:
+        raise ValueError(
+            'stage6b.pdf_extraction_timeout_seconds must be positive.'
+        )
+    ocr_pages = int(cfg_get(config, 'stage6b.maximum_ocr_pages', 0))
+    if not 1 <= ocr_pages <= int(
+        cfg_get(config, 'stage6b.maximum_pdf_pages', 0)
+    ):
+        raise ValueError(
+            'stage6b.maximum_ocr_pages must be within the PDF page limit.'
+        )
+    ocr_dpi = int(cfg_get(config, 'stage6b.ocr_dpi', 0))
+    if not 72 <= ocr_dpi <= 600:
+        raise ValueError('stage6b.ocr_dpi must be in [72,600].')
+    ocr_timeout = float(
+        cfg_get(config, 'stage6b.ocr_page_timeout_seconds', 0)
+    )
+    if not 0 < ocr_timeout <= float(
+        cfg_get(config, 'stage6b.pdf_extraction_timeout_seconds', 0)
+    ):
+        raise ValueError(
+            'stage6b.ocr_page_timeout_seconds must be positive and within '
+            'the total PDF timeout.'
+        )
+    if int(cfg_get(config, 'stage6b.maximum_ocr_pixels_per_page', 0)) < 1:
+        raise ValueError(
+            'stage6b.maximum_ocr_pixels_per_page must be positive.'
+        )
+
+
 def _assert_contract_equal(label: str, left: Any, right: Any) -> None:
     if left != right:
         raise ValueError(f"Consumer Defensive contract drift for {label}: config={left!r}, policy={right!r}")
@@ -291,6 +420,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"Missing Consumer Defensive config root keys: {', '.join(missing)}")
     _validate_nested_keys(config)
     _validate_positioning_contract(config)
+    _validate_scoring_feature_contract(config)
+    _validate_stage6b_contract(config)
 
     expected_values = {
         "runtime.model_family": "consumer_defensive",

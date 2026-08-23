@@ -65,7 +65,11 @@ REQUIRED_IDENTITY_INPUT_COLUMNS = {
     "MissingIdentityFields": ("MissingIdentityFields", "missing_identity_fields"),
 }
 DEFAULT_TARGET_SECURITY_TYPES = {"Common Stock", "Ordinary Shares", "ADR/ADS"}
-DEFAULT_ALLOWED_LISTING_STATUSES = {"active"}
+DEFAULT_ALLOWED_LISTING_STATUSES = {
+    "active",
+    "active_financial_status_D",
+    "active_financial_status_E",
+}
 
 CTG_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik10}.json"
@@ -1751,12 +1755,15 @@ def fetch_liquidity_ib(ticker: str, args: argparse.Namespace) -> tuple[Optional[
             if frame.empty or "close" not in frame.columns or "volume" not in frame.columns:
                 last_error = "ib_empty"
                 continue
-            dollar_volume = pd.to_numeric(frame["close"], errors="coerce") * pd.to_numeric(frame["volume"], errors="coerce")
+            close_values = cast(pd.Series, pd.to_numeric(frame["close"], errors="coerce"))
+            volume_values = cast(pd.Series, pd.to_numeric(frame["volume"], errors="coerce"))
+            dollar_volume = cast(pd.Series, close_values.mul(volume_values))
             daily_dollar_volume = dollar_volume.dropna()
             if len(daily_dollar_volume) < 20:
                 last_error = "ib_insufficient_history"
                 continue
-            addv20 = daily_dollar_volume.rolling(20).mean().dropna()
+            rolling_addv20 = cast(pd.Series, daily_dollar_volume.rolling(20).mean())
+            addv20 = rolling_addv20.dropna()
             if addv20.empty:
                 last_error = "ib_insufficient_history"
                 continue
@@ -1813,8 +1820,11 @@ def load_mapping(
                 col = tickers_df.columns[0]
                 keep = {normalize_ticker(x) for x in tickers_df[col].tolist() if normalize_ticker(x)}
                 if keep:
-                    df = df[df["Ticker"].isin(keep)].copy()
-    return df.drop_duplicates(subset=["Ticker"], keep="first").reset_index(drop=True)
+                    ticker_values = cast(pd.Series, df["Ticker"])
+                    mask = ticker_values.isin(sorted(keep))
+                    df = cast(pd.DataFrame, df.loc[mask]).copy()
+    clean_frame = cast(pd.DataFrame, df)
+    return clean_frame.drop_duplicates(subset="Ticker", keep="first").reset_index(drop=True)
 
 
 def empty_ctgov_summary() -> dict[str, Any]:
@@ -2042,6 +2052,13 @@ def decide_row(
     manual_include = parse_boolish(row.get("manual_include"))
     manual_exclude = parse_boolish(row.get("manual_exclude"))
     manual_review = parse_boolish(row.get("manual_review"))
+
+    listing_status = normalize_key_text(row.get("listing_status"))
+    if listing_status.startswith("active_financial_status_"):
+        # Nasdaq D/E flags are allocation vetoes, not proof that the security
+        # stopped trading. Keep the issuer scoreable for research while the
+        # report/portfolio gate blocks deployment until status returns clean.
+        keep_review_reasons.append("review:listing_financial_status_not_clean")
 
     if manual_exclude:
         return "remove", ["manual_exclude"]

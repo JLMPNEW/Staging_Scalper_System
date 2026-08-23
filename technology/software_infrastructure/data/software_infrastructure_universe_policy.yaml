@@ -1,7 +1,7 @@
 model_family: software_infrastructure
 source_csv: "../../../ticker_mapping/software_infrastructure_tickers.csv"
 source_of_truth: true
-expected_ticker_count: 64
+expected_ticker_count: 77
 allow_missing_cik_for_foreign_otc: false
 default_industry: Software - Infrastructure
 default_unassigned_calibration_use: review

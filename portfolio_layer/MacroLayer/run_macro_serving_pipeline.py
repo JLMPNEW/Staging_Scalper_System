@@ -35,6 +35,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--composite-policy-csv", type=Path, default=None, help="Optional composite policy CSV override.")
     parser.add_argument("--start-date", type=str, default=None, help="Optional shared build start YYYY-MM-DD override.")
     parser.add_argument("--end-date", type=str, default=None, help="Optional shared build end YYYY-MM-DD override.")
+    parser.add_argument(
+        "--overlay-start-date",
+        type=str,
+        default=None,
+        help="Optional W-FRI industry/stock/sleeve overlay start override.",
+    )
+    parser.add_argument(
+        "--overlay-end-date",
+        type=str,
+        default=None,
+        help="Optional W-FRI industry/stock/sleeve overlay end override.",
+    )
     parser.add_argument("--metric-keys", nargs="*", default=None, help="Optional metric_key filter for PIT/feature steps.")
     parser.add_argument("--composite-keys", nargs="*", default=None, help="Optional composite_key filter for the composite step.")
     parser.add_argument("--probability-keys", nargs="*", default=None, help="Optional probability_key filter for the probability step.")
@@ -494,8 +506,8 @@ def main() -> None:
     if not args.skip_industry_macro:
         industry_macro_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_industry_fit.py"), *common_cfg]
         _append_path_arg(industry_macro_cmd, "--serving-db-path", args.serving_db_path)
-        _append_text_arg(industry_macro_cmd, "--start-date", args.start_date)
-        _append_text_arg(industry_macro_cmd, "--end-date", pipeline_end_date)
+        _append_text_arg(industry_macro_cmd, "--start-date", args.overlay_start_date or args.start_date)
+        _append_text_arg(industry_macro_cmd, "--end-date", args.overlay_end_date or pipeline_end_date)
         _run_step(step_name="industry_macro_layer", command=industry_macro_cmd)
 
     if not args.skip_country_macro:
@@ -509,29 +521,29 @@ def main() -> None:
     if not args.skip_stock_macro_overlay:
         stock_overlay_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_stock_overlay.py"), *common_cfg]
         _append_path_arg(stock_overlay_cmd, "--serving-db-path", args.serving_db_path)
-        _append_text_arg(stock_overlay_cmd, "--start-date", args.start_date)
-        _append_text_arg(stock_overlay_cmd, "--end-date", pipeline_end_date)
+        _append_text_arg(stock_overlay_cmd, "--start-date", args.overlay_start_date or args.start_date)
+        _append_text_arg(stock_overlay_cmd, "--end-date", args.overlay_end_date or pipeline_end_date)
         _run_step(step_name="stock_macro_overlay", command=stock_overlay_cmd)
 
     if not args.skip_portfolio_inputs:
         portfolio_input_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_portfolio_inputs.py"), *common_cfg]
         _append_path_arg(portfolio_input_cmd, "--serving-db-path", args.serving_db_path)
-        _append_text_arg(portfolio_input_cmd, "--start-date", args.start_date)
-        _append_text_arg(portfolio_input_cmd, "--end-date", pipeline_end_date)
+        _append_text_arg(portfolio_input_cmd, "--start-date", args.overlay_start_date or args.start_date)
+        _append_text_arg(portfolio_input_cmd, "--end-date", args.overlay_end_date or pipeline_end_date)
         _run_step(step_name="portfolio_input_layer", command=portfolio_input_cmd)
 
     if not args.skip_stock_sleeve_targets:
         stock_sleeve_target_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_stock_sleeve_targets.py"), *common_cfg]
         _append_path_arg(stock_sleeve_target_cmd, "--serving-db-path", args.serving_db_path)
-        _append_text_arg(stock_sleeve_target_cmd, "--start-date", args.start_date)
-        _append_text_arg(stock_sleeve_target_cmd, "--end-date", pipeline_end_date)
+        _append_text_arg(stock_sleeve_target_cmd, "--start-date", args.overlay_start_date or args.start_date)
+        _append_text_arg(stock_sleeve_target_cmd, "--end-date", args.overlay_end_date or pipeline_end_date)
         _run_step(step_name="stock_sleeve_target_layer", command=stock_sleeve_target_cmd)
 
     if not args.skip_foreign_sleeve_budget:
         foreign_sleeve_budget_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_foreign_sleeve_budget.py"), *common_cfg]
         _append_path_arg(foreign_sleeve_budget_cmd, "--serving-db-path", args.serving_db_path)
-        _append_text_arg(foreign_sleeve_budget_cmd, "--start-date", args.start_date)
-        _append_text_arg(foreign_sleeve_budget_cmd, "--end-date", pipeline_end_date)
+        _append_text_arg(foreign_sleeve_budget_cmd, "--start-date", args.overlay_start_date or args.start_date)
+        _append_text_arg(foreign_sleeve_budget_cmd, "--end-date", args.overlay_end_date or pipeline_end_date)
         _run_step(step_name="foreign_sleeve_budget_layer", command=foreign_sleeve_budget_cmd)
 
     optimizer_cfg = dict(cfg_get(cfg, "optimizer_integration_layer", default={}) or {})

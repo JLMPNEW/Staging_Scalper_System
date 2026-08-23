@@ -18,6 +18,15 @@ ALLOWED_COHORTS = frozenset(
 ALLOWED_INITIAL_STATUSES = frozenset(
     {"research_candidate", "measurement_only", "deferred", "rejected"}
 )
+ALLOWED_SOURCE_AVAILABILITY_CLASSES = frozenset(
+    {
+        "sec_direct",
+        "sec_derived",
+        "sec_direct_or_derived",
+        "sec_selective",
+        "non_sec",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,11 @@ class SpecializedMetric:
     purpose: str
     initial_status: str
     production_weight: float
+    source_availability_class: str = 'sec_direct'
+
+    @property
+    def sec_addressable(self) -> bool:
+        return self.source_availability_class != "non_sec"
 
 
 def utc_now() -> str:
@@ -66,6 +80,7 @@ def load_metric_registry(path: Path) -> tuple[str, list[SpecializedMetric]]:
         'admission_stage',
         'scoring_evidence_stage',
         'source_priority',
+        'default_source_availability_class',
         'metrics',
     }
     unknown_root = sorted(set(payload) - allowed_root_keys)
@@ -105,6 +120,16 @@ def load_metric_registry(path: Path) -> tuple[str, list[SpecializedMetric]]:
         for field in ('unit_family', 'direction_hint', 'purpose'):
             if not str(raw.get(field) or '').strip():
                 raise ValueError(f'Metric {metric_id} requires {field}.')
+        availability = str(
+            raw.get('source_availability_class')
+            or payload.get('default_source_availability_class')
+            or ''
+        ).strip()
+        if availability not in ALLOWED_SOURCE_AVAILABILITY_CLASSES:
+            raise ValueError(
+                f'Metric {metric_id} has invalid source_availability_class '
+                f'{availability!r}.'
+            )
         metrics.append(
             SpecializedMetric(
                 metric_id=metric_id,
@@ -115,6 +140,7 @@ def load_metric_registry(path: Path) -> tuple[str, list[SpecializedMetric]]:
                 purpose=str(raw.get("purpose") or "").strip(),
                 initial_status=status,
                 production_weight=weight,
+                source_availability_class=availability,
             )
         )
     return version, metrics
@@ -128,6 +154,15 @@ def upsert_metric_registry(
 ) -> int:
     now = utc_now()
     with conn:
+        columns = {
+            str(row[1])
+            for row in conn.execute('PRAGMA table_info(dim_specialized_metric)')
+        }
+        if 'source_availability_class' not in columns:
+            conn.execute(
+                'ALTER TABLE dim_specialized_metric ADD COLUMN '
+                "source_availability_class TEXT NOT NULL DEFAULT 'sec_direct'"
+            )
         metric_ids = [metric.metric_id for metric in metrics]
         if not metric_ids:
             raise ValueError('Cannot synchronize an empty specialized metric registry.')
@@ -144,9 +179,10 @@ def upsert_metric_registry(
                 INSERT INTO dim_specialized_metric(
                     metric_id, registry_version, cohorts_json, applicability_subtypes_json,
                     unit_family, direction_hint, purpose, production_status,
-                    production_weight, created_at, updated_at
+                    production_weight, source_availability_class,
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(metric_id) DO UPDATE SET
                     registry_version=excluded.registry_version,
                     cohorts_json=excluded.cohorts_json,
@@ -156,6 +192,7 @@ def upsert_metric_registry(
                     purpose=excluded.purpose,
                     production_status=excluded.production_status,
                     production_weight=excluded.production_weight,
+                    source_availability_class=excluded.source_availability_class,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -168,6 +205,7 @@ def upsert_metric_registry(
                     metric.purpose,
                     metric.initial_status,
                     metric.production_weight,
+                    metric.source_availability_class,
                     now,
                     now,
                 ),

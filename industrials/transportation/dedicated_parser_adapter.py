@@ -35,7 +35,7 @@ from industrials.transportation.surface_metric_parser import (
 )
 
 
-ADAPTER_VERSION = "transportation_specialized_metrics_v3.discovery8"
+ADAPTER_VERSION = "transportation_specialized_metrics_v3.discovery9"
 _ROOT = Path(__file__).resolve().parent
 _DATA = _ROOT / "data"
 _FINAL_REGISTRY = _DATA / "transportation_specialized_metric_discovery_registry.csv"
@@ -45,9 +45,12 @@ _SUPPORT_SCOPE = _DATA / "transportation_dedicated_parser_support_scope.csv"
 _TANKER_SOURCE_MAP = _DATA / "transportation_tanker_metric_source_map_v1.csv"
 _TANKER_XBRL_MAP = _DATA / "transportation_tanker_exact_xbrl_concepts_v1.csv"
 _TANKER_FILING_PROFILES = _DATA / "transportation_tanker_filing_profiles_v1.csv"
-_SURFACE_SOURCE_MAP = _DATA / "transportation_surface_metric_source_map_v1.csv"
+_SURFACE_SOURCE_MAP = _DATA / "transportation_surface_metric_source_map_v2.csv"
 _SURFACE_XBRL_OPERAND_MAP = _DATA / "transportation_surface_xbrl_operand_map_v1.csv"
-_SURFACE_FILING_PROFILES = _DATA / "transportation_surface_filing_profiles_v1.csv"
+_SURFACE_FILING_PROFILES = _DATA / "transportation_surface_filing_profiles_v2.csv"
+_EXTRACTION_OVERRIDES = _DATA / "transportation_metric_extraction_overrides_v1.csv"
+_DERIVATION_CONTRACTS = _DATA / "transportation_metric_derivation_contracts_v1.csv"
+_ISSUER_ALIASES = _DATA / "transportation_issuer_aliases_v1.csv"
 _INVESTABLE_V3_POLICY = _DATA / "transportation_investable_universe_v3.yaml"
 _REVIEW_POLICY = _ROOT / "review_policies" / "dedicated_parser_review_policy.csv"
 _REVIEW_POLICY_GOLDEN = _DATA / "transportation_dedicated_parser_review_policy_golden.json"
@@ -342,6 +345,43 @@ def _pipe(value: object) -> tuple[str, ...]:
     return tuple(item.strip() for item in str(value or "").split("|") if item.strip())
 
 
+def _merge_pipe(*values: object) -> str:
+    return "|".join(
+        dict.fromkeys(item for value in values for item in _pipe(value))
+    )
+
+
+@lru_cache(maxsize=1)
+def _extraction_overrides() -> dict[tuple[str, str], dict[str, str]]:
+    return {
+        (row["cohort"], row["metric_id"]): row
+        for row in _read_csv(_EXTRACTION_OVERRIDES)
+    }
+
+
+def _source_map_with_overrides(
+    rows: tuple[dict[str, str], ...],
+    *,
+    cohort: str,
+) -> dict[str, dict[str, str]]:
+    output: dict[str, dict[str, str]] = {}
+    for source in rows:
+        row = dict(source)
+        override = _extraction_overrides().get((cohort, row["metric_id"]), {})
+        row["parser_aliases"] = _merge_pipe(
+            row.get("parser_aliases", ""), override.get("extra_aliases", "")
+        )
+        if override.get("extra_event_sections"):
+            row["source_sections_event"] = _merge_pipe(
+                row.get("source_sections_event", ""),
+                override.get("extra_event_sections", ""),
+            )
+        row["definition_basis"] = override.get("definition_basis", "")
+        row["comparability_class"] = override.get("comparability_class", "")
+        output[row["metric_id"]] = row
+    return output
+
+
 @lru_cache(maxsize=1)
 def _final_metrics() -> tuple[dict[str, str], ...]:
     return _read_csv(_FINAL_REGISTRY)
@@ -354,7 +394,9 @@ def _supporting_metrics() -> tuple[dict[str, str], ...]:
 
 @lru_cache(maxsize=1)
 def _tanker_source_map() -> dict[str, dict[str, str]]:
-    return {row["metric_id"]: row for row in _read_csv(_TANKER_SOURCE_MAP)}
+    return _source_map_with_overrides(
+        _read_csv(_TANKER_SOURCE_MAP), cohort="tanker"
+    )
 
 
 @lru_cache(maxsize=1)
@@ -387,7 +429,31 @@ def _tanker_filing_profiles() -> dict[str, dict[str, str]]:
 
 @lru_cache(maxsize=1)
 def _surface_source_map() -> dict[str, dict[str, str]]:
-    return {row["metric_id"]: row for row in _read_csv(_SURFACE_SOURCE_MAP)}
+    return _source_map_with_overrides(
+        _read_csv(_SURFACE_SOURCE_MAP), cohort="surface"
+    )
+
+
+@lru_cache(maxsize=1)
+def _metric_derivation_contracts() -> tuple[dict[str, str], ...]:
+    return _read_csv(_DERIVATION_CONTRACTS)
+
+
+@lru_cache(maxsize=1)
+def _surface_derivation_contracts() -> tuple[dict[str, str], ...]:
+    return tuple(
+        row
+        for row in _metric_derivation_contracts()
+        if row.get("cohort") == "surface"
+    )
+
+
+@lru_cache(maxsize=1)
+def _issuer_aliases() -> dict[str, dict[str, str]]:
+    return {
+        row["ticker"].upper(): row
+        for row in _read_csv(_ISSUER_ALIASES)
+    }
 
 
 @lru_cache(maxsize=1)
@@ -565,6 +631,20 @@ def _concept_patterns(metric_id: str) -> tuple[str, ...]:
                 # {namespace}Concept even though persisted concept_name is
                 # normalized to the local name. Request both forms.
                 output.append("(?i)(?:^|[:}])" + pattern[len("(?i)^"):])
+    for contract in _metric_derivation_contracts():
+        if contract.get("metric_id") != metric_id:
+            continue
+        for field in (
+            "numerator_aliases",
+            "denominator_aliases",
+            "alternate_numerator_aliases",
+        ):
+            for alias in _pipe(contract.get(field, "")):
+                tokens = re.findall(r"[A-Za-z0-9]+", alias)
+                if tokens:
+                    output.append(
+                        "(?i)" + ".*".join(re.escape(token) for token in tokens)
+                    )
     return tuple(dict.fromkeys(output))
 
 
@@ -589,7 +669,9 @@ def get_registry() -> AdapterRegistry:
         supported_forms=_SUPPORTED_FORMS,
         source_metrics=source,
         supporting_metrics=supporting,
-        metric_dependencies={},
+        metric_dependencies={
+            metric_id: metric_id for metric_id in contracts
+        },
         metric_requirements={metric_id: MetricRequirement(metric_id) for metric_id in contracts},
         metric_freshness_days={metric_id: int(row["max_staleness_days"]) for metric_id, row in contracts.items()},
         production_mappings={},
@@ -599,6 +681,10 @@ def get_registry() -> AdapterRegistry:
             "capacity",
             "carrying capacity",
             "carload",
+            "car miles per day",
+            "car velocity",
+            "cash break-even",
+            "cash breakeven",
             "contracted services",
             "certification",
             "charter",
@@ -612,25 +698,31 @@ def get_registry() -> AdapterRegistry:
             "fuel",
             "going concern",
             "gross ton miles",
+            "locomotive fuel consumed",
             "intermodal units",
             "lease",
             "load factor",
             "non-GAAP",
             "off-hire",
             "operating days",
+            "operating statistics",
             "operating ratio",
             "orders",
             "passenger",
             "purchased transportation",
+            "purchased transportation and warehousing",
+            "pounds per day",
             "rail",
             "railroad performance",
             "revenue per",
             "revenue days",
             "shipment",
+            "shipments per day",
             "terminal dwell",
             "TCE",
             "traffic",
             "train velocity",
+            "percentage covered",
             "utilization",
             "vessel",
         ),
@@ -781,7 +873,7 @@ def _metric_source_context(
     elif is_surface:
         section_field = "source_sections_event"
     else:
-        section_field = ""
+        section_field = "source_sections_event"
     preferred_sections = _pipe(source.get(section_field, "")) if section_field else ()
     normalized_text = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
     section_match = any(
@@ -796,7 +888,7 @@ def _metric_source_context(
         "10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"
     }
     return {
-        "metric_source_profile": "surface_freight_v1" if is_surface else "tanker_v1",
+        "metric_source_profile": "surface_freight_v3" if is_surface else "tanker_v2",
         "accounting_framework": profile.get("accounting_framework", ""),
         "expected_annual_form": expected_form,
         "filing_form_type": item.filing.form_type,
@@ -807,6 +899,15 @@ def _metric_source_context(
         "preferred_section_match": section_match,
         "expected_tables": list(_pipe(source.get("expected_tables", ""))),
         "source_posture": source.get("source_posture", ""),
+        "definition_basis": source.get("definition_basis", ""),
+        "comparability_class": source.get("comparability_class", ""),
+        "issuer_aliases": list(
+            _pipe(
+                _issuer_aliases()
+                .get(item.filing.ticker.upper(), {})
+                .get("issuer_aliases", "")
+            )
+        ),
     }
 
 
@@ -1024,6 +1125,7 @@ def extract_metric_evidence(item: WorkItem) -> tuple[MetricEvidence, ...]:
                 document_sha256=document.content_sha256,
                 source_kind=document.source_kind,
                 source_contracts=_surface_source_map(),
+                derivation_contracts=_surface_derivation_contracts(),
                 filing_profiles=_surface_filing_profiles(),
                 document_extraction_method=extracted.extraction_method,
                 document_extraction_warning=extracted.warning,

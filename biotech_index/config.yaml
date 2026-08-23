@@ -5,6 +5,11 @@ paths:
   company_ticker_actions_csv: "data/company_ticker_actions.csv"
   database_path: "${BIOTECH_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/biotech_index.sqlite"
 
+active_biotech_history:
+  # Effective-dated identities for active names onboarded after historical snapshots were frozen.
+  # The registry may augment historical research universes only inside explicit membership windows.
+  registry_csv: "data/active_biotech_historical_additions.csv"
+
 delisted_calibration:
   enabled: true
   candidate_csv: "data/delisted_biotech_calibration_candidates.csv"
@@ -721,6 +726,7 @@ financial_survival:
   going_concern_source_priority:
     - "db"
     - "csv"
+  going_concern_resolution_runway_months: 18
   active_atm_penalty: 15
   recent_offering_penalty: 10
   shelf_registration_penalty: 8
@@ -1337,6 +1343,9 @@ biotech_refresh:
   step_timeout_sec: 28800
   max_upstream_staleness_days: 2
   validate_final_outputs: true
+  # Permit the latest Friday snapshot for weekend/holiday report dates while
+  # still rejecting genuinely stale market-feature panels.
+  max_market_snapshot_lag_calendar_days: 4
   ibkr_preflight:
     # Catch stale/missing IB market and borrow data before the long refresh run.
     # This mirrors the Form 4 preflight: daily production runs should not

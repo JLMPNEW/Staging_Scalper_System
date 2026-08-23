@@ -29,7 +29,7 @@ from industrials.transportation.scripts._shared import DEFAULT_CONFIG  # noqa: E
 
 
 DATA_ROOT = PROJECT_ROOT / "industrials" / "transportation" / "data"
-POLICY = DATA_ROOT / "transportation_investable_universe_v3.yaml"
+POLICY = DATA_ROOT / "transportation_investable_universe_v5.yaml"
 DEFAULT_OUTPUT_ROOT = (
     PROJECT_ROOT
     / "output"

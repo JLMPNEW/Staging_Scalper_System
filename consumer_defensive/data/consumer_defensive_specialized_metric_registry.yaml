@@ -1,10 +1,11 @@
-registry_version: "consumer_defensive_specialized_metrics_v1"
+registry_version: "consumer_defensive_specialized_metrics_v2"
 model_family: "consumer_defensive"
 default_initial_status: "research_candidate"
 default_production_weight: 0.0
 admission_stage: "stage_6b_disclosure_census_and_parser_validation"
 scoring_evidence_stage: "signal_diagnostics_and_stage_8"
 source_priority: [sec_xbrl, filing_table, structured_section, filing_prose, manual_adjudication]
+default_source_availability_class: sec_direct
 
 metrics:
   - metric_id: organic_revenue_growth_pct
@@ -35,6 +36,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: gross_margin_change_bps
+    source_availability_class: sec_derived
     cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
     applicability_subtypes: [all_operating_issuers]
     unit_family: basis_points
@@ -44,6 +46,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: advertising_promotion_pct_sales
+    source_availability_class: sec_direct_or_derived
     cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
     applicability_subtypes: [alcohol, non_alcohol, mixed_beverage, household_personal, branded_food]
     unit_family: percent_of_sales
@@ -53,6 +56,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: market_share_change_bps
+    source_availability_class: sec_selective
     cohorts: [beverages, household_personal_tobacco, packaged_foods_agricultural_products]
     applicability_subtypes: [alcohol, non_alcohol, mixed_beverage, household_personal, branded_food]
     unit_family: basis_points
@@ -62,6 +66,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: revenue_per_unit_growth_pct
+    source_availability_class: sec_derived
     cohorts: [beverages]
     applicability_subtypes: [alcohol, non_alcohol, mixed_beverage]
     unit_family: percent
@@ -71,6 +76,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: distribution_points_growth_pct
+    source_availability_class: non_sec
     cohorts: [beverages]
     applicability_subtypes: [alcohol, non_alcohol, mixed_beverage]
     unit_family: percent
@@ -125,6 +131,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: net_store_growth_pct
+    source_availability_class: sec_direct_or_derived
     cohorts: [consumer_staples_distribution_retail]
     applicability_subtypes: [retail, hybrid]
     unit_family: percent
@@ -134,6 +141,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: sales_per_square_foot
+    source_availability_class: sec_direct_or_derived
     cohorts: [consumer_staples_distribution_retail]
     applicability_subtypes: [retail, hybrid]
     unit_family: currency_per_area
@@ -170,6 +178,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: inventory_turnover
+    source_availability_class: sec_derived
     cohorts: [consumer_staples_distribution_retail, packaged_foods_agricultural_products]
     applicability_subtypes: [all_operating_issuers]
     unit_family: ratio
@@ -188,6 +197,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: gross_profit_per_case
+    source_availability_class: sec_derived
     cohorts: [consumer_staples_distribution_retail]
     applicability_subtypes: [food_distribution, hybrid]
     unit_family: currency_per_unit
@@ -206,8 +216,9 @@ metrics:
     production_weight: 0.0
 
   - metric_id: lease_adjusted_net_leverage
+    source_availability_class: sec_derived
     cohorts: [consumer_staples_distribution_retail]
-    applicability_subtypes: [retail, hybrid]
+    applicability_subtypes: [retail, food_distribution, hybrid]
     unit_family: ratio
     direction_hint: negative
     purpose: Fixed-obligation leverage risk.
@@ -215,8 +226,9 @@ metrics:
     production_weight: 0.0
 
   - metric_id: fixed_charge_coverage
+    source_availability_class: sec_derived
     cohorts: [consumer_staples_distribution_retail]
-    applicability_subtypes: [retail, hybrid]
+    applicability_subtypes: [retail, food_distribution, hybrid]
     unit_family: ratio
     direction_hint: positive
     purpose: Rent and interest coverage.
@@ -224,6 +236,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: innovation_sales_mix_pct
+    source_availability_class: non_sec
     cohorts: [household_personal_tobacco]
     applicability_subtypes: [household_personal]
     unit_family: percent
@@ -278,6 +291,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: excise_tax_impact_bps
+    source_availability_class: sec_direct_or_derived
     cohorts: [household_personal_tobacco]
     applicability_subtypes: [tobacco]
     unit_family: basis_points
@@ -305,6 +319,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: capacity_utilization_pct
+    source_availability_class: non_sec
     cohorts: [packaged_foods_agricultural_products]
     applicability_subtypes: [protein_dairy, agricultural_processor]
     unit_family: percent
@@ -341,6 +356,7 @@ metrics:
     production_weight: 0.0
 
   - metric_id: net_debt_to_ebitda
+    source_availability_class: sec_derived
     cohorts: [packaged_foods_agricultural_products]
     applicability_subtypes: [all_operating_issuers]
     unit_family: ratio

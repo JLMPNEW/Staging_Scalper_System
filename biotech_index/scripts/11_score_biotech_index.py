@@ -41,6 +41,7 @@ from biotech_index.core.db import (  # noqa: E402
     start_run,
     utc_now,
 )
+from biotech_index.core.financial_survival import cash_runway_is_reliable  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.pipeline_guards import (  # noqa: E402
     read_final_scoring_tickers,
@@ -425,6 +426,10 @@ def as_bool(raw: object, default: bool = False) -> bool:
         return default
     if isinstance(raw, bool):
         return raw
+    if isinstance(raw, (int, float)):
+        if isinstance(raw, float) and not math.isfinite(raw):
+            return default
+        return raw != 0
     text = str(raw).strip().lower()
     if text in {"1", "true", "t", "yes", "y", "enabled", "on"}:
         return True
@@ -1185,6 +1190,28 @@ def configured_strict_oos_start_date(config: dict[str, Any]) -> date | None:
     return parsed
 
 
+_NON_ALLOCATABLE_UNIVERSE_STATUSES = frozenset(
+    {
+        "calibration_only",
+        "delisted_calibration",
+        "excluded",
+        "inactive",
+        "remove",
+        "review",
+    }
+)
+
+
+def portfolio_candidate_universe_eligible(row: dict[str, Any]) -> bool:
+    """Return False for explicit review/excluded universe states.
+
+    Blank values remain eligible for backward-compatible historical rows whose
+    universe status predates this field.
+    """
+    universe_status = str(row.get("universe_status") or "").strip().lower()
+    return universe_status not in _NON_ALLOCATABLE_UNIVERSE_STATUSES
+
+
 def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]], config: dict[str, Any]) -> None:
     """Add cross-sector portfolio/calibration aliases without changing scoring math."""
     strict_oos_start = configured_strict_oos_start_date(config)
@@ -1197,21 +1224,22 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]], config: dic
         allocation_bucket = str(row.get("allocation_bucket") or row.get("bucket") or "").strip().lower()
         native_score_field = str(row.get("production_rank_score_field") or "opportunity_score").strip() or "opportunity_score"
         native_score_value = to_float(row.get(native_score_field), to_float(row.get("production_rank_score"), math.nan))
-        # A zero produced by a veto/cap is a real production score, not a missing one.
+        # A finite zero is a computed score. Missingness describes score availability,
+        # not whether the model's bounded score landed at its lower endpoint.
         score_zeroed_by_veto = (
             math.isfinite(native_score_value)
             and native_score_value <= 0.0
             and (rank_cap_vetoed or core_veto)
         )
-        missing_score = not math.isfinite(native_score_value) or (
-            native_score_value <= 0.0 and not score_zeroed_by_veto
-        )
+        missing_score = not math.isfinite(native_score_value)
         price_data_available = bool(str(row.get("price_data_asof_date") or row.get("latest_price_date") or "").strip())
         pit_valid = not any(
             source_date_after_asof(row.get(field), row.get("asof_date"))
             for field in PIT_PROVENANCE_DATE_FIELDS
         )
 
+        universe_eligible = portfolio_candidate_universe_eligible(row)
+        universe_status = str(row.get("universe_status") or "").strip().lower()
         if missing_score:
             status = "excluded"
             reason = "missing_score"
@@ -1221,6 +1249,9 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]], config: dic
         elif not investible:
             status = "excluded"
             reason = "not_investible"
+        elif not universe_eligible:
+            status = "review" if universe_status == "review" else "excluded"
+            reason = f"universe_status_{universe_status or 'excluded'}"
         elif core_veto:
             status = "excluded"
             reason = "core_structural_veto"
@@ -1230,13 +1261,18 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]], config: dic
         elif rank_cap_vetoed:
             status = "review"
             reason = "rank_quality_cap_veto"
+        elif native_score_value <= 0.0:
+            status = "excluded"
+            reason = "nonpositive_score"
         else:
             status = "eligible"
             reason = "ok"
         candidate_gate = bool(
             not missing_score
+            and native_score_value > 0.0
             and status == "eligible"
             and investible
+            and universe_eligible
             and not core_veto
         )
 
@@ -1375,6 +1411,7 @@ def _promoted_policy_base_candidate(row: dict[str, Any]) -> bool:
         and _candidate_policy_score(row) > 0.0
         and to_float(row.get("score_zero_is_missing_flag"), 0.0) <= 0.0
         and to_float(row.get("biotech_cohort_investible_flag"), 1.0) > 0.0
+        and portfolio_candidate_universe_eligible(row)
         and to_float(row.get("core_structural_veto_flag"), 0.0) <= 0.0
         and to_float(row.get("rank_quality_cap_vetoed"), 0.0) <= 0.0
         and price_data_available
@@ -1702,9 +1739,10 @@ def core_structural_veto_reasons(
     reasons: list[str] = []
 
     cash_runway = to_float(survival.get("cash_runway_months"), math.nan)
-    if math.isfinite(cash_runway) and cash_runway < 9.0:
+    runway_reliable = cash_runway_is_reliable(survival)
+    if runway_reliable and math.isfinite(cash_runway) and cash_runway < 9.0:
         reasons.append("cash_runway_lt_9m")
-    if as_bool(survival.get("severe_runway_flag"), False):
+    if runway_reliable and as_bool(survival.get("severe_runway_flag"), False):
         reasons.append("severe_runway_flag")
     going_status = str(sec_liq.get("going_concern_status") or survival.get("going_concern_status") or "").strip().lower()
     if going_status in GOING_CONCERN_HARD_STATUSES:
@@ -1774,7 +1812,12 @@ def soft_weakness_reasons(
     active_pivotal = to_float(ctgov.get("active_pivotal_trials"), 0.0)
     has_advanced_trial = lead_phase2_3 > 0.0 or program_phase2_3 > 0.0 or active_pivotal > 0.0
 
-    if math.isfinite(cash_runway) and 9.0 <= cash_runway < 12.0 and not has_business_anchor:
+    if (
+        cash_runway_is_reliable(survival)
+        and math.isfinite(cash_runway)
+        and 9.0 <= cash_runway < 12.0
+        and not has_business_anchor
+    ):
         reasons.append("cash_runway_9_to_12m_clinical")
     going_status = str(sec_liq.get("going_concern_status") or survival.get("going_concern_status") or "").strip().lower()
     if going_status in GOING_CONCERN_SOFT_STATUSES:
@@ -1997,7 +2040,8 @@ def score_bucket(
     program_phase2_3 = int(to_float(ctgov.get("program_phase2_3_active_trials", 0)))
     pivotal = int(to_float(ctgov.get("active_pivotal_trials", 0)))
     runway = to_float(survival.get("cash_runway_months"), math.nan)
-    severe_runway = as_bool(survival.get("severe_runway_flag"), False)
+    runway_reliable = cash_runway_is_reliable(survival)
+    severe_runway = runway_reliable and as_bool(survival.get("severe_runway_flag"), False)
     survival_quality = str(survival.get("data_quality") or "").lower()
     going_status = str(sec_liq.get("going_concern_status") or survival.get("going_concern_status") or "").lower()
     recent_nt = int(to_float(sec_liq.get("recent_nt_filing_count_2y", 0)))
@@ -2013,7 +2057,7 @@ def score_bucket(
     if (
         risk >= params.avoid_risk_min
         or severe_runway
-        or (math.isfinite(runway) and runway <= params.terminal_runway)
+        or (runway_reliable and math.isfinite(runway) and runway <= params.terminal_runway)
         or going_status in GOING_CONCERN_HARD_STATUSES
     ):
         return "avoid"
@@ -2023,6 +2067,7 @@ def score_bucket(
         score_cmp >= params.high_min
         and risk <= params.max_high_risk
         and recent_nt == 0
+        and runway_reliable
         and math.isfinite(runway)
         and runway >= params.min_high_runway
         and survival_quality != "low"
@@ -2032,7 +2077,10 @@ def score_bucket(
     if (
         score_cmp >= params.watch_min
         and risk <= params.max_watch_risk
-        and (has_business_anchor or (math.isfinite(runway) and runway >= params.min_watch_runway))
+        and (
+            has_business_anchor
+            or (runway_reliable and math.isfinite(runway) and runway >= params.min_watch_runway)
+        )
         and (verified_active > 0 or has_business_anchor or not params.require_active_watch)
     ):
         return "watchlist"
@@ -3190,6 +3238,7 @@ def score_rows(
                 "avg_dollar_volume_60d": avg_dollar_volume_60d if math.isfinite(avg_dollar_volume_60d) else "",
                 "liquidity_score": liquidity_score if math.isfinite(liquidity_score) else "",
                 "cash_runway_months": finite_value_or_none(survival.get("cash_runway_months")),
+                "cash_runway_reliable_flag": 1.0 if cash_runway_is_reliable(survival) else 0.0,
                 "financial_survival_score": finite_value_or_none(survival.get("financial_survival_score")),
                 "financial_data_quality": survival.get("data_quality", ""),
                 "sec_dilution_event_count": sec_events.get("dilution_event_count", 0) if isinstance(sec_events, dict) else 0,
@@ -3469,6 +3518,7 @@ def score_rows(
                 "avg_dollar_volume_60d": round(avg_dollar_volume_60d, 4) if math.isfinite(avg_dollar_volume_60d) else "",
                 "liquidity_score": round(liquidity_score, 4) if math.isfinite(liquidity_score) else "",
                 "cash_runway_months": finite_value_or_none(survival.get("cash_runway_months")),
+                "cash_runway_reliable_flag": 1.0 if cash_runway_is_reliable(survival) else 0.0,
                 "financial_survival_score": finite_value_or_none(survival.get("financial_survival_score")),
                 "financial_data_quality": survival.get("data_quality", ""),
                 "going_concern_status": sec_liq.get("going_concern_status") or survival.get("going_concern_status", ""),
@@ -3773,6 +3823,7 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "active_pivotal_trials",
         "median_addv20",
         "cash_runway_months",
+        "cash_runway_reliable_flag",
         "financial_survival_score",
         "financial_data_quality",
         "going_concern_status",
@@ -4184,6 +4235,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "active_pivotal_trials",
         "median_addv20",
         "cash_runway_months",
+        "cash_runway_reliable_flag",
         "financial_survival_score",
         "financial_data_quality",
         "going_concern_status",

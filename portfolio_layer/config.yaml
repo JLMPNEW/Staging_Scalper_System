@@ -186,7 +186,9 @@ expectations_monitor:
     event_cycle:
       policy_version: provider_event_cycle_v1
       included_tiers: [tier0, tier1]
-      calendar_source: alpha_vantage_bulk
+      # Direct provider observations win same-day ties; governed carry-forward
+      # rows keep unchanged earnings dates current between provider refreshes.
+      calendar_sources: [alpha_vantage_bulk, carried_forward_prior]
       lookback_calendar_days: 2
       lookahead_calendar_days: 2
       maximum_calendar_staleness_days: 3
@@ -536,11 +538,10 @@ score_contract:
     # calibration, and production activation are complete and separately approved.
     - model_family: transportation
       adapter: industrial_family
-      # Enabled but fail-closed: require_oos_score_valid blocks allocation
-      # (sealed zero-overlay shadow). Daily publishes resumed 2026-08-03 via
-      # the orchestration transportation lane, so the staleness mute that
-      # briefly disabled this source is obsolete.
-      enabled: true
+      # The global orchestrator continues the independent shadow evidence lane,
+      # but Stage 1 must not collect or freshness-gate this family until its
+      # separately governed production activation is approved.
+      enabled: false
       required: false
       staleness_tolerance_days: 3
       sector: "Industrials"

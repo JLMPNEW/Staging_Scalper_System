@@ -113,3 +113,164 @@ def test_offline_ib_company_loader_can_use_inactive_pit_members() -> None:
 
     assert [company.ticker for company in active_only] == ["ACTIVE"]
     assert [company.ticker for company in pit_members] == ["ACTIVE", "HIST"]
+
+
+def test_security_identity_registry_bounds_history_and_validates_rows(tmp_path: Path) -> None:
+    from biotech_index.core.security_identity import load_security_identity_rules, security_history_start
+
+    registry = tmp_path / "identities.csv"
+    registry.write_text(
+        "ticker,company_name,cik,historical_ciks,calibration_cohort,membership_start_date,"
+        "membership_end_date,historical_price_ticker,institutional_13f_issuer_alias,cusip,source_reference,approved\n"
+        "NEW,New Bio,1234,9999,platform,2024-06-03,,NEW,NEW BIO INC,123456789,test,true\n",
+        encoding="utf-8",
+    )
+    rules = load_security_identity_rules(registry)
+
+    assert rules["NEW"].cik == "0000001234"
+    assert rules["NEW"].historical_ciks == ("0000009999",)
+    assert rules["NEW"].contains(date(2024, 6, 2)) is False
+    assert rules["NEW"].contains(date(2024, 6, 3)) is True
+    assert security_history_start(rules, "NEW", default=date(2019, 1, 4)) == date(2024, 6, 3)
+
+
+def test_historical_additions_use_neutral_metadata_and_respect_pit_root() -> None:
+    from biotech_index.core.security_identity import SecurityIdentityRule
+
+    module = load_script_module("57_build_historical_scoring_universe.py", "historical_addition_registry")
+    rule = SecurityIdentityRule(
+        ticker="NEW",
+        company_name="New Bio",
+        cik="0000001234",
+        historical_ciks=(),
+        calibration_cohort="platform_partnered_modality_pipeline",
+        membership_start_date=date(2024, 6, 3),
+        membership_end_date=None,
+        historical_price_ticker="NEW",
+        institutional_13f_issuer_aliases=("NEW BIO INC",),
+        cusip="",
+        source_reference="test",
+    )
+    companies = {"NEW": {"company_id": 7, "company_name": "New Bio", "is_active": 1}}
+    prices = {"NEW": {"latest_price_date": "2024-06-03", "first_price_date": "2024-06-03"}}
+
+    before, _ = module.historical_addition_rows(
+        {"NEW": rule},
+        pit_root_tickers=set(),
+        companies=companies,
+        prices=prices,
+        asof=date(2024, 5, 31),
+        max_price_staleness_days=10,
+    )
+    active, _ = module.historical_addition_rows(
+        {"NEW": rule},
+        pit_root_tickers=set(),
+        companies=companies,
+        prices=prices,
+        asof=date(2024, 6, 3),
+        max_price_staleness_days=10,
+    )
+    owned_by_pit_root, audit = module.historical_addition_rows(
+        {"NEW": rule},
+        pit_root_tickers={"NEW"},
+        companies=companies,
+        prices=prices,
+        asof=date(2024, 6, 3),
+        max_price_staleness_days=10,
+    )
+
+    assert before == []
+    assert len(active) == 1
+    assert active[0]["historical_universe_source"] == "active_biotech_pit_membership_registry"
+    assert active[0].get("primary_nct", "") == ""
+    assert active[0]["biotech_calibration_cohort"] == "platform_partnered_modality_pipeline"
+    assert owned_by_pit_root == []
+    assert audit[0]["reason"] == "dated_pit_universe_owns_membership"
+
+
+def test_companyfacts_historical_cik_merge_preserves_first_reported_value() -> None:
+    module = load_script_module("15_sync_sec_companyfacts_history.py", "companyfacts_cik_lineage_merge")
+    primary = module.Company(1, "ATAI", "0002081043", "AtaiBeckley Inc.")
+    predecessor = module.Company(1, "ATAI", "0001840904", "AtaiBeckley Inc.")
+
+    def observation(*, cik: str, filed: str, value: float, accession: str) -> dict[str, object]:
+        return {
+            "company_id": 1,
+            "cik": cik,
+            "taxonomy": "us-gaap",
+            "concept": "CashAndCashEquivalentsAtCarryingValue",
+            "label": "Cash",
+            "unit": "USD",
+            "value": value,
+            "period_start": "",
+            "period_end": "2025-09-30",
+            "fiscal_year": 2025,
+            "fiscal_period": "Q3",
+            "form": "10-Q",
+            "filed_date": filed,
+            "accession_nodash": accession,
+            "frame": "",
+            "source": "sec_companyfacts",
+            "confidence": 1.0,
+        }
+
+    merged = module.merge_companyfacts_results(
+        [
+            module.CompanyFactsFetchResult(
+                company=primary,
+                latest_source_filing_date="2026-03-01",
+                payload_hash="current",
+                observations=(observation(cik=primary.cik, filed="2026-03-01", value=90.0, accession="later"),),
+            ),
+            module.CompanyFactsFetchResult(
+                company=predecessor,
+                latest_source_filing_date="2025-11-01",
+                payload_hash="historical",
+                observations=(observation(cik=predecessor.cik, filed="2025-11-01", value=100.0, accession="first"),),
+            ),
+        ],
+        primary_companies={1: primary},
+    )
+
+    assert len(merged) == 1
+    assert merged[0].company.cik == primary.cik
+    assert len(merged[0].observations) == 2
+    assert len(merged[0].normalized) == 1
+    assert merged[0].normalized[0]["cash"] == 100.0
+    assert merged[0].normalized[0]["filed_date"] == "2025-11-01"
+
+def test_current_root_reconstruction_strips_non_pit_ctgov_metadata() -> None:
+    module = load_script_module("57_build_historical_scoring_universe.py", "historical_neutral_survivor_root")
+    root_rows = [
+        {
+            "ticker": "SURV",
+            "company_name": "Survivor Bio",
+            "scoring_include": "true",
+            "primary_nct": "NCT_FUTURE",
+            "active_qualifying_trial_count": "4",
+            "ctgov_review_bucket": "active_study_exists",
+        }
+    ]
+    companies = {"SURV": {"company_id": 1, "ticker": "SURV", "company_name": "Survivor Bio", "is_active": 1}}
+    prices = {
+        "SURV": {
+            "first_price_date": "2018-01-01",
+            "last_price_date": "2026-01-01",
+            "latest_price_date": "2019-01-04",
+        }
+    }
+
+    rows, _ = module.live_universe_rows(
+        root_rows,
+        companies=companies,
+        prices=prices,
+        asof=date(2019, 1, 4),
+        max_price_staleness_days=10,
+        root_universe_is_pit=False,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["historical_universe_source"] == "current_survivor_price_window_reconstruction"
+    assert "primary_nct" not in rows[0]
+    assert "active_qualifying_trial_count" not in rows[0]
+    assert "ctgov_review_bucket" not in rows[0]

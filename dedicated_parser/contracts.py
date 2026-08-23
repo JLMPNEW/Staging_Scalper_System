@@ -13,6 +13,9 @@ DOCUMENT_PARSER_RELEASE = "0.4.6"
 # Version 7 scopes persisted evidence keys to the immutable work identity so
 # a later adapter or review-policy evaluation cannot mutate an earlier run.
 PARSER_SCHEMA_VERSION = 7
+# OCR-only work identity. Increment when the image-to-text runtime contract
+# changes without invalidating completed HTML/XML filing work.
+PDF_OCR_CONTRACT_VERSION = 2
 
 
 def _hash_default(value: Any) -> str:
@@ -147,12 +150,21 @@ class WorkItem:
     enable_arelle: bool = True
     enable_edgartools: bool = True
     enable_pdf_ocr: bool = False
-    max_pdf_pages: int = 250
-    max_pdf_bytes: int = 25_000_000
+    max_pdf_pages: int = 300
+    max_pdf_bytes: int = 50_000_000
     pdf_extraction_timeout_seconds: float = 30.0
+    max_ocr_pages: int = 12
+    ocr_dpi: int = 144
+    ocr_page_timeout_seconds: float = 8.0
+    max_ocr_pixels_per_page: int = 20_000_000
 
     @property
     def work_key(self) -> str:
+        has_pdf = any(
+            Path(document.name).suffix.casefold() == '.pdf'
+            for document in self.documents
+        )
+        pdf_ocr_enabled = self.enable_pdf_ocr and has_pdf
         filing_identity = {
             "ticker": self.filing.ticker,
             "cik": self.filing.cik,
@@ -189,10 +201,33 @@ class WorkItem:
                 "options": {
                     "enable_arelle": self.enable_arelle,
                     "enable_edgartools": self.enable_edgartools,
-                    "enable_pdf_ocr": self.enable_pdf_ocr,
-                    "max_pdf_pages": self.max_pdf_pages,
-                    "max_pdf_bytes": self.max_pdf_bytes,
-                    "pdf_extraction_timeout_seconds": (self.pdf_extraction_timeout_seconds),
+                    "enable_pdf_ocr": pdf_ocr_enabled,
+                    "max_pdf_pages": (
+                        self.max_pdf_pages if has_pdf else 250
+                    ),
+                    "max_pdf_bytes": (
+                        self.max_pdf_bytes if has_pdf else 25_000_000
+                    ),
+                    "pdf_extraction_timeout_seconds": (
+                        self.pdf_extraction_timeout_seconds
+                        if has_pdf
+                        else 30.0
+                    ),
+                    **(
+                        {
+                            "ocr_contract_version": PDF_OCR_CONTRACT_VERSION,
+                            "max_ocr_pages": self.max_ocr_pages,
+                            "ocr_dpi": self.ocr_dpi,
+                            "ocr_page_timeout_seconds": (
+                                self.ocr_page_timeout_seconds
+                            ),
+                            "max_ocr_pixels_per_page": (
+                                self.max_ocr_pixels_per_page
+                            ),
+                        }
+                        if pdf_ocr_enabled
+                        else {}
+                    ),
                 },
             }
         )

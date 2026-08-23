@@ -1,0 +1,23 @@
+ticker,company_name,cik,historical_ciks,calibration_cohort,membership_start_date,membership_end_date,historical_price_ticker,institutional_13f_issuer_alias,cusip,source_reference,approved,scoring_include
+ETON,"Eton Pharmaceuticals, Inc.",0001710340,,commercial_turnaround_or_unprofitable_growth,2019-01-04,,ETON,ETON PHARMACEUTICALS INC,,SEC issuer history and first accepted calibration price,true,true
+RPRX,Royalty Pharma plc,0001802768,,commercial_profitable_quality_or_mature,2020-06-16,,RPRX,ROYALTY PHARMA PLC,G7710AAC0,SEC issuer history and first trading date,true,true
+ACOG,Alpha Cognition Inc.,0001655923,,commercial_turnaround_or_unprofitable_growth,2024-11-12,,ACOG,ALPHA COGNITION INC,,SEC issuer history and first Nasdaq price,true,true
+GYRE,"Gyre Therapeutics, Inc.",0001124105,,commercial_turnaround_or_unprofitable_growth,2023-10-31,,GYRE,GYRE THERAPEUTICS INC,,SEC 8-K 0001140361-23-050292,true,true
+KLRA,"Kailera Therapeutics, Inc.",0002096997,,late_clinical_pivotal_or_registrational,2026-04-17,,KLRA,KAILERA THERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+KARD,"Kardigan, Inc.",0002123613,,late_clinical_pivotal_or_registrational,2026-06-18,,KARD,KARDIGAN INC,,SEC issuer history and first trading date,true,true
+BRVE,"Braveheart Bio, Inc.",0002131524,,late_clinical_pivotal_or_registrational,2026-08-06,,BRVE,BRAVEHEART BIO INC,,SEC issuer history and first trading date,true,true
+ATAI,AtaiBeckley Inc.,0002081043,0001840904,platform_partnered_modality_pipeline,2021-06-18,,ATAI,ATAI LIFE SCIENCES NV;ATAI BECKLEY NV;ATAIBECKLEY INC,,SEC successor issuer history and first trading date,true,true
+OBX,"Obsidian Therapeutics, Inc.",0002130606,,platform_partnered_modality_pipeline,2026-08-04,,OBX,OBSIDIAN THERAPEUTICS INC,67448A106,SEC 8-K 0001193125-26-330810,true,true
+TRAX,"First Tracks Biotherapeutics, Inc.",0002091349,,platform_partnered_modality_pipeline,2026-04-06,,TRAX,FIRST TRACKS BIOTHERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+ATTO,"Attovia Therapeutics, Inc.",0002058707,,platform_partnered_modality_pipeline,2026-08-05,,ATTO,ATTOVIA THERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+PBLS,"Parabilis Medicines, Inc.",0001657677,,platform_partnered_modality_pipeline,2026-06-10,,PBLS,PARABILIS MEDICINES INC,,SEC issuer history and first trading date,true,true
+ODTX,"Odyssey Therapeutics, Inc.",0001882782,,platform_partnered_modality_pipeline,2026-05-08,,ODTX,ODYSSEY THERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+SCTX,"Scribe Therapeutics, Inc.",0001853921,,platform_partnered_modality_pipeline,2026-07-24,,SCTX,SCRIBE THERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+SRZN,"Surrozen, Inc.",0001824893,,platform_partnered_modality_pipeline,2021-08-12,,SRZN,SURROZEN INC,,SEC de-SPAC closing 2021-08-11,true,true
+BLSM,"BlossomHill Therapeutics, Inc.",0001839970,,platform_partnered_modality_pipeline,2026-08-07,,BLSM,BLOSSOMHILL THERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+SPTX,"Seaport Therapeutics, Inc.",0002042347,,platform_partnered_modality_pipeline,2026-05-01,,SPTX,SEAPORT THERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+ACET,"Adicet Bio, Inc.",0001720580,,platform_partnered_modality_pipeline,2020-09-16,,ACET,ADICET BIO INC,,SEC 8-K 0001193125-20-246853,true,true
+VOGX,"Vogenx, Inc.",0001903784,,early_clinical_speculative_or_single_asset_pipeline,2026-08-12,,VOGX,VOGENX INC,,SEC issuer history and first trading date,true,true
+LTGO,"Latigo Biotherapeutics, Inc.",0002056611,,late_clinical_pivotal_or_registrational,2026-08-07,,LTGO,LATIGO BIOTHERAPEUTICS INC,,SEC issuer history and first trading date,true,true
+DMRA,"Damora Therapeutics, Inc.",0001800315,,early_clinical_speculative_or_single_asset_pipeline,2025-11-10,,DMRA,GALECTO INC;DAMORA THERAPEUTICS INC,,SEC 8-K 0001193125-25-273342,true,true
+AVLN,Avalyn Pharma Inc.,0001540171,,late_clinical_pivotal_or_registrational,2026-04-30,,AVLN,AVALYN PHARMA INC,,SEC issuer history and first trading date,true,true

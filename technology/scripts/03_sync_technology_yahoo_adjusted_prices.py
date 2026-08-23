@@ -166,6 +166,29 @@ def timestamp_date_text(raw: object) -> str:
         return ""
 
 
+def is_synthetic_post_market_bar(
+    *,
+    bar_date: str,
+    authoritative_market_date: str,
+    open_value: float | None,
+    high_value: float | None,
+    low_value: float | None,
+    close_value: float,
+    volume: float | None,
+) -> bool:
+    """Identify Yahoo carry-forward rows emitted after a security stops trading."""
+    if not authoritative_market_date or bar_date <= authoritative_market_date:
+        return False
+    if volume is None or volume > 0.0:
+        return False
+    prices = (open_value, high_value, low_value, close_value)
+    if any(value is None for value in prices):
+        return False
+    return max(float(value) for value in prices if value is not None) == min(
+        float(value) for value in prices if value is not None
+    )
+
+
 def int_set(raw: object, default: set[int]) -> set[int]:
     values = raw if isinstance(raw, list) else list(default)
     out: set[int] = set()
@@ -412,6 +435,8 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
             )
         )
 
+    authoritative_market_date = timestamp_date_text(meta.get("regularMarketTime"))
+    dropped_synthetic_dates: list[str] = []
     bars: list[YahooBar] = []
     for idx, raw_ts in enumerate(timestamps):
         try:
@@ -423,6 +448,21 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
         close = to_float(closes[idx] if idx < len(closes) else None)
         if close is None:
             continue
+        open_value = to_float(opens[idx] if idx < len(opens) else None)
+        high_value = to_float(highs[idx] if idx < len(highs) else None)
+        low_value = to_float(lows[idx] if idx < len(lows) else None)
+        volume = to_float(volumes[idx] if idx < len(volumes) else None)
+        if is_synthetic_post_market_bar(
+            bar_date=bar_date,
+            authoritative_market_date=authoritative_market_date,
+            open_value=open_value,
+            high_value=high_value,
+            low_value=low_value,
+            close_value=close,
+            volume=volume,
+        ):
+            dropped_synthetic_dates.append(bar_date)
+            continue
         adj = to_float(adjusted[idx] if idx < len(adjusted) else None)
         price_adjustment = "adjusted_close" if adj is not None else "missing_adjusted_close"
         bars.append(
@@ -430,17 +470,28 @@ def parse_chart_result(job: PriceJob, payload_text: str, source_id: str) -> tupl
                 ticker=job.ticker,
                 bar_date=bar_date,
                 source_id=source_id,
-                open=to_float(opens[idx] if idx < len(opens) else None),
-                high=to_float(highs[idx] if idx < len(highs) else None),
-                low=to_float(lows[idx] if idx < len(lows) else None),
+                open=open_value,
+                high=high_value,
+                low=low_value,
                 close=close,
                 adj_close=adj,
-                volume=to_float(volumes[idx] if idx < len(volumes) else None),
+                volume=volume,
                 dividend_amount=dividends_by_date.get(bar_date),
                 split_factor=split_by_date.get(bar_date),
                 price_adjustment=price_adjustment,
                 is_adjusted=1 if adj is not None else 0,
             )
+        )
+    if dropped_synthetic_dates:
+        meta = {
+            **meta,
+            "droppedSyntheticPostMarketBarDates": dropped_synthetic_dates,
+        }
+        LOGGER.warning(
+            "Dropped synthetic post-market Yahoo bars: ticker=%s authoritative_market_date=%s dates=%s",
+            job.ticker,
+            authoritative_market_date,
+            ",".join(dropped_synthetic_dates),
         )
     if not bars:
         return [], actions, meta, "no_price_bars"

@@ -530,6 +530,28 @@ def test_machinery_orchestrator_orders_related_database_refreshes() -> None:
         str(PROJECT_ROOT / "industrials" / "machinery" / "scripts" / "17_run_machinery_refresh_pipeline.py")
     )
     build_steps = namespace["build_steps"]
+    overwrite_tail_on_resume = namespace["overwrite_tail_on_resume"]
+    assert overwrite_tail_on_resume(force=False, resume=False) is False
+    assert overwrite_tail_on_resume(force=True, resume=False) is True
+    assert overwrite_tail_on_resume(force=False, resume=True) is True
+    resumed_steps = build_steps(
+        ASOF,
+        force=False,
+        overwrite_outputs=True,
+        include_norgate_backfill=False,
+        refresh_sec_insider=True,
+        full_positioning_refresh=False,
+    )
+    resumed_by_id = {step.step_id: step for step in resumed_steps}
+    assert "--incremental" in resumed_by_id["07_sync_sec"].args
+    assert "--force" not in resumed_by_id["07_sync_sec"].args
+    assert "--force-refresh" not in resumed_by_id["03_sync_prices"].args
+    assert "--force" not in resumed_by_id["07b_sync_issuer_ir"].args
+    assert "--force" not in resumed_by_id["11_sync_fx"].args
+    assert "--force" in resumed_by_id["06a_build_scoring"].args
+    assert "--force" in resumed_by_id["10_build_scores"].args
+    assert "--allow-overwrite" in resumed_by_id["10b_publish"].args
+
     steps = build_steps(
         ASOF,
         force=False,
@@ -539,6 +561,10 @@ def test_machinery_orchestrator_orders_related_database_refreshes() -> None:
         bootstrap_sec_archives=True,
     )
     step_ids = [step.step_id for step in steps]
+    assert step_ids[0] == "00a_validate_production_source_seal"
+    preflight = steps[0]
+    assert preflight.args == ["--asof", ASOF]
+    assert preflight.pass_db is False
     assert step_ids.index("12_sync_sec_ownership") < step_ids.index("13_sync_positioning")
     assert step_ids.index("13_sync_positioning") < step_ids.index("09_import_positioning")
     assert step_ids.index("08b_scan_disclosures") < step_ids.index("08_build_financial")
@@ -5255,3 +5281,84 @@ def test_financial_builder_rejects_sector_config_mismatch() -> None:
     assert resolve_model_family("machinery", "machinery") == "machinery"
     with pytest.raises(ValueError, match="matching sector config"):
         resolve_model_family("machinery", "defense")
+
+def test_machinery_source_hash_ignores_platform_line_endings(tmp_path: Path) -> None:
+    from industrials.machinery.stage12_activation import (
+        changed_production_policy_sources,
+        production_policy_source_paths,
+        source_file_sha256,
+    )
+
+    lf_path = tmp_path / "lf.py"
+    crlf_path = tmp_path / "crlf.py"
+    lf_path.write_bytes(
+        ("def value():" + chr(10) + "    return 1" + chr(10)).encode()
+    )
+    crlf_path.write_bytes(
+        ("def value():" + chr(13) + chr(10) + "    return 1" + chr(13) + chr(10)).encode()
+    )
+
+    assert source_file_sha256(lf_path) == source_file_sha256(crlf_path)
+
+    source_paths = production_policy_source_paths()
+    key = next(iter(source_paths))
+    legacy = {name: source_file_sha256(path) for name, path in source_paths.items()}
+    normalized = source_paths[key].read_bytes().replace(b"\r\n", b"\n").replace(
+        b"\r", b"\n"
+    )
+    legacy[key] = hashlib.sha256(normalized.replace(b"\n", b"\r\n")).hexdigest()
+    assert changed_production_policy_sources(legacy) == []
+
+def test_machinery_source_seal_preflight_is_fail_closed(tmp_path: Path) -> None:
+    from industrials.machinery.stage12_activation import production_policy_source_hashes
+    from industrials.machinery.stage12_governance import Stage12Paths
+
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "00a_validate_machinery_production_source_seal.py"
+        )
+    )
+    validate_source_seal = namespace["validate_source_seal"]
+    governance_root = tmp_path / "stage12"
+    state_path = Stage12Paths(governance_root).activation_state_json
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    source_hashes = production_policy_source_hashes()
+    state_path.write_text(
+        json.dumps(
+            {
+                "acceptance": "PASS",
+                "production_policy_status": "ACTIVE",
+                "activation_asof": "2026-08-03",
+                "production_source_sha256": source_hashes,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config = {"machinery_stage12": {"output_root": str(governance_root)}}
+
+    result = validate_source_seal(
+        config, config_path=config_path, asof="2026-08-17"
+    )
+    assert result["acceptance"] == "PASS"
+    assert result["production_policy_status"] == "ACTIVE"
+
+    changed = dict(source_hashes)
+    changed["db.py"] = "0" * 64
+    state_path.write_text(
+        json.dumps(
+            {
+                "acceptance": "PASS",
+                "production_policy_status": "ACTIVE",
+                "activation_asof": "2026-08-03",
+                "production_source_sha256": changed,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"new governed Stage 8/9/12.*db\.py"):
+        validate_source_seal(config, config_path=config_path, asof="2026-08-17")

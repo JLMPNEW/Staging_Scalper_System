@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import date
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
@@ -172,6 +173,55 @@ def test_earnings_fallback_prioritizes_holdings_before_candidates() -> None:
 
     assert [row["ticker"] for row in ordered] == ["ZZZ", "AAA", "BBB"]
 
+
+def test_historical_earnings_history_excludes_future_captures() -> None:
+    module = _earnings_sync()
+    rows = [
+        {
+            "ticker": "AAA",
+            "run_as_of_date": "2026-08-17",
+            "fetched_at_utc": "2026-08-17T12:00:00Z",
+        },
+        {
+            "ticker": "BBB",
+            "run_as_of_date": "2026-08-17",
+            "fetched_at_utc": "2026-08-20T12:00:00Z",
+        },
+        {
+            "ticker": "CCC",
+            "run_as_of_date": "2026-08-18",
+            "fetched_at_utc": "2026-08-18T12:00:00Z",
+        },
+        {
+            "ticker": "DDD",
+            "run_as_of_date": "invalid",
+            "fetched_at_utc": "invalid",
+        },
+    ]
+
+    available = module.history_rows_available_asof(rows, as_of="2026-08-17")
+
+    assert [row["ticker"] for row in available] == ["AAA"]
+
+def test_live_earnings_provider_calls_require_current_run_date() -> None:
+    module = _earnings_sync()
+    current = date(2026, 8, 20)
+
+    assert module.live_provider_refresh_allowed(
+        run_as_of="2026-08-20",
+        historical_catchup=False,
+        today=current,
+    )
+    assert not module.live_provider_refresh_allowed(
+        run_as_of="2026-08-19",
+        historical_catchup=False,
+        today=current,
+    )
+    assert not module.live_provider_refresh_allowed(
+        run_as_of="2026-08-20",
+        historical_catchup=True,
+        today=current,
+    )
 
 def test_preserved_level_drift_is_deferred_only_in_explicit_supplement_mode() -> None:
     module = _level_outcomes()

@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS dim_security (
     listing_status TEXT,
     is_primary_listing INTEGER NOT NULL DEFAULT 1,
     currency TEXT,
+    listing_start_date TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE,
@@ -595,7 +596,15 @@ CREATE TABLE IF NOT EXISTS fact_clinical_trial_status (
     primary_completion_date TEXT,
     completion_date TEXT,
     last_update_post_date TEXT,
+    lead_sponsor TEXT,
     interventions_json TEXT,
+    relationship_type TEXT,
+    mapping_confidence REAL,
+    mapping_method TEXT,
+    valid_from TEXT,
+    valid_to TEXT,
+    reviewed_at TEXT,
+    source_snapshot_asof_date TEXT,
     source_id TEXT,
     payload_json TEXT,
     created_at TEXT NOT NULL,
@@ -1194,6 +1203,10 @@ CREATE TABLE IF NOT EXISTS med_device_daily_scores (
     tier1_safety_status TEXT DEFAULT 'pass',
     tier1_safety_reason TEXT DEFAULT '',
     passed_tier1_safety_gate INTEGER DEFAULT 1,
+    tier1_safety_policy_version TEXT DEFAULT 'tier1_strict_v1',
+    tier1_safety_strict_pass_flag INTEGER DEFAULT 1,
+    tier1_safety_balanced_pass_flag INTEGER DEFAULT 0,
+    tier1_safety_tolerated_reason TEXT DEFAULT '',
     portfolio_candidate_gate INTEGER DEFAULT 0,
     portfolio_candidate_status TEXT DEFAULT '',
     portfolio_candidate_reason TEXT DEFAULT '',
@@ -1554,6 +1567,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_table_optional_columns(conn, "fact_price_ohlcv", {"price_adjustment": "TEXT"})
+    _ensure_table_optional_columns(conn, "dim_security", {"listing_start_date": "TEXT"})
     _ensure_table_optional_columns(
         conn,
         "dim_company_alias",
@@ -1593,6 +1607,20 @@ def init_db(conn: sqlite3.Connection) -> None:
             "interest_expense": "REAL",
             "total_assets": "REAL",
             "stockholders_equity": "REAL",
+        },
+    )
+    _ensure_table_optional_columns(
+        conn,
+        "fact_clinical_trial_status",
+        {
+            "lead_sponsor": "TEXT",
+            "relationship_type": "TEXT",
+            "mapping_confidence": "REAL",
+            "mapping_method": "TEXT",
+            "valid_from": "TEXT",
+            "valid_to": "TEXT",
+            "reviewed_at": "TEXT",
+            "source_snapshot_asof_date": "TEXT",
         },
     )
     _ensure_table_optional_columns(
@@ -1910,6 +1938,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             "tier1_safety_status": "TEXT DEFAULT 'pass'",
             "tier1_safety_reason": "TEXT DEFAULT ''",
             "passed_tier1_safety_gate": "INTEGER DEFAULT 1",
+            "tier1_safety_policy_version": "TEXT DEFAULT 'tier1_strict_v1'",
+            "tier1_safety_strict_pass_flag": "INTEGER DEFAULT 1",
+            "tier1_safety_balanced_pass_flag": "INTEGER DEFAULT 0",
+            "tier1_safety_tolerated_reason": "TEXT DEFAULT ''",
             # portfolio candidate fields
             "portfolio_candidate_gate": "INTEGER DEFAULT 0",
             "portfolio_candidate_status": "TEXT DEFAULT ''",

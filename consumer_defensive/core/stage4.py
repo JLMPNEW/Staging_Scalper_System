@@ -17,6 +17,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -1879,20 +1880,47 @@ def _http_policy(config: dict[str, Any], root: str) -> HttpPolicy:
 
 
 def http_fetcher(policy: HttpPolicy) -> Fetcher:
+    transient_statuses = {408, 425, 429, 500, 502, 503, 504}
+    throttle_lock = threading.Lock()
+    next_request_at = 0.0
+
+    def wait_for_request_slot() -> None:
+        nonlocal next_request_at
+        if policy.sleep_sec <= 0:
+            return
+        with throttle_lock:
+            now = time.monotonic()
+            delay = max(0.0, next_request_at - now)
+            next_request_at = max(now, next_request_at) + policy.sleep_sec
+        if delay:
+            time.sleep(delay)
+
     def fetch(url: str) -> bytes:
         request = urllib.request.Request(url, headers={"User-Agent": policy.user_agent, "Accept-Encoding": "identity"})
         last: Exception | None = None
         for attempt in range(policy.retries):
             try:
+                wait_for_request_slot()
                 with urllib.request.urlopen(request, timeout=policy.timeout_sec) as response:
                     payload = response.read()
-                if policy.sleep_sec:
-                    time.sleep(policy.sleep_sec)
                 return payload
+            except urllib.error.HTTPError as exc:
+                last = exc
+                if exc.code not in transient_statuses:
+                    break
+                if attempt + 1 < policy.retries:
+                    retry_after = 0.0
+                    raw_retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    if raw_retry_after:
+                        try:
+                            retry_after = max(0.0, float(raw_retry_after))
+                        except ValueError:
+                            retry_after = 0.0
+                    time.sleep(min(max(retry_after, float(2 ** attempt)), 30.0))
             except (OSError, urllib.error.URLError) as exc:
                 last = exc
                 if attempt + 1 < policy.retries:
-                    time.sleep(min(2 ** attempt, 4))
+                    time.sleep(min(float(2 ** attempt), 16.0))
         raise RuntimeError(f"HTTP fetch failed for {url}: {last}")
     return fetch
 
@@ -1961,8 +1989,15 @@ def _safe_cache_write_target(
                     f'{context} has a symlinked or non-directory cache parent'
                 )
         else:
-            mkdir_path(current)
-            if resolve_filesystem_path(current, strict=True) != expected:
+            try:
+                mkdir_path(current)
+            except FileExistsError:
+                # A sibling hydration worker may have created the same safe
+                # accession parent after the lexical check.  Re-resolve it
+                # below so a symlink or non-directory race still fails closed.
+                pass
+            actual = resolve_filesystem_path(current, strict=True)
+            if actual != expected or not is_dir_path(actual):
                 raise RuntimeError(f'{context} cache parent identity changed')
 
     expected_target = expected / relative.parts[-1]
@@ -3096,6 +3131,40 @@ def _raw_fact_semantics(rows: Iterable[Iterable[Any]]) -> list[str]:
     )
 
 
+def _additive_raw_fact_rows(
+    existing_rows: Iterable[Iterable[Any]],
+    staged_rows: Iterable[tuple[Any, ...]],
+) -> list[tuple[Any, ...]] | None:
+    '''Return only new rows when a staged SEC slice is a strict safe superset.'''
+    existing_by_id: dict[str, tuple[Any, ...]] = {}
+    for raw_row in existing_rows:
+        row = tuple(raw_row)
+        observation_id = str(row[-1] or '')
+        if not observation_id or observation_id in existing_by_id:
+            return None
+        existing_by_id[observation_id] = row[:-1]
+    staged_by_id: dict[str, tuple[Any, ...]] = {}
+    materialized: list[tuple[Any, ...]] = []
+    for raw_row in staged_rows:
+        row = tuple(raw_row)
+        observation_id = str(row[-2] or '')
+        if not observation_id or observation_id in staged_by_id:
+            return None
+        staged_by_id[observation_id] = row[:-2]
+        materialized.append(row)
+    if not set(existing_by_id).issubset(staged_by_id):
+        return None
+    if any(
+        staged_by_id[observation_id] != semantic
+        for observation_id, semantic in existing_by_id.items()
+    ):
+        return None
+    return [
+        row for row in materialized
+        if str(row[-2]) not in existing_by_id
+    ]
+
+
 def _association_manifest(
     conn: sqlite3.Connection, *, cutoff: str, tickers: list[str]
 ) -> dict[str, Any]:
@@ -3174,6 +3243,7 @@ def sync_sec_fundamentals(
     force_refresh: bool = False,
     fetch: Fetcher | None = None,
     _rehabilitation_preflight: bool = False,
+    incremental_from_asof: str | None = None,
 ) -> dict[str, Any]:
     asof_date = (as_of or date.today().isoformat())[:10]
     date.fromisoformat(asof_date)
@@ -3183,6 +3253,34 @@ def sync_sec_fundamentals(
     cache = resolve_path(settings["cache_dir"], base_dir=bundle.base_dir)
     fetch = fetch or http_fetcher(_http_policy(config, "sec_fundamentals"))
     cutoff = asof_date + "T23:59:59Z"
+    incremental_cutoff = ''
+    incremental_input_hashes: dict[str, str] = {}
+    if incremental_from_asof is not None:
+        incremental_date = incremental_from_asof[:10]
+        date.fromisoformat(incremental_date)
+        if incremental_date >= asof_date:
+            raise ValueError(
+                'Incremental SEC history base must precede the requested cutoff.'
+            )
+        trusted_base = conn.execute(
+            '''SELECT cache_manifest_json
+               FROM consumer_defensive_sec_cache_snapshot
+               WHERE asof_date=? AND scope_contract_version=3
+                 AND trust_state='trusted_current' ''',
+            (incremental_date,),
+        ).fetchone()
+        if trusted_base is None:
+            raise RuntimeError(
+                'Incremental SEC history base lacks an exact trusted snapshot: '
+                f'{incremental_date}'
+            )
+        incremental_cutoff = incremental_date + 'T23:59:59Z'
+        for entry in json.loads(str(trusted_base[0])):
+            logical_path = str(entry.get('path') or '')
+            if logical_path.startswith(('submissions/', 'companyfacts/')):
+                incremental_input_hashes[logical_path] = str(
+                    entry.get('sha256') or ''
+                )
     expected_issuers = _issuer_rows(conn, tickers)
     ingestion_config_sha256 = _sec_ingestion_config_sha256(settings)
     issuer_scope_sha256 = _issuer_scope_sha256(expected_issuers)
@@ -3424,13 +3522,39 @@ def sync_sec_fundamentals(
                     _atomic_promote_bytes(
                         staged_path, staged_raw, cache_root=cache
                     )
-            cache_records.extend(
+            issuer_input_records = [
                 _cache_manifest_record(cache, staged_path, staged_raw)
                 for staged_path, staged_raw in issuer_cache_payloads
-            )
+            ]
+            cache_records.extend(issuer_input_records)
+            issuer_incremental_cutoff = ''
+            if incremental_cutoff and all(
+                incremental_input_hashes.get(str(record['path']))
+                == str(record['sha256'])
+                for record in issuer_input_records
+            ):
+                issuer_incremental_cutoff = incremental_cutoff
             accession_lookup: dict[str, str] = {}
             associated_rows: list[dict[str, Any]] = []
             shared_accessions_to_reconcile: set[str] = set()
+            prior_projection: dict[str, tuple[list[Any], str]] = {}
+            if issuer_incremental_cutoff:
+                for stored in conn.execute(
+                    '''SELECT b.accession_number,b.issuer_company_id,
+                              b.issuer_ticker,b.issuer_cik,b.relationship,
+                              b.form_type,b.filing_date,b.accepted_at,
+                              COALESCE(b.report_date,''),
+                              COALESCE(b.primary_document,''),b.source_id,
+                              COALESCE(b.source_url,''),f.accepted_at
+                       FROM bridge_sec_filing_company b
+                       JOIN fact_sec_filing f
+                         ON f.accession_number=b.accession_number
+                       WHERE b.issuer_company_id=? AND b.accepted_at<=?''',
+                    (company_id, issuer_incremental_cutoff),
+                ):
+                    prior_projection[str(stored[0])] = (
+                        list(stored[:12]), str(stored[12]),
+                    )
             with conn:
                 mutation_changes_before = conn.total_changes
                 for row in filing_rows:
@@ -3459,6 +3583,16 @@ def sync_sec_fundamentals(
                             f"{ticker} {accession}"
                         )
                     parsed_associations[association_key] = parsed_row
+                    prior = prior_projection.get(accession)
+                    if accepted <= issuer_incremental_cutoff and prior is not None:
+                        stored_projection, canonical_accepted = prior
+                        if stored_projection == parsed_row:
+                            accession_lookup[accession] = canonical_accepted
+                            canonical_row = dict(row)
+                            canonical_row['acceptanceDateTime'] = canonical_accepted
+                            associated_rows.append(canonical_row)
+                            filing_count += 1
+                            continue
                     projection = conn.execute('''SELECT association_status
                         FROM bridge_sec_filing_company
                         WHERE accession_number=? AND issuer_company_id=?''',
@@ -3549,6 +3683,42 @@ def sync_sec_fundamentals(
                 issuer_fact_rows: list[tuple[Any, ...]] = []
                 facts_created_at = utc_now()
                 latest_fact = ""
+                if issuer_incremental_cutoff:
+                    taxonomies.update(
+                        str(row[0]) for row in conn.execute(
+                            '''SELECT DISTINCT taxonomy
+                               FROM fact_sec_xbrl_fact_raw
+                               WHERE ticker=? AND source_id=?
+                                 AND accepted_at<=?''',
+                            (
+                                ticker, SEC_COMPANYFACTS,
+                                issuer_incremental_cutoff,
+                            ),
+                        )
+                    )
+                    companyfacts_xbrl_accessions.update(
+                        str(row[0]) for row in conn.execute(
+                            '''SELECT DISTINCT accession_number
+                               FROM fact_sec_xbrl_fact_raw
+                               WHERE ticker=? AND source_id=?
+                                 AND accepted_at<=?
+                                 AND COALESCE(accession_number,'')<>'' ''',
+                            (
+                                ticker, SEC_COMPANYFACTS,
+                                issuer_incremental_cutoff,
+                            ),
+                        )
+                    )
+                    prior_latest = conn.execute(
+                        '''SELECT MAX(accepted_at)
+                           FROM fact_sec_xbrl_fact_raw
+                           WHERE ticker=? AND source_id=? AND accepted_at<=?''',
+                        (
+                            ticker, SEC_COMPANYFACTS,
+                            issuer_incremental_cutoff,
+                        ),
+                    ).fetchone()[0]
+                    latest_fact = str(prior_latest or '')
                 for taxonomy, concepts in (companyfacts.get("facts") or {}).items():
                     if taxonomy not in {"us-gaap", "ifrs-full", "dei"} or not isinstance(concepts, dict):
                         continue
@@ -3562,6 +3732,12 @@ def sync_sec_fundamentals(
                                 if form not in ALLOWED_FACT_FORMS or not accepted or accepted > cutoff:
                                     continue
                                 companyfacts_xbrl_accessions.add(accession)
+                                latest_fact = max(latest_fact, accepted)
+                                if (
+                                    issuer_incremental_cutoff
+                                    and accepted <= issuer_incremental_cutoff
+                                ):
+                                    continue
                                 value = obs.get("val")
                                 numeric = float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
                                 semantic_fact = (
@@ -3575,20 +3751,31 @@ def sync_sec_fundamentals(
                                     *semantic_fact,
                                     _source_observation_id(semantic_fact),facts_created_at,
                                 ))
-                                latest_fact = max(latest_fact, accepted)
-                existing_fact_rows = conn.execute(
-                    """SELECT ticker,cik,accession_number,taxonomy,concept,
-                              value_text,numeric_value,unit,period_start,period_end,
-                              filed_date,accepted_at,form_type,frame,dimensions_json,
-                              source_id,source_detail,source_observation_id
-                       FROM fact_sec_xbrl_fact_raw
-                       WHERE ticker=? AND source_id=? AND accepted_at<=?""",
-                    (ticker, SEC_COMPANYFACTS, cutoff),
-                ).fetchall()
-                staged_semantics = [row[:-1] for row in issuer_fact_rows]
-                if _raw_fact_semantics(existing_fact_rows) != _raw_fact_semantics(
-                    staged_semantics
-                ):
+                if issuer_incremental_cutoff:
+                    conn.executemany(
+                        """INSERT OR IGNORE INTO fact_sec_xbrl_fact_raw(ticker,cik,accession_number,taxonomy,concept,value_text,numeric_value,unit,period_start,period_end,filed_date,accepted_at,form_type,frame,dimensions_json,source_id,source_detail,source_observation_id,created_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        issuer_fact_rows,
+                    )
+                    issuer_fact_count = int(conn.execute(
+                        '''SELECT COUNT(*) FROM fact_sec_xbrl_fact_raw
+                           WHERE ticker=? AND source_id=? AND accepted_at<=?''',
+                        (ticker, SEC_COMPANYFACTS, cutoff),
+                    ).fetchone()[0])
+                else:
+                    existing_fact_rows = conn.execute(
+                        """SELECT ticker,cik,accession_number,taxonomy,concept,
+                                  value_text,numeric_value,unit,period_start,period_end,
+                                  filed_date,accepted_at,form_type,frame,dimensions_json,
+                                  source_id,source_detail,source_observation_id
+                           FROM fact_sec_xbrl_fact_raw
+                           WHERE ticker=? AND source_id=? AND accepted_at<=?""",
+                        (ticker, SEC_COMPANYFACTS, cutoff),
+                    ).fetchall()
+                    additive_rows = _additive_raw_fact_rows(
+                        existing_fact_rows, issuer_fact_rows
+                    )
+                if not issuer_incremental_cutoff and additive_rows is None:
                     conn.execute(
                         """DELETE FROM fact_sec_xbrl_fact_raw
                            WHERE ticker=? AND source_id=? AND accepted_at<=?""",
@@ -3599,7 +3786,14 @@ def sync_sec_fundamentals(
                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         issuer_fact_rows,
                     )
-                issuer_fact_count = len(issuer_fact_rows)
+                elif not issuer_incremental_cutoff and additive_rows:
+                    conn.executemany(
+                        """INSERT INTO fact_sec_xbrl_fact_raw(ticker,cik,accession_number,taxonomy,concept,value_text,numeric_value,unit,period_start,period_end,filed_date,accepted_at,form_type,frame,dimensions_json,source_id,source_detail,source_observation_id,created_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        additive_rows,
+                    )
+                if not issuer_incremental_cutoff:
+                    issuer_fact_count = len(issuer_fact_rows)
                 inline_xbrl_accessions: set[str] = set()
                 relevant_accessions = {
                     (str(row['accessionNumber']), str(row['primaryDocument']))

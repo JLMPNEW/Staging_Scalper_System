@@ -6,6 +6,7 @@ import csv
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from typing import Any
 from technology.core.config import cfg_get, load_yaml, resolve_path
 from technology.core.db import connect, init_db
 from technology.core.logging_utils import configure_utc_logging
-from technology.core.text_norm import normalize_cik, normalize_ticker
+from technology.core.text_norm import normalize_cik, normalize_label, normalize_ticker
 
 
 LOGGER = logging.getLogger("technology_universe_validator")
@@ -113,6 +114,69 @@ def csv_tickers_and_rows(rows: list[dict[str, str]]) -> tuple[list[str], list[st
     return tickers, duplicates
 
 
+def expected_current_tickers(
+    rows: list[dict[str, str]],
+    *,
+    policy: dict[str, Any],
+    effective_date: date | None = None,
+) -> set[str]:
+    """Return source rows that the loader contract marks as current."""
+    non_investable_statuses = {normalize_label(value) for value in policy.get("non_investable_listing_statuses", [])}
+    investable_types = {normalize_label(value) for value in policy.get("investable_security_types", [])}
+    retired_by_lifecycle: set[str] = set()
+    cutoff = effective_date or date.today()
+    for raw in policy.get("lifecycle_overrides", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        ticker = normalize_ticker(raw.get("ticker"))
+        try:
+            last_tradable = date.fromisoformat(str(raw.get("last_tradable_date") or "").strip()[:10])
+        except ValueError:
+            continue
+        if ticker and last_tradable < cutoff:
+            retired_by_lifecycle.add(ticker)
+
+    expected: set[str] = set()
+    for row in rows:
+        ticker = normalize_ticker(row_get(row, "ticker", "Ticker", "symbol", "Symbol"))
+        listing_status = normalize_label(row_get(row, "listing_status", "ListingStatus"))
+        security_type = normalize_label(row_get(row, "security_type", "SecurityType"))
+        if not ticker or ticker in retired_by_lifecycle:
+            continue
+        if listing_status in non_investable_statuses:
+            continue
+        if security_type and security_type not in investable_types:
+            continue
+        expected.add(ticker)
+    return expected
+
+
+def expected_current_ticker_count(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    policy_path: Path | None = None,
+    universe_csv_path: Path | None = None,
+    effective_date: date | None = None,
+) -> int:
+    resolved_policy = policy_path or resolve_path(
+        cfg_get(config, "technology_universe.policy_path"),
+        base_dir=base_dir,
+    )
+    policy = load_yaml_map(resolved_policy)
+    universe_csv = universe_csv_path or resolve_path(
+        cfg_get(config, "technology_universe.seed_csv"),
+        base_dir=base_dir,
+    )
+    return len(
+        expected_current_tickers(
+            read_csv_flexible(universe_csv),
+            policy=policy,
+            effective_date=effective_date,
+        )
+    )
+
+
 def scalar(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> int:
     row = conn.execute(sql, params).fetchone()
     return int(row[0]) if row is not None else 0
@@ -130,7 +194,11 @@ def validate_universe(settings: UniverseValidationSettings, argv: list[str] | No
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     universe_csv = (
         args.universe_csv.expanduser().resolve()
         if args.universe_csv
@@ -146,15 +214,20 @@ def validate_universe(settings: UniverseValidationSettings, argv: list[str] | No
         if args.policy
         else resolve_path(cfg_get(config, "technology_universe.policy_path"), base_dir=base_dir)
     )
-    model_family = str(args.model_family or cfg_get(config, "technology_universe.initial_subsector", settings.default_model_family)).strip()
+    model_family = str(
+        args.model_family or cfg_get(config, "technology_universe.initial_subsector", settings.default_model_family)
+    ).strip()
     policy = load_yaml_map(policy_path)
     required_non_cik = [str(x) for x in policy.get("required_non_cik_fields", [])]
     expected_ticker_count = int(policy.get("expected_ticker_count") or 0)
-    unassigned_cohort_id = str(policy.get("default_unassigned_cohort_id") or settings.default_unassigned_cohort_id).strip()
+    unassigned_cohort_id = str(
+        policy.get("default_unassigned_cohort_id") or settings.default_unassigned_cohort_id
+    ).strip()
     cohort_map = load_cohort_tickers(cohort_path)
     csv_rows = read_csv_flexible(universe_csv)
     tickers, duplicates = csv_tickers_and_rows(csv_rows)
     unique_tickers = sorted(set(tickers))
+    expected_current = expected_current_tickers(csv_rows, policy=policy)
     ticker_params = tuple(unique_tickers)
     placeholders = quoted_placeholders(unique_tickers)
 
@@ -188,24 +261,30 @@ def validate_universe(settings: UniverseValidationSettings, argv: list[str] | No
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
-        company_count = scalar(conn, f"SELECT COUNT(*) FROM dim_company WHERE ticker IN ({placeholders})", ticker_params)
-        security_count = scalar(conn, f"SELECT COUNT(*) FROM dim_security WHERE ticker IN ({placeholders})", ticker_params)
+        company_count = scalar(
+            conn, f"SELECT COUNT(*) FROM dim_company WHERE ticker IN ({placeholders})", ticker_params
+        )
+        security_count = scalar(
+            conn, f"SELECT COUNT(*) FROM dim_security WHERE ticker IN ({placeholders})", ticker_params
+        )
         taxonomy_count = scalar(
             conn,
             f"SELECT COUNT(*) FROM dim_technology_taxonomy WHERE model_family = ? AND ticker IN ({placeholders})",
             (model_family, *ticker_params),
         )
-        current_membership_count = scalar(
-            conn,
+        current_membership_rows = conn.execute(
             f"""
-            SELECT COUNT(DISTINCT ticker)
+            SELECT DISTINCT ticker
             FROM dim_universe_membership
             WHERE model_family = ?
               AND is_current_member = 1
               AND ticker IN ({placeholders})
+            ORDER BY ticker
             """,
             (model_family, *ticker_params),
-        )
+        ).fetchall()
+        current_membership_tickers = {str(row[0]) for row in current_membership_rows}
+        current_membership_count = len(current_membership_tickers)
         pit_membership_count = scalar(
             conn,
             f"""
@@ -222,9 +301,15 @@ def validate_universe(settings: UniverseValidationSettings, argv: list[str] | No
         if security_count != len(unique_tickers):
             errors.append(f"dim_security count mismatch: db={security_count} csv_unique={len(unique_tickers)}")
         if taxonomy_count != len(unique_tickers):
-            errors.append(f"dim_technology_taxonomy count mismatch: db={taxonomy_count} csv_unique={len(unique_tickers)}")
-        if current_membership_count != len(unique_tickers):
-            errors.append(f"dim_universe_membership current count mismatch: db={current_membership_count} csv_unique={len(unique_tickers)}")
+            errors.append(
+                f"dim_technology_taxonomy count mismatch: db={taxonomy_count} csv_unique={len(unique_tickers)}"
+            )
+        if current_membership_tickers != expected_current:
+            errors.append(
+                "dim_universe_membership current ticker mismatch: "
+                f"missing={sorted(expected_current - current_membership_tickers)} "
+                f"unexpected={sorted(current_membership_tickers - expected_current)}"
+            )
 
         if raw_contains_na_ticker:
             db_na = scalar(conn, "SELECT COUNT(*) FROM dim_company WHERE ticker = 'NA'")
@@ -275,7 +360,11 @@ def validate_universe(settings: UniverseValidationSettings, argv: list[str] | No
             errors.append(f"Core cohort assignment mismatches: {bad_cohort_assignments[:20]}")
 
         unassigned_count = sum(1 for ticker in unique_tickers if db_cohort_map.get(ticker) == unassigned_cohort_id)
-        missing_cik_count = scalar(conn, f"SELECT COUNT(*) FROM dim_company WHERE ticker IN ({placeholders}) AND COALESCE(cik, '') = ''", ticker_params)
+        missing_cik_count = scalar(
+            conn,
+            f"SELECT COUNT(*) FROM dim_company WHERE ticker IN ({placeholders}) AND COALESCE(cik, '') = ''",
+            ticker_params,
+        )
         missing_cik_issue_count = scalar(
             conn,
             f"""
@@ -293,21 +382,29 @@ def validate_universe(settings: UniverseValidationSettings, argv: list[str] | No
             (settings.load_stage, settings.unassigned_issue_type, *ticker_params),
         )
         if missing_cik_issue_count != missing_cik_count:
-            errors.append(f"missing_cik issue mismatch: issues={missing_cik_issue_count} missing_cik={missing_cik_count}")
+            errors.append(
+                f"missing_cik issue mismatch: issues={missing_cik_issue_count} missing_cik={missing_cik_count}"
+            )
         if unassigned_issue_count != unassigned_count:
-            errors.append(f"unassigned cohort issue mismatch: issues={unassigned_issue_count} unassigned={unassigned_count}")
+            errors.append(
+                f"unassigned cohort issue mismatch: issues={unassigned_issue_count} unassigned={unassigned_count}"
+            )
 
         csv_missing_cik = sum(1 for row in csv_rows if not normalize_cik(row_get(row, "cik", "CIK")))
         if missing_cik_count != csv_missing_cik:
-            errors.append(f"DB missing CIK count {missing_cik_count} does not match CSV missing CIK count {csv_missing_cik}")
+            errors.append(
+                f"DB missing CIK count {missing_cik_count} does not match CSV missing CIK count {csv_missing_cik}"
+            )
 
         warnings.append(f"CSV rows={len(csv_rows)} unique_tickers={len(unique_tickers)}")
         warnings.append(f"Core cohort tickers={len(cohort_map)}")
         warnings.append(f"Unassigned cohort rows={unassigned_count}")
         warnings.append(f"Missing CIK rows={missing_cik_count}")
-        warnings.append(f"Current membership rows={current_membership_count}")
+        warnings.append(f"Current membership rows={current_membership_count} expected={len(expected_current)}")
         warnings.append(f"Point-in-time membership rows={pit_membership_count}")
-        warnings.append(f"Data-quality issues: missing_cik={missing_cik_issue_count} unassigned={unassigned_issue_count}")
+        warnings.append(
+            f"Data-quality issues: missing_cik={missing_cik_issue_count} unassigned={unassigned_issue_count}"
+        )
 
     for message in warnings:
         LOGGER.info(message)

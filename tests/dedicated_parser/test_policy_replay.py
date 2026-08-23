@@ -7,6 +7,10 @@ from types import ModuleType
 
 import pytest
 
+from dedicated_parser.adjudication import (
+    build_ambiguous_adjudication_skeleton,
+    build_ocr_adjudication_skeleton,
+)
 from dedicated_parser.contracts import (
     AdapterRegistry,
     DocumentRef,
@@ -22,6 +26,7 @@ from dedicated_parser.review_replay import (
     REVIEW_EVALUATION_CONTRACT_VERSION,
     base_run_scope_hash,
     load_review_evidence,
+    materialize_review_evaluation_run,
     replay_review_policies,
 )
 from dedicated_parser.storage import (
@@ -269,6 +274,159 @@ def test_policy_replay_is_idempotent_and_supports_explicit_status_selection(
     assert accepted == []
 
 
+def test_review_evaluation_materializes_idempotent_zero_provider_parser_run(
+    tmp_path: Path,
+) -> None:
+    with connect_database(tmp_path / 'parser.sqlite') as conn:
+        base_run_id, _, _ = _base_run(conn, tmp_path=tmp_path)
+        base_before = dict(conn.execute(
+            'SELECT * FROM sec_parser_metric_evidence_shadow'
+        ).fetchone())
+        evaluation = replay_review_policies(
+            conn,
+            base_run_id=base_run_id,
+            adapter_path=ADAPTER,
+            policy_path=_policy(tmp_path),
+        )
+        run_id = materialize_review_evaluation_run(
+            conn, evaluation_id=evaluation.evaluation_id
+        )
+        reused = materialize_review_evaluation_run(
+            conn, evaluation_id=evaluation.evaluation_id
+        )
+        run = dict(conn.execute(
+            'SELECT * FROM sec_parser_run WHERE run_id=?', (run_id,)
+        ).fetchone())
+        reviewed = dict(conn.execute(
+            '''
+            SELECT evidence.* FROM sec_parser_run_metric_evidence AS relation
+            JOIN sec_parser_metric_evidence_shadow AS evidence
+              ON evidence.evidence_key=relation.evidence_key
+            WHERE relation.run_id=?
+            ''',
+            (run_id,),
+        ).fetchone())
+        evaluation_row = dict(conn.execute(
+            '''SELECT * FROM sec_parser_review_evaluation
+               WHERE evaluation_id=?''',
+            (evaluation.evaluation_id,),
+        ).fetchone())
+        base_after = dict(conn.execute(
+            'SELECT * FROM sec_parser_metric_evidence_shadow '
+            'WHERE evidence_key=?',
+            (base_before['evidence_key'],),
+        ).fetchone())
+
+    assert reused == run_id
+    assert run['mode'] == 'review_replay'
+    assert run['status'] == 'COMPLETED'
+    assert run['worker_count'] == 0
+    assert run['failed_work_count'] == 0
+    assert reviewed['candidate_status'] == 'ACCEPTED'
+    assert reviewed['confidence'] == pytest.approx(0.99)
+    assert reviewed['run_id'] == run_id
+    assert evaluation_row['materialized_run_id'] == run_id
+    assert base_after == base_before
+
+
+def test_ambiguous_review_pack_is_exact_pair_and_policy_ready(
+    tmp_path: Path,
+) -> None:
+    with connect_database(tmp_path / 'parser.sqlite') as conn:
+        run_id, _, _ = _base_run(conn, tmp_path=tmp_path)
+        evidence_key = str(conn.execute(
+            'SELECT evidence_key FROM sec_parser_metric_evidence_shadow'
+        ).fetchone()[0])
+        conn.execute(
+            '''
+            INSERT INTO sec_parser_recovery_assessment(
+                run_id,model_family,ticker,metric_name,asof_date,
+                baseline_status,baseline_value,anchor_period_end,
+                current_match_mode,current_evidence_period_end,
+                current_evidence_age_days,recovery_class,predicted_status,
+                accepted_current_count,accepted_historical_count,
+                review_required_count,rejected_count,parser_failure_count,
+                searched_filing_count,searched_document_count,
+                failed_filing_count,missing_cache_filing_count,
+                evidence_keys_json,status_reason,created_at
+            ) VALUES (?,?,?,?,?,'missing',NULL,'','none','',NULL,
+                      'FOUND_AMBIGUOUS','review_required',0,0,1,0,0,
+                      1,1,0,0,?,'conflicting_candidate_values',?)
+            ''',
+            (
+                run_id, 'test_family', 'TEST', 'reported_backlog',
+                '2026-07-26', json.dumps([evidence_key]),
+                '2026-07-26T00:00:00Z',
+            ),
+        )
+        rows = build_ambiguous_adjudication_skeleton(conn, run_id=run_id)
+
+    assert len(rows) == 1
+    assert rows[0]['ticker'] == 'TEST'
+    assert rows[0]['metric_name'] == 'reported_backlog'
+    assert rows[0]['evidence_key'] == evidence_key
+    assert rows[0]['recovery_class'] == 'FOUND_AMBIGUOUS'
+    assert rows[0]['enabled'] == 'false'
+    assert rows[0]['decision'] == 'REVIEW_REQUIRED'
+    assert rows[0]['candidate_value'] == pytest.approx(100_000_000.0)
+    assert rows[0]['unit'] == 'USD'
+    assert rows[0]['period_end'] == '2026-03-31'
+    assert rows[0]['evidence_text']
+    assert rows[0]['provenance_json']
+
+
+def test_ocr_review_pack_is_exact_review_only_evidence(
+    tmp_path: Path,
+) -> None:
+    with connect_database(tmp_path / 'parser.sqlite') as conn:
+        run_id, _, _ = _base_run(conn, tmp_path=tmp_path)
+        evidence_key = str(conn.execute(
+            'SELECT evidence_key FROM sec_parser_metric_evidence_shadow'
+        ).fetchone()[0])
+        conn.execute(
+            '''
+            UPDATE sec_parser_metric_evidence_shadow
+            SET provenance_json=?, candidate_status='REVIEW_REQUIRED',
+                status_reason='ocr_derived_requires_review'
+            WHERE evidence_key=?
+            ''',
+            (json.dumps({'ocr_used': True, 'ocr_page_indices': [1]}),
+             evidence_key),
+        )
+        conn.execute(
+            '''
+            INSERT INTO sec_parser_recovery_assessment(
+                run_id,model_family,ticker,metric_name,asof_date,
+                baseline_status,baseline_value,anchor_period_end,
+                current_match_mode,current_evidence_period_end,
+                current_evidence_age_days,recovery_class,predicted_status,
+                accepted_current_count,accepted_historical_count,
+                review_required_count,rejected_count,parser_failure_count,
+                searched_filing_count,searched_document_count,
+                failed_filing_count,missing_cache_filing_count,
+                evidence_keys_json,status_reason,created_at
+            ) VALUES (?,?,?,?,?,'missing',NULL,'','none','',NULL,
+                      'FOUND_AMBIGUOUS','review_required',0,0,1,0,0,
+                      1,1,0,0,?,'ocr_review_required',?)
+            ''',
+            (
+                run_id, 'test_family', 'TEST', 'reported_backlog',
+                '2026-07-26', json.dumps([evidence_key]),
+                '2026-07-26T00:00:00Z',
+            ),
+        )
+        rows = build_ocr_adjudication_skeleton(conn, run_id=run_id)
+
+    assert len(rows) == 1
+    assert rows[0]['evidence_key'] == evidence_key
+    assert rows[0]['enabled'] == 'false'
+    assert rows[0]['decision'] == 'REVIEW_REQUIRED'
+    assert rows[0]['status_reason'] == 'ocr_derived_requires_review'
+    assert rows[0]['suggested_action'] == (
+        'compare_rendered_page_and_ocr_text_then_accept_or_reject'
+    )
+
+
 def test_idempotent_reuse_fails_if_base_evidence_changes(
     tmp_path: Path,
 ) -> None:
@@ -450,6 +608,7 @@ def test_explicit_policy_replay_cli_writes_evaluation_manifest(
             str(run_id),
             "--output-json",
             str(output),
+            '--materialize-parser-run',
         ]
     )
     payload = json.loads(output.read_text(encoding="utf-8"))
@@ -461,3 +620,4 @@ def test_explicit_policy_replay_cli_writes_evaluation_manifest(
     assert payload["arelle_invocation_count"] == 0
     assert payload["edgartools_invocation_count"] == 0
     assert payload["ocr_invocation_count"] == 0
+    assert payload['materialized_parser_run_id'] > 0

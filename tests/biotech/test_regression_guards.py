@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sqlite3
 import sys
@@ -347,6 +348,62 @@ def test_companyfacts_fetch_reuses_supplied_http_client(monkeypatch: pytest.Monk
     assert fake_http.calls == 1
     assert result.error == ""
     assert result.normalized[0]["company_id"] == 1
+
+
+def test_companyfacts_cash_includes_current_and_noncurrent_marketable_securities() -> None:
+    module = load_script_module("15_sync_sec_companyfacts_history.py", "companyfacts_investments_regression")
+
+    def observation(concept: str, value: float) -> dict[str, object]:
+        return {
+            "concept": concept,
+            "value": value,
+            "period_end": "2026-06-30",
+            "fiscal_year": 2026,
+            "fiscal_period": "Q2",
+            "form": "10-Q",
+            "filed_date": "2026-07-31",
+            "accession_nodash": "000168285226000150",
+        }
+
+    rows = module.normalize_rows(
+        [
+            observation("CashAndCashEquivalentsAtCarryingValue", 1_723_000_000.0),
+            observation("AvailableForSaleSecuritiesDebtSecuritiesCurrent", 3_415_000_000.0),
+            observation("AvailableForSaleSecuritiesDebtSecuritiesNoncurrent", 1_772_000_000.0),
+            observation("AvailableForSaleSecuritiesDebtMaturitiesSingleMaturityDate", 5_187_000_000.0),
+        ],
+        company_id=1,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["marketable_investments_total"] == pytest.approx(5_187_000_000.0)
+    assert rows[0]["cash_and_investments"] == pytest.approx(6_910_000_000.0)
+    assert "cash_only_for_cash_and_investments" not in rows[0]["proxy_fields_used"]
+
+
+def test_cash_only_proxy_cannot_trigger_cash_runway_hard_veto() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_cash_proxy_veto_regression")
+    settings = {
+        "enabled": True,
+        "reasons": {"cash_runway_lt_9m", "severe_runway_flag"},
+        "min_addv20": 0.0,
+        "commercial_stage_revenue_min": 50_000_000.0,
+    }
+    payload = {
+        "financial_survival": {
+            "cash_runway_months": 3.0,
+            "severe_runway_flag": 1.0,
+            "proxy_fields_used": "cash_only_for_cash_and_investments",
+        }
+    }
+
+    assert module.core_structural_veto_reasons(payload, {}, settings) == []
+
+    payload["financial_survival"]["cash_runway_reliable_flag"] = 1.0
+    assert module.core_structural_veto_reasons(payload, {}, settings) == [
+        "cash_runway_lt_9m",
+        "severe_runway_flag",
+    ]
 
 
 def test_governance_invalid_date_returns_none() -> None:
@@ -718,6 +775,188 @@ def test_promoted_portfolio_candidate_policy_rejects_evidence_drift() -> None:
 
     with pytest.raises(ValueError, match="rank_top_n differs"):
         module.apply_promoted_portfolio_candidate_policy([], config)
+
+
+def test_review_universe_status_cannot_enter_portfolio_candidate_gate() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_biotech_review_gate_regression")
+    row = {
+        "ticker": "REVIEW",
+        "asof_date": "2026-08-22",
+        "universe_status": "review",
+        "opportunity_score": 80.0,
+        "production_rank_score": 80.0,
+        "allocation_bucket": "core",
+        "biotech_cohort_investible_flag": 1.0,
+        "biotech_cohort_calibration_eligible_flag": 1.0,
+        "core_structural_veto_flag": 0.0,
+        "rank_quality_cap_vetoed": 0.0,
+        "price_data_asof_date": "2026-08-21",
+        "latest_price_date": "2026-08-21",
+        "pit_valid_flag": 1.0,
+    }
+
+    module.enrich_portfolio_layer_contract_rows([row], {})
+
+    assert row["portfolio_candidate_gate"] == 0.0
+    assert row["portfolio_candidate_status"] == "review"
+    assert row["portfolio_candidate_reason"] == "universe_status_review"
+
+    config = {
+        "biotech_scoring": {
+            "portfolio_candidate_policy": {
+                "enabled": True,
+                "name": "review_guard",
+                "allowed_primary_cohorts": [],
+                "rank_top_n": 10,
+                "total_max": 10,
+                "min_selected_names": 1,
+            }
+        }
+    }
+    module.apply_promoted_portfolio_candidate_policy([row], config)
+    assert row["portfolio_candidate_gate"] == 0.0
+    assert row["portfolio_candidate_status"] == "review"
+    assert row["portfolio_candidate_reason"] == "universe_status_review"
+
+
+def test_computed_zero_score_is_valid_for_research_but_not_live_allocation() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_computed_zero_regression")
+    row = {
+        "ticker": "ZERO",
+        "asof_date": "2026-08-21",
+        "source_snapshot_asof_date": "2026-08-21",
+        "price_data_asof_date": "2026-08-21",
+        "opportunity_score": 0.0,
+        "production_rank_score": 0.0,
+        "production_rank_score_field": "opportunity_score",
+        "allocation_bucket": "avoid",
+        "biotech_cohort_investible_flag": 1.0,
+        "biotech_cohort_calibration_eligible_flag": 1.0,
+        "core_structural_veto_flag": 0.0,
+        "rank_quality_cap_vetoed": 0.0,
+        "survivorship_corrected_panel_flag": 1.0,
+    }
+
+    module.enrich_portfolio_layer_contract_rows([row], {})
+
+    assert row["score_zero_is_missing_flag"] == 0.0
+    assert row["portfolio_candidate_gate"] == 0.0
+    assert row["portfolio_candidate_reason"] == "allocation_bucket_avoid"
+    assert row["research_calibration_input_eligible_flag"] == 1.0
+    assert row["stage11_calibration_input_eligible_flag"] == 1.0
+    assert row["stage11_calibration_input_reason"] == "ok"
+
+
+def test_veto_zero_score_is_not_missing_or_research_eligible() -> None:
+    module = load_script_module("11_score_biotech_index.py", "score_veto_zero_regression")
+    row = {
+        "ticker": "VETO",
+        "asof_date": "2026-08-21",
+        "source_snapshot_asof_date": "2026-08-21",
+        "price_data_asof_date": "2026-08-21",
+        "opportunity_score": 0.0,
+        "production_rank_score": 0.0,
+        "production_rank_score_field": "opportunity_score",
+        "allocation_bucket": "avoid",
+        "biotech_cohort_investible_flag": 1.0,
+        "biotech_cohort_calibration_eligible_flag": 1.0,
+        "core_structural_veto_flag": 1.0,
+        "rank_quality_cap_vetoed": 0.0,
+        "survivorship_corrected_panel_flag": 1.0,
+    }
+
+    module.enrich_portfolio_layer_contract_rows([row], {})
+
+    assert row["score_zero_is_missing_flag"] == 0.0
+    assert row["portfolio_candidate_reason"] == "score_zeroed_by_veto"
+    assert row["research_calibration_input_eligible_flag"] == 0.0
+    assert row["stage11_calibration_input_reason"] == "score_zeroed_by_veto"
+
+
+def test_historical_export_distinguishes_computed_and_placeholder_zero_scores() -> None:
+    module = load_script_module(
+        "56_generate_historical_biotech_score_csvs.py",
+        "historical_export_zero_score_regression",
+    )
+
+    class ExportModule:
+        pass
+
+    base = {
+        "asof_date": "2026-08-21",
+        "ticker": "ZERO",
+        "company_id": 1,
+        "opportunity_score": 0.0,
+        "allocation_bucket": "avoid",
+        "biotech_cohort_investible_flag": 1.0,
+        "biotech_cohort_calibration_eligible_flag": 1.0,
+        "core_structural_veto_flag": 0.0,
+        "rank_quality_cap_vetoed": 0.0,
+    }
+    placeholder = {
+        **base,
+        "ticker": "MISSING",
+        "company_id": "delisted:MISSING",
+        "biotech_cohort_exclusion_reason": "delisted_membership_missing_score",
+    }
+    rows = module.prepare_score_rows_for_export(
+        [base, placeholder],
+        ExportModule(),
+        config={},
+        model_metadata={},
+        market_context={
+            "ZERO": {"latest_price_date": "2026-08-21", "avg_dollar_volume_60d": 1_000_000},
+            "MISSING": {"latest_price_date": "2026-08-21", "avg_dollar_volume_60d": 1_000_000},
+        },
+        survivorship_corrected_panel=True,
+    )
+    by_ticker = {row["ticker"]: row for row in rows}
+
+    assert by_ticker["ZERO"]["score_zero_is_missing_flag"] == 0.0
+    assert by_ticker["ZERO"]["stage11_calibration_input_eligible_flag"] == 1.0
+    assert by_ticker["MISSING"]["score_zero_is_missing_flag"] == 1.0
+    assert by_ticker["MISSING"]["stage11_calibration_input_reason"] == "missing_score"
+
+
+def test_historical_export_validator_accepts_research_eligible_computed_zero(tmp_path: Path) -> None:
+    module = load_script_module(
+        "56_generate_historical_biotech_score_csvs.py",
+        "historical_export_zero_score_validation_regression",
+    )
+    row: dict[str, Any] = {column: "value" for column in module.REQUIRED_PRESENT_COLUMNS}
+    row.update(
+        {
+            "ticker": "ZERO",
+            "asof_date": "2026-08-21",
+            "biotech_primary_cohort": "early_clinical_speculative_or_single_asset_pipeline",
+            "production_score_source": "legacy_allocation",
+            "production_rank_score_field": "opportunity_score",
+            "native_score_value": 0.0,
+            "score_zero_is_missing_flag": 0.0,
+            "research_calibration_input_eligible_flag": 1.0,
+            "research_calibration_reason": "ok",
+            "stage11_calibration_input_eligible_flag": 1.0,
+            "stage11_calibration_input_reason": "ok",
+            "survivorship_corrected_panel_flag": 1.0,
+            "stage11_calibration_panel_source": "biotech_survivorship_corrected_pit_score_recompute",
+            "price_data_asof_date": "2026-08-21",
+        }
+    )
+    path = tmp_path / "biotech_daily_scores.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row), lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(row)
+
+    failures = module.validate_score_csv(
+        path,
+        asof="2026-08-21",
+        min_rows=1,
+        terminal_events={},
+        calibration_tickers={"ZERO"},
+    )
+
+    assert failures == []
 
 
 def test_ctgov_shared_study_merge_is_deterministic_on_conflict() -> None:
@@ -1400,6 +1639,40 @@ def test_historical_export_forwards_config_to_contract_enrichment() -> None:
     assert observed == {"rows": [], "config": config}
 
 
+def test_historical_stage11_sidecar_includes_cohort_fields() -> None:
+    module = load_script_module(
+        "56_generate_historical_biotech_score_csvs.py",
+        "historical_export_sidecar_cohort_regression",
+    )
+
+    assert "calibration_cohort" in module.STAGE11_SIDECAR_COLUMNS
+    assert "biotech_primary_cohort" in module.STAGE11_SIDECAR_COLUMNS
+
+
+def test_historical_export_ignores_untrusted_exact_score_snapshot() -> None:
+    module = load_script_module(
+        "56_generate_historical_biotech_score_csvs.py",
+        "historical_export_trusted_snapshot_regression",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE daily_scores(asof_date TEXT, ticker TEXT)")
+    conn.executemany(
+        "INSERT INTO daily_scores VALUES (?, ?)",
+        [("2026-07-03", "AAA"), ("2026-07-08", "AAA")],
+    )
+
+    resolved = module.resolve_score_snapshot_asof(
+        conn,
+        "2026-07-08",
+        calibration_tickers={"AAA"},
+        carry_forward=True,
+        trusted_snapshot_dates={"2026-07-03", "2026-07-10"},
+    )
+
+    assert resolved == "2026-07-03"
+
+
 def test_adcom_unknown_or_future_announcement_is_not_pit_visible() -> None:
     module = load_script_module("10_build_biotech_features.py", "adcom_announcement_pit_regression")
     conn = sqlite3.connect(":memory:")
@@ -1527,3 +1800,39 @@ def test_ranked_report_surfaces_portfolio_contract_fields() -> None:
     assert flattened["portfolio_candidate_reason"] == "promoted_policy"
     assert flattened["calibration_sample_role"] == "strict_oos"
     assert {"portfolio_candidate_gate", "oos_score_valid_flag"}.issubset(module.TOP_SCORE_FIELDS)
+
+def test_forward_catalyst_loader_excludes_future_source_snapshot(tmp_path: Path) -> None:
+    module = load_script_module("10_build_biotech_features.py", "feature_forward_catalyst_pit_regression")
+    path = tmp_path / "forward_catalysts.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["ticker", "event_date", "source", "snapshot_asof"],
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "ticker": "FUTR",
+                "event_date": "2026-11-15",
+                "source": "ctgov_primary_completion",
+                "snapshot_asof": "2026-08-22",
+            }
+        )
+        writer.writerow(
+            {
+                "ticker": "VALID",
+                "event_date": "2026-11-15",
+                "source": "sec_pdufa",
+                "snapshot_asof": "2026-08-21",
+            }
+        )
+
+    rows = module.load_forward_catalyst_calendar(
+        path,
+        date(2026, 8, 21),
+        lookahead_days=180,
+    )
+
+    assert "FUTR" not in rows
+    assert rows["VALID"][0]["snapshot_asof"] == "2026-08-21"

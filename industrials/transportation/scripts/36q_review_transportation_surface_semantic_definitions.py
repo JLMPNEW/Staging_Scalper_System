@@ -47,7 +47,9 @@ ROW_FIELDS = (
     "metric_id", "candidate_value", "reviewed_value", "unit", "period_start", "period_end",
     "filing_date", "accepted_at", "form_type", "accession_number", "concept_name",
     "extraction_method", "status_reason", "formula", "numerator_concept",
-    "denominator_concept", "source_document", "source_path", "source_content_sha256",
+    "denominator_concept", "definition_basis", "comparability_class", "segment_id",
+    "denominator_basis", "weighting_basis", "capacity_basis",
+    "source_document", "source_path", "source_content_sha256",
     "evidence_key", "evidence_text_sha256", "source_integrity_pass", "semantic_guard_pass",
     "row_decision", "row_reason", "review_policy_version", "reviewed_by", "reviewed_at",
 )
@@ -210,10 +212,10 @@ def main() -> int:
         did = definition_id(definition)
         for row in candidates:
             lane = str(row["source_lane"])
+            provenance = _json(row.get("provenance_json"))
             integrity = True
             integrity_reason = "lineage_fields_pass"
             if lane == "parser_run_evidence":
-                provenance = _json(row.get("provenance_json"))
                 path_text = str(row.get("source_path") or "")
                 stored_hash = str(row.get("source_content_sha256") or "")
                 provenance_hash = str(provenance.get("document_sha256") or "")
@@ -259,6 +261,12 @@ def main() -> int:
                 "status_reason": row["status_reason"], "formula": row["formula"],
                 "numerator_concept": row["numerator_concept"],
                 "denominator_concept": row["denominator_concept"],
+                "definition_basis": provenance.get("definition_basis") or row.get("formula") or row.get("concept_name") or "",
+                "comparability_class": provenance.get("comparability_class") or ("exact_fact_definition" if lane == "fact_store_ratio" else ""),
+                "segment_id": provenance.get("segment_id") or "",
+                "denominator_basis": provenance.get("denominator_basis") or "",
+                "weighting_basis": provenance.get("weighting_basis") or "",
+                "capacity_basis": provenance.get("capacity_basis") or "",
                 "source_document": row["source_document"], "source_path": row["source_path"],
                 "source_content_sha256": row["source_content_sha256"], "evidence_key": row["evidence_key"],
                 "evidence_text_sha256": hashlib.sha256(str(row["evidence_text"]).encode("utf-8")).hexdigest(),

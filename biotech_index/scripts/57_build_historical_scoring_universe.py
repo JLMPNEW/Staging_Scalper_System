@@ -22,6 +22,10 @@ from biotech_index.core.db import connect, init_db  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.pipeline_guards import normalize_ticker  # noqa: E402
 from biotech_index.core.report_inputs import dated_output_dir  # noqa: E402
+from biotech_index.core.security_identity import (  # noqa: E402
+    SecurityIdentityRule,
+    load_security_identity_rules,
+)
 
 
 LOGGER = logging.getLogger("build_historical_scoring_universe")
@@ -43,6 +47,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--summary-csv", type=Path, default=None)
     parser.add_argument("--max-price-staleness-days", type=int, default=10)
+    parser.add_argument(
+        "--force-current-root-reconstruction",
+        action="store_true",
+        help=(
+            "Ignore a dated CTGov universe when no trial snapshot existed by --asof; reconstruct neutral survivor "
+            "membership from the configured root plus price windows and curated delisted rows."
+        ),
+    )
     parser.add_argument("--include-delisted", action="store_true", default=True)
     parser.add_argument("--exclude-delisted", action="store_false", dest="include_delisted")
     return parser.parse_args()
@@ -176,6 +188,9 @@ def add_output_fields(fieldnames: list[str]) -> list[str]:
         "drop_otc_tape",
         "historical_price_ticker",
         "latest_price_date",
+        "membership_start_date",
+        "membership_end_date",
+        "historical_ciks",
     ]
     return [*fieldnames, *[field for field in extras if field not in fieldnames]]
 
@@ -188,6 +203,8 @@ def live_universe_rows(
     asof: date,
     max_price_staleness_days: int,
     nonretained_ticker_actions: dict[str, tuple[date, str]] | None = None,
+    security_identity_rules: dict[str, SecurityIdentityRule] | None = None,
+    root_universe_is_pit: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     included: list[dict[str, Any]] = []
     audit: list[dict[str, Any]] = []
@@ -195,6 +212,21 @@ def live_universe_rows(
     for row in root_rows:
         ticker = normalize_ticker(row.get("ticker"))
         if not ticker or not as_bool(row.get("scoring_include"), False):
+            continue
+        identity_rule = (security_identity_rules or {}).get(ticker)
+        if identity_rule is not None and not identity_rule.contains(asof):
+            audit.append(
+                {"ticker": ticker, "decision": "exclude", "reason": "outside_security_membership_window"}
+            )
+            continue
+        if historical_asof and identity_rule is not None and not root_universe_is_pit:
+            audit.append(
+                {
+                    "ticker": ticker,
+                    "decision": "delegate",
+                    "reason": "historical_identity_registry_replaces_current_metadata",
+                }
+            )
             continue
         terminal_action = (nonretained_ticker_actions or {}).get(ticker)
         if terminal_action is not None and asof >= terminal_action[0]:
@@ -233,7 +265,11 @@ def live_universe_rows(
         if not ok:
             audit.append({"ticker": ticker, "decision": "exclude", "reason": reason})
             continue
-        out: dict[str, Any] = dict(row)
+        # A current root can reconstruct membership from price windows, but its
+        # CTGov/trial fields are not historical observations. Start from an empty
+        # row so those fields serialize blank rather than leaking today's state.
+        reconstructed_current_root = historical_asof and not root_universe_is_pit
+        out: dict[str, Any] = {} if reconstructed_current_root else dict(row)
         out.update(
             {
                 "ticker": ticker,
@@ -241,7 +277,11 @@ def live_universe_rows(
                 "company_name": row.get("company_name") or company.get("company_name") or ticker,
                 "scoring_include": "true",
                 "calibration_only": "false",
-                "historical_universe_source": "current_final_scoring_universe",
+                "historical_universe_source": (
+                    "current_survivor_price_window_reconstruction"
+                    if reconstructed_current_root
+                    else "dated_pit_final_scoring_universe"
+                ),
                 "price_start_date": window.get("first_price_date") if window else "",
                 "price_end_date": "",
                 "historical_price_ticker": price_ticker,
@@ -256,6 +296,72 @@ def live_universe_rows(
                 "reason": "active_with_price_history" if is_active else "inactive_now_but_priced_on_asof",
             }
         )
+    return included, audit
+
+
+def historical_addition_rows(
+    rules: dict[str, SecurityIdentityRule],
+    *,
+    pit_root_tickers: set[str],
+    companies: dict[str, dict[str, Any]],
+    prices: dict[str, dict[str, Any]],
+    asof: date,
+    max_price_staleness_days: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build neutral PIT rows for approved active names absent from old dated universes."""
+    included: list[dict[str, Any]] = []
+    audit: list[dict[str, Any]] = []
+    for ticker, rule in sorted(rules.items()):
+        if ticker in pit_root_tickers:
+            audit.append({"ticker": ticker, "decision": "defer", "reason": "dated_pit_universe_owns_membership"})
+            continue
+        if not rule.contains(asof):
+            audit.append({"ticker": ticker, "decision": "exclude", "reason": "outside_security_membership_window"})
+            continue
+        company = companies.get(ticker)
+        if not company:
+            audit.append({"ticker": ticker, "decision": "exclude", "reason": "missing_company_row"})
+            continue
+        company_id = int(company.get("company_id") or 0)
+        if company_id <= 0:
+            audit.append({"ticker": ticker, "decision": "exclude", "reason": "missing_company_id"})
+            continue
+        window = prices.get(rule.historical_price_ticker)
+        ok, reason = usable_latest_price(window, asof, max_staleness_days=max_price_staleness_days)
+        if not ok:
+            audit.append({"ticker": ticker, "decision": "exclude", "reason": reason})
+            continue
+        included.append(
+            {
+                "ticker": ticker,
+                "company_id": company_id,
+                "company_name": rule.company_name,
+                "universe_status": "historical_active_member",
+                "recommended_status": "keep",
+                "review_bucket": "pit_membership_registry",
+                "root_cause_category": "historical_active_member",
+                "recommended_fix": "none",
+                "review_reason": "approved effective-dated active biotech membership",
+                "source_reason_codes": "active_biotech_pit_membership_registry",
+                "company_diagnostic_like": "false",
+                "manual_verified_active_study": "false",
+                "manual_override_applied": "false",
+                "final_status": "keep",
+                "final_status_reason": "effective_dated_active_membership",
+                "scoring_include": "true",
+                "calibration_only": "false",
+                "historical_universe_source": "active_biotech_pit_membership_registry",
+                "biotech_calibration_cohort": rule.calibration_cohort,
+                "price_start_date": rule.membership_start_date.isoformat(),
+                "price_end_date": rule.membership_end_date.isoformat() if rule.membership_end_date else "",
+                "historical_price_ticker": rule.historical_price_ticker,
+                "latest_price_date": window.get("latest_price_date") if window else "",
+                "membership_start_date": rule.membership_start_date.isoformat(),
+                "membership_end_date": rule.membership_end_date.isoformat() if rule.membership_end_date else "",
+                "historical_ciks": ";".join(rule.historical_ciks),
+            }
+        )
+        audit.append({"ticker": ticker, "decision": "include", "reason": "effective_dated_active_membership"})
     return included, audit
 
 
@@ -364,19 +470,49 @@ def main() -> int:
         cfg_get(config, "paths.company_ticker_actions_csv"),
         base_dir=base_dir,
     )
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = load_security_identity_rules(identity_registry_path)
     dated_pit_universe = output_dir / configured_root_universe.name
     root_universe = (
         args.root_universe_csv.expanduser().resolve()
         if args.root_universe_csv
+        else configured_root_universe
+        if args.force_current_root_reconstruction
         else dated_pit_universe
         if dated_pit_universe.exists()
         else configured_root_universe
+    )
+    root_universe_is_pit = (
+        not args.force_current_root_reconstruction
+        and dated_pit_universe.exists()
+        and root_universe.resolve() == dated_pit_universe.resolve()
     )
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else output_dir / root_universe.name
     summary_csv = args.summary_csv.expanduser().resolve() if args.summary_csv else output_dir / "historical_scoring_universe_audit.csv"
     manifest_path = output_dir / "historical_scoring_universe_manifest.json"
 
     root_fields, root_rows = read_csv(root_universe)
+    if root_universe_is_pit and not any(as_bool(row.get("scoring_include"), False) for row in root_rows):
+        # CTGov snapshots did not exist for early history. An empty dated audit
+        # means "trial state unavailable", not "no biotech companies existed".
+        # Reconstruct survivor membership from observed price windows and add the
+        # separately curated delisted panel below; live_universe_rows deliberately
+        # strips all current CTGov metadata in this fallback mode.
+        LOGGER.warning(
+            "Dated CTGov universe has no scoring rows for asof=%s; using neutral current-survivor price-window reconstruction",
+            asof.isoformat(),
+        )
+        root_universe = configured_root_universe
+        root_universe_is_pit = False
+        root_fields, root_rows = read_csv(root_universe)
+    pit_root_tickers = (
+        {ticker for row in root_rows if (ticker := normalize_ticker(row.get("ticker")))}
+        if root_universe_is_pit
+        else set()
+    )
     nonretained_ticker_actions = load_nonretained_ticker_actions(ticker_actions_path)
     with connect(db_path) as conn:
         init_db(conn)
@@ -390,6 +526,16 @@ def main() -> int:
             asof=asof,
             max_price_staleness_days=max(0, int(args.max_price_staleness_days)),
             nonretained_ticker_actions=nonretained_ticker_actions,
+            security_identity_rules=security_identity_rules,
+            root_universe_is_pit=root_universe_is_pit,
+        )
+        addition_rows, addition_audit = historical_addition_rows(
+            security_identity_rules,
+            pit_root_tickers=pit_root_tickers,
+            companies=companies,
+            prices=live_prices,
+            asof=asof,
+            max_price_staleness_days=max(0, int(args.max_price_staleness_days)),
         )
         delisted_rows: list[dict[str, Any]] = []
         delisted_audit: list[dict[str, Any]] = []
@@ -402,7 +548,7 @@ def main() -> int:
             )
 
     fieldnames = add_output_fields(root_fields)
-    rows = sorted([*live_rows, *delisted_rows], key=lambda row: str(row.get("ticker") or ""))
+    rows = sorted([*live_rows, *addition_rows, *delisted_rows], key=lambda row: str(row.get("ticker") or ""))
     tickers = [str(row.get("ticker") or "").upper() for row in rows]
     duplicates = sorted({ticker for ticker in tickers if tickers.count(ticker) > 1})
     if duplicates:
@@ -411,7 +557,7 @@ def main() -> int:
         raise RuntimeError(f"Historical scoring universe is empty for asof={asof.isoformat()}")
     write_csv(output_csv, rows, fieldnames)
     audit_fieldnames = ["ticker", "decision", "reason"]
-    write_csv(summary_csv, [*live_audit, *delisted_audit], audit_fieldnames)
+    write_csv(summary_csv, [*live_audit, *addition_audit, *delisted_audit], audit_fieldnames)
     manifest = {
         "asof_date": asof.isoformat(),
         "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -420,6 +566,10 @@ def main() -> int:
         "root_universe_csv": str(root_universe),
         "row_count": len(rows),
         "live_row_count": len(live_rows),
+        "active_historical_addition_row_count": len(addition_rows),
+        "active_historical_registry_count": len(security_identity_rules),
+        "active_historical_registry_csv": str(identity_registry_path),
+        "root_universe_is_pit": root_universe_is_pit,
         "delisted_row_count": len(delisted_rows),
         "max_price_staleness_days": max(0, int(args.max_price_staleness_days)),
         "source_policy": {
@@ -427,17 +577,24 @@ def main() -> int:
             "current": (
                 "included when active with price history on/before asof; for historical asof dates, "
                 "currently-inactive names are kept when usable as-of price bars exist, but non-retained ticker "
-                "actions end membership on their effective date (survivorship correction)"
+                "actions end membership on their effective date. If the dated CTGov universe is empty because "
+                "snapshots did not yet exist, membership is reconstructed from current survivors plus observed "
+                "price windows with all current trial metadata stripped; curated delisted rows are added separately"
+            ),
+            "active_historical_additions": (
+                "included only inside explicit membership windows; neutral universe metadata prevents current CTGov state "
+                "from leaking into historical feature recomputation"
             ),
             "missing_historical_feeds": "left null/availability-flagged by downstream feature builders; never forward-filled from future dates",
         },
     }
     write_json(manifest_path, manifest)
     LOGGER.info(
-        "Built historical scoring universe: asof=%s rows=%d live=%d delisted=%d output=%s",
+        "Built historical scoring universe: asof=%s rows=%d live=%d active_additions=%d delisted=%d output=%s",
         asof.isoformat(),
         len(rows),
         len(live_rows),
+        len(addition_rows),
         len(delisted_rows),
         output_csv,
     )

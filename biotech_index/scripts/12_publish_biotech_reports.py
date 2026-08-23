@@ -1287,19 +1287,29 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         if sec_catalyst_recency_basis == "pdufa_event_date_proximity"
         else sec_catalyst_recency_days
     )
+    listing_status = row.get("listing_status", "")
+    portfolio_candidate_gate = row.get("portfolio_candidate_gate", "")
+    portfolio_candidate_status = row.get("portfolio_candidate_status", "")
+    portfolio_candidate_reason = row.get("portfolio_candidate_reason", "")
+    eligibility_reason = row.get("eligibility_reason", "")
+    if listing_status_not_clean(listing_status):
+        portfolio_candidate_gate = 0.0
+        portfolio_candidate_status = "excluded"
+        portfolio_candidate_reason = "listing_status_not_clean"
+        eligibility_reason = "listing_status_not_clean"
     return {
         "asof_date": row.get("asof_date", ""),
         "company_id": row.get("company_id", ""),
         "rank": row.get("rank", ""),
         "top_evidence_json": row.get("top_evidence_json", ""),
         "ticker": row.get("ticker", ""),
-        "listing_status": row.get("listing_status", ""),
+        "listing_status": listing_status,
         "company_name": row.get("company_name", ""),
-        "portfolio_candidate_gate": row.get("portfolio_candidate_gate", ""),
+        "portfolio_candidate_gate": portfolio_candidate_gate,
         "portfolio_candidate_score": row.get("portfolio_candidate_score", ""),
-        "portfolio_candidate_status": row.get("portfolio_candidate_status", ""),
-        "portfolio_candidate_reason": row.get("portfolio_candidate_reason", ""),
-        "eligibility_reason": row.get("eligibility_reason", ""),
+        "portfolio_candidate_status": portfolio_candidate_status,
+        "portfolio_candidate_reason": portfolio_candidate_reason,
+        "eligibility_reason": eligibility_reason,
         "calibration_eligible_flag": row.get("calibration_eligible_flag", ""),
         "native_score_field": row.get("native_score_field", ""),
         "native_score_value": row.get("native_score_value", ""),

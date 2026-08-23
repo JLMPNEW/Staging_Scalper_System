@@ -36,6 +36,11 @@ from biotech_index.core.pipeline_guards import (
     validate_requested_tickers,
 )
 from biotech_index.core.report_inputs import resolve_dated_report_input_csv
+from biotech_index.core.security_identity import (
+    SecurityIdentityRule,
+    identity_start_dates_by_company,
+    load_security_identity_rules,
+)
 
 
 LOGGER = logging.getLogger("build_governance_event_features")
@@ -387,21 +392,30 @@ def load_form4_rows_bulk(
     companies: list[dict[str, Any]],
     start_date: date,
     asof_date: date,
+    security_identity_rules: dict[str, SecurityIdentityRule] | None = None,
 ) -> tuple[dict[int, list[dict[str, Any]]], str]:
     if form4_conn is None:
         return {}, "form4_db_unavailable"
+    rules = security_identity_rules or {}
     tickers = sorted({normalize_ticker(company.get("ticker")) for company in companies if normalize_ticker(company.get("ticker"))})
-    ciks = sorted({normalize_cik(company.get("cik")) for company in companies if normalize_cik(company.get("cik"))})
     ticker_to_company_ids: dict[str, list[int]] = {}
     cik_to_company_ids: dict[str, list[int]] = {}
+    company_ids_by_ticker: dict[str, int] = {}
     for company in companies:
         company_id = int(company["company_id"])
         ticker = normalize_ticker(company.get("ticker"))
-        cik_int = normalize_cik(company.get("cik"))
         if ticker:
             ticker_to_company_ids.setdefault(ticker, []).append(company_id)
-        if cik_int:
+            company_ids_by_ticker[ticker] = company_id
+        accepted_ciks = {normalize_cik(company.get("cik"))}
+        rule = rules.get(ticker)
+        if rule is not None:
+            accepted_ciks.add(normalize_cik(rule.cik))
+            accepted_ciks.update(normalize_cik(value) for value in rule.historical_ciks)
+        for cik_int in accepted_ciks - {""}:
             cik_to_company_ids.setdefault(cik_int, []).append(company_id)
+    ciks = sorted(cik_to_company_ids)
+    identity_start_dates = identity_start_dates_by_company(rules, company_ids_by_ticker)
     if not tickers and not ciks:
         return {int(company["company_id"]): [] for company in companies}, ""
     rows_by_key: dict[str, dict[str, Any]] = {}
@@ -440,7 +454,11 @@ def load_form4_rows_bulk(
         cik_int = normalize_cik(item.get("issuer_cik"))
         matched_ids.update(ticker_to_company_ids.get(ticker, []))
         matched_ids.update(cik_to_company_ids.get(cik_int, []))
+        event_date = parse_date(item.get("trans_date")) or parse_date(item.get("filing_date"))
         for company_id in matched_ids:
+            identity_start = identity_start_dates.get(company_id)
+            if identity_start is not None and (event_date is None or event_date < identity_start):
+                continue
             grouped.setdefault(company_id, []).append(item)
     return grouped, ""
 
@@ -1117,6 +1135,7 @@ def load_sec_governance_inputs_bulk(
     company_ids: list[int],
     asof_date: date,
     config: dict[str, Any],
+    identity_start_dates: dict[int, date] | None = None,
 ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, int]]:
     if not company_ids:
         return {}, {}
@@ -1129,6 +1148,7 @@ def load_sec_governance_inputs_bulk(
                 company_ids=[int(value) for value in company_chunk],
                 asof_date=asof_date,
                 config=config,
+                identity_start_dates=identity_start_dates,
             )
             docs_by_company.update(chunk_docs)
             activist_counts.update(chunk_activists)
@@ -1138,6 +1158,16 @@ def load_sec_governance_inputs_bulk(
     start_date = (asof_date - timedelta(days=lookback_days)).isoformat()
     company_placeholders = ",".join("?" for _ in company_ids)
     form_placeholders = ",".join("?" for _ in SEC_SCAN_FORMS)
+    floor_pairs = sorted(
+        (company_id, floor.isoformat())
+        for company_id in company_ids
+        if (floor := (identity_start_dates or {}).get(company_id)) is not None
+    )
+    identity_guard_sql = ""
+    identity_guard_params: tuple[Any, ...] = ()
+    if floor_pairs:
+        identity_guard_sql = " AND NOT (" + " OR ".join("(company_id = ? AND filing_date < ?)" for _ in floor_pairs) + ")"
+        identity_guard_params = tuple(value for pair in floor_pairs for value in pair)
     rows = conn.execute(
         f"""
         WITH target_filings AS (
@@ -1146,6 +1176,7 @@ def load_sec_governance_inputs_bulk(
             WHERE company_id IN ({company_placeholders})
               AND filing_date >= ?
               AND filing_date <= ?
+              {identity_guard_sql}
               AND form IN ({form_placeholders})
         ),
         latest_docs AS (
@@ -1200,7 +1231,11 @@ def load_sec_governance_inputs_bulk(
         WHERE rn <= ?
         ORDER BY company_id, filing_date DESC, accession_nodash DESC
         """,
-        tuple(company_ids) + (start_date, asof_date.isoformat()) + SEC_SCAN_FORMS + (max_docs,),
+        tuple(company_ids)
+        + (start_date, asof_date.isoformat())
+        + identity_guard_params
+        + SEC_SCAN_FORMS
+        + (max_docs,),
     ).fetchall()
     docs_by_company: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in company_ids}
     for row in rows:
@@ -1217,10 +1252,11 @@ def load_sec_governance_inputs_bulk(
         WHERE company_id IN ({company_placeholders})
           AND filing_date >= ?
           AND filing_date <= ?
+          {identity_guard_sql}
           AND form IN ('SC 13D','SC 13D/A')
         GROUP BY company_id
         """,
-        tuple(company_ids) + (start_date, asof_date.isoformat()),
+        tuple(company_ids) + (start_date, asof_date.isoformat()) + identity_guard_params,
     ).fetchall()
     activist_counts = {company_id: 0 for company_id in company_ids}
     for row in activist_rows:
@@ -1426,6 +1462,11 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = load_security_identity_rules(identity_registry_path)
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = resolve_path(cfg_get(config, "governance_events.output_csv"), base_dir=base_dir)
     configured_universe_csv = resolve_path(cfg_get(config, "governance_events.final_scoring_universe_csv"), base_dir=base_dir)
@@ -1483,6 +1524,14 @@ def main() -> None:
                 subset_mode=subset_mode,
             )
             company_ids = [int(company["company_id"]) for company in companies]
+            company_ids_by_ticker = {
+                normalize_ticker(company["ticker"]): int(company["company_id"])
+                for company in companies
+            }
+            identity_start_dates = identity_start_dates_by_company(
+                security_identity_rules,
+                company_ids_by_ticker,
+            )
             table = str(cfg_get(config, "governance_events.form4_table", "form4_events_tier1"))
             lookback_days = int(cfg_get(config, "governance_events.lookback_days", 365))
             phase_start = time.perf_counter()
@@ -1492,6 +1541,7 @@ def main() -> None:
                 companies=companies,
                 start_date=asof_date - timedelta(days=lookback_days),
                 asof_date=asof_date,
+                security_identity_rules=security_identity_rules,
             )
             delisted_form4_rows_by_company = load_delisted_form4_rows_bulk(
                 conn,
@@ -1518,6 +1568,7 @@ def main() -> None:
                 company_ids=company_ids,
                 asof_date=asof_date,
                 config=config,
+                identity_start_dates=identity_start_dates,
             )
             LOGGER.info(
                 "Governance SEC metadata preload complete: companies=%d docs=%d elapsed=%.3fs",

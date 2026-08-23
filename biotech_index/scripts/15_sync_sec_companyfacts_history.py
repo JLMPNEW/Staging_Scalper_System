@@ -26,6 +26,7 @@ from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
+from biotech_index.core.security_identity import SecurityIdentityRule, load_security_identity_rules
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
     read_final_scoring_tickers,
@@ -40,6 +41,7 @@ from biotech_index.core.pipeline_guards import (
 LOGGER = logging.getLogger("sync_sec_companyfacts_history")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SQLITE_PARAM_CHUNK_SIZE = 800
+COMPANYFACTS_NORMALIZER_VERSION = "2026-08-21.1"
 
 
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
@@ -57,7 +59,20 @@ CONCEPT_GROUPS: dict[str, list[str]] = {
         "ShortTermInvestments",
         "MarketableSecuritiesCurrent",
         "AvailableForSaleSecuritiesCurrent",
+        "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
         "ShortTermInvestmentsAvailableForSaleSecurities",
+    ],
+    "long_term_investments": [
+        "LongTermInvestments",
+        "MarketableSecuritiesNoncurrent",
+        "AvailableForSaleSecuritiesNoncurrent",
+        "AvailableForSaleSecuritiesDebtSecuritiesNoncurrent",
+    ],
+    "marketable_investments_reported_total": [
+        "MarketableSecurities",
+        "AvailableForSaleSecurities",
+        "AvailableForSaleSecuritiesDebtSecurities",
+        "AvailableForSaleSecuritiesDebtMaturitiesSingleMaturityDate",
     ],
     "restricted_cash": [
         "RestrictedCashAndCashEquivalentsCurrent",
@@ -188,6 +203,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow inactive companies with universe_status=delisted_calibration when the supplied universe CSV names them.",
     )
+    parser.add_argument(
+        "--include-historical-ciks",
+        action="store_true",
+        help="Atomically merge approved predecessor/successor CIK payloads from active_biotech_history.registry_csv.",
+    )
     parser.add_argument("--full-refresh", action="store_true", help="Force refresh for all eligible companies regardless of sync state.")
     parser.add_argument("--audit-only", action="store_true", help="Write the sign-convention audit from existing DB rows without fetching SEC data.")
     parser.add_argument("--allow-partial", action="store_true", help="Return success even if one or more companyfacts fetches fail.")
@@ -269,6 +289,98 @@ def load_companies(
         if max_companies > 0 and len(companies) >= max_companies:
             break
     return companies
+
+
+def expand_company_cik_history(
+    companies: list[Company],
+    rules: dict[str, SecurityIdentityRule],
+) -> list[Company]:
+    expanded: list[Company] = []
+    for company in companies:
+        rule = rules.get(company.ticker)
+        historical_ciks = rule.historical_ciks if rule is not None else ()
+        for historical_cik in historical_ciks:
+            if historical_cik and historical_cik != company.cik:
+                expanded.append(
+                    Company(
+                        company_id=company.company_id,
+                        ticker=company.ticker,
+                        cik=historical_cik,
+                        company_name=company.company_name,
+                    )
+                )
+        expanded.append(company)
+    return expanded
+
+
+def merge_companyfacts_results(
+    results: list[CompanyFactsFetchResult],
+    *,
+    primary_companies: dict[int, Company],
+) -> list[CompanyFactsFetchResult]:
+    """Merge reviewed issuer-CIK payloads once so one lineage cannot overwrite another."""
+    grouped: dict[int, list[CompanyFactsFetchResult]] = {}
+    for result in results:
+        grouped.setdefault(result.company.company_id, []).append(result)
+    merged: list[CompanyFactsFetchResult] = []
+    for company_id, group in sorted(grouped.items()):
+        primary = primary_companies[company_id]
+        successful = [result for result in group if not result.error]
+        if not successful:
+            errors = "; ".join(sorted({result.error for result in group if result.error}))
+            merged.append(
+                CompanyFactsFetchResult(
+                    company=primary,
+                    latest_source_filing_date=max(
+                        (result.latest_source_filing_date for result in group), default=""
+                    ),
+                    error=errors or "all_cik_fetches_failed",
+                )
+            )
+            continue
+        failed_ciks = [result.company.cik for result in group if result.error]
+        if failed_ciks:
+            LOGGER.warning(
+                "SEC companyfacts partial issuer-lineage fetch for %s failed_ciks=%s",
+                primary.ticker,
+                ",".join(sorted(failed_ciks)),
+            )
+        observations: list[dict[str, Any]] = []
+        seen_observations: set[tuple[Any, ...]] = set()
+        for result in successful:
+            for observation in result.observations:
+                key = (
+                    observation.get("cik"),
+                    observation.get("taxonomy"),
+                    observation.get("concept"),
+                    observation.get("unit"),
+                    observation.get("value"),
+                    observation.get("period_start"),
+                    observation.get("period_end"),
+                    observation.get("form"),
+                    observation.get("filed_date"),
+                    observation.get("accession_nodash"),
+                    observation.get("frame"),
+                )
+                if key in seen_observations:
+                    continue
+                seen_observations.add(key)
+                observations.append(dict(observation))
+        payload_material = "|".join(
+            sorted(f"{result.company.cik}:{result.payload_hash}" for result in successful)
+        )
+        merged.append(
+            CompanyFactsFetchResult(
+                company=primary,
+                latest_source_filing_date=max(
+                    (result.latest_source_filing_date for result in successful), default=""
+                ),
+                payload_hash=hashlib.sha256(payload_material.encode("utf-8")).hexdigest(),
+                observations=tuple(observations),
+                normalized=tuple(normalize_rows(observations, company_id=company_id)),
+            )
+        )
+    return merged
 
 
 def fiscal_sort_key(obs: dict[str, Any]) -> tuple[str, str, str]:
@@ -415,6 +527,8 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
                 "filed_date": obs.get("filed_date"),
                 "accession_nodash": obs.get("accession_nodash"),
                 "_source_concepts": {},
+                "_source_duration_days": {},
+                "_source_period_starts": {},
             },
         )
         # Known limitation: concepts for one (period_end, fp, form) row can come
@@ -428,15 +542,32 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
             row["accession_nodash"] = obs.get("accession_nodash")
         row[group] = obs.get("value")
         row["_source_concepts"][group] = obs.get("concept")
+        row["_source_duration_days"][group] = observation_duration_days(obs)
+        row["_source_period_starts"][group] = obs.get("period_start")
 
     out: list[dict[str, Any]] = []
     for row in period_rows.values():
         source_concepts = row.pop("_source_concepts", {})
+        source_duration_days = row.pop("_source_duration_days", {})
+        source_period_starts = row.pop("_source_period_starts", {})
         cash = row.get("cash")
         short_term_investments = row.get("short_term_investments")
+        long_term_investments = row.get("long_term_investments")
+        reported_investments_total = row.get("marketable_investments_reported_total")
+        if short_term_investments is not None and long_term_investments is not None:
+            marketable_investments_total = float(short_term_investments) + float(long_term_investments)
+        elif short_term_investments is not None:
+            marketable_investments_total = float(short_term_investments)
+        elif long_term_investments is not None:
+            marketable_investments_total = float(long_term_investments)
+        elif reported_investments_total is not None:
+            marketable_investments_total = float(reported_investments_total)
+        else:
+            marketable_investments_total = None
         row["cash_and_equivalents"] = cash
+        row["marketable_investments_total"] = marketable_investments_total
         row["cash_and_investments"] = (
-            (float(cash or 0.0) + float(short_term_investments or 0.0)) if cash is not None else None
+            float(cash) + float(marketable_investments_total or 0.0) if cash is not None else None
         )
         if row.get("total_debt_reported") is not None:
             row["total_debt"] = row.get("total_debt_reported")
@@ -481,8 +612,37 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
         for field in ("cash_and_investments", "revenue", "rd_expense", "operating_cash_flow", "current_assets", "current_liabilities"):
             if row.get(field) is None:
                 missing.append(field)
-        if cash is not None and short_term_investments is None:
+        if cash is not None and marketable_investments_total is None:
             proxies.append("cash_only_for_cash_and_investments")
+        elif (
+            cash is not None
+            and short_term_investments is not None
+            and long_term_investments is None
+            and reported_investments_total is not None
+            and not math.isclose(
+                float(short_term_investments),
+                float(reported_investments_total),
+                rel_tol=0.001,
+                abs_tol=1.0,
+            )
+        ):
+            # Broad AFS totals can include securities classified inside cash equivalents.
+            # Prefer the explicit balance-sheet component so cash is not counted twice.
+            proxies.append("ignored_reported_investments_total_overlap_risk")
+        elif (
+            cash is not None
+            and long_term_investments is not None
+            and short_term_investments is None
+            and reported_investments_total is None
+        ):
+            proxies.append("long_term_investments_only_for_cash_and_investments")
+        elif (
+            cash is not None
+            and reported_investments_total is not None
+            and short_term_investments is None
+            and long_term_investments is None
+        ):
+            proxies.append("reported_investments_total_only_for_cash_and_investments")
         missing_set = set(missing)
         cash_is_proxy_only = "cash_only_for_cash_and_investments" in proxies
         if (
@@ -496,8 +656,15 @@ def normalize_rows(observations: list[dict[str, Any]], *, company_id: int) -> li
         else:
             confidence = "low"
         row["cash_source_concept"] = source_concepts.get("cash")
+        row["short_term_investments_source_concept"] = source_concepts.get("short_term_investments")
+        row["long_term_investments_source_concept"] = source_concepts.get("long_term_investments")
+        row["marketable_investments_total_source_concept"] = source_concepts.get(
+            "marketable_investments_reported_total"
+        )
         row["rd_source_concept"] = source_concepts.get("rd_expense")
         row["ocf_source_concept"] = source_concepts.get("operating_cash_flow")
+        row["operating_cash_flow_period_start"] = source_period_starts.get("operating_cash_flow")
+        row["operating_cash_flow_duration_days"] = source_duration_days.get("operating_cash_flow")
         row["shares_source_concept"] = source_concepts.get("shares_outstanding") or source_concepts.get("weighted_average_shares_diluted") or source_concepts.get("weighted_average_shares_basic")
         row["revenue_source_concept"] = source_concepts.get("revenue")
         row["gross_profit_source_concept"] = source_concepts.get("gross_profit")
@@ -523,6 +690,8 @@ QUARTERLY_FIELDS = [
     "cash",
     "cash_and_equivalents",
     "short_term_investments",
+    "long_term_investments",
+    "marketable_investments_total",
     "cash_and_investments",
     "restricted_cash",
     "current_assets",
@@ -546,12 +715,17 @@ QUARTERLY_FIELDS = [
     "weighted_average_shares_basic",
     "weighted_average_shares_diluted",
     "operating_cash_flow",
+    "operating_cash_flow_period_start",
+    "operating_cash_flow_duration_days",
     "investing_cash_flow",
     "financing_cash_flow",
     "capital_expenditures",
     "free_cash_flow",
     "shares_outstanding",
     "cash_source_concept",
+    "short_term_investments_source_concept",
+    "long_term_investments_source_concept",
+    "marketable_investments_total_source_concept",
     "rd_source_concept",
     "ocf_source_concept",
     "shares_source_concept",
@@ -637,7 +811,7 @@ def load_companyfacts_sync_state(conn: sqlite3.Connection, company_ids: list[int
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
-        SELECT company_id, latest_source_filing_date, payload_hash, last_synced_at, sync_status
+        SELECT company_id, latest_source_filing_date, payload_hash, normalizer_version, last_synced_at, sync_status
         FROM company_facts_sync_state
         WHERE company_id IN ({placeholders})
         """,
@@ -710,6 +884,8 @@ def should_refresh_company(
     force_refresh: bool,
 ) -> bool:
     if force_refresh:
+        return True
+    if str((sync_state or {}).get("normalizer_version") or "") != COMPANYFACTS_NORMALIZER_VERSION:
         return True
     if not company.cik:
         return True
@@ -865,17 +1041,28 @@ def upsert_company_facts_sync_state(
     conn.execute(
         """
         INSERT INTO company_facts_sync_state(
-            company_id, latest_source_filing_date, payload_hash, last_synced_at, sync_status, created_at, updated_at
+            company_id, latest_source_filing_date, payload_hash, normalizer_version,
+            last_synced_at, sync_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company_id) DO UPDATE SET
             latest_source_filing_date = excluded.latest_source_filing_date,
             payload_hash = excluded.payload_hash,
+            normalizer_version = excluded.normalizer_version,
             last_synced_at = excluded.last_synced_at,
             sync_status = excluded.sync_status,
             updated_at = excluded.updated_at
         """,
-        (company_id, latest_source_filing_date, payload_hash, now, sync_status, now, now),
+        (
+            company_id,
+            latest_source_filing_date,
+            payload_hash,
+            COMPANYFACTS_NORMALIZER_VERSION,
+            now,
+            sync_status,
+            now,
+            now,
+        ),
     )
 
 
@@ -1238,6 +1425,13 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = (
+        load_security_identity_rules(identity_registry_path) if args.include_historical_ciks else {}
+    )
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     universe_csv = (
         args.universe_csv.expanduser().resolve()
@@ -1295,13 +1489,15 @@ def main() -> None:
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
         scoring_tickers = read_scoring_tickers(universe_csv)
-        companies = load_companies(
+        primary_company_list = load_companies(
             conn,
             scoring_tickers=scoring_tickers,
             ticker_filter=ticker_filter,
             max_companies=int(args.max_companies),
             include_delisted_calibration=bool(args.include_delisted_calibration),
         )
+        primary_companies = {company.company_id: company for company in primary_company_list}
+        companies = expand_company_cik_history(primary_company_list, security_identity_rules)
         subset_mode = subset_mode_enabled(ticker_filter=ticker_filter, max_count=int(args.max_companies))
         output_csv = subset_output_path(output_csv, subset_mode=subset_mode)
         sign_audit_csv = subset_output_path(sign_audit_csv, subset_mode=subset_mode)
@@ -1314,7 +1510,7 @@ def main() -> None:
             context="SEC companyfacts sync",
             subset_mode=subset_mode,
         )
-        company_ids = [company.company_id for company in companies]
+        company_ids = sorted(primary_companies)
         if args.audit_only:
             all_csv_rows = export_quarterly_rows(conn, company_ids)
             audit_rows, audit_summary = build_sign_convention_audit_rows(
@@ -1340,7 +1536,8 @@ def main() -> None:
             refresh_targets = [
                 company
                 for company in companies
-                if should_refresh_company(
+                if args.include_historical_ciks
+                or should_refresh_company(
                     company,
                     sync_state=sync_state_by_company.get(company.company_id),
                     fact_summary=fact_summary_by_company.get(company.company_id),
@@ -1450,6 +1647,8 @@ def main() -> None:
                     for client in thread_clients:
                         client.close()
 
+            if args.include_historical_ciks:
+                results = merge_companyfacts_results(results, primary_companies=primary_companies)
             for idx, result in enumerate(sorted(results, key=lambda item: item.company.ticker), start=1):
                 company = result.company
                 if result.error == "missing_cik":
@@ -1483,6 +1682,7 @@ def main() -> None:
                     state is not None
                     and str(state.get("payload_hash") or "") == result.payload_hash
                     and str(state.get("latest_source_filing_date") or "") == result.latest_source_filing_date
+                    and str(state.get("normalizer_version") or "") == COMPANYFACTS_NORMALIZER_VERSION
                 )
                 with conn:
                     if not payload_unchanged:

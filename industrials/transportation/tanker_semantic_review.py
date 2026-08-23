@@ -5,10 +5,11 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Mapping
 
 
-REVIEW_POLICY_VERSION = "transportation_tanker_semantic_review_v3"
+REVIEW_POLICY_VERSION = "transportation_tanker_semantic_review_v4"
 
 _NUMBER = re.compile(
     r"(?P<currency>US\$|USD|\$)?\s*(?P<open>\()?\s*"
@@ -49,6 +50,7 @@ def normalized(value: object) -> str:
 
 
 def definition_signature(row: Mapping[str, object]) -> tuple[str, ...]:
+    provenance = _json(row.get("provenance_json"))
     return (
         str(row.get("source_lane") or ""),
         str(row.get("ticker") or ""),
@@ -57,9 +59,14 @@ def definition_signature(row: Mapping[str, object]) -> tuple[str, ...]:
         normalized(row.get("unit")),
         normalized(row.get("extraction_method")),
         normalized(row.get("status_reason") or row.get("reason")),
-        normalized(row.get("formula")),
+        normalized(row.get("formula") or provenance.get("formula")),
         normalized(row.get("numerator_concept")),
         normalized(row.get("denominator_concept")),
+        normalized(provenance.get("definition_basis")),
+        normalized(provenance.get("weighting_basis")),
+        normalized(provenance.get("denominator_basis")),
+        normalized(provenance.get("coverage_start_date")),
+        normalized(provenance.get("coverage_end_date")),
     )
 
 
@@ -133,6 +140,28 @@ def _derived_review(row: Mapping[str, object], value: float) -> CandidateReview 
                 and float(provenance["total_capacity"]) > 0
                 and provenance.get("weighting_basis") == "DWT_or_table_capacity"
             )
+        elif concept == "DerivedSimpleAverageFleetAge":
+            valid = (
+                metric == "fleet_age"
+                and 0 <= value <= 60
+                and int(provenance["operand_count"]) >= 2
+                and provenance.get("weighting_basis") == "simple_average_year_built"
+            )
+        elif concept == "DerivedVesselCountFromSchedule":
+            valid = (
+                metric == "vessel_count"
+                and int(provenance["operand_count"]) >= 2
+                and provenance.get("identity_basis") == "normalized_unique_vessel_name"
+                and math.isclose(value, float(provenance["operand_count"]))
+            )
+        elif concept == "DerivedFleetCapacityFromVesselSchedule":
+            valid = (
+                metric == "fleet_capacity"
+                and int(provenance["operand_count"]) >= 2
+                and provenance.get("capacity_basis") == "DWT"
+                and float(provenance["total_capacity"]) > 0
+                and math.isclose(value, float(provenance["total_capacity"]))
+            )
         elif concept == "DerivedRevenueDaysFromAvailableLessOffhire":
             available = float(provenance["available_days"])
             offhire = float(provenance["offhire_days"])
@@ -151,6 +180,30 @@ def _derived_review(row: Mapping[str, object], value: float) -> CandidateReview 
             fixed = float(provenance["fixed_days"])
             denominator = float(provenance["denominator_days"])
             valid = metric == "charter_coverage_next_12m" and denominator > 0 and 0 <= fixed <= denominator and math.isclose(value, fixed / denominator)
+        elif concept == "DerivedFleetUtilizationFromDays":
+            revenue = float(provenance["revenue_days"])
+            available = float(provenance["available_days"])
+            valid = metric == "fleet_utilization" and available > 0 and 0 <= revenue <= available and math.isclose(value, revenue / available)
+        elif concept == "DerivedVesselOpexPerOperatingDay":
+            expense = float(provenance["vessel_operating_expense"])
+            operating = float(provenance["operating_days"])
+            valid = metric == "vessel_opex_per_day" and operating > 0 and expense >= 0 and provenance.get("denominator_basis") == "operating_days" and math.isclose(value, expense / operating)
+        elif concept == "DerivedForwardCharterCoverageFromVesselSchedule":
+            contracted = float(provenance["contracted_days"])
+            available = float(provenance["available_days"])
+            vessel_count = int(provenance["vessel_count"])
+            fixed_vessel_count = int(provenance["fixed_vessel_count"])
+            coverage_start = date.fromisoformat(str(provenance["coverage_start_date"]))
+            coverage_end = date.fromisoformat(str(provenance["coverage_end_date"]))
+            valid = (
+                metric == "charter_coverage_next_12m"
+                and (coverage_end - coverage_start).days == 365
+                and available == vessel_count * 365
+                and available > 0 and 0 <= contracted <= available
+                and vessel_count >= fixed_vessel_count >= 1
+                and provenance.get("denominator_basis") == "all_schedule_vessels_x_365"
+                and math.isclose(value, contracted / available)
+            )
         else:
             return None
     except (KeyError, TypeError, ValueError):
@@ -193,20 +246,20 @@ def review_candidate(row: Mapping[str, object]) -> CandidateReview:
     filing_year_value = 1900 <= value <= 2100 and value.is_integer()
     patterns = {
         "fleet_capacity": r"(?:total|aggregate)\s+(?:fleet\s+)?(?:carrying\s+)?capacity|total\s+(?:fleet\s+)?deadweight\s+tonnage|fleet\s+(?:capacity|dwt)",
-        "revenue_days": r"(?:total\s+)?(?:revenue|earning)\s+days",
+        "revenue_days": r"(?:total\s+)?(?:revenue|earning|net\s+earnings|earnings\s+capacity|available\s+earning)\s+days",
         "offhire_or_drydock_ratio": r"off[- ]?hire|dry[- ]?dock",
         "tce_day_rate": r"time\s+charter\s+equivalent|\btce(?:\s+rate|\s+per\s+day)?\b",
         "fleet_age": r"(?:weighted\s+)?average\s+(?:fleet|vessel)\s+age",
-        "vessel_count": r"number\s+of\s+vessels|total\s+operating\s+fleet|owned\s+fleet",
+        "vessel_count": r"fleet\s+size|(?:average\s+)?number\s+of\s+vessels|total\s+operating\s+fleet|owned\s+and\s+operated\s+fleet|owned\s+fleet",
         "newbuild_capacity_commitments": r"newbuild(?:ing)?\s+(?:contracts?|commitments?)|vessel\s+purchase\s+commitments?",
         "capex_commitments": r"(?:contracted|contractual|capital\s+expenditure)\s+(?:capital\s+)?commitments?|remaining\s+committed\s+payments",
         "vessel_opex_per_day": r"vessel\s+operating\s+(?:expenses?|costs?)\s+per\s+day|daily\s+vessel\s+operating\s+expenses?|opex\s+per\s+day",
         "spot_or_charter_day_rate": r"(?:spot(?:\s+market)?|time\s+charter|pool)\s+(?:tce\s+)?rate",
         "fleet_utilization": r"(?:fleet|commercial)\s+utili[sz]ation",
-        "charter_coverage_next_12m": r"(?:contract(?:ed)?|fixed[- ]rate)\s+coverage|available\s+days\s+fixed",
+        "charter_coverage_next_12m": r"(?:contract(?:ed)?|fixed[- ]rate|time\s+charter)\s+coverage|(?:available|earning)\s+days\s+(?:fixed|covered)|percentage\s+covered",
         "contracted_revenue_backlog": r"remaining\s+performance\s+obligations?|future\s+(?:minimum\s+)?charter\s+(?:revenue|hire)|minimum\s+lease\s+payments\s+receivable",
         "weighted_average_charter_term": r"(?:weighted\s+)?average\s+remaining\s+(?:charter|lease)\s+(?:duration|term)",
-        "cash_breakeven_per_day": r"cash\s+breakeven(?:\s+per\s+day)?",
+        "cash_breakeven_per_day": r"cash\s+break[- ]?even(?:\s+(?:rate|per\s+day))?",
         "spot_exposure_ratio": r"spot(?:\s+market)?\s+exposure",
     }
     snippet = _near_value(text, patterns[metric], value)

@@ -6,6 +6,7 @@ import csv
 import importlib.util
 import json
 import logging
+import math
 import re
 import sqlite3
 import sys
@@ -198,6 +199,8 @@ STAGE11_SIDECAR_COLUMNS = [
     "portfolio_candidate_gate",
     "portfolio_candidate_reason",
     "calibration_eligible_flag",
+    "calibration_cohort",
+    "biotech_primary_cohort",
     "price_data_asof_date",
     "score_zero_is_missing_flag",
     "research_calibration_input_eligible_flag",
@@ -273,6 +276,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When a selected date has no exact daily_scores rows, export the latest prior score snapshot "
             "with the selected date as asof_date and the original snapshot preserved in provenance fields."
+        ),
+    )
+    parser.add_argument(
+        "--trusted-score-snapshot-summary",
+        type=Path,
+        default=None,
+        help=(
+            "Optional historical-score generation summary whose PASS asof_date rows are the only "
+            "daily_scores snapshots eligible for exact selection or carry-forward."
         ),
     )
     parser.add_argument("--fridays-only", action="store_true")
@@ -479,6 +491,7 @@ def resolve_score_snapshot_asof(
     *,
     calibration_tickers: set[str],
     carry_forward: bool,
+    trusted_snapshot_dates: set[str] | None = None,
 ) -> str | None:
     tickers = sorted(ticker for ticker in calibration_tickers if ticker)
     ticker_filter = ""
@@ -487,6 +500,7 @@ def resolve_score_snapshot_asof(
         placeholders = ", ".join("?" for _ in tickers)
         ticker_filter = f"AND UPPER(ticker) IN ({placeholders})"
         params = (asof, *tickers)
+    exact_allowed = trusted_snapshot_dates is None or asof in trusted_snapshot_dates
     exact = conn.execute(
         f"""
         SELECT COUNT(*) AS row_count
@@ -496,10 +510,26 @@ def resolve_score_snapshot_asof(
         """,
         params,
     ).fetchone()
-    if exact and int(exact["row_count"] or 0) > 0:
+    if exact_allowed and exact and int(exact["row_count"] or 0) > 0:
         return asof
     if not carry_forward:
-        return asof
+        return asof if exact_allowed else None
+    if trusted_snapshot_dates is not None:
+        candidates = sorted(item for item in trusted_snapshot_dates if item <= asof)
+        for candidate in reversed(candidates):
+            candidate_params: tuple[object, ...] = (candidate, *tickers) if tickers else (candidate,)
+            candidate_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS row_count
+                FROM daily_scores
+                WHERE asof_date = ?
+                  {ticker_filter}
+                """,
+                candidate_params,
+            ).fetchone()
+            if candidate_row and int(candidate_row["row_count"] or 0) > 0:
+                return candidate
+        return None
     params = (asof, *tickers) if tickers else (asof,)
     prior = conn.execute(
         f"""
@@ -512,6 +542,28 @@ def resolve_score_snapshot_asof(
     ).fetchone()
     score_asof = str(prior["score_asof"] or "") if prior else ""
     return score_asof or None
+
+
+def load_trusted_score_snapshot_dates(path: Path) -> set[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Trusted score snapshot summary not found: {path}")
+    dates: set[str] = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames or "asof_date" not in reader.fieldnames or "status" not in reader.fieldnames:
+            raise ValueError(
+                "Trusted score snapshot summary must contain asof_date and status columns: "
+                f"{path}"
+            )
+        for row in reader:
+            if str(row.get("status") or "").strip().upper() != "PASS":
+                continue
+            parsed = parse_date(row.get("asof_date"))
+            if parsed is not None:
+                dates.add(parsed.isoformat())
+    if not dates:
+        raise ValueError(f"Trusted score snapshot summary contains no PASS dates: {path}")
+    return dates
 
 
 def load_calibration_tickers(config: dict[str, Any], *, config_path: Path) -> set[str]:
@@ -805,6 +857,7 @@ def add_missing_delisted_membership_rows(
                 "biotech_cohort_calibration_eligible_flag": 1.0 if cohort in ALLOWED_CALIBRATION_COHORTS else 0.0,
                 "biotech_cohort_investible_flag": 0.0,
                 "biotech_cohort_exclusion_reason": "delisted_membership_missing_score",
+                "score_zero_is_missing_flag": 1.0,
                 "bucket": "avoid",
                 "allocation_bucket": "avoid",
                 "opportunity_score": 0.0,
@@ -923,11 +976,20 @@ def prepare_score_rows_for_export(
         candidate_score = row.get("production_rank_score") if not is_blank(row.get("production_rank_score")) else row.get("opportunity_score")
         candidate_score_value = to_float(candidate_score, None)
         native_score_float = to_float(native_score_value, None)
-        missing_score = (
-            candidate_score_value is None
-            or candidate_score_value <= 0.0
-            or native_score_float is None
-            or native_score_float <= 0.0
+        candidate_score_available = (
+            candidate_score_value is not None and math.isfinite(candidate_score_value)
+        )
+        native_score_available = native_score_float is not None and math.isfinite(native_score_float)
+        placeholder_missing_score = (
+            str(row.get("biotech_cohort_exclusion_reason") or "").strip()
+            == "delisted_membership_missing_score"
+        )
+        missing_score = not candidate_score_available or not native_score_available or placeholder_missing_score
+        score_zeroed_by_veto = bool(
+            not missing_score
+            and native_score_float is not None
+            and native_score_float <= 0.0
+            and (core_veto or rank_veto)
         )
         reason_parts: list[str] = []
         if missing_score:
@@ -947,6 +1009,9 @@ def prepare_score_rows_for_export(
         if missing_score:
             candidate_status = "excluded"
             candidate_reason = "missing_score"
+        elif score_zeroed_by_veto:
+            candidate_status = "excluded"
+            candidate_reason = "score_zeroed_by_veto"
         elif not has_price_data:
             candidate_status = "excluded"
             candidate_reason = "missing_price_data"
@@ -962,11 +1027,16 @@ def prepare_score_rows_for_export(
         elif rank_veto:
             candidate_status = "review"
             candidate_reason = "rank_quality_cap_veto"
+        elif native_score_float is not None and native_score_float <= 0.0:
+            candidate_status = "excluded"
+            candidate_reason = "nonpositive_score"
         elif reason_parts:
             candidate_status = "excluded"
             candidate_reason = "|".join(reason_parts)
         candidate_gate = bool(
             not missing_score
+            and native_score_float is not None
+            and native_score_float > 0.0
             and has_price_data
             and candidate_status == "eligible"
             and investible
@@ -979,7 +1049,9 @@ def prepare_score_rows_for_export(
         )
 
         row["portfolio_candidate_gate"] = 1.0 if candidate_gate else 0.0
-        row["portfolio_candidate_score"] = candidate_score if candidate_score_value is not None and candidate_score_value > 0.0 else 0.0
+        row["portfolio_candidate_score"] = (
+            candidate_score_value if candidate_score_available else 0.0
+        )
         row["portfolio_candidate_status"] = candidate_status
         row["portfolio_candidate_reason"] = candidate_reason
         fill_blank("calibration_eligible_flag", calibration_eligible)
@@ -1020,6 +1092,9 @@ def prepare_score_rows_for_export(
         elif missing_score:
             calibration_status = "excluded"
             calibration_status_reason = "missing_score"
+        elif score_zeroed_by_veto:
+            calibration_status = "excluded"
+            calibration_status_reason = "score_zeroed_by_veto"
         elif not has_price_data:
             calibration_status = "excluded"
             calibration_status_reason = "missing_price_data"
@@ -1051,6 +1126,7 @@ def prepare_score_rows_for_export(
             ticker
             and calibration_eligible_value > 0.0
             and not missing_score
+            and not score_zeroed_by_veto
             and has_price_data
             and pit_valid
         )
@@ -1066,6 +1142,9 @@ def prepare_score_rows_for_export(
         elif missing_score:
             research_status = "missing_score"
             research_reason = "missing_score"
+        elif score_zeroed_by_veto:
+            research_status = "score_zeroed_by_veto"
+            research_reason = "score_zeroed_by_veto"
         elif not has_price_data:
             research_status = "missing_price_data"
             research_reason = "missing_price_data"
@@ -1204,11 +1283,11 @@ def validate_score_csv(
         stage11_eligible = (to_float(row.get("stage11_calibration_input_eligible_flag"), 0.0) or 0.0) > 0.0
         survivorship_flag = (to_float(row.get("survivorship_corrected_panel_flag"), 0.0) or 0.0) > 0.0
         score_missing = (to_float(row.get("score_zero_is_missing_flag"), 0.0) or 0.0) > 0.0
-        native_score = to_float(row.get("native_score_value"), 0.0) or 0.0
+        native_score = to_float(row.get("native_score_value"), None)
         if research_eligible:
             if str(row.get("research_calibration_reason") or "").strip() != "ok":
                 failures.append(f"research_eligible_reason_not_ok:{ticker}:{row.get('research_calibration_reason')}")
-            if score_missing or native_score <= 0.0:
+            if score_missing or native_score is None or not math.isfinite(native_score):
                 failures.append(f"research_eligible_missing_score:{ticker}")
             if is_blank(row.get("price_data_asof_date")):
                 failures.append(f"research_eligible_missing_price_data:{ticker}")
@@ -1310,6 +1389,16 @@ def main() -> None:
     if not isinstance(model_metadata, dict):
         model_metadata = {}
     export_module = load_scoring_export_module()
+    trusted_snapshot_summary = (
+        args.trusted_score_snapshot_summary.expanduser().resolve()
+        if args.trusted_score_snapshot_summary
+        else None
+    )
+    trusted_snapshot_dates = (
+        load_trusted_score_snapshot_dates(trusted_snapshot_summary)
+        if trusted_snapshot_summary is not None
+        else None
+    )
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         dates = load_dates(
@@ -1354,6 +1443,7 @@ def main() -> None:
                     asof,
                     calibration_tickers=calibration_tickers,
                     carry_forward=bool(args.carry_forward_scores),
+                    trusted_snapshot_dates=trusted_snapshot_dates,
                 )
                 score_snapshot_asof = resolved_snapshot or ""
                 carry_forwarded = 1.0 if resolved_snapshot and resolved_snapshot != asof else 0.0
@@ -1491,6 +1581,8 @@ def main() -> None:
         "summary_csv": str(summary_csv),
         "date_source_table": args.source_table,
         "carry_forward_scores": bool(args.carry_forward_scores),
+        "trusted_score_snapshot_summary": str(trusted_snapshot_summary or ""),
+        "trusted_score_snapshot_count": len(trusted_snapshot_dates or ()),
         "survivorship_corrected_panel": bool(survivorship_corrected_panel),
         "strict_oos_start_date": strict_oos_start_date.isoformat() if strict_oos_start_date is not None else "",
         "strict_oos_start_date_warning": (

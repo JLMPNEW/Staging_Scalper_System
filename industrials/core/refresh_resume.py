@@ -36,7 +36,19 @@ def load_resume_plan(
     if not isinstance(rows, list) or not rows:
         raise ValueError("Resume manifest has no executed step rows")
     executed_ids = [str(row.get("step_id") or "") for row in rows]
-    expected_prefix = current_step_ids[: len(executed_ids)]
+    resume_origin = str(manifest.get("resume_start_step") or "").strip()
+    if resume_origin:
+        if resume_origin not in current_step_ids:
+            raise ValueError(
+                "Resume manifest start step is no longer available: "
+                f"{resume_origin}"
+            )
+        origin_index = current_step_ids.index(resume_origin)
+    else:
+        origin_index = 0
+    expected_prefix = current_step_ids[
+        origin_index : origin_index + len(executed_ids)
+    ]
     if executed_ids != expected_prefix:
         raise ValueError(
             "Resume manifest step prefix differs from the current pipeline; "

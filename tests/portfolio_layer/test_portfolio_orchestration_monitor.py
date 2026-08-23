@@ -222,6 +222,26 @@ def test_monitor_filter_is_mandatory_second_pass() -> None:
     assert bootstrap_group[0][2] == "final/bootstrap_final_weights_manifest.json"
 
 
+def test_monitor_filter_partial_recovery_is_intrinsically_rebuilt(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    plan = orchestrator.build_step_plan(
+        ["monitor_filter"],
+        orchestrator.GROUPS,
+    )
+    steps = plan[0]
+
+    assert all(step["occurrence"] == 1 for step in steps)
+    assert all(step["self_force"] for step in steps)
+    assert all(
+        not orchestrator.step_resume_skip(
+            tmp_path, step, operator_force=False
+        )
+        for step in steps
+    )
+
+
 def test_historical_catchup_suppresses_current_provider_event_cycle() -> None:
     orchestrator = _load_orchestrator()
     args = SimpleNamespace(
@@ -234,6 +254,11 @@ def test_historical_catchup_suppresses_current_provider_event_cycle() -> None:
         "50_run_expectations_monitor_daily.py",
         group="monitor",
     ) == ["--skip-event-cycle"]
+    assert orchestrator.script_args(
+        args,
+        "37_sync_earnings_dates.py",
+        group="earnings",
+    ) == ["--historical-catchup"]
 
 
 def test_liquidity_attempt_precedes_authoritative_risk_gates() -> None:
@@ -314,7 +339,7 @@ def test_missing_statement_uses_prior_ledger_and_defers_only_current_broker_grou
         runs_root / "2026-08-03",
     )
 
-    assert planned == ["monitor", "monitor_filter", "final", "final_report"]
+    assert planned == ["macro_contract", "monitor", "monitor_filter", "final", "final_report"]
     assert metadata["deferred_groups"] == ["ledger", "exits", "payout"]
     assert metadata["broker_holdings_source_as_of"] == "2026-08-02"
     assert metadata["broker_holdings_age_days"] == 1
@@ -470,7 +495,54 @@ def test_holdings_required_monitor_normalizes_ledger_before_consumer(
         tmp_path / "2026-08-03",
     )
 
-    assert planned == ["ledger", "monitor", "monitor_filter", "final"]
+    assert planned == ["ledger", "macro_contract", "monitor", "monitor_filter", "final"]
+
+
+@pytest.mark.parametrize("ledger_ready", [False, True])
+def test_holdings_required_monitor_normalizes_ledger_before_bootstrap_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_ready: bool,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_broker_statement_available",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_sealed_ledger_available",
+        lambda _run_dir: ledger_ready,
+    )
+    args = SimpleNamespace(
+        groups="bootstrap_final,earnings,monitor,monitor_filter,ledger,final",
+        cadence="strategic",
+        skip="",
+        config=tmp_path / "config.yaml",
+    )
+    config = {
+        "orchestration": {"cadences": {}},
+        "expectations_monitor": {
+            "universe": {"require_broker_holdings": True}
+        },
+    }
+
+    planned = orchestrator.plan_groups(
+        args,
+        config,
+        tmp_path / "2026-08-17",
+    )
+
+    assert planned == [
+        "ledger",
+        "macro_contract",
+        "bootstrap_final",
+        "earnings",
+        "monitor",
+        "monitor_filter",
+        "final",
+    ]
 
 
 def test_default_run_as_of_rejects_stale_latest_run_dir(
@@ -535,3 +607,40 @@ def test_holdings_required_monitor_rejects_explicit_ledger_skip(
 
     with pytest.raises(ValueError, match="explicitly skipped"):
         orchestrator.plan_groups(args, config, tmp_path / "2026-08-03")
+
+def test_monitor_keeps_post_filter_macro_contract_and_adds_prerequisite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _load_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_broker_statement_available",
+        lambda *_args, **_kwargs: True,
+    )
+    args = SimpleNamespace(
+        groups="macro_contract,monitor,monitor_filter,macro_contract,final",
+        cadence="strategic",
+        skip="",
+        config=tmp_path / "config.yaml",
+    )
+    config = {
+        "orchestration": {"cadences": {}},
+        "expectations_monitor": {
+            "universe": {"require_broker_holdings": False}
+        },
+    }
+
+    planned = orchestrator.plan_groups(
+        args,
+        config,
+        tmp_path / "2026-08-18",
+    )
+
+    assert planned == [
+        "macro_contract",
+        "monitor",
+        "monitor_filter",
+        "macro_contract",
+        "final",
+    ]

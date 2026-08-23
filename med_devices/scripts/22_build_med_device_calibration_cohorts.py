@@ -5,6 +5,7 @@ import argparse
 import csv
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -70,10 +71,13 @@ DIAGNOSTICS_CLINICAL_TESTS = {
     "ADPT",
     "BDSX",
     "BIAF",
+    "BLLN",
     "CDNA",
     "CODX",
     "CSTL",
     "DGX",
+    "FLGT",
+    "FRNM",
     "GH",
     "GRAL",
     "IMDX",
@@ -85,6 +89,7 @@ DIAGNOSTICS_CLINICAL_TESTS = {
     "OPK",
     "OSUR",
     "PSNL",
+    "PRPO",
     "QDEL",
     "VCYT",
     "VNRX",
@@ -120,7 +125,7 @@ LIFE_SCIENCE_TOOLS = {
     "WAT",
 }
 HEALTHCARE_SERVICES = {"AHCO", "FMS", "IQV", "MEDP", "RDNT", "SHC", "VMD", "XWEL"}
-DIABETES_WEARABLES_DRUG_DELIVERY = {"DXCM", "GCTK", "PODD", "SENS", "TNDM", "VTAK"}
+DIABETES_WEARABLES_DRUG_DELIVERY = {"BBNX", "DXCM", "GCTK", "PODD", "SENS", "TNDM", "VTAK"}
 SURGICAL_ROBOTICS_PLATFORMS = {"ISRG", "MBOT", "PRCT", "TMDX"}
 CAPITAL_EQUIPMENT_IMAGING = {
     "BFLY",
@@ -199,6 +204,7 @@ EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS = "emerging_single_product_therape
 IMPLANTABLE_MIXED_OTHER_COHORT = EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS
 ELECTIVE_VISION_DENTAL_AESTHETIC_DEVICES = "elective_vision_dental_aesthetic_devices"
 ORTHOPEDICS_SPINE_SPORTS_IMPLANTS = "orthopedics_spine_sports_implants"
+ELECTIVE_VISION_DENTAL = {"LNSR"}
 VALID_CALIBRATION_COHORTS = {
     "diagnostics_clinical_tests",
     "life_science_tools_research_instruments",
@@ -213,7 +219,9 @@ VALID_CALIBRATION_COHORTS = {
     ORTHOPEDICS_SPINE_SPORTS_IMPLANTS,
 }
 SINGLE_PRODUCT_RISK = {
+    "ALMR",
     "AVR",
+    "BBNX",
     "BFLY",
     "CATX",
     "CLPT",
@@ -221,8 +229,10 @@ SINGLE_PRODUCT_RISK = {
     "DCTH",
     "GCTK",
     "GRAL",
+    "FRNM",
     "INSP",
     "MBOT",
+    "MOBI",
     "NVCR",
     "PLSE",
     "PROF",
@@ -243,6 +253,7 @@ TICKER_HEURISTIC_UNIVERSE_TICKERS = (
     | ORTHOPEDICS_SPINE_DENTAL
     | HOSPITAL_SUPPLIES_CONSUMABLES_DME
     | IMPLANTABLE_INTERVENTIONAL
+    | ELECTIVE_VISION_DENTAL
 )
 
 
@@ -259,6 +270,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--asof", type=str, default="")
+    parser.add_argument(
+        "--active-universe",
+        action="store_true",
+        help="Use the current active universe for a recent live replay instead of PIT membership.",
+    )
     return parser.parse_args()
 
 
@@ -338,16 +354,18 @@ def latest_feature_rows(conn: Any, table: str, *, asof: str | None = None) -> di
     table_name = quote_identifier(table)
     rows = conn.execute(
         f"""
-        SELECT f.*
-        FROM {table_name} f
-        WHERE f.rowid = (
-            SELECT f2.rowid
-            FROM {table_name} f2
-            WHERE f2.company_id = f.company_id
-              AND (? IS NULL OR f2.asof_date <= ?)
-            ORDER BY f2.asof_date DESC, f2.rowid DESC
-            LIMIT 1
-        )
+        SELECT *
+        FROM (
+            SELECT
+                f.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY f.company_id
+                    ORDER BY f.asof_date DESC, f.rowid DESC
+                ) AS _latest_rank
+            FROM {table_name} f
+            WHERE (? IS NULL OR f.asof_date <= ?)
+        ) ranked
+        WHERE _latest_rank = 1
         """,
         (asof, asof),
     ).fetchall()
@@ -418,6 +436,8 @@ def classify_cohort(ticker: str, raw_subsector: str) -> tuple[str, float, str]:
         return CAPITAL_EQUIPMENT_PROCEDURE_PLATFORMS, 0.88, "ticker_heuristic"
     if ticker in ORTHOPEDICS_SPINE_DENTAL:
         return ORTHOPEDICS_SPINE_SPORTS_IMPLANTS, 0.88, "ticker_heuristic"
+    if ticker in ELECTIVE_VISION_DENTAL:
+        return ELECTIVE_VISION_DENTAL_AESTHETIC_DEVICES, 0.90, "ticker_heuristic"
     if ticker in HOSPITAL_SUPPLIES_CONSUMABLES_DME:
         return HOSPITAL_SUPPLIES_SURGICAL_CONSUMABLES_OEM, 0.86, "ticker_heuristic"
     if ticker in IMPLANTABLE_INTERVENTIONAL:
@@ -508,10 +528,16 @@ def procedure_sensitivity(cohort: str) -> str:
     return "high"
 
 
-def build_rows(conn: Any, *, taxonomy_overrides: dict[str, dict[str, str]], asof: str | None = None) -> list[dict[str, Any]]:
+def build_rows(
+    conn: Any,
+    *,
+    taxonomy_overrides: dict[str, dict[str, str]],
+    asof: str | None = None,
+    include_active_universe: bool = False,
+) -> list[dict[str, Any]]:
     reimbursement = latest_feature_rows(conn, "feature_reimbursement", asof=asof)
     fda = latest_feature_rows(conn, "feature_fda_product_risk", asof=asof)
-    if asof:
+    if asof and not include_active_universe:
         status_placeholders = ", ".join("?" for _ in PIT_EXCLUDED_MEMBERSHIP_STATUSES)
         companies = conn.execute(
             f"""
@@ -699,12 +725,25 @@ def main() -> None:
             LOGGER.warning("Unable to infer calibration cohort as-of date from feature tables.")
             raise ValueError("No as-of date supplied and no feature rows are available to infer one.")
         asof_text = parsed_asof.isoformat()
+        if args.active_universe:
+            replay_window_days = int(cfg_get(config, "scoring.oos_replay_window_days", 5))
+            asof_age_days = (datetime.now(timezone.utc).date() - parsed_asof).days
+            if asof_age_days < 0 or asof_age_days > replay_window_days:
+                raise ValueError(
+                    "--active-universe is restricted to recent live replays: "
+                    f"asof={asof_text} age_days={asof_age_days} max_age_days={replay_window_days}"
+                )
         taxonomy_overrides = load_taxonomy_overrides(
             override_csv,
             asof=asof_text,
             include_missing_pit_metadata=include_missing_pit_metadata,
         )
-        rows = build_rows(conn, taxonomy_overrides=taxonomy_overrides, asof=asof_text)
+        rows = build_rows(
+            conn,
+            taxonomy_overrides=taxonomy_overrides,
+            asof=asof_text,
+            include_active_universe=args.active_universe,
+        )
         validate_final_rows(rows)
         missing_override_tickers = warn_on_unmatched_taxonomy_overrides(rows, taxonomy_overrides)
         fallback_rows = warn_on_unmapped_ticker_heuristics(rows)

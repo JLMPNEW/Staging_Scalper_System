@@ -4,7 +4,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -36,7 +36,11 @@ from technology.core.short_interest_float import (
     load_issuer_flags,
     validate_float_enrichment,
 )
-from technology.core.universe_loader import prune_removed_current_universe_rows
+from technology.core.universe_loader import (
+    apply_lifecycle_overrides,
+    prune_removed_current_universe_rows,
+)
+from technology.core.universe_validator import expected_current_tickers
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -216,8 +220,7 @@ def test_current_universe_prune_retires_company_unless_another_family_owns_it() 
         ],
     )
     company_ids = {
-        str(row["ticker"]): int(row["company_id"])
-        for row in conn.execute("SELECT company_id, ticker FROM dim_company")
+        str(row["ticker"]): int(row["company_id"]) for row in conn.execute("SELECT company_id, ticker FROM dim_company")
     }
     conn.executemany(
         """
@@ -246,29 +249,269 @@ def test_current_universe_prune_retires_company_unless_another_family_owns_it() 
     retired = conn.execute(
         "SELECT is_active, universe_status, data_quality_status FROM dim_company WHERE ticker = 'RETIRED'"
     ).fetchone()
-    shared = conn.execute(
-        "SELECT is_active, universe_status FROM dim_company WHERE ticker = 'SHARED'"
-    ).fetchone()
+    shared = conn.execute("SELECT is_active, universe_status FROM dim_company WHERE ticker = 'SHARED'").fetchone()
     assert retired is not None
     assert tuple(retired) == (0, "historical", "retired_from_current_universe")
     assert shared is not None
     assert tuple(shared) == (1, "keep")
-    assert conn.execute(
-        """
+    assert (
+        conn.execute(
+            """
         SELECT COUNT(*)
         FROM dim_universe_membership
         WHERE ticker = 'RETIRED' AND is_current_member = 1
         """
-    ).fetchone()[0] == 0
-    assert conn.execute(
-        """
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            """
         SELECT COUNT(*)
         FROM dim_universe_membership
         WHERE ticker = 'SHARED'
           AND model_family = 'software_infrastructure'
           AND is_current_member = 1
         """
-    ).fetchone()[0] == 1
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_market_validator_expected_count_uses_active_contract(tmp_path: Path) -> None:
+    module = load_script(
+        "technology/scripts/06_validate_technology_market_stage.py",
+        "technology_market_validator_active_count_test",
+    )
+    seed = tmp_path / "universe.csv"
+    seed.write_text(
+        "ticker,listing_status,security_type\n"
+        "ACTIVE,active,common stock\n"
+        "INACTIVE,inactive,common stock\n"
+        "RETIRED,active,common stock\n",
+        encoding="utf-8",
+    )
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(
+        json.dumps(
+            {
+                "non_investable_listing_statuses": ["inactive"],
+                "investable_security_types": ["common stock"],
+                "lifecycle_overrides": [{"ticker": "RETIRED", "last_tradable_date": "2026-07-30"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = {"technology_universe": {"seed_csv": str(seed)}}
+
+    assert (
+        module.expected_current_ticker_count(
+            config,
+            base_dir=tmp_path,
+            policy_path=policy,
+            universe_csv_path=seed,
+            effective_date=date(2026, 8, 17),
+        )
+        == 1
+    )
+
+
+def test_market_validator_expected_count_uses_explicit_family_seed(
+    tmp_path: Path,
+) -> None:
+    module = load_script(
+        "technology/scripts/06_validate_technology_market_stage.py",
+        "technology_market_validator_family_seed_test",
+    )
+    default_seed = tmp_path / "default.csv"
+    default_seed.write_text(
+        "ticker,listing_status,security_type\nSEMI,active,common stock\n",
+        encoding="utf-8",
+    )
+    family_seed = tmp_path / "family.csv"
+    family_seed.write_text(
+        "ticker,listing_status,security_type\nSOFT1,active,common stock\nSOFT2,active,common stock\n",
+        encoding="utf-8",
+    )
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(
+        json.dumps(
+            {
+                "non_investable_listing_statuses": ["inactive"],
+                "investable_security_types": ["common stock"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = {"technology_universe": {"seed_csv": str(default_seed)}}
+
+    assert (
+        module.expected_current_ticker_count(
+            config,
+            base_dir=tmp_path,
+            policy_path=policy,
+            universe_csv_path=family_seed,
+            effective_date=date(2026, 8, 17),
+        )
+        == 2
+    )
+
+
+def test_expected_current_tickers_honors_status_type_and_lifecycle() -> None:
+    rows = [
+        {"ticker": "ACTIVE", "listing_status": "active", "security_type": "common stock"},
+        {"ticker": "INACTIVE", "listing_status": "inactive", "security_type": "common stock"},
+        {"ticker": "FUND", "listing_status": "active", "security_type": "fund"},
+        {"ticker": "RETIRED", "listing_status": "active", "security_type": "common stock"},
+    ]
+    policy = {
+        "non_investable_listing_statuses": ["inactive"],
+        "investable_security_types": ["common stock"],
+        "lifecycle_overrides": [{"ticker": "RETIRED", "last_tradable_date": "2026-07-30"}],
+    }
+
+    assert expected_current_tickers(
+        rows,
+        policy=policy,
+        effective_date=date(2026, 8, 19),
+    ) == {"ACTIVE"}
+
+
+def test_lifecycle_override_retires_ticker_and_prunes_post_end_market_rows() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    now = "2026-08-19T00:00:00+00:00"
+    conn.executemany(
+        """
+        INSERT INTO source_registry(
+            source_id, stage, source_name, source_type, base_url,
+            status, created_at, updated_at
+        )
+        VALUES (?, 'test', ?, 'test', 'https://example.test', 'active', ?, ?)
+        """,
+        [
+            ("semiconductor_current_universe_csv", "universe", now, now),
+            ("yahoo_finance_adjusted", "prices", now, now),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO dim_company(
+            ticker, company_name, universe_status, is_active,
+            data_quality_status, first_seen_at, updated_at
+        )
+        VALUES ('SKYT', 'SkyWater Technology', 'keep', 1, 'complete', ?, ?)
+        """,
+        (now, now),
+    )
+    company_id = int(conn.execute("SELECT company_id FROM dim_company WHERE ticker = 'SKYT'").fetchone()[0])
+    conn.execute(
+        """
+        INSERT INTO dim_security(
+            company_id, ticker, exchange, security_type, listing_status,
+            is_primary_listing, currency, created_at, updated_at
+        )
+        VALUES (?, 'SKYT', 'NASDAQ', 'common stock', 'active', 1, 'USD', ?, ?)
+        """,
+        (company_id, now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO dim_universe_membership(
+            company_id, ticker, model_family, membership_source_id,
+            membership_basis, start_date, membership_status,
+            is_current_member, point_in_time_flag, created_at, updated_at
+        )
+        VALUES (?, 'SKYT', 'semiconductors', 'semiconductor_current_universe_csv',
+                'current_source_of_truth', '2021-04-21', 'active', 1, 0, ?, ?)
+        """,
+        (company_id, now, now),
+    )
+    conn.executemany(
+        """
+        INSERT INTO fact_price_ohlcv(
+            ticker, bar_date, source_id, close, adj_close, volume,
+            is_adjusted, created_at, updated_at
+        )
+        VALUES ('SKYT', ?, 'yahoo_finance_adjusted', 32.46, 32.46, ?, 1, ?, ?)
+        """,
+        [
+            ("2026-07-30", 2_241_100.0, now, now),
+            ("2026-08-07", 0.0, now, now),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO fact_market_snapshot(
+            ticker, asof_date, source_id, regular_market_price,
+            source_timestamp, created_at, updated_at
+        )
+        VALUES ('SKYT', ?, 'yahoo_finance_adjusted', 32.46, ?, ?, ?)
+        """,
+        [
+            ("2026-07-30", "2026-07-30T20:00:00Z", now, now),
+            ("2026-08-07", "2026-07-30T20:00:00Z", now, now),
+        ],
+    )
+    policy = {
+        "lifecycle_overrides": [
+            {
+                "ticker": "SKYT",
+                "start_date": "2021-04-21",
+                "last_tradable_date": "2026-07-30",
+                "event_type": "acquired_and_delisted",
+                "successor_ticker": "IONQ",
+                "confidence": 1.0,
+                "source_url": "https://www.sec.gov/example",
+                "reason": "Acquisition completed before the 2026-07-31 market open.",
+            }
+        ]
+    }
+
+    counts = apply_lifecycle_overrides(
+        conn,
+        policy=policy,
+        model_family="semiconductors",
+        membership_source_id="semiconductor_current_universe_csv",
+        price_source_id="yahoo_finance_adjusted",
+        effective_date=date(2026, 8, 19),
+    )
+
+    assert counts == {"applied": 1, "prices_deleted": 1, "snapshots_deleted": 1}
+    assert tuple(
+        conn.execute(
+            "SELECT universe_status, is_active, data_quality_status FROM dim_company WHERE ticker = 'SKYT'"
+        ).fetchone()
+    ) == ("historical", 0, "retired_by_governed_lifecycle")
+    assert (
+        conn.execute("SELECT listing_status FROM dim_security WHERE ticker = 'SKYT'").fetchone()[0]
+        == "historical_delisted"
+    )
+    membership = conn.execute(
+        """
+        SELECT end_date, membership_status, is_current_member, point_in_time_flag
+        FROM dim_universe_membership
+        WHERE ticker = 'SKYT' AND membership_basis = 'governed_lifecycle_override'
+        """
+    ).fetchone()
+    assert tuple(membership) == ("2026-07-30", "historical", 0, 1)
+    assert (
+        conn.execute(
+            """
+        SELECT COUNT(*) FROM dim_universe_membership
+        WHERE ticker = 'SKYT' AND end_date IS NULL
+        """
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT MAX(bar_date) FROM fact_price_ohlcv WHERE ticker = 'SKYT'").fetchone()[0] == "2026-07-30"
+    )
+    assert (
+        conn.execute("SELECT MAX(asof_date) FROM fact_market_snapshot WHERE ticker = 'SKYT'").fetchone()[0]
+        == "2026-07-30"
+    )
 
 
 @pytest.mark.parametrize("implementation", ["shared", "semiconductor"])
@@ -289,9 +532,7 @@ def test_financial_amendment_cannot_shadow_newer_period(
         },
     ]
     function = (
-        shared_financial_subfeatures
-        if implementation == "shared"
-        else semiconductor_diagnostics.financial_subfeatures
+        shared_financial_subfeatures if implementation == "shared" else semiconductor_diagnostics.financial_subfeatures
     )
     result = function(rows, "2024-06-15")
     assert result["gross_margin"] == pytest.approx(0.40)
@@ -451,12 +692,8 @@ def test_short_interest_float_uses_filing_availability_and_split_adjustment() ->
 
     assert stats.rows_examined == 2
     assert stats.rows_enriched == 1
-    before = conn.execute(
-        "SELECT * FROM fact_short_interest WHERE settlement_date = '2024-01-31'"
-    ).fetchone()
-    after = conn.execute(
-        "SELECT * FROM fact_short_interest WHERE settlement_date = '2024-03-31'"
-    ).fetchone()
+    before = conn.execute("SELECT * FROM fact_short_interest WHERE settlement_date = '2024-01-31'").fetchone()
+    after = conn.execute("SELECT * FROM fact_short_interest WHERE settlement_date = '2024-03-31'").fetchone()
     assert before["short_interest_pct_float"] is None
     assert before["float_selection_reason"] == "no_pit_float_candidate"
     assert after["source_id"] == "market_positioning_upstream"
@@ -466,11 +703,14 @@ def test_short_interest_float_uses_filing_availability_and_split_adjustment() ->
     assert after["float_split_adjustment_factor"] == pytest.approx(2.0)
     assert after["float_shares"] == pytest.approx(200_000_000.0)
     assert after["short_interest_pct_float"] == pytest.approx(0.05)
-    assert validate_float_enrichment(
-        conn,
-        ["TEST"],
-        source_id="market_positioning_upstream",
-    ) == []
+    assert (
+        validate_float_enrichment(
+            conn,
+            ["TEST"],
+            source_id="market_positioning_upstream",
+        )
+        == []
+    )
 
 
 def test_ibkr_current_availability_cannot_be_backdated_or_future_dated() -> None:
@@ -501,9 +741,7 @@ def test_ibkr_current_availability_cannot_be_backdated_or_future_dated() -> None
         ],
     )
     assert prune_backdated_ibkr_shortable_rows(conn) == 1
-    assert conn.execute(
-        "SELECT GROUP_CONCAT(ticker) FROM ibkr_shortable_shares_snapshots"
-    ).fetchone()[0] == "KEEP"
+    assert conn.execute("SELECT GROUP_CONCAT(ticker) FROM ibkr_shortable_shares_snapshots").fetchone()[0] == "KEEP"
 
 
 def test_ticker_change_is_not_misclassified_as_multiple_share_classes() -> None:
@@ -541,19 +779,13 @@ def test_positioning_stale_fallback_only_accepts_availability_errors() -> None:
         "technology_positioning_upstream_error_classification",
     )
 
-    assert importer.is_upstream_availability_error(
-        sqlite3.OperationalError("database is locked")
-    )
+    assert importer.is_upstream_availability_error(sqlite3.OperationalError("database is locked"))
     assert importer.is_upstream_availability_error(OSError("share unavailable"))
     assert not importer.is_upstream_availability_error(
         sqlite3.OperationalError("no such table: short_interest_snapshots")
     )
-    assert upstream.is_shared_db_availability_error(
-        sqlite3.OperationalError("unable to open database file")
-    )
-    assert not upstream.is_shared_db_availability_error(
-        sqlite3.OperationalError("no such column: settlement_date")
-    )
+    assert upstream.is_shared_db_availability_error(sqlite3.OperationalError("unable to open database file"))
+    assert not upstream.is_shared_db_availability_error(sqlite3.OperationalError("no such column: settlement_date"))
 
 
 def test_positioning_incremental_window_is_bounded_and_respects_floor() -> None:
@@ -812,9 +1044,7 @@ def test_incremental_short_interest_excludes_unpublished_observations() -> None:
     )
 
     assert stats == {"TEST": 1}
-    assert dest.execute(
-        "SELECT settlement_date FROM fact_short_interest"
-    ).fetchone()[0] == "2024-11-30"
+    assert dest.execute("SELECT settlement_date FROM fact_short_interest").fetchone()[0] == "2024-11-30"
 
 
 def test_incremental_13f_aggregation_preserves_outer_history_and_prior_delta() -> None:
@@ -916,6 +1146,132 @@ def test_yahoo_parser_skips_malformed_corporate_action_dates(yahoo_prices: Modul
     assert actions == []
 
 
+def test_yahoo_parser_drops_zero_volume_carry_forward_after_authoritative_market_time(
+    yahoo_prices: ModuleType,
+) -> None:
+    market_time = int(datetime(2026, 7, 30, 20, tzinfo=timezone.utc).timestamp())
+    timestamps = [
+        market_time,
+        int(datetime(2026, 7, 31, 20, tzinfo=timezone.utc).timestamp()),
+        int(datetime(2026, 8, 3, 20, tzinfo=timezone.utc).timestamp()),
+    ]
+    payload = {
+        "chart": {
+            "error": None,
+            "result": [
+                {
+                    "meta": {"regularMarketTime": market_time},
+                    "timestamp": timestamps,
+                    "indicators": {
+                        "quote": [
+                            {
+                                "close": [32.46, 32.46, 32.46],
+                                "open": [31.8, 32.46, 32.46],
+                                "high": [33.0, 32.46, 32.46],
+                                "low": [31.5, 32.46, 32.46],
+                                "volume": [2_241_100, 0, 0],
+                            }
+                        ],
+                        "adjclose": [{"adjclose": [32.46, 32.46, 32.46]}],
+                    },
+                }
+            ],
+        }
+    }
+
+    bars, _actions, meta, error = yahoo_prices.parse_chart_result(
+        yahoo_prices.PriceJob("SKYT", "SkyWater Technology"),
+        json.dumps(payload),
+        "yahoo_finance_adjusted",
+    )
+
+    assert error == ""
+    assert [bar.bar_date for bar in bars] == ["2026-07-30"]
+    assert meta["droppedSyntheticPostMarketBarDates"] == [
+        "2026-07-31",
+        "2026-08-03",
+    ]
+
+
+def test_semiconductor_membership_cleanup_removes_post_end_market_rows() -> None:
+    membership = load_script(
+        "technology/semiconductors/scripts/01b_load_semiconductor_historical_membership.py",
+        "technology_semiconductor_membership_cleanup_regression",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    now = "2026-08-19T00:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO source_registry(
+            source_id, stage, source_name, source_type, base_url,
+            subsector_scope, created_at, updated_at
+        )
+        VALUES ('yahoo_finance_adjusted', 'stage_3', 'Yahoo', 'api',
+                'https://finance.yahoo.com', 'technology', ?, ?)
+        """,
+        (now, now),
+    )
+    conn.executemany(
+        """
+        INSERT INTO fact_price_ohlcv(
+            ticker, bar_date, source_id, close, adj_close,
+            price_adjustment, is_adjusted, created_at, updated_at
+        )
+        VALUES ('SKYT', ?, 'yahoo_finance_adjusted', 32.46, 32.46,
+                'adjusted_close', 1, ?, ?)
+        """,
+        [
+            ("2026-07-30", now, now),
+            ("2026-07-31", now, now),
+            ("2026-08-03", now, now),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO fact_market_snapshot(
+            ticker, asof_date, source_id, regular_market_price,
+            created_at, updated_at
+        )
+        VALUES ('SKYT', ?, 'yahoo_finance_adjusted', 32.46, ?, ?)
+        """,
+        [
+            ("2026-07-30", now, now),
+            ("2026-08-03", now, now),
+        ],
+    )
+
+    deleted_prices, deleted_snapshots = membership.truncate_prices_after_membership_end(
+        conn,
+        [{"ticker": "SKYT", "end_date": "2026-07-30"}],
+        price_source="yahoo_finance_adjusted",
+    )
+
+    assert deleted_prices == 2
+    assert deleted_snapshots == 1
+    assert (
+        conn.execute("SELECT MAX(bar_date) FROM fact_price_ohlcv WHERE ticker = 'SKYT'").fetchone()[0] == "2026-07-30"
+    )
+    assert (
+        conn.execute("SELECT MAX(asof_date) FROM fact_market_snapshot WHERE ticker = 'SKYT'").fetchone()[0]
+        == "2026-07-30"
+    )
+
+
+def test_skyt_is_governed_as_historical_after_ionq_acquisition() -> None:
+    seed_path = PROJECT_ROOT / "ticker_mapping" / "semiconductor_tickers.csv"
+    history_path = PROJECT_ROOT / "technology" / "semiconductors" / "data" / "semiconductor_historical_membership.csv"
+    seed_rows = {row["ticker"]: row for row in __import__("csv").DictReader(seed_path.open(encoding="utf-8-sig"))}
+    history_rows = {
+        row["internal_ticker"]: row for row in __import__("csv").DictReader(history_path.open(encoding="utf-8-sig"))
+    }
+
+    assert seed_rows["SKYT"]["listing_status"] == "inactive_or_not_investable"
+    assert history_rows["SKYT"]["end_date"] == "2026-07-30"
+    assert history_rows["SKYT"]["successor_ticker"] == "IONQ"
+
+
 def test_financial_batch_runner_rejects_invalid_batch_size() -> None:
     runner = load_script(
         "technology/scripts/08_build_technology_financial_features_batched.py",
@@ -997,9 +1353,7 @@ def test_refresh_orchestrators_use_recoverable_financial_batches(
 
     kwargs["allow_stale_ibkr_borrow_on_error"] = True
     fallback_steps = module.build_steps(**kwargs)
-    fallback_positioning = next(
-        item for item in fallback_steps if item.step_id == "13_sync_positioning_upstream"
-    )
+    fallback_positioning = next(item for item in fallback_steps if item.step_id == "13_sync_positioning_upstream")
     assert "--allow-stale-ibkr-borrow-on-error" in fallback_positioning.args
 
 
@@ -1010,12 +1364,8 @@ def test_historical_positioning_rebuild_is_features_only() -> None:
     )
     families = {
         module.FAMILIES["semiconductors"].family: module.FAMILIES["semiconductors"],
-        module.FAMILIES["technology_hardware"].family: module.FAMILIES[
-            "technology_hardware"
-        ],
-        module.FAMILIES["software_infrastructure"].family: module.FAMILIES[
-            "software_infrastructure"
-        ],
+        module.FAMILIES["technology_hardware"].family: module.FAMILIES["technology_hardware"],
+        module.FAMILIES["software_infrastructure"].family: module.FAMILIES["software_infrastructure"],
     }
     for spec in families.values():
         step = next(item for item in spec.steps if item.step_id == "09_import_positioning")
@@ -1027,11 +1377,14 @@ def test_historical_refresh_rejects_latest_only_governance_steps() -> None:
         def __init__(self, step_id: str) -> None:
             self.step_id = step_id
 
-    assert asof_governance_conflict(
-        "2024-01-02",
-        [TestStep("10b_publish_dashboard")],
-        publisher_script="publisher.py",
-    ) == ""
+    assert (
+        asof_governance_conflict(
+            "2024-01-02",
+            [TestStep("10b_publish_dashboard")],
+            publisher_script="publisher.py",
+        )
+        == ""
+    )
     message = asof_governance_conflict(
         "2024-01-02",
         [TestStep("16_publish_governance")],

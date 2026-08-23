@@ -32,6 +32,7 @@ from biotech_index.core.db import connect, quote_identifier  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 from biotech_index.core.market_policy import scoring_market_sources  # noqa: E402
 from biotech_index.core.pipeline_guards import format_ticker_sample, read_final_scoring_tickers, universe_coverage  # noqa: E402
+from biotech_index.core.report_inputs import resolve_dated_report_input_csv  # noqa: E402
 
 
 LOGGER = logging.getLogger("run_biotech_refresh_pipeline")
@@ -628,6 +629,27 @@ def snap_asof_to_latest_trading_date(
     return latest
 
 
+def normalize_requested_pipeline_asof(
+    candidate: date,
+    *,
+    db_path: Path,
+    config: dict[str, Any],
+) -> date:
+    """Normalize an explicit report date to an authoritative market date."""
+    market_timezone = str(cfg_get(config, "ib_market_data.market_timezone", "America/New_York"))
+    local_today = datetime.now(timezone.utc).astimezone(ZoneInfo(market_timezone)).date()
+    normalized = previous_business_day(candidate) if candidate.weekday() >= 5 else candidate
+    if normalized < local_today or normalized != candidate:
+        normalized = snap_asof_to_latest_trading_date(normalized, db_path=db_path, config=config)
+    if normalized != candidate:
+        LOGGER.warning(
+            "Normalized explicit pipeline asof from non-trading date %s to %s.",
+            candidate.isoformat(),
+            normalized.isoformat(),
+        )
+    return normalized
+
+
 def default_pipeline_asof(config: dict[str, Any], db_path: Path | None = None) -> date:
     market_timezone = str(cfg_get(config, "ib_market_data.market_timezone", "America/New_York"))
     market_close_time = parse_clock_time(cfg_get(config, "ib_market_data.market_close_time", "16:15"))
@@ -772,7 +794,9 @@ def historical_restatement_steps(
         ),
         Step("forward_guidance", "19_parse_forward_guidance.py", ("--run-mode", "weekly_reconcile")),
         Step("governance_events", "20_build_governance_event_features.py", governance_args),
-        Step("fda_adcom_calendar", "14_sync_fda_adcom_calendar.py"),
+        # Historical restatement consumes the already-synced AdCom table through
+        # script 10. Re-fetching today's FDA calendar for every old as-of date is
+        # neither a derived-layer operation nor point-in-time reproducible.
         Step("biotech_features", "10_build_biotech_features.py"),
         Step("biotech_scores", "11_score_biotech_index.py"),
         Step(
@@ -782,6 +806,15 @@ def historical_restatement_steps(
         ),
         Step("multibagger_scores", "22_score_multibagger_candidates.py"),
     ]
+
+
+def validate_historical_step_selection(selected_steps: set[str]) -> None:
+    """Reject partial historical feature rebuilds that would reuse live positioning exports."""
+    if "biotech_features" in selected_steps and "market_positioning_export" not in selected_steps:
+        raise ValueError(
+            "Historical biotech_features restatement requires market_positioning_export in --steps "
+            "so short-interest, 13F, float, and borrow inputs are exported as of each historical date."
+        )
 
 
 def parse_history_dates(raw: str) -> list[str]:
@@ -900,6 +933,17 @@ def text_tail(raw: str, limit: int = 4000) -> str:
 STEP_STATE_SCHEMA_VERSION = 1
 ALREADY_COMPLETE_STATUS = "already_complete"
 
+STEP_COVERAGE_TABLES = {
+    "financial_survival": "financial_survival_features",
+    "commercial_value": "commercial_value_features_daily",
+    "forward_guidance": "forward_guidance_features_daily",
+    "governance_events": "governance_event_features_daily",
+    "biotech_features": "daily_features",
+    "biotech_scores": "daily_scores",
+    "multibagger_features": "multibagger_features_daily",
+    "multibagger_scores": "multibagger_scores_daily",
+}
+
 
 def resume_state_dir(config: dict[str, Any], *, base_dir: Path) -> Path:
     return resolve_path(
@@ -997,6 +1041,59 @@ def step_resume_skip(
     if str(marker.get("script")) != step.script:
         return False
     if list(marker.get("args") or []) != list(step.args):
+        return False
+    return True
+
+
+def resolve_final_scoring_universe_csv(
+    config: dict[str, Any],
+    *,
+    base_dir: Path,
+    asof: str,
+) -> Path:
+    configured = resolve_path(
+        cfg_get(
+            config,
+            "biotech_features.final_scoring_universe_csv",
+            "../output/biotech_index_reports/ctgov_final_scoring_universe.csv",
+        ),
+        base_dir=base_dir,
+    )
+    return resolve_dated_report_input_csv(
+        configured,
+        base_output_dir=configured.parent,
+        asof_date=asof,
+        logger=LOGGER,
+    )
+
+def step_marker_output_current(
+    *,
+    config: dict[str, Any],
+    base_dir: Path,
+    db_path: Path,
+    step: Step,
+    asof: str,
+) -> bool:
+    """Verify that a skippable table-producing step still covers its live input universe."""
+    table = STEP_COVERAGE_TABLES.get(step.name)
+    if table is None:
+        return True
+    universe_csv = resolve_final_scoring_universe_csv(config, base_dir=base_dir, asof=asof)
+    expected_tickers = read_final_scoring_tickers(universe_csv)
+    try:
+        with connect(db_path) as conn:
+            validate_table_coverage(
+                conn,
+                table=table,
+                asof=asof,
+                expected_tickers=expected_tickers,
+            )
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        LOGGER.warning(
+            "Invalidating stale completion marker for %s: %s",
+            step.name,
+            exc,
+        )
         return False
     return True
 
@@ -1311,6 +1408,13 @@ def historical_universe_requires_norgate(
                 f"Historical scoring universe is missing required calibration_only column: {universe_path}"
             )
         return any(as_bool(row.get("calibration_only"), False) for row in reader)
+
+
+def earliest_ctgov_snapshot_date(db_path: Path) -> str:
+    """Return the first immutable CTGov snapshot date available to historical replay."""
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT MIN(asof_date) FROM trial_snapshot_daily").fetchone()
+    return str(row[0] or "") if row is not None else ""
 
 
 def build_step_command(
@@ -1997,6 +2101,37 @@ def observed_table_tickers(conn: sqlite3.Connection, table: str, *, asof: str, s
     return [str(row["ticker"] or "") for row in rows]
 
 
+def validated_market_feature_snapshot_asof(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    report_asof: str,
+    max_lag_calendar_days: int,
+) -> str:
+    report_date = parse_db_date(report_asof)
+    if report_date is None:
+        raise RuntimeError(f"Invalid report asof date for market validation: {report_asof!r}")
+    row = conn.execute(
+        """
+        SELECT MAX(asof_date) AS latest_asof
+        FROM market_features_daily
+        WHERE source = ? AND asof_date <= ?
+        """,
+        (source, report_asof),
+    ).fetchone()
+    snapshot_date = parse_db_date(row["latest_asof"] if row else None)
+    if snapshot_date is None:
+        raise RuntimeError(f"market_features_daily:{source} has no snapshot at or before {report_asof}")
+    lag_days = (report_date - snapshot_date).days
+    if lag_days < 0 or lag_days > max_lag_calendar_days:
+        raise RuntimeError(
+            f"market_features_daily:{source} latest snapshot {snapshot_date.isoformat()} is "
+            f"{lag_days} calendar day(s) behind report asof={report_asof}; "
+            f"maximum={max_lag_calendar_days}"
+        )
+    return snapshot_date.isoformat()
+
+
 def validate_table_coverage(
     conn: sqlite3.Connection,
     *,
@@ -2240,14 +2375,7 @@ def validate_final_outputs(
 ) -> dict[str, Any]:
     start = time.monotonic()
     LOGGER.info("Starting final_output_validation")
-    universe_csv = resolve_path(
-        cfg_get(
-            config,
-            "biotech_features.final_scoring_universe_csv",
-            "../output/biotech_index_reports/ctgov_final_scoring_universe.csv",
-        ),
-        base_dir=base_dir,
-    )
+    universe_csv = resolve_final_scoring_universe_csv(config, base_dir=base_dir, asof=asof)
     expected_tickers = read_final_scoring_tickers(universe_csv)
     biotech_output_dir = resolve_path(
         cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"), base_dir=base_dir
@@ -2282,6 +2410,11 @@ def validate_final_outputs(
     candidate_market_sources = [source for source in scoring_sources if source not in skipped]
     if not candidate_market_sources:
         candidate_market_sources = scoring_sources
+    max_market_snapshot_lag_days = int(
+        cfg_get(config, "biotech_refresh.max_market_snapshot_lag_calendar_days", 4)
+    )
+    if max_market_snapshot_lag_days < 0:
+        raise ValueError("biotech_refresh.max_market_snapshot_lag_calendar_days must be >= 0")
     multibagger_required_columns = list(MULTIBAGGER_SCORE_BASE_REQUIRED_COLUMNS)
     if as_bool(cfg_get(config, "multibagger.tier1_interaction.enabled", False)):
         multibagger_required_columns.extend(MULTIBAGGER_SCORE_TIER1_REQUIRED_COLUMNS)
@@ -2300,11 +2433,17 @@ def validate_final_outputs(
         market_coverage_failures: list[str] = []
         for source in candidate_market_sources:
             try:
+                market_snapshot_asof = validated_market_feature_snapshot_asof(
+                    conn,
+                    source=source,
+                    report_asof=asof,
+                    max_lag_calendar_days=max_market_snapshot_lag_days,
+                )
                 # Market features can include extra symbols from the vendor cache; downstream layers filter to the final universe.
                 validate_table_coverage(
                     conn,
                     table="market_features_daily",
-                    asof=asof,
+                    asof=market_snapshot_asof,
                     expected_tickers=expected_tickers,
                     source=source,
                     allow_extra=True,
@@ -2312,7 +2451,12 @@ def validate_final_outputs(
             except RuntimeError as exc:
                 market_coverage_failures.append(str(exc))
                 continue
-            LOGGER.info("market_features_daily coverage satisfied by source=%s for asof=%s", source, asof)
+            LOGGER.info(
+                "market_features_daily coverage satisfied by source=%s snapshot_asof=%s report_asof=%s",
+                source,
+                market_snapshot_asof,
+                asof,
+            )
             break
         else:
             if candidate_market_sources:
@@ -2625,7 +2769,11 @@ def main() -> None:
         parsed_asof = parse_date(args.asof)
         if parsed_asof is None:
             raise ValueError(f"Invalid --asof date: {args.asof}")
-        asof = parsed_asof.isoformat()
+        asof = normalize_requested_pipeline_asof(
+            parsed_asof,
+            db_path=db_path,
+            config=config,
+        ).isoformat()
     else:
         asof = default_pipeline_asof(config, db_path=db_path).isoformat()
     LOGGER.info("Pipeline as-of date: %s", asof)
@@ -2660,6 +2808,8 @@ def main() -> None:
         unknown = sorted(selected_steps - known)
         if unknown:
             raise ValueError(f"Unknown pipeline step(s): {', '.join(unknown)}")
+        if args.history_restatement:
+            validate_historical_step_selection(selected_steps)
     steps = [step for step in all_steps if not selected_steps or step.name in selected_steps]
     steps = maybe_skip_company_master(
         steps,
@@ -2862,12 +3012,33 @@ def main() -> None:
             LOGGER.warning("Form 4 preflight skipped because biotech_refresh.form4_preflight.enabled=false.")
         run_dates = history_dates if args.history_restatement else [asof]
         effective_mode = "history_restatement" if args.history_restatement else args.mode
+        first_ctgov_snapshot = earliest_ctgov_snapshot_date(db_path) if args.history_restatement else ""
         for run_asof in run_dates:
+            deterministic_tail_dirty = False
             for step in steps:
                 command_step = step
                 timing_step = step
                 if args.history_restatement:
                     timing_step = Step(f"{step.name}@{run_asof}", step.script, step.args, step.supports_asof)
+                ctgov_snapshot_available = bool(first_ctgov_snapshot and run_asof >= first_ctgov_snapshot)
+                if args.history_restatement and step.name == "ctgov_audit" and not ctgov_snapshot_available:
+                    LOGGER.info(
+                        "Skipping %s: no CTGov snapshot exists on/before asof; historical universe will use neutral reconstruction",
+                        timing_step.name,
+                    )
+                    timing_rows.append(
+                        {
+                            "run_started_at": run_started_at,
+                            "mode": effective_mode,
+                            "step": timing_step.name,
+                            "status": "success",
+                            "elapsed_sec": 0.0,
+                            "returncode": 0,
+                            "command": "skip CTGov audit: no snapshot on/before asof",
+                        }
+                    )
+                    write_timing_csv(timing_csv, timing_rows)
+                    continue
                 if (
                     args.history_restatement
                     and step.name == "norgate_market_features"
@@ -2897,7 +3068,24 @@ def main() -> None:
                 marker_path = step_marker_path(state_dir, run_asof, step.name) if resume_tracking else None
                 if resume_enabled and marker_path is not None:
                     marker = load_step_marker(marker_path)
-                    if step_resume_skip(marker, step, asof=run_asof, mode=effective_mode):
+                    marker_matches = step_resume_skip(
+                        marker,
+                        step,
+                        asof=run_asof,
+                        mode=effective_mode,
+                    )
+                    output_current = (
+                        marker_matches
+                        and not deterministic_tail_dirty
+                        and step_marker_output_current(
+                            config=config,
+                            base_dir=base_dir,
+                            db_path=db_path,
+                            step=step,
+                            asof=run_asof,
+                        )
+                    )
+                    if output_current:
                         resume_epoch = earliest_epoch(resume_epoch, (marker or {}).get("run_started_at"))
                         LOGGER.info(
                             "Skipping %s: ALREADY_COMPLETE (sealed PASS marker for asof=%s: %s)",
@@ -2916,6 +3104,8 @@ def main() -> None:
                         write_timing_csv(timing_csv, timing_rows)
                         continue
                 command = build_step_command(command_step, config_path=config_path, db_path=db_path, asof=run_asof)
+                if args.history_restatement and step.name == "historical_scoring_universe" and not ctgov_snapshot_available:
+                    command.append("--force-current-root-reconstruction")
                 if args.history_restatement and step.name == "ctgov_audit":
                     historical_output_root = resolve_path(
                         cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"),
@@ -2956,6 +3146,8 @@ def main() -> None:
                     except (TypeError, ValueError):
                         step_returncode = 1
                     raise SystemExit(step_returncode if step_returncode > 0 else 1)
+                if not step.always_rerun:
+                    deterministic_tail_dirty = True
         if not args.skip_analyze:
             timing_rows.append(analyze_db(db_path, run_started_at=run_started_at, mode=effective_mode))
             write_timing_csv(timing_csv, timing_rows)

@@ -162,6 +162,53 @@ def test_shadow_comparison_scales_past_sqlite_expression_depth(
     assert rows == []
 
 
+def test_shadow_comparison_allows_sector_without_legacy_tables(
+    tmp_path: Path,
+) -> None:
+    with connect_database(tmp_path / "consumer-defensive.sqlite") as conn:
+        run_id = start_run(
+            conn,
+            model_family="consumer_defensive",
+            asof_date="2026-08-14",
+            adapter_version="consumer_defensive_test",
+            mode="shadow",
+            worker_count=1,
+        )
+        conn.execute(
+            """
+            INSERT INTO sec_parser_work_ledger(
+                work_key, run_id, model_family, ticker, cik,
+                accession_number, parser_release, adapter_version,
+                requested_metrics_json, input_hashes_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "consumer-defensive-work", run_id, "consumer_defensive",
+                "KO", "0000021344", "0000021344-26-000001", "test",
+                "consumer_defensive_test", "[]", "{}", "COMPLETED",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO sec_parser_run_work(
+                   run_id, work_key, ticker, accession_number
+               ) VALUES (?, ?, ?, ?)""",
+            (
+                run_id, "consumer-defensive-work", "KO",
+                "0000021344-26-000001",
+            ),
+        )
+
+        rows = compare_shadow_run(
+            conn,
+            run_id=run_id,
+            model_family="consumer_defensive",
+            asof_date="2026-08-14",
+            requested_metrics=("organic_revenue_growth_pct",),
+        )
+
+    assert rows == []
+
+
 def test_edgartools_stderr_is_captured_as_provider_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -846,6 +893,30 @@ def test_enabled_provider_dependencies_fail_fast(
     validate_provider_dependencies(
         enable_arelle=False,
         enable_edgartools=True,
+    )
+
+
+def test_planned_pdf_dependencies_fail_before_run_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_pdf_import(module_name: str) -> object:
+        if module_name in {'pypdf', 'fitz'}:
+            raise ImportError('missing')
+        return object()
+
+    monkeypatch.setattr(
+        'dedicated_parser.runtime.import_module', missing_pdf_import
+    )
+    with pytest.raises(RuntimeError, match='PDF native text extraction'):
+        validate_provider_dependencies(
+            enable_arelle=False,
+            enable_edgartools=False,
+            require_pdf_native=True,
+        )
+    validate_provider_dependencies(
+        enable_arelle=False,
+        enable_edgartools=False,
+        require_pdf_native=False,
     )
 
 

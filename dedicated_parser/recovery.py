@@ -149,7 +149,14 @@ def _anchor_periods(
     asof_date: str,
     tickers: list[str],
 ) -> dict[str, str]:
-    if not tickers or not _table_exists(conn, "feature_financial_statement"):
+    required_columns = {
+        "ticker", "model_family", "asof_date", "fiscal_period_end"
+    }
+    if (
+        not tickers
+        or not required_columns
+        <= _table_columns(conn, "feature_financial_statement")
+    ):
         return {}
     placeholders = ",".join("?" for _ in tickers)
     return {

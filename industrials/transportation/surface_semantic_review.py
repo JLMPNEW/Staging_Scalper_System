@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 
-REVIEW_POLICY_VERSION = "transportation_surface_semantic_review_v5"
+REVIEW_POLICY_VERSION = "transportation_surface_semantic_review_v6"
 
 _NUMBER = re.compile(
     r"(?P<currency>US\$|CA\$|USD|CAD|\$)?\s*"
@@ -61,6 +61,7 @@ def normalized(value: object) -> str:
 
 
 def definition_signature(row: Mapping[str, object]) -> tuple[str, ...]:
+    provenance = _json(row.get("provenance_json"))
     return (
         str(row.get("source_lane") or ""),
         str(row.get("ticker") or ""),
@@ -69,9 +70,13 @@ def definition_signature(row: Mapping[str, object]) -> tuple[str, ...]:
         normalized(row.get("unit")),
         normalized(row.get("extraction_method")),
         normalized(row.get("status_reason") or row.get("reason")),
-        normalized(row.get("formula")),
-        normalized(row.get("numerator_concept")),
-        normalized(row.get("denominator_concept")),
+        normalized(row.get("formula") or provenance.get("formula")),
+        normalized(row.get("numerator_concept") or provenance.get("numerator_label")),
+        normalized(row.get("denominator_concept") or provenance.get("denominator_label")),
+        normalized(provenance.get("segment_id")),
+        normalized(provenance.get("definition_basis")),
+        normalized(provenance.get("comparability_class")),
+        normalized(provenance.get("denominator_basis")),
     )
 
 
@@ -224,6 +229,51 @@ def _derived_surface_ratio_review(
     return CandidateReview(True, "strict_table_ratio_definition_and_recalculation_pass", value)
 
 
+def _derived_surface_contract_review(
+    row: Mapping[str, object],
+    value: float,
+) -> CandidateReview | None:
+    concept = str(row.get("concept_name") or "")
+    metric_by_concept = {
+        "DerivedFreightWeightPerShipment": "freight_weight_per_shipment",
+        "DerivedSurfaceSegmentOperatingRatio": "operating_ratio",
+        "DerivedSurfacePurchasedTransportationRatio": "purchased_transportation_ratio",
+        "DerivedSurfaceLogisticsNetRevenueMargin": "logistics_net_revenue_margin",
+    }
+    expected_metric = metric_by_concept.get(concept)
+    if expected_metric is None:
+        return None
+    if str(row.get("metric_id") or "") != expected_metric:
+        return CandidateReview(False, "surface_contract_metric_identity_failed", value)
+    provenance = _json(row.get("provenance_json"))
+    try:
+        numerator = float(provenance["numerator_value"])
+        denominator = float(provenance["denominator_value"])
+        formula = str(provenance["formula"])
+    except (KeyError, TypeError, ValueError):
+        return CandidateReview(False, "surface_contract_operands_missing", value)
+    if denominator <= 0 or numerator < 0:
+        return CandidateReview(False, "surface_contract_operand_bounds_failed", value)
+    if formula == "numerator/denominator":
+        calculated = numerator / denominator
+    elif formula in {"1-numerator/denominator", "1-alternate/denominator"}:
+        calculated = 1.0 - numerator / denominator
+    else:
+        return CandidateReview(False, "surface_contract_formula_unsupported", value)
+    if not math.isclose(value, calculated, rel_tol=1e-10, abs_tol=1e-10):
+        return CandidateReview(False, "surface_contract_recalculation_failed", value)
+    comparability = str(provenance.get("comparability_class") or "")
+    if comparability == "broad_proxy":
+        return CandidateReview(False, "broad_proxy_is_diagnostic_only", value)
+    if expected_metric == "operating_ratio" and not provenance.get("segment_id"):
+        return CandidateReview(False, "named_segment_identity_missing", value)
+    if expected_metric == "freight_weight_per_shipment" and not 100 <= value <= 10_000:
+        return CandidateReview(False, "ltl_weight_semantic_range_failed", value)
+    elif expected_metric != "freight_weight_per_shipment" and not 0 <= value <= 1.5:
+        return CandidateReview(False, "surface_contract_ratio_range_failed", value)
+    return CandidateReview(True, "surface_contract_definition_and_recalculation_pass", value)
+
+
 def _percent_context(snippet: str, raw: str) -> bool:
     return bool(re.search(r"%|\bpercent(?:age)?\b", f"{raw} {snippet}", re.IGNORECASE))
 
@@ -286,6 +336,9 @@ def _parser_review(row: Mapping[str, object]) -> CandidateReview:
     derived_ratio = _derived_surface_ratio_review(row, value)
     if derived_ratio is not None:
         return derived_ratio
+    derived_contract = _derived_surface_contract_review(row, value)
+    if derived_contract is not None:
+        return derived_contract
     if unit != _EXPECTED_UNITS.get(metric):
         return CandidateReview(False, "metric_unit_contract_failed", value)
     if re.search(r"\b(?:peer|competitor|acquisition target|customer fleet|pro forma)\b", text, re.I):
@@ -371,8 +424,17 @@ def _parser_review(row: Mapping[str, object]) -> CandidateReview:
             re.search(r"intermodal.{0,120}(?:increase|decrease|decline|growth|change|higher|lower)", text, re.I)
         )
     elif metric == "rail_network_velocity":
-        snippet = near(r"train\s+velocity|average\s+train\s+speed|train\s+speed")
-        ok = bool(snippet) and 5 <= value <= 80 and not _raw_is_percent(raw)
+        provenance = _json(row.get("provenance_json"))
+        basis = str(provenance.get("definition_basis") or "")
+        if basis == "car_velocity_miles_per_day":
+            snippet = near(r"(?:car|freight\s+car)\s+(?:velocity|miles?\s+per\s+day)")
+            ok = bool(snippet) and 50 <= value <= 1_000 and not _raw_is_percent(raw)
+        elif basis == "train_speed_mph":
+            snippet = near(r"train\s+velocity|average\s+train\s+speed|train\s+speed")
+            ok = bool(snippet) and 5 <= value <= 80 and not _raw_is_percent(raw)
+        else:
+            snippet = ""
+            ok = False
     elif metric == "revenue_per_shipment_or_load":
         snippet = near(r"(?:billed\s+|ltl\s+)?revenue\s+per\s+(?:shipment|load)")
         ok = bool(snippet) and value > 0 and _currency_context(snippet, raw, currency)

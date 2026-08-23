@@ -28,7 +28,7 @@ from industrials.transportation.scripts._shared import (  # noqa: E402
 
 ADAPTER = "industrials.transportation.dedicated_parser_adapter:extract_metric_evidence"
 DATA_ROOT = PROJECT_ROOT / "industrials" / "transportation" / "data"
-SOURCE_MAP = DATA_ROOT / "transportation_surface_metric_source_map_v1.csv"
+SOURCE_MAP = DATA_ROOT / "transportation_surface_metric_source_map_v2.csv"
 DEFAULT_OUTPUT_ROOT = (
     PROJECT_ROOT
     / "output"
@@ -42,7 +42,7 @@ DEFAULT_OUTPUT_ROOT = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plan or execute the exact 19-name, metric-specific surface-freight "
+            "Plan or execute the exact 24-name, metric-specific surface-freight "
             "parser batch against a complete-cache surface census."
         )
     )
@@ -102,7 +102,7 @@ def main() -> int:
         raise ValueError("surface parser requires a PASS census with zero cache gaps")
     scope = census.get("execution_scope") or {}
     if set(scope.get("tickers", ())) != set(tickers):
-        raise ValueError("census ticker scope does not match the 19-name surface contract")
+        raise ValueError("census ticker scope does not match the 24-name surface research contract")
     if set(scope.get("direct_metric_ids", ())) != set(direct_metrics):
         raise ValueError("census metric scope does not match the direct surface contract")
     if scope.get("source_map_sha256") != file_sha256(SOURCE_MAP):
@@ -150,7 +150,7 @@ def main() -> int:
         if plan.get("mode") != "plan_only":
             errors.append("parser did not produce plan_only mode")
         if int(summary.get("requested_tickers") or 0) != len(tickers):
-            errors.append("plan requested ticker count is not 19")
+            errors.append("plan requested ticker count does not match the sealed 24-name research contract")
         if int(summary.get("missing_cache_accessions") or 0) != 0:
             errors.append("plan contains missing cache accessions")
         if not execution.get("all_metrics"):
@@ -203,7 +203,7 @@ def main() -> int:
         ).fetchone()[0]
     run = _read_json(run_path)
     run["bounded_batch_contract"] = {
-        "contract_version": "transportation_surface_delta_parser_v1",
+        "contract_version": "transportation_surface_delta_parser_v2",
         "source_map_sha256": file_sha256(SOURCE_MAP),
         "ticker_count": len(tickers),
         "direct_metric_count": len(direct_metrics),

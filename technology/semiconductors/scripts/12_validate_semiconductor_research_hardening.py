@@ -22,6 +22,7 @@ from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E40
 from technology.core.db import connect, init_db  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.text_norm import normalize_ticker  # noqa: E402
+from technology.core.universe_validator import expected_current_ticker_count  # noqa: E402
 from technology.semiconductors.optuna_calibration import load_membership_intervals  # noqa: E402
 
 
@@ -101,7 +102,11 @@ def main() -> int:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     output_csv = args.output_csv.expanduser().resolve()
     model_family = str(cfg_get(config, "technology_universe.initial_subsector", "semiconductors"))
-    expected_universe = int(cfg_get(config, "technology_universe.expected_ticker_count", 99))
+    expected_universe = expected_current_ticker_count(
+        config,
+        base_dir=base_dir,
+        effective_date=date.today(),
+    )
     min_historical = int(cfg_get(config, "technology_universe.min_historical_membership_tickers", 20))
 
     rows: list[dict[str, Any]] = []

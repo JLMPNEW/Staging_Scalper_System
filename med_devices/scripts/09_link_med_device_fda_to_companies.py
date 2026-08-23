@@ -44,6 +44,8 @@ STOP_TOKENS = {
     "HEALTH",
     "HEALTHCARE",
     "INTERNATIONAL",
+    "IMAGING",
+    "INNOVATIONS",
     "LAB",
     "LABORATORIES",
     "LABORATORY",
@@ -696,20 +698,6 @@ def best_match(
     )
     second_ticker = second[1].ticker if second is not None else ""
     second_score = round(second[0], 2) if second is not None else None
-    if second is not None and score < 95.0 and score - second[0] < ambiguity_margin:
-        return ManufacturerMatch(
-            None,
-            "",
-            "",
-            round(score, 2),
-            "ambiguous",
-            f"ambiguous_top2:{alias.ticker}:{round(score, 2)}:{second[1].ticker}:{round(second[0], 2)}",
-            matched_alias=alias.alias_raw,
-            matched_alias_source=alias.source,
-            second_best_ticker=second_ticker,
-            second_best_score=second_score,
-            candidate_summary=candidate_summary,
-        )
     if score < min_confidence:
         return ManufacturerMatch(
             None,
@@ -718,6 +706,20 @@ def best_match(
             round(score, 2),
             "unmapped",
             f"below_threshold:{round(score, 2)}",
+            matched_alias=alias.alias_raw,
+            matched_alias_source=alias.source,
+            second_best_ticker=second_ticker,
+            second_best_score=second_score,
+            candidate_summary=candidate_summary,
+        )
+    if second is not None and score < 95.0 and score - second[0] < ambiguity_margin:
+        return ManufacturerMatch(
+            None,
+            "",
+            "",
+            round(score, 2),
+            "ambiguous",
+            f"ambiguous_top2:{alias.ticker}:{round(score, 2)}:{second[1].ticker}:{round(second[0], 2)}",
             matched_alias=alias.alias_raw,
             matched_alias_source=alias.source,
             second_best_ticker=second_ticker,

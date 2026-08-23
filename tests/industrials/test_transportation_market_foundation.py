@@ -290,17 +290,15 @@ def test_transportation_family_benchmarks_override_legacy_defaults_without_cli_f
     assert secondary == ["XTN", "SPY"]
 
 
-def test_portfolio_layer_keeps_transportation_fail_closed() -> None:
-    # Sealed release contract (20/22/22a and the v3/v4 immutable releases):
-    # the source stays ENABLED so the adapter ingests shadow rows for
-    # diagnostics, while require_oos_score_valid blocks any allocation until
-    # a reviewed promotion flips the OOS flag. "Disabled" is not the sealed
-    # posture; fail-closed-enabled is.
+def test_portfolio_layer_keeps_transportation_isolated_until_activation() -> None:
+    # Transportation shadow evidence is collected by its independent
+    # orchestrator lane. Stage 1 must not collect or freshness-gate the family
+    # until the separately governed production activation is approved.
     config = load_yaml(PROJECT_ROOT / "portfolio_layer" / "config.yaml")
     sources = config["score_contract"]["sectors"]
     source = next(row for row in sources if row["model_family"] == "transportation")
     assert source["adapter"] == "industrial_family"
-    assert source["enabled"] is True
+    assert source["enabled"] is False
     assert source["required"] is False
     assert source["require_oos_score_valid"] is True
 

@@ -206,7 +206,25 @@ def load_name_map(path: Path) -> dict[str, str]:
 
 
 def load_company_map(conn: Any) -> dict[str, dict[str, Any]]:
-    rows = conn.execute("SELECT company_id, ticker FROM dim_company WHERE is_active = 1").fetchall()
+    rows = conn.execute(
+        """
+        SELECT
+            c.company_id,
+            c.ticker,
+            COALESCE(
+                (
+                    SELECT MIN(s.listing_start_date)
+                    FROM dim_security s
+                    WHERE s.company_id = c.company_id
+                      AND COALESCE(s.is_primary_listing, 0) = 1
+                      AND COALESCE(TRIM(s.listing_start_date), '') <> ''
+                ),
+                ''
+            ) AS listing_start_date
+        FROM dim_company c
+        WHERE c.is_active = 1
+        """
+    ).fetchall()
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
 
 
@@ -355,8 +373,13 @@ def aggregate_holdings(
 ) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, date], list[Holding]] = defaultdict(list)
     for holding in holdings.values():
-        if holding.ticker in company_by_ticker:
-            grouped[(holding.ticker, holding.period)].append(holding)
+        company = company_by_ticker.get(holding.ticker)
+        if company is None:
+            continue
+        listing_start = parse_date(company.get("listing_start_date"))
+        if listing_start is not None and holding.period < listing_start:
+            continue
+        grouped[(holding.ticker, holding.period)].append(holding)
     rows_by_ticker: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (ticker, period), group in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
         manager_count = len({holding.manager_key for holding in group})
@@ -383,6 +406,8 @@ def aggregate_holdings(
                         "source": "sec_form_13f_data_sets_cached_common_share_rebuild",
                         "raw_latest_rows": len(group),
                         "security_filter": "SSHPRNAMTTYPE=SH;PUTCALL empty;exclude note/bond/preferred/warrant titles",
+                        "listing_start_date": company_by_ticker[ticker].get("listing_start_date") or "",
+                        "listing_start_guard_applied": bool(company_by_ticker[ticker].get("listing_start_date")),
                     },
                     sort_keys=True,
                     ensure_ascii=True,
@@ -563,7 +588,16 @@ def main() -> None:
                 max_archives=max(0, int(args.max_archives or 0)),
             )
             rows = aggregate_holdings(latest_holdings, company_by_ticker=company_by_ticker)
-            expected_tickers = set(company_by_ticker)
+            latest_report_period = max(
+                (holding.period for holding in latest_holdings.values()),
+                default=asof,
+            )
+            expected_tickers = {
+                ticker
+                for ticker, company in company_by_ticker.items()
+                if (listing_start := parse_date(company.get("listing_start_date"))) is None
+                or listing_start <= latest_report_period
+            }
             observed_tickers = {str(row["ticker"]) for row in rows}
             missing = sorted(expected_tickers - observed_tickers)
             coverage_pct = 100.0 * len(observed_tickers) / max(1, len(expected_tickers))

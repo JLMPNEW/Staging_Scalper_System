@@ -6,7 +6,9 @@ import csv
 import hashlib
 import json
 import math
+import os
 import sqlite3
+import tempfile
 import sys
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
@@ -21,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.market_policy import scoring_market_sources  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
@@ -131,6 +134,16 @@ def latest_parsed_db_date(
     return max(parsed) if parsed else None
 
 
+def latest_trial_snapshot_asof(conn: sqlite3.Connection, *, asof: date) -> str | None:
+    row = conn.execute(
+        "SELECT MAX(asof_date) FROM trial_snapshot_daily WHERE asof_date <= ?",
+        (asof.isoformat(),),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
 def parse_timestamp(raw: object) -> datetime | None:
     text = str(raw or "").strip()
     if not text:
@@ -167,6 +180,70 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def write_bytes_atomic(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def write_bytes_exclusive(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def persist_acceptance_manifests(
+    *,
+    latest_path: Path,
+    archive_root: Path,
+    asof: date,
+    created_at_utc: datetime,
+    payload: dict[str, Any],
+) -> dict[str, Path]:
+    """Write latest compatibility, dated canonical, and immutable attempt evidence."""
+    serialized = (
+        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + chr(10)
+    ).encode("utf-8")
+    digest = hashlib.sha256(serialized).hexdigest()
+    dated_path = latest_path.parent / asof.strftime("%Y%m%d") / latest_path.name
+    timestamp = created_at_utc.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    archive_path = (
+        archive_root
+        / asof.strftime("%Y%m%d")
+        / f"{timestamp}_{payload.get('status', 'UNKNOWN')}_{digest[:16]}.json"
+    )
+    write_bytes_exclusive(archive_path, serialized)
+    write_bytes_atomic(dated_path, serialized)
+    write_bytes_atomic(latest_path, serialized)
+    return {
+        "latest": latest_path,
+        "dated": dated_path,
+        "archive": archive_path,
+    }
 
 
 def score_path(config: dict[str, Any], *, base_dir: Path, asof: date) -> Path:
@@ -255,7 +332,35 @@ def validate_provider_runs(
         )
 
 
-def validate_score_lineage(rows: list[dict[str, str]], checks: list[Check], *, asof: date) -> list[dict[str, str]]:
+def latest_market_snapshot_asof(
+    conn: sqlite3.Connection,
+    config: dict[str, Any],
+    *,
+    asof: date,
+) -> date | None:
+    table_row = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='market_bars_daily'"
+    ).fetchone()
+    if table_row is None or int(table_row[0]) <= 0:
+        return None
+    for source in scoring_market_sources(config):
+        row = conn.execute(
+            "SELECT MAX(bar_date) FROM market_bars_daily WHERE source = ? AND bar_date <= ?",
+            (source, asof.isoformat()),
+        ).fetchone()
+        observed = parse_date(row[0] if row else None)
+        if observed is not None:
+            return observed
+    return None
+
+
+def validate_score_lineage(
+    rows: list[dict[str, str]],
+    checks: list[Check],
+    *,
+    asof: date,
+    expected_market_asof: date | None = None,
+) -> list[dict[str, str]]:
     if not rows:
         add_check(
             checks,
@@ -318,10 +423,11 @@ def validate_score_lineage(rows: list[dict[str, str]], checks: list[Check], *, a
         evidence={"future_dates": future_dates},
     )
 
+    expected_price_date = expected_market_asof or asof
     stale_candidate_prices = sorted(
         str(row.get("ticker") or "")
         for row in candidates
-        if str(row.get("price_data_asof_date") or "") != asof.isoformat()
+        if str(row.get("price_data_asof_date") or "") != expected_price_date.isoformat()
     )
     add_check(
         checks,
@@ -330,8 +436,11 @@ def validate_score_lineage(rows: list[dict[str, str]], checks: list[Check], *, a
         role="primary",
         required=True,
         passed=not stale_candidate_prices,
-        detail="every investable candidate uses an as-of-date market snapshot",
-        evidence={"stale_candidate_tickers": stale_candidate_prices},
+        detail="every investable candidate uses the expected latest market snapshot",
+        evidence={
+            "expected_market_asof_date": expected_price_date.isoformat(),
+            "stale_candidate_tickers": stale_candidate_prices,
+        },
     )
 
     invalid_borrow = sorted(
@@ -533,15 +642,30 @@ def validate_form4_source(
     base_dir: Path,
     checks: list[Check],
     asof: date,
+    expected_snapshot_date: date | None = None,
 ) -> None:
     db_path = resolve_path(cfg_get(config, "governance_events.form4_db_path"), base_dir=base_dir)
     snapshot_date: date | None = None
+    snapshot_source: str | None = None
     raw_dates: list[date] = []
     with sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True) as conn:
         tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        if "sec_form4_daily_state" in tables:
-            row = conn.execute("SELECT MAX(last_index_date) FROM sec_form4_daily_state").fetchone()
-            snapshot_date = parse_date(row[0] if row else None)
+        snapshot_candidates: list[tuple[date, str]] = []
+        for table, column in (
+            ("stock_signal_snapshot_tier1", "as_of_date"),
+            ("sec_form4_daily_state", "last_index_date"),
+            ("sec_form4_daily_state", "as_of_date"),
+        ):
+            if table not in tables:
+                continue
+            columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                continue
+            parsed = latest_parsed_db_date(conn, table=table, column=column, asof=asof)
+            if parsed is not None:
+                snapshot_candidates.append((parsed, f"{table}.{column}"))
+        if snapshot_candidates:
+            snapshot_date, snapshot_source = max(snapshot_candidates, key=lambda item: item[0])
         for table, column in (
             ("sec_ownership_submission", "filing_date"),
             ("sec_form4_daily_ingest_log", "filing_date"),
@@ -559,7 +683,8 @@ def validate_form4_source(
     latest_raw = max(raw_dates) if raw_dates else None
     max_raw_lag = int(cfg_get(config, "biotech_refresh.form4_preflight.max_raw_filing_lag_days", 5))
     raw_lag = business_day_age(latest_raw, asof) if latest_raw is not None else None
-    passed = snapshot_date == asof and raw_lag is not None and 0 <= raw_lag <= max_raw_lag
+    expected_date = expected_snapshot_date or asof
+    passed = snapshot_date == expected_date and raw_lag is not None and 0 <= raw_lag <= max_raw_lag
     add_check(
         checks,
         name="form4_source_freshness",
@@ -570,7 +695,9 @@ def validate_form4_source(
         detail="Form 4 snapshot is as-of aligned and raw filing ingestion is within its business-day lag policy",
         evidence={
             "database_path": str(db_path),
+            "expected_snapshot_date": expected_date.isoformat(),
             "snapshot_date": snapshot_date.isoformat() if snapshot_date is not None else None,
+            "snapshot_source": snapshot_source,
             "latest_raw_filing_date": latest_raw.isoformat() if latest_raw is not None else None,
             "raw_filing_lag_business_days": raw_lag,
             "max_raw_filing_lag_business_days": max_raw_lag,
@@ -602,6 +729,14 @@ def main() -> None:
         ),
         base_dir=base_dir,
     )
+    archive_root = resolve_path(
+        cfg_get(
+            config,
+            "source_acceptance.archive_dir",
+            "../output/biotech_index_reports/orchestration/source_acceptance",
+        ),
+        base_dir=base_dir,
+    )
     max_run_age = float(cfg_get(config, "source_acceptance.max_provider_run_age_hours", 48.0))
     max_universe_age = int(cfg_get(config, "source_acceptance.max_universe_age_days", 8))
     checks: list[Check] = []
@@ -627,11 +762,17 @@ def main() -> None:
 
     scores = score_path(config, base_dir=base_dir, asof=asof)
     score_rows = read_csv(scores)
-    candidates = validate_score_lineage(score_rows, checks, asof=asof)
     with sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
+        expected_market_asof = latest_market_snapshot_asof(conn, config, asof=asof)
+        candidates = validate_score_lineage(
+            score_rows,
+            checks,
+            asof=asof,
+            expected_market_asof=expected_market_asof,
+        )
         validate_provider_runs(conn, checks, max_age_hours=max_run_age)
-        snapshot_date = conn.execute("SELECT MAX(asof_date) FROM trial_snapshot_daily").fetchone()[0]
+        snapshot_date = latest_trial_snapshot_asof(conn, asof=asof)
         add_check(
             checks,
             name="ctgov_snapshot_date",
@@ -644,7 +785,13 @@ def main() -> None:
         )
         validate_financial_lineage(conn, candidates, checks, asof=asof)
     validate_positioning_feed_state(positioning_db, checks, max_age_hours=max_run_age)
-    validate_form4_source(config, base_dir=base_dir, checks=checks, asof=asof)
+    validate_form4_source(
+        config,
+        base_dir=base_dir,
+        checks=checks,
+        asof=asof,
+        expected_snapshot_date=expected_market_asof,
+    )
 
     norgate_in_primary = "norgate_us_equities_total_return" in {
         str(cfg_get(config, "market_data_policy.scoring_primary_source", "")),
@@ -678,11 +825,14 @@ def main() -> None:
     blocking = [check.name for check in checks if check.required and check.status != "PASS"]
     advisory = [check.name for check in checks if not check.required and check.status != "PASS"]
     status = "PASS" if not blocking else "FAIL"
+    created_at_utc = datetime.now(timezone.utc)
     payload = {
+        "artifact_family": "biotech_source_acceptance",
+        "schema_version": 2,
         "status": status,
         "acceptance": status,
         "asof_date": asof.isoformat(),
-        "created_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "created_at_utc": created_at_utc.isoformat(),
         "score_path": str(scores),
         "score_sha256": file_sha256(scores),
         "source_policy": {
@@ -705,11 +855,22 @@ def main() -> None:
         "advisories": advisory,
         "checks": [asdict(check) for check in checks],
     }
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    written = persist_acceptance_manifests(
+        latest_path=manifest_path,
+        archive_root=archive_root,
+        asof=asof,
+        created_at_utc=created_at_utc,
+        payload=payload,
+    )
     if blocking:
-        raise RuntimeError(f"Biotech source acceptance failed: {', '.join(blocking)}; manifest={manifest_path}")
-    print(f"Biotech source acceptance PASS: checks={len(checks)} advisories={len(advisory)} manifest={manifest_path}")
+        raise RuntimeError(
+            f"Biotech source acceptance failed: {', '.join(blocking)}; "
+            f"dated_manifest={written['dated']}; archive={written['archive']}"
+        )
+    print(
+        f"Biotech source acceptance PASS: checks={len(checks)} advisories={len(advisory)} "
+        f"dated_manifest={written['dated']} archive={written['archive']}"
+    )
 
 
 if __name__ == "__main__":

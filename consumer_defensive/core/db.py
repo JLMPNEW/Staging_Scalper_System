@@ -229,6 +229,7 @@ CREATE TABLE IF NOT EXISTS dim_specialized_metric (
     purpose TEXT NOT NULL,
     production_status TEXT NOT NULL,
     production_weight REAL NOT NULL DEFAULT 0.0,
+    source_availability_class TEXT NOT NULL DEFAULT 'sec_direct',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

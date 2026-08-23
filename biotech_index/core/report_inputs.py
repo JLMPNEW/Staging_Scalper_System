@@ -61,3 +61,43 @@ def resolve_dated_report_input_csv(
     if configured_path.exists():
         return configured_path
     return configured_path
+
+
+def resolve_market_snapshot_universe_csv(
+    configured_path: Path,
+    *,
+    base_output_dir: Path,
+    requested_asof_date: str,
+    effective_market_asof_date: str,
+    logger: logging.Logger | None = None,
+) -> Path:
+    """Resolve universe membership at report date, not the last market date.
+
+    Weekend and holiday market refreshes roll price collection back to the
+    latest trading day. Universe membership and adjudications remain effective
+    on the requested report date and must not roll back with the prices.
+    """
+    requested_key = compact_asof(requested_asof_date)
+    effective_key = compact_asof(effective_market_asof_date)
+    for label, key in (
+        ("requested_asof_date", requested_key),
+        ("effective_market_asof_date", effective_key),
+    ):
+        if len(key) != 8 or not key.isdigit():
+            raise ValueError(f"Invalid {label}: {key!r}")
+        try:
+            datetime.strptime(key, "%Y%m%d")
+        except ValueError as exc:
+            raise ValueError(f"Invalid {label}: {key!r}") from exc
+    if effective_key > requested_key:
+        raise ValueError(
+            "effective_market_asof_date cannot be after requested_asof_date: "
+            f"{effective_market_asof_date!r} > {requested_asof_date!r}"
+        )
+
+    return resolve_dated_report_input_csv(
+        configured_path,
+        base_output_dir=base_output_dir,
+        asof_date=requested_asof_date,
+        logger=logger,
+    )

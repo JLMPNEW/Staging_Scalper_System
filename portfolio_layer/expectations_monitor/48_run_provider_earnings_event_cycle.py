@@ -111,11 +111,17 @@ def select_events(
     as_of: date,
     universe_by_ticker: dict[str, dict[str, Any]],
     included_tiers: set[str],
-    calendar_source: str,
+    calendar_sources: tuple[str, ...],
     lookback_days: int,
     lookahead_days: int,
     maximum_staleness_days: int,
 ) -> tuple[list[dict[str, Any]], date]:
+    if not calendar_sources:
+        raise ValueError('At least one calendar source is required')
+    source_priority = {
+        source: len(calendar_sources) - index
+        for index, source in enumerate(calendar_sources)
+    }
     required = {
         'run_as_of_date',
         'fetched_at_utc',
@@ -124,7 +130,9 @@ def select_events(
         'fiscal_date_ending',
         'source',
     }
-    latest_by_ticker: dict[str, tuple[tuple[date, str], dict[str, str]]] = {}
+    latest_by_ticker: dict[
+        str, tuple[tuple[date, int, str], dict[str, str]]
+    ] = {}
     latest_calendar_date: date | None = None
     with calendar_path.resolve().open(
         'r', encoding='utf-8-sig', newline=''
@@ -134,7 +142,8 @@ def select_events(
         if missing:
             raise ValueError(f'Earnings calendar missing columns: {missing}')
         for row in reader:
-            if str(row.get('source', '')).strip() != calendar_source:
+            row_source = str(row.get('source', '')).strip()
+            if row_source not in source_priority:
                 continue
             try:
                 run_as_of = _parse_iso_date(
@@ -151,13 +160,18 @@ def select_events(
             ticker = str(row.get('ticker', '')).strip().upper()
             if ticker not in universe_by_ticker:
                 continue
-            key = (run_as_of, str(row.get('fetched_at_utc', '')).strip())
+            key = (
+                run_as_of,
+                source_priority[row_source],
+                str(row.get('fetched_at_utc', '')).strip(),
+            )
             prior = latest_by_ticker.get(ticker)
             if prior is None or key > prior[0]:
                 latest_by_ticker[ticker] = (key, row)
     if latest_calendar_date is None:
         raise ValueError(
-            f'No {calendar_source!r} calendar rows exist on or before {as_of}'
+            f'No configured calendar rows {calendar_sources!r} exist on or before '
+            f'{as_of}'
         )
     staleness = (as_of - latest_calendar_date).days
     if staleness > maximum_staleness_days:
@@ -192,7 +206,7 @@ def select_events(
                 'calendar_fetched_at_utc': str(
                     row.get('fetched_at_utc', '')
                 ).strip(),
-                'calendar_source': calendar_source,
+                'calendar_source': str(row.get('source', '')).strip(),
                 'fiscal_period_end': str(
                     row.get('fiscal_date_ending', '')
                 ).strip(),
@@ -385,13 +399,50 @@ def run_selftest() -> None:
                 'CCC': {'tier': 'tier1', 'source_pipeline': 'test'},
             },
             included_tiers={'tier0', 'tier1'},
-            calendar_source='alpha_vantage_bulk',
+            calendar_sources=('alpha_vantage_bulk', 'carried_forward_prior'),
             lookback_days=2,
             lookahead_days=2,
             maximum_staleness_days=3,
         )
         assert latest == date(2026, 7, 31)
         assert [row['ticker'] for row in rows] == ['AAA']
+
+        write_csv(
+            calendar,
+            fields,
+            [
+                {
+                    'run_as_of_date': '2026-08-17',
+                    'fetched_at_utc': '2026-08-17T22:00:00Z',
+                    'ticker': 'AAA',
+                    'next_earnings_date': '2026-08-21',
+                    'fiscal_date_ending': '2026-06-30',
+                    'source': 'alpha_vantage_bulk',
+                },
+                {
+                    'run_as_of_date': '2026-08-21',
+                    'fetched_at_utc': '2026-08-21T22:00:00Z',
+                    'ticker': 'AAA',
+                    'next_earnings_date': '2026-08-21',
+                    'fiscal_date_ending': '2026-06-30',
+                    'source': 'carried_forward_prior',
+                },
+            ],
+        )
+        rows, latest = select_events(
+            calendar,
+            as_of=date(2026, 8, 21),
+            universe_by_ticker={
+                'AAA': {'tier': 'tier0', 'source_pipeline': 'test'},
+            },
+            included_tiers={'tier0'},
+            calendar_sources=('alpha_vantage_bulk', 'carried_forward_prior'),
+            lookback_days=2,
+            lookahead_days=2,
+            maximum_staleness_days=3,
+        )
+        assert latest == date(2026, 8, 21)
+        assert rows[0]['calendar_source'] == 'carried_forward_prior'
 
         output = root / 'child'
         report = output / 'report.csv'
@@ -533,9 +584,20 @@ def main() -> int:
         raise ValueError('maximum_event_symbols must be positive')
     if max_attempts < 1:
         raise ValueError('max_attempts_per_batch must be positive')
-    calendar_source = str(event_cfg.get('calendar_source', '')).strip()
-    if not calendar_source:
-        raise ValueError('event_cycle.calendar_source is required')
+    raw_calendar_sources = event_cfg.get('calendar_sources')
+    if raw_calendar_sources is None:
+        raw_calendar_sources = [event_cfg.get('calendar_source', '')]
+    if not isinstance(raw_calendar_sources, list):
+        raise ValueError('event_cycle.calendar_sources must be a list')
+    calendar_sources = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in raw_calendar_sources
+            if str(value).strip()
+        )
+    )
+    if not calendar_sources:
+        raise ValueError('event_cycle.calendar_sources is required')
 
     entitlements = load_entitlements(entitlements_path)
     provider_caps = entitlements.get('probe', {}).get('max_symbols_by_provider', {})
@@ -589,7 +651,7 @@ def main() -> int:
         as_of=args.as_of,
         universe_by_ticker=universe_by_ticker,
         included_tiers=included_tiers,
-        calendar_source=calendar_source,
+        calendar_sources=calendar_sources,
         lookback_days=lookback_days,
         lookahead_days=lookahead_days,
         maximum_staleness_days=maximum_staleness,
@@ -615,7 +677,7 @@ def main() -> int:
         'as_of_date': args.as_of.isoformat(),
         'universe_as_of': universe_as_of,
         'included_tiers': sorted(included_tiers),
-        'calendar_source': calendar_source,
+        'calendar_sources': list(calendar_sources),
         'latest_calendar_date': latest_calendar_date.isoformat(),
         'lookback_calendar_days': lookback_days,
         'lookahead_calendar_days': lookahead_days,
@@ -639,7 +701,7 @@ def main() -> int:
             'as_of_date',
             'universe_as_of',
             'included_tiers',
-            'calendar_source',
+            'calendar_sources',
             'latest_calendar_date',
             'lookback_calendar_days',
             'lookahead_calendar_days',

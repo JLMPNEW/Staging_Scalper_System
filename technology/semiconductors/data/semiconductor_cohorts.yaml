@@ -8,6 +8,7 @@ cohorts:
       - AMD
       - INTC
       - ARM
+      - AIP
       - AVGO
       - MRVL
       - ALAB

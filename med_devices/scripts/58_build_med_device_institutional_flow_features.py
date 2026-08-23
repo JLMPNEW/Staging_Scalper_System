@@ -178,13 +178,21 @@ def load_quarterly_facts(conn: Any, *, cutoff: str) -> dict[int, list[dict[str, 
             MAX(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN institutional_ownership_pct END) AS reported_ownership_pct,
             MAX(CASE WHEN COALESCE(manager_count, 0.0) > 1.0 THEN institutional_ownership_delta_pct END) AS reported_delta_pct,
             COUNT(DISTINCT COALESCE(manager_cik, manager_name, accession_nodash)) AS distinct_manager_count
-        FROM fact_sec_13f_holding
-        WHERE report_date <= ?
-          AND report_date >= date(?, '-3 years')
-          AND company_id IS NOT NULL
-          AND COALESCE(put_call, '') = ''
-        GROUP BY company_id, ticker, report_date
-        ORDER BY company_id, report_date DESC
+        FROM fact_sec_13f_holding h
+        WHERE h.report_date <= ?
+          AND h.report_date >= date(?, '-3 years')
+          AND h.company_id IS NOT NULL
+          AND COALESCE(h.put_call, '') = ''
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dim_security s
+              WHERE s.company_id = h.company_id
+                AND COALESCE(s.is_primary_listing, 0) = 1
+                AND COALESCE(TRIM(s.listing_start_date), '') <> ''
+                AND h.report_date < s.listing_start_date
+          )
+        GROUP BY h.company_id, h.ticker, h.report_date
+        ORDER BY h.company_id, h.report_date DESC
         """,
         (cutoff, cutoff),
     ).fetchall()

@@ -49,6 +49,57 @@ MISSING_STATUSES = frozenset(
 DocumentScope = Mapping[tuple[str, str], Mapping[str, str]]
 DirectFilings = Mapping[tuple[str, str], FilingRef]
 DirectDocuments = Mapping[tuple[str, str], tuple[DocumentRef, ...]]
+
+
+def _normalized_consumer_defensive_seal_entries(
+    manifest_json: str,
+    expected_sha256: str,
+    *,
+    label: str,
+) -> dict[str, dict[str, object]]:
+    try:
+        entries = json.loads(manifest_json)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'{label} manifest is invalid') from exc
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError(f'{label} manifest is empty')
+    manifest: dict[str, dict[str, object]] = {}
+    normalized_entries: list[dict[str, object]] = []
+    casefold_paths: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f'{label} entry is invalid')
+        logical = str(entry.get('logical_path') or '')
+        digest = str(entry.get('sha256') or '').lower()
+        object_path = str(entry.get('object_path') or '')
+        try:
+            byte_count = int(entry.get('bytes'))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f'{label} byte count is invalid') from exc
+        if not logical or logical in manifest or logical.casefold() in casefold_paths:
+            raise RuntimeError(f'{label} has duplicate paths')
+        if (
+            not re.fullmatch(r'[0-9a-f]{64}', digest)
+            or byte_count < 0
+            or object_path != f'objects/sha256/{digest}'
+        ):
+            raise RuntimeError(f'{label} entry identity is invalid')
+        normalized = {
+            'logical_path': logical,
+            'object_path': object_path,
+            'bytes': byte_count,
+            'sha256': digest,
+        }
+        manifest[logical] = normalized
+        normalized_entries.append(normalized)
+        casefold_paths.add(logical.casefold())
+    normalized_entries.sort(key=lambda item: str(item['logical_path']))
+    encoded = json.dumps(
+        normalized_entries, sort_keys=True, separators=(',', ':'),
+    ).encode()
+    if hashlib.sha256(encoded).hexdigest() != expected_sha256:
+        raise RuntimeError(f'{label} manifest hash mismatch')
+    return manifest
 MetricScope = Mapping[tuple[str, str], frozenset[str]]
 
 
@@ -123,7 +174,7 @@ def _validate_consumer_defensive_direct_documents(
     provider execution.
     '''
     seal = conn.execute('''SELECT s.seal_relative_path,s.cache_manifest_json,
-        s.cache_manifest_sha256
+        s.cache_manifest_sha256,r.ingestion_config_sha256,r.issuer_scope_sha256
         FROM consumer_defensive_sec_cache_snapshot s
         JOIN consumer_defensive_sec_reconciliation_state r USING(asof_date)
         WHERE s.asof_date=? AND r.status='complete'
@@ -139,55 +190,91 @@ def _validate_consumer_defensive_direct_documents(
         raise RuntimeError(
             'Consumer Defensive direct documents require an exact reconciled seal'
         )
-    try:
-        entries = json.loads(str(seal[1]))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError('Consumer Defensive SEC seal manifest is invalid') from exc
-    if not isinstance(entries, list) or not entries:
-        raise RuntimeError('Consumer Defensive SEC seal manifest is empty')
-    manifest: dict[str, dict[str, object]] = {}
-    normalized_entries: list[dict[str, object]] = []
-    casefold_paths: set[str] = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise RuntimeError('Consumer Defensive SEC seal entry is invalid')
-        logical = str(entry.get('logical_path') or '')
-        digest = str(entry.get('sha256') or '').lower()
-        object_path = str(entry.get('object_path') or '')
-        try:
-            byte_count = int(entry.get('bytes'))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError('Consumer Defensive SEC seal byte count is invalid') from exc
-        if (
-            not logical
-            or logical in manifest
-            or logical.casefold() in casefold_paths
-        ):
-            raise RuntimeError('Consumer Defensive SEC seal has duplicate paths')
-        if (
-            not re.fullmatch(r'[0-9a-f]{64}', digest)
-            or byte_count < 0
-            or object_path != f'objects/sha256/{digest}'
-        ):
-            raise RuntimeError('Consumer Defensive SEC seal entry identity is invalid')
-        normalized = {
-            'logical_path': logical,
-            'object_path': object_path,
-            'bytes': byte_count,
-            'sha256': digest,
-        }
-        manifest[logical] = normalized
-        normalized_entries.append(normalized)
-        casefold_paths.add(logical.casefold())
-    normalized_entries.sort(key=lambda item: str(item['logical_path']))
-    encoded = json.dumps(
-        normalized_entries, sort_keys=True, separators=(',', ':'),
-    ).encode()
-    if hashlib.sha256(encoded).hexdigest() != str(seal[2]):
-        raise RuntimeError('Consumer Defensive SEC seal manifest hash mismatch')
+    manifest = _normalized_consumer_defensive_seal_entries(
+        str(seal[1]), str(seal[2]), label='Consumer Defensive SEC seal'
+    )
     sealed_root = resolve_sec_seal_root(
         cache_dir, str(seal[0]), expected_asof=asof_date
     )
+    historical_table_exists = conn.execute(
+        '''SELECT 1 FROM sqlite_master WHERE type='table'
+           AND name='stage6b_historical_document_snapshot_run' '''
+    ).fetchone() is not None
+    historical_seal = (
+        conn.execute(
+            '''SELECT snapshot_run_id,manifest_json,manifest_sha256,seal_relative_path
+               FROM stage6b_historical_document_snapshot_run
+               WHERE asof_date=? AND status='PASS'
+                 AND target_document_count=hydrated_document_count
+                 AND ingestion_config_sha256=? AND issuer_scope_sha256=?
+               ORDER BY snapshot_run_id DESC LIMIT 1''',
+            (asof_date, str(seal[3]), str(seal[4])),
+        ).fetchone()
+        if historical_table_exists else None
+    )
+    historical_manifest: dict[str, dict[str, object]] = {}
+    historical_root: Path | None = None
+    historical_run_id: int | None = None
+    if historical_seal is not None:
+        historical_run_id = int(historical_seal[0])
+        historical_manifest = _normalized_consumer_defensive_seal_entries(
+            str(historical_seal[1]), str(historical_seal[2]),
+            label='Consumer Defensive Stage 6B historical seal',
+        )
+        historical_root = resolve_filesystem_path(
+            cache_dir / str(historical_seal[3]), strict=True
+        )
+        try:
+            historical_root.relative_to(resolve_filesystem_path(cache_dir, strict=True))
+        except ValueError as exc:
+            raise RuntimeError(
+                'Consumer Defensive Stage 6B historical seal escapes cache root'
+            ) from exc
+    event_table_exists = conn.execute(
+        '''SELECT 1 FROM sqlite_master WHERE type='table'
+           AND name='stage6b_event_document_snapshot_run' '''
+    ).fetchone() is not None
+    event_seal = (
+        conn.execute(
+            '''SELECT event_snapshot_run_id,manifest_json,manifest_sha256,
+                      seal_relative_path,target_filing_count,
+                      indexed_filing_count,selected_document_count
+               FROM stage6b_event_document_snapshot_run
+               WHERE asof_date=? AND status='PASS'
+                 AND target_filing_count=indexed_filing_count
+                 AND ingestion_config_sha256=? AND issuer_scope_sha256=?
+               ORDER BY event_snapshot_run_id DESC LIMIT 1''',
+            (asof_date, str(seal[3]), str(seal[4])),
+        ).fetchone()
+        if event_table_exists else None
+    )
+    event_manifest: dict[str, dict[str, object]] = {}
+    event_root: Path | None = None
+    event_run_id: int | None = None
+    if event_seal is not None:
+        event_run_id = int(event_seal[0])
+        event_manifest = _normalized_consumer_defensive_seal_entries(
+            str(event_seal[1]), str(event_seal[2]),
+            label='Consumer Defensive Stage 6B event seal',
+        )
+        event_root = resolve_filesystem_path(
+            cache_dir / str(event_seal[3]), strict=True
+        )
+        try:
+            event_root.relative_to(resolve_filesystem_path(cache_dir, strict=True))
+        except ValueError as exc:
+            raise RuntimeError(
+                'Consumer Defensive Stage 6B event seal escapes cache root'
+            ) from exc
+        persisted_event_documents = int(conn.execute(
+            '''SELECT COUNT(*) FROM stage6b_event_document_snapshot
+               WHERE event_snapshot_run_id=?''',
+            (event_run_id,),
+        ).fetchone()[0])
+        if persisted_event_documents != int(event_seal[6]):
+            raise RuntimeError(
+                'Consumer Defensive Stage 6B event snapshot is incomplete'
+            )
     cutoff = asof_date + 'T23:59:59Z'
     normalized_filings: dict[tuple[str, str], FilingRef] = {}
     for raw_key, filing in direct_filings.items():
@@ -226,58 +313,147 @@ def _validate_consumer_defensive_direct_documents(
                 )
             seen_names.add(document_name.casefold())
             primary_count += int(document.is_primary)
-            bridge_rows = conn.execute('''SELECT d.issuer_cik,d.primary_document,
-                d.content_sha256,d.hydration_status,d.accepted_at,d.source_id
-                FROM bridge_sec_filing_document_company d
-                JOIN bridge_sec_filing_company b
-                  ON b.accession_number=d.accession_number
-                 AND b.issuer_company_id=d.issuer_company_id
-                WHERE d.issuer_ticker=? AND d.accession_number=?
-                  AND d.primary_document=? AND d.accepted_at<=?
+            association = conn.execute('''SELECT f.archive_cik,
+                f.primary_document,f.accepted_at,f.source_id,f.issuer_company_id
+                FROM consumer_defensive_sec_parser_filing_input f
+                WHERE f.ticker=? AND f.accession_number=? AND f.accepted_at<=?
                   AND (SELECT e.event_type
                        FROM sec_filing_company_association_event e
-                       WHERE e.accession_number=b.accession_number
-                         AND e.issuer_company_id=b.issuer_company_id
+                       WHERE e.accession_number=f.accession_number
+                         AND e.issuer_company_id=f.issuer_company_id
                          AND e.effective_asof<=?
                        ORDER BY e.effective_asof DESC,e.event_id DESC LIMIT 1)
                       IN ('observed','reactivated')''',
-                (
-                    normalized_key[0], normalized_key[1], document_name,
-                    cutoff, cutoff,
-                ),
+                (normalized_key[0], normalized_key[1], cutoff, cutoff),
             ).fetchall()
-            if len(bridge_rows) != 1 or str(bridge_rows[0][3]) != 'hydrated':
+            if len(association) != 1:
                 raise ValueError(
-                    'Consumer Defensive direct document is not an active '
-                    'hydrated PIT document: '
-                    f'{normalized_key[0]}/{normalized_key[1]}/{document_name}'
+                    'Consumer Defensive direct document is not an active PIT '
+                    f'association: {normalized_key[0]}/{normalized_key[1]}'
                 )
-            bridge = bridge_rows[0]
+            active = association[0]
             filing_cik = str(filing.archive_cik or filing.cik or '').zfill(10)
             if (
-                str(bridge[0] or '').zfill(10) != filing_cik
-                or str(bridge[1]) != document_name
-                or str(bridge[4] or '') != filing.accepted_at
+                str(active[0] or '').zfill(10) != filing_cik
+                or str(active[2] or '') != filing.accepted_at
+                or (
+                    document.is_primary
+                    and str(active[1]) != document_name
+                )
             ):
                 raise ValueError(
-                    'Consumer Defensive direct document metadata differs from '
-                    f'the active PIT filing: {normalized_key[0]}/'
+                    'Consumer Defensive direct document is not an active hydrated '
+                    'PIT document or governed event association: '
+                    f'{normalized_key[0]}/'
                     f'{normalized_key[1]}/{document_name}'
                 )
+            event = None
+            if event_run_id is not None:
+                event = conn.execute(
+                    '''SELECT archive_cik,document_name,accepted_at,
+                              content_sha256,bytes,object_path,logical_path,
+                              document_role
+                       FROM stage6b_event_document_snapshot
+                       WHERE event_snapshot_run_id=? AND ticker=?
+                         AND accession_number=? AND document_name=?''',
+                    (
+                        event_run_id, normalized_key[0], normalized_key[1],
+                        document_name,
+                    ),
+                ).fetchone()
             logical = (
-                f'filings/{str(bridge[0]).zfill(10)}/'
+                str(event[6]) if event is not None else
+                f'filings/{str(active[0]).zfill(10)}/'
                 f'{normalized_key[1]}/{document_name}'
             )
-            entry = manifest.get(logical)
-            expected_hash = str(bridge[2] or '').lower()
+            entry = (
+                event_manifest.get(logical) if event is not None
+                else manifest.get(logical)
+            )
+            trusted_root = sealed_root
+            source_kind = 'stage4_sealed_cas'
+            expected_hash = ''
+            bridge = conn.execute('''SELECT content_sha256,hydration_status,
+                accepted_at,primary_document FROM bridge_sec_filing_document_company
+                WHERE issuer_ticker=? AND accession_number=?
+                  AND issuer_company_id=? AND primary_document=?''',
+                (
+                    normalized_key[0], normalized_key[1], int(active[4]),
+                    document_name,
+                ),
+            ).fetchone()
+            if event is not None:
+                if event_root is None or any((
+                    str(event[0]).zfill(10) != filing_cik,
+                    str(event[1]) != document_name,
+                    str(event[2]) != filing.accepted_at,
+                    (
+                        str(event[7]) == 'primary_event_filing'
+                    ) != bool(document.is_primary),
+                    entry is None,
+                    str(entry.get('object_path') if entry else '')
+                        != str(event[5]),
+                    int(entry.get('bytes') if entry else -1) != int(event[4]),
+                )):
+                    raise ValueError(
+                        'Consumer Defensive event exhibit metadata differs '
+                        f'from its exact seal: {logical}'
+                    )
+                expected_hash = str(event[3] or '').lower()
+                trusted_root = event_root
+                source_kind = 'stage6b_event_sealed_cas'
+            elif (
+                entry is not None
+                and bridge is not None
+                and str(bridge[1]) == 'hydrated'
+                and str(bridge[2] or '') == filing.accepted_at
+                and str(bridge[3]) == document_name
+            ):
+                expected_hash = str(bridge[0] or '').lower()
+            else:
+                historical = None
+                if historical_run_id is not None:
+                    historical = conn.execute('''SELECT archive_cik,document_name,
+                        accepted_at,content_sha256,bytes,object_path,logical_path
+                        FROM stage6b_historical_document_snapshot
+                        WHERE snapshot_run_id=? AND ticker=? AND accession_number=?
+                          AND document_name=?''',
+                        (
+                            historical_run_id, normalized_key[0], normalized_key[1],
+                            document_name,
+                        ),
+                    ).fetchone()
+                if historical is None or historical_root is None:
+                    raise ValueError(
+                        'Consumer Defensive direct document is absent from both '
+                        f'exact seals: {logical}'
+                    )
+                entry = historical_manifest.get(logical)
+                expected_hash = str(historical[3] or '').lower()
+                if any((
+                    str(historical[0]).zfill(10) != filing_cik,
+                    str(historical[1]) != document_name,
+                    str(historical[2]) != filing.accepted_at,
+                    str(historical[6]) != logical,
+                    entry is None,
+                    str(entry.get('object_path') if entry else '')
+                        != str(historical[5]),
+                    int(entry.get('bytes') if entry else -1) != int(historical[4]),
+                )):
+                    raise ValueError(
+                        'Consumer Defensive historical document metadata differs '
+                        f'from its exact seal: {logical}'
+                    )
+                trusted_root = historical_root
+                source_kind = 'stage6b_historical_sealed_cas'
             if entry is None or any((
                 str(entry.get('sha256') or '') != expected_hash,
                 str(document.content_sha256).lower() != expected_hash,
                 int(entry.get('bytes') or -1) != document.file_size,
             )):
                 raise ValueError(
-                    'Consumer Defensive direct document does not match the '
-                    f'exact Stage4 seal: {logical}'
+                    'Consumer Defensive direct document does not match the exact '
+                    f'Stage4 seal or a governed historical/event Stage6B seal: {logical}'
                 )
             try:
                 local_path = resolve_filesystem_path(
@@ -294,13 +470,13 @@ def _validate_consumer_defensive_direct_documents(
             ):
                 raise ValueError(
                     'Consumer Defensive direct document local bytes differ '
-                    f'from the Stage4 seal: {logical}'
+                    f'from the governed seal: {logical}'
                 )
             sealed_path = resolve_filesystem_path(
-                sealed_root / str(entry.get('object_path') or ''), strict=True
+                trusted_root / str(entry.get('object_path') or ''), strict=True
             )
             try:
-                sealed_path.relative_to(sealed_root)
+                sealed_path.relative_to(trusted_root)
             except ValueError as exc:
                 raise RuntimeError('Consumer Defensive sealed object escapes') from exc
             if (
@@ -331,7 +507,7 @@ def _validate_consumer_defensive_direct_documents(
                 # full-submission SGML. Never trust a transport-manifest flag
                 # to switch provider routing for otherwise valid sealed bytes.
                 is_full_submission=False,
-                source_kind='stage4_sealed_cas',
+                source_kind=source_kind,
             ))
         if (
             primary_count != 1
@@ -1017,9 +1193,13 @@ def build_plan(
     enable_arelle: bool = True,
     enable_edgartools: bool = True,
     enable_pdf_ocr: bool = False,
-    max_pdf_pages: int = 250,
-    max_pdf_bytes: int = 25_000_000,
+    max_pdf_pages: int = 300,
+    max_pdf_bytes: int = 50_000_000,
     pdf_extraction_timeout_seconds: float = 30.0,
+    max_ocr_pages: int = 12,
+    ocr_dpi: int = 144,
+    ocr_page_timeout_seconds: float = 8.0,
+    max_ocr_pixels_per_page: int = 20_000_000,
     document_scope: DocumentScope | None = None,
     direct_filings: DirectFilings | None = None,
     direct_documents: DirectDocuments | None = None,
@@ -1027,6 +1207,18 @@ def build_plan(
     catalog_documents_enabled: bool = True,
     expected_ingestion_config_sha256: str | None = None,
 ) -> tuple[list[WorkItem], PlanSummary]:
+    if max_pdf_pages < 1 or max_pdf_bytes < 1:
+        raise ValueError('PDF page and byte limits must be positive')
+    if pdf_extraction_timeout_seconds <= 0:
+        raise ValueError('PDF extraction timeout must be positive')
+    if not 1 <= max_ocr_pages <= max_pdf_pages:
+        raise ValueError('OCR page limit must be within the PDF page limit')
+    if not 72 <= ocr_dpi <= 600:
+        raise ValueError('OCR DPI must be in [72, 600]')
+    if not 0 < ocr_page_timeout_seconds <= pdf_extraction_timeout_seconds:
+        raise ValueError('OCR page timeout must be positive and within total timeout')
+    if max_ocr_pixels_per_page < 1:
+        raise ValueError('OCR pixel limit must be positive')
     if registry.model_family == 'consumer_defensive':
         validate_consumer_defensive_catalog_contract(
             conn,asof_date=asof_date,
@@ -1181,6 +1373,10 @@ def build_plan(
                 max_pdf_pages=max_pdf_pages,
                 max_pdf_bytes=max_pdf_bytes,
                 pdf_extraction_timeout_seconds=(pdf_extraction_timeout_seconds),
+                max_ocr_pages=max_ocr_pages,
+                ocr_dpi=ocr_dpi,
+                ocr_page_timeout_seconds=ocr_page_timeout_seconds,
+                max_ocr_pixels_per_page=max_ocr_pixels_per_page,
             )
             if item.work_key in completed:
                 skipped_completed += 1

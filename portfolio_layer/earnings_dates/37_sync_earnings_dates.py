@@ -325,6 +325,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--as-of", default="", help="Run directory date (default: latest sealed stocks_scores)")
     parser.add_argument("--force", action="store_true", help="Overwrite an existing earnings artifact for the run")
+    parser.add_argument(
+        "--historical-catchup",
+        action="store_true",
+        help="Disable current provider calls and use only history captured on/before --as-of.",
+    )
     parser.add_argument("--refresh-av-cache", action="store_true", help="Ignore today's cached bulk calendar")
     parser.add_argument("--disable-yahoo", action="store_true")
     parser.add_argument("--disable-gemini", action="store_true")
@@ -332,6 +337,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-gemini-calls", type=int, default=-1, help="-1 uses the config value")
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
+
+
+def live_provider_refresh_allowed(
+    *,
+    run_as_of: str,
+    historical_catchup: bool,
+    today: date | None = None,
+) -> bool:
+    """Provider calls are allowed only for the actual current calendar date."""
+    current_date = today or date.today()
+    return not historical_catchup and date.fromisoformat(run_as_of) == current_date
+
+
+def history_rows_available_asof(
+    rows: list[dict[str, str]],
+    *,
+    as_of: str,
+) -> list[dict[str, str]]:
+    """Exclude replayed/future-captured rows from a historical earnings view."""
+    cutoff = date.fromisoformat(as_of)
+    available: list[dict[str, str]] = []
+    for row in rows:
+        row_as_of = str(row.get("run_as_of_date", "")).strip()
+        fetched_at = str(row.get("fetched_at_utc", "")).strip()
+        try:
+            row_date = date.fromisoformat(row_as_of)
+            fetched_date = datetime.fromisoformat(
+                fetched_at.replace("Z", "+00:00")
+            ).date()
+        except ValueError:
+            continue
+        if row_date <= cutoff and fetched_date <= cutoff:
+            available.append(row)
+    return available
 
 
 def order_universe_entries(
@@ -427,14 +466,22 @@ def main() -> int:
     )
 
     fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    floor = date.today()
+    run_date = date.fromisoformat(run_as_of)
+    provider_network_calls_allowed = live_provider_refresh_allowed(
+        run_as_of=run_as_of,
+        historical_catchup=bool(args.historical_catchup),
+    )
+    roll_forward_only = not provider_network_calls_allowed
+    floor = run_date if roll_forward_only else date.today()
 
     # Provider 1: one bulk call for the whole universe.
     av_error: str | None = None
     calendar: dict[str, list[dict[str, str]]] = {}
     av_cache_path = paths.cache_dir / "earnings_dates" / f"alpha_vantage_earnings_calendar_{floor.isoformat()}.csv"
     av_key = env_key(list(cfg_get(config, "earnings_dates.alpha_vantage.api_key_env", ["ALPHAVANTAGE_API_KEY"])))
-    if av_key:
+    if roll_forward_only:
+        av_error = "roll_forward_only_network_disabled"
+    elif av_key:
         raw_csv, av_error = fetch_alpha_vantage_bulk(
             api_key=av_key,
             horizon=str(cfg_get(config, "earnings_dates.alpha_vantage.horizon", "12month")),
@@ -451,13 +498,21 @@ def main() -> int:
         LOGGER.warning("Alpha Vantage bulk calendar unavailable: %s", av_error)
 
     # Fallback budgets (free-tier discipline).
-    yahoo_enabled = bool(cfg_get(config, "earnings_dates.yahoo.enabled", True)) and not args.disable_yahoo
+    yahoo_enabled = (
+        provider_network_calls_allowed
+        and bool(cfg_get(config, "earnings_dates.yahoo.enabled", True))
+        and not args.disable_yahoo
+    )
     yahoo_budget = int(args.max_yahoo_calls)
     if yahoo_budget < 0:
         yahoo_budget = int(cfg_get(config, "earnings_dates.yahoo.max_calls_per_run", 400))
     yahoo_pause = float(cfg_get(config, "earnings_dates.yahoo.request_pause_sec", 1.0))
 
-    gemini_enabled = bool(cfg_get(config, "earnings_dates.gemini.enabled", True)) and not args.disable_gemini
+    gemini_enabled = (
+        provider_network_calls_allowed
+        and bool(cfg_get(config, "earnings_dates.gemini.enabled", True))
+        and not args.disable_gemini
+    )
     gemini_budget = int(args.max_gemini_calls)
     if gemini_budget < 0:
         gemini_budget = int(cfg_get(config, "earnings_dates.gemini.max_calls_per_run", 15))
@@ -470,7 +525,12 @@ def main() -> int:
 
     history_path = paths.output_dir / HISTORY_RELATIVE_PATH
     history_rows = load_history(history_path)
-    prior_dates = latest_prior_dates(history_rows)
+    prior_source_rows = (
+        history_rows_available_asof(history_rows, as_of=run_as_of)
+        if roll_forward_only
+        else history_rows
+    )
+    prior_dates = latest_prior_dates(prior_source_rows)
 
     # Existing holdings carry immediate portfolio risk. Spend bounded fallback
     # calls on them before investable candidates, then on the remaining universe.
@@ -597,6 +657,9 @@ def main() -> int:
         "generated_at": fetched_at,
         "acceptance": "PASS",
         "advisory_only": True,
+        "historical_catchup": bool(args.historical_catchup),
+        "roll_forward_only": roll_forward_only,
+        "provider_network_calls_allowed": provider_network_calls_allowed,
         "universe_size": len(rows),
         "investable_count": len(investable_rows),
         "investable_with_date": len(dated_investable),
@@ -630,7 +693,11 @@ def main() -> int:
                 if ledger_path is not None and ledger_manifest_path is not None
                 else {}
             ),
-            **({"alpha_vantage_bulk_cache": sha256_file(av_cache_path)} if av_cache_path.exists() else {}),
+            **(
+                {"alpha_vantage_bulk_cache": sha256_file(av_cache_path)}
+                if provider_network_calls_allowed and av_cache_path.exists()
+                else {}
+            ),
         },
         "outputs_sha256": {RUN_ARTIFACT_NAME: sha256_file(artifact_path)},
         "source_sha256": source_hashes(PACKAGE_ROOT, SOURCE_FILES),

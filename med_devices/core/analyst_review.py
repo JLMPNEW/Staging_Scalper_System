@@ -869,9 +869,9 @@ def review_categories_for_item(
         categories.append("special_situation_or_binary_risk")
     if score >= high_score_threshold and not int_flag(value_from(item, "portfolio_candidate_gate", 0)):
         categories.append("high_score_blocked")
-    tier1_safety_gate = value_from(item, "passed_tier1_safety_gate")
-    if tier1_safety_gate is not None and int_flag(tier1_safety_gate) == 0:
-        categories.append("tier1_safety_failed")
+    # Tier-1 is a selective admission gate, not a per-name review event. Specific
+    # actionable causes (regulatory, reimbursement, binary risk, or high-score block)
+    # are categorized independently below.
     if int_flag(value_from(item, "hard_red_flag", 0)):
         categories.append("hard_red_flag")
     if int_flag(value_from(item, "unknown_reimbursement_flag", 0)):

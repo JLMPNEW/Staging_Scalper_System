@@ -50,10 +50,20 @@ ACTIVATION_STATUS_FULLY_VALIDATED = "ACTIVATED_FULL_PORTFOLIO_VALIDATED"
 PRODUCTION_POLICY_STATUS_ACTIVE = "ACTIVE"
 
 
-def production_policy_source_hashes() -> dict[str, str]:
+def source_file_sha256(path: Path) -> str:
+    """Hash source semantics without platform-specific newline noise."""
+    payload = (
+        path.read_bytes()
+        .replace(bytes((13, 10)), bytes((10,)))
+        .replace(bytes((13,)), bytes((10,)))
+    )
+    return sha256(payload).hexdigest()
+
+
+def production_policy_source_paths() -> dict[str, Path]:
     package_root = Path(__file__).resolve().parent
     industrials_root = package_root.parent
-    paths = {
+    return {
         "stage12_activation.py": package_root / "stage12_activation.py",
         "stage12_activation_transaction.py": (
             package_root / "stage12_activation_transaction.py"
@@ -89,7 +99,45 @@ def production_policy_source_hashes() -> dict[str, str]:
             package_root / "scripts" / "20_validate_machinery_portfolio_adapter.py"
         ),
     }
-    return {name: file_sha256(path) for name, path in paths.items()}
+
+
+def production_policy_source_hashes() -> dict[str, str]:
+    """Return canonical source hashes for newly written activation seals."""
+    return {
+        name: source_file_sha256(path)
+        for name, path in production_policy_source_paths().items()
+    }
+
+
+def changed_production_policy_sources(expected: Mapping[str, object]) -> list[str]:
+    """Compare a source seal while remaining compatible with legacy raw hashes.
+
+    Activation states written before canonical newline hashing store the raw-byte
+    digest. Accept that digest when the current bytes still match, or the
+    canonical digest when only platform line endings changed. Any semantic byte
+    change remains blocking.
+    """
+    paths = production_policy_source_paths()
+    changed: list[str] = []
+    for name in sorted(set(expected) | set(paths)):
+        path = paths.get(name)
+        if path is None or not path.is_file():
+            changed.append(name)
+            continue
+        sealed = str(expected.get(name) or "")
+        raw = path.read_bytes()
+        normalized = raw.replace(bytes((13, 10)), bytes((10,))).replace(
+            bytes((13,)), bytes((10,))
+        )
+        accepted = {
+            sha256(raw).hexdigest(),
+            sha256(normalized).hexdigest(),
+            sha256(normalized.replace(bytes((10,)), bytes((13, 10)))).hexdigest(),
+            sha256(normalized.replace(bytes((10,)), bytes((13,)))).hexdigest(),
+        }
+        if sealed not in accepted:
+            changed.append(name)
+    return changed
 
 
 class ActivationPaths:
@@ -418,8 +466,13 @@ def apply_active_production_policy(
                 state_paths.activation_state_json
             ),
         }
-    if state.get("production_source_sha256") != (production_policy_source_hashes()):
-        raise ValueError("Machinery production policy source changed")
+    expected_source_hashes = state.get("production_source_sha256")
+    expected = expected_source_hashes if isinstance(expected_source_hashes, Mapping) else {}
+    changed = changed_production_policy_sources(expected)
+    if changed:
+        raise ValueError(
+            "Machinery production policy source changed: " + ",".join(changed)
+        )
     active_root = _active_cycle_root(state, default_root=governance_root)
     active_paths = Stage12Paths(active_root)
     lock, _ = _sealed_governance(

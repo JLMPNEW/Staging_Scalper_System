@@ -32,7 +32,8 @@ from biotech_index.core.pipeline_guards import (
     validate_nonempty_selection,
     validate_requested_tickers,
 )
-from biotech_index.core.report_inputs import resolve_dated_report_input_csv
+from biotech_index.core.report_inputs import resolve_market_snapshot_universe_csv
+from biotech_index.core.security_identity import load_security_identity_rules, security_history_start
 
 
 LOGGER = logging.getLogger("sync_market_data_ib")
@@ -1052,6 +1053,11 @@ def main() -> None:
     config = load_yaml(config_path)
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = load_security_identity_rules(identity_registry_path)
     global SOURCE
     SOURCE = str(cfg_get(config, "ib_market_data.source", SOURCE) or SOURCE).strip() or SOURCE
     if SOURCE == "yahoo_adjusted":
@@ -1104,10 +1110,11 @@ def main() -> None:
         cfg_get(config, "biotech_scoring.output_dir", "../output/biotech_index_reports"),
         base_dir=base_dir,
     )
-    final_universe_csv = resolve_dated_report_input_csv(
+    final_universe_csv = resolve_market_snapshot_universe_csv(
         configured_final_universe_csv,
         base_output_dir=report_output_dir,
-        asof_date=asof_date.isoformat(),
+        requested_asof_date=asof_decision.requested_asof.isoformat(),
+        effective_market_asof_date=asof_date.isoformat(),
         logger=LOGGER,
     )
     if start_date is not None and start_date > asof_date:
@@ -1276,10 +1283,13 @@ def main() -> None:
             csv_rows: list[dict[str, Any]] = []
             for idx, company in enumerate(companies, start=1):
                 try:
+                    company_history_start = security_history_start(
+                        security_identity_rules, company.ticker, default=history_start
+                    )
                     existing_bars = [] if full_refresh else load_bars_from_db(
                         conn,
                         company.ticker,
-                        start_date=history_start,
+                        start_date=company_history_start,
                         asof_date=asof_date,
                     )
                     latest_date = None if full_refresh else latest_bar_date(conn, company.ticker, asof_date=asof_date)
@@ -1324,7 +1334,7 @@ def main() -> None:
                                 use_rth=use_rth,
                                 provisional_asof=asof_decision.provisional_asof,
                             )
-                            fetched_bars = filter_bars_from_start(fetched_bars, start_date)
+                            fetched_bars = filter_bars_from_start(fetched_bars, company_history_start)
                             if not full_refresh and existing_bars and fetched_bars and (
                                 adjustment_mode_mismatch(existing_bars, fetched_bars)
                                 or adjustment_discontinuity(existing_bars, fetched_bars)
@@ -1349,7 +1359,7 @@ def main() -> None:
                                     use_rth=use_rth,
                                     provisional_asof=asof_decision.provisional_asof,
                                 )
-                                fetched_bars = filter_bars_from_start(fetched_bars, start_date)
+                                fetched_bars = filter_bars_from_start(fetched_bars, company_history_start)
                                 existing_bars = []
                                 replace_bar_tickers.add(company.ticker)
                             all_bars.extend(fetched_bars)

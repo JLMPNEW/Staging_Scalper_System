@@ -35,9 +35,11 @@ from industrials.machinery.stage12_activation_transaction import (
     PORTFOLIO_RESUME_GROUPS,
     REQUIRED_PORTFOLIO_GROUPS,
     REUSABLE_PORTFOLIO_PREFIX_GROUPS,
+    portfolio_smoke_runtime_flags,
     render_portfolio_activation_config,
     resolve_stage12_python,
     run_activation_transaction,
+    requires_historical_catchup,
     validate_completed_session,
     validate_portfolio_smoke,
     validate_wall_clock,
@@ -195,6 +197,41 @@ def test_activation_requires_completed_same_day_session() -> None:
         "2026-07-24",
         now_et=datetime.fromisoformat("2026-07-27T09:00:00-04:00"),
     )
+
+
+def test_historical_activation_suppresses_current_provider_event_cycle() -> None:
+    now_et = datetime.fromisoformat("2026-08-20T17:00:00-04:00")
+
+    assert requires_historical_catchup("2026-08-17", now_et=now_et)
+    assert not requires_historical_catchup("2026-08-20", now_et=now_et)
+
+
+def test_resumed_portfolio_smoke_is_incremental() -> None:
+    flags = portfolio_smoke_runtime_flags(
+        asof="2026-08-17",
+        resume_portfolio_smoke=True,
+        reuse_risk_price_data=True,
+        now_et=datetime.fromisoformat("2026-08-20T17:00:00-04:00"),
+    )
+
+    assert flags == [
+        "--historical-catchup",
+        "--groups",
+        ",".join(PORTFOLIO_RESUME_GROUPS),
+    ]
+    assert "--force" not in flags
+    assert "--reuse-risk-price-data" not in flags
+
+
+def test_new_portfolio_smoke_remains_forced() -> None:
+    flags = portfolio_smoke_runtime_flags(
+        asof="2026-08-20",
+        resume_portfolio_smoke=False,
+        reuse_risk_price_data=True,
+        now_et=datetime.fromisoformat("2026-08-20T17:00:00-04:00"),
+    )
+
+    assert flags == ["--force", "--reuse-risk-price-data"]
 
 
 def test_portfolio_activation_renderer_changes_only_reviewed_fields() -> None:
@@ -632,7 +669,9 @@ def test_resume_contract_reruns_monitor_and_downstream_groups() -> None:
 
     resume = list(PORTFOLIO_RESUME_GROUPS)
     assert reusable.isdisjoint(resume)
-    assert resume.index("ledger") < resume.index("monitor")
+    assert resume.index("ledger") < resume.index("bootstrap_final")
+    assert resume.index("bootstrap_final") < resume.index("earnings")
+    assert resume.index("earnings") < resume.index("monitor")
     assert resume.index("monitor") < resume.index("monitor_filter")
     assert resume.index("monitor_filter") < resume.index("bl")
     assert resume.index("bl") < resume.index("sleeves")

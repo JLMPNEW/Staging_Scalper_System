@@ -126,6 +126,14 @@ def load_latest_snapshots(conn: Any, *, asof: str) -> dict[int, dict[str, Any]]:
             FROM fact_ibkr_borrow_snapshot s
             WHERE s.company_id IS NOT NULL
               AND s.asof_date <= ?
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM dim_security identity_security
+                    WHERE identity_security.company_id = s.company_id
+                      AND COALESCE(identity_security.is_primary_listing, 0) = 1
+                      AND COALESCE(TRIM(identity_security.listing_start_date), '') <> ''
+                      AND s.asof_date < identity_security.listing_start_date
+                  )
         )
         SELECT *
         FROM ranked

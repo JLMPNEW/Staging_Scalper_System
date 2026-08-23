@@ -220,6 +220,8 @@ class FinancialFeaturePolicy:
     winsor_high_pct: float
     ttm_sanity_min_annual_ratio: float
     ttm_sanity_max_annual_ratio: float
+    financial_history_start_by_ticker: dict[str, str] = field(default_factory=dict)
+    expected_precommercial_missing_revenue: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -418,6 +420,29 @@ def cfg_weight_map(config: dict[str, Any], dotted_key: str, default: dict[str, f
     return out
 
 
+def cfg_ticker_string_map(
+    config: dict[str, Any],
+    dotted_key: str,
+    *,
+    require_iso_date: bool = False,
+) -> dict[str, str]:
+    raw = cfg_get(config, dotted_key, {})
+    if raw in (None, ""):
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"Config value must be a ticker mapping: {dotted_key}")
+    out: dict[str, str] = {}
+    for raw_ticker, raw_value in raw.items():
+        ticker = normalize_ticker(raw_ticker)
+        value = str(raw_value or "").strip()
+        if not ticker or not value:
+            raise ValueError(f"Config ticker mapping contains a blank key/value: {dotted_key}")
+        if require_iso_date and parse_date(value) is None:
+            raise ValueError(f"Config value must be an ISO date: {dotted_key}.{ticker}={value!r}")
+        out[ticker] = value
+    return out
+
+
 def financial_feature_policy(config: dict[str, Any]) -> FinancialFeaturePolicy:
     share_count_sources_raw = cfg_get(config, "financial_features.share_count_sources", ["ib_market_data", "yahoo_finance_backup"])
     if isinstance(share_count_sources_raw, list):
@@ -486,6 +511,15 @@ def financial_feature_policy(config: dict[str, Any]) -> FinancialFeaturePolicy:
         winsor_high_pct=cfg_float(config, "financial_features.winsor_high_pct", 0.90),
         ttm_sanity_min_annual_ratio=cfg_float(config, "financial_features.ttm_sanity_min_annual_ratio", 0.20),
         ttm_sanity_max_annual_ratio=cfg_float(config, "financial_features.ttm_sanity_max_annual_ratio", 3.00),
+        financial_history_start_by_ticker=cfg_ticker_string_map(
+            config,
+            "financial_features.financial_history_start_by_ticker",
+            require_iso_date=True,
+        ),
+        expected_precommercial_missing_revenue=cfg_ticker_string_map(
+            config,
+            "financial_features.expected_precommercial_missing_revenue",
+        ),
     )
 
 
@@ -592,7 +626,13 @@ def load_price_selection(
     )
 
 
-def load_financial_rows(conn: Any, companies: list[Company], *, asof: date) -> dict[int, list[FinancialRow]]:
+def load_financial_rows(
+    conn: Any,
+    companies: list[Company],
+    *,
+    asof: date,
+    history_start_by_ticker: dict[str, str] | None = None,
+) -> dict[int, list[FinancialRow]]:
     company_ids = [company.company_id for company in companies]
     if not company_ids:
         return {}
@@ -614,7 +654,13 @@ def load_financial_rows(conn: Any, companies: list[Company], *, asof: date) -> d
         [*company_ids, asof.isoformat(), asof.isoformat()],
     ).fetchall()
     out: dict[int, list[FinancialRow]] = {}
+    company_by_id = {company.company_id: company for company in companies}
+    history_start_by_ticker = history_start_by_ticker or {}
     for row in rows:
+        company = company_by_id[int(row["company_id"])]
+        history_start = history_start_by_ticker.get(company.ticker, "")
+        if history_start and str(row["period_end"] or "") < history_start:
+            continue
         values = {metric: to_float(row[metric]) for metric in [*FLOW_METRICS, *BALANCE_METRICS]}
         item = FinancialRow(
             company_id=int(row["company_id"]),
@@ -1784,7 +1830,10 @@ def replace_data_quality_issues(conn: Any, rows: list[FeatureRow], *, asof: str)
     for row in rows:
         if row.data_quality_status == "pass":
             continue
-        severity = "error" if row.data_quality_status == "fail" else "warning"
+        expected_reason = str(row.payload.get("expected_missing_data_reason") or "")
+        issue_type = "expected_precommercial_missing_revenue" if expected_reason else row.data_quality_status
+        severity = "warning" if expected_reason else ("error" if row.data_quality_status == "fail" else "warning")
+        detail = expected_reason or ",".join(row.missing_fields) or row.ttm_method
         issue_rows.append(
             (
                 asof,
@@ -1792,9 +1841,9 @@ def replace_data_quality_issues(conn: Any, rows: list[FeatureRow], *, asof: str)
                 row.market_source_id or None,
                 "feature_financial_valuation",
                 "missing_fields",
-                row.data_quality_status,
+                issue_type,
                 severity,
-                f"{row.ticker}: {','.join(row.missing_fields) or row.ttm_method}",
+                f"{row.ticker}: {detail}",
                 now,
             )
         )
@@ -1837,7 +1886,12 @@ def build_features(
         max_staleness_days=policy.max_staleness_days,
         require_adjusted=policy.require_adjusted,
     )
-    financial_rows_by_company = load_financial_rows(conn, companies, asof=asof)
+    financial_rows_by_company = load_financial_rows(
+        conn,
+        companies,
+        asof=asof,
+        history_start_by_ticker=policy.financial_history_start_by_ticker,
+    )
     market_share_snapshots = load_market_share_snapshots(
         conn,
         companies,
@@ -1863,6 +1917,11 @@ def build_features(
         )
         for company in companies
     ]
+    for row in rows:
+        expected_reason = policy.expected_precommercial_missing_revenue.get(row.ticker, "")
+        if expected_reason and row.revenue_ttm is None:
+            row.payload["expected_missing_data_class"] = "precommercial_no_reported_revenue"
+            row.payload["expected_missing_data_reason"] = expected_reason
     apply_scores(rows, policy=policy)
     return rows
 

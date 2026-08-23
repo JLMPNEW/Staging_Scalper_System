@@ -307,6 +307,8 @@ CREATE TABLE IF NOT EXISTS company_facts_quarterly (
     cash REAL,
     cash_and_equivalents REAL,
     short_term_investments REAL,
+    long_term_investments REAL,
+    marketable_investments_total REAL,
     cash_and_investments REAL,
     restricted_cash REAL,
     current_assets REAL,
@@ -321,12 +323,17 @@ CREATE TABLE IF NOT EXISTS company_facts_quarterly (
     operating_income REAL,
     net_income REAL,
     operating_cash_flow REAL,
+    operating_cash_flow_period_start TEXT,
+    operating_cash_flow_duration_days INTEGER,
     investing_cash_flow REAL,
     financing_cash_flow REAL,
     capital_expenditures REAL,
     free_cash_flow REAL,
     shares_outstanding REAL,
     cash_source_concept TEXT,
+    short_term_investments_source_concept TEXT,
+    long_term_investments_source_concept TEXT,
+    marketable_investments_total_source_concept TEXT,
     rd_source_concept TEXT,
     ocf_source_concept TEXT,
     shares_source_concept TEXT,
@@ -344,6 +351,7 @@ CREATE TABLE IF NOT EXISTS company_facts_sync_state (
     company_id INTEGER PRIMARY KEY,
     latest_source_filing_date TEXT,
     payload_hash TEXT,
+    normalizer_version TEXT,
     last_synced_at TEXT NOT NULL,
     sync_status TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -392,6 +400,7 @@ CREATE TABLE IF NOT EXISTS financial_survival_features (
     rd_expense_ttm REAL,
     sgna_expense_ttm REAL,
     cash_runway_months REAL,
+    cash_runway_reliable_flag INTEGER,
     working_capital REAL,
     working_capital_ratio REAL,
     debt_to_cash REAL,
@@ -942,10 +951,13 @@ FORWARD_GUIDANCE_PARSE_STATE_OPTIONAL_COLUMNS = {
 
 FINANCIAL_SURVIVAL_OPTIONAL_COLUMNS = {
     "negative_cash_flag": "INTEGER",
+    "cash_runway_reliable_flag": "INTEGER",
 }
 
 
 COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS = {
+    "long_term_investments": "REAL",
+    "marketable_investments_total": "REAL",
     "cost_of_revenue": "REAL",
     "gross_profit": "REAL",
     "interest_expense": "REAL",
@@ -959,6 +971,15 @@ COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS = {
     "gross_profit_source_concept": "TEXT",
     "cost_of_revenue_source_concept": "TEXT",
     "net_income_source_concept": "TEXT",
+    "operating_cash_flow_period_start": "TEXT",
+    "operating_cash_flow_duration_days": "INTEGER",
+    "short_term_investments_source_concept": "TEXT",
+    "long_term_investments_source_concept": "TEXT",
+    "marketable_investments_total_source_concept": "TEXT",
+}
+
+COMPANY_FACTS_SYNC_STATE_OPTIONAL_COLUMNS = {
+    "normalizer_version": "TEXT",
 }
 
 DAILY_SCORES_OPTIONAL_COLUMNS = {
@@ -1221,6 +1242,7 @@ DAILY_SCORES_OPTIONAL_COLUMNS = {
     "active_pivotal_trials": "REAL",
     "median_addv20": "REAL",
     "cash_runway_months": "REAL",
+    "cash_runway_reliable_flag": "REAL",
     "financial_survival_score": "REAL",
     "financial_data_quality": "TEXT",
     "going_concern_status": "TEXT",
@@ -1525,6 +1547,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     ensure_table_optional_columns(conn, "sec_events", SEC_EVENT_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "company_facts_quarterly", COMPANY_FACTS_QUARTERLY_OPTIONAL_COLUMNS)
+    ensure_table_optional_columns(conn, "company_facts_sync_state", COMPANY_FACTS_SYNC_STATE_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "daily_features", DAILY_FEATURES_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "financial_survival_features", FINANCIAL_SURVIVAL_OPTIONAL_COLUMNS)
     ensure_table_optional_columns(conn, "daily_scores", DAILY_SCORES_OPTIONAL_COLUMNS)
@@ -1990,6 +2013,7 @@ def _create_company_facts_sync_state(conn: sqlite3.Connection) -> None:
             company_id INTEGER PRIMARY KEY,
             latest_source_filing_date TEXT,
             payload_hash TEXT,
+            normalizer_version TEXT,
             last_synced_at TEXT NOT NULL,
             sync_status TEXT NOT NULL,
             created_at TEXT NOT NULL,

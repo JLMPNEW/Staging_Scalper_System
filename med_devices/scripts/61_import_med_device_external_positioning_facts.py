@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
+from med_devices.core.security_identity import parse_iso_date  # noqa: E402
 from med_devices.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from med_devices.core.text_norm import normalize_ticker  # noqa: E402
 
@@ -86,8 +87,25 @@ def required_config_path(config: dict[str, Any], key: str, *, base_dir: Path) ->
 
 
 def company_map(conn: Any) -> dict[str, dict[str, Any]]:
-    rows = conn.execute("SELECT company_id, ticker, cik FROM dim_company WHERE is_active = 1").fetchall()
+    rows = conn.execute(
+        """
+        SELECT c.company_id, c.ticker, c.cik, s.listing_start_date
+        FROM dim_company c
+        LEFT JOIN dim_security s
+          ON s.company_id = c.company_id
+         AND COALESCE(s.is_primary_listing, 0) = 1
+        WHERE c.is_active = 1
+        """
+    ).fetchall()
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
+
+
+def identity_date_allowed(company: dict[str, Any] | None, raw_date: object) -> bool:
+    if company is None:
+        return False
+    observation_date = parse_iso_date(raw_date)
+    listing_start = parse_iso_date(company.get("listing_start_date"))
+    return observation_date is not None and (listing_start is None or observation_date >= listing_start)
 
 
 def qmarks(values: list[str]) -> str:
@@ -150,6 +168,11 @@ def import_short_interest(conn: Any, mp_conn: sqlite3.Connection, *, companies: 
         """,
         (*tickers, start, asof),
     ).fetchall()
+    rows = [
+        row
+        for row in rows
+        if identity_date_allowed(companies.get(normalize_ticker(row["ticker"])), row["settlement_date"])
+    ]
     now = utc_now()
     with conn:
         conn.executemany(
@@ -215,6 +238,16 @@ def import_borrow(conn: Any, mp_conn: sqlite3.Connection, *, companies: dict[str
         """,
         (*tickers, start, asof),
     ).fetchall()
+    share_rows = [
+        row
+        for row in share_rows
+        if identity_date_allowed(companies.get(normalize_ticker(row["ticker"])), row["asof_date"])
+    ]
+    fee_rows = [
+        row
+        for row in fee_rows
+        if identity_date_allowed(companies.get(normalize_ticker(row["ticker"])), row["asof_date"])
+    ]
     now = utc_now()
     with conn:
         conn.executemany(
@@ -323,6 +356,8 @@ def import_13f_snapshots(conn: Any, mp_conn: sqlite3.Connection, *, companies: d
     prior_by_ticker: dict[str, float] = {}
     for row in raw_rows:
         ticker = normalize_ticker(row["ticker"])
+        if not identity_date_allowed(companies.get(ticker), row["period_of_report"]):
+            continue
         shares = to_float(row["institutional_shares"]) or 0.0
         prior_shares = prior_by_ticker.get(ticker)
         delta = (shares - prior_shares) / prior_shares if prior_shares and prior_shares > 0.0 else None
@@ -443,7 +478,7 @@ def import_form4(conn: Any, form4_conn: sqlite3.Connection, *, companies: dict[s
                 company = companies_by_cik.get(cik)
                 if company is not None:
                     break
-        if company is None:
+        if company is None or not identity_date_allowed(company, trade_date):
             continue
         ticker = normalize_ticker(company["ticker"])
         shares = to_float(row["transaction_shares"])

@@ -156,3 +156,48 @@ def test_percent_change_is_not_misread_as_tanker_ratio_level() -> None:
     )
 
     assert evidence == ()
+
+def test_single_vessel_schedule_derives_count_capacity_age_and_forward_coverage() -> None:
+    evidence = _derive(
+        """
+        <h2>Fleet Overview</h2>
+        <table>
+          <tr><th>Vessel Name</th><th>Year Built</th><th>DWT</th><th>Employment</th><th>Charter End</th></tr>
+          <tr><td>Alpha</td><td>2020</td><td>50,000</td><td>Time charter</td><td>December 31, 2026</td></tr>
+          <tr><td>Beta</td><td>2015</td><td>100,000</td><td>Spot</td><td>-</td></tr>
+        </table>
+        """,
+        "vessel_count",
+        "fleet_capacity",
+        "fleet_age",
+        "charter_coverage_next_12m",
+    )
+    by_concept = {row.concept_name: row for row in evidence}
+
+    assert by_concept["DerivedVesselCountFromSchedule"].value == 2.0
+    assert by_concept["DerivedFleetCapacityFromVesselSchedule"].value == 150_000.0
+    assert by_concept["DerivedDwtWeightedFleetAge"].value == pytest.approx(8.3333333333)
+    assert by_concept["DerivedForwardCharterCoverageFromVesselSchedule"].value == pytest.approx(0.5)
+    assert by_concept["DerivedForwardCharterCoverageFromVesselSchedule"].provenance["coverage_end_date"] == "2026-12-31"
+
+
+def test_utilization_and_scaled_opex_use_explicit_day_denominators() -> None:
+    evidence = _derive(
+        """
+        <h2>Operating Statistics (in thousands)</h2>
+        <table>
+          <tr><th>Metric</th><th>2025</th></tr>
+          <tr><td>Revenue Days</td><td>3,500</td></tr>
+          <tr><td>Available Days</td><td>3,650</td></tr>
+          <tr><td>Operating Days</td><td>3,650</td></tr>
+          <tr><td>Vessel Operating Expenses</td><td>36,500</td></tr>
+        </table>
+        """,
+        "fleet_utilization",
+        "vessel_opex_per_day",
+    )
+    by_concept = {row.concept_name: row for row in evidence}
+
+    assert by_concept["DerivedFleetUtilizationFromDays"].value == pytest.approx(3500 / 3650)
+    assert by_concept["DerivedVesselOpexPerOperatingDay"].value == pytest.approx(10_000.0)
+    assert by_concept["DerivedVesselOpexPerOperatingDay"].provenance["denominator_basis"] == "operating_days"

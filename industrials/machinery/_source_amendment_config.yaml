@@ -1,0 +1,506 @@
+paths:
+  database_path: "${INDUSTRIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/industrials.sqlite"
+
+runtime:
+  sqlite_timeout_sec: 120.0
+
+source_registry:
+  path: "../data/free_source_registry.yaml"
+
+industrials_universe:
+  initial_subsector: machinery
+  seed_csv: "system_csvs/machinery_tickers.csv"
+  seed_source_id: machinery_ticker_seed
+  policy_path: "data/machinery_universe_policy.yaml"
+  cohort_path: "data/machinery_cohorts.yaml"
+  cohort_source_id: machinery_cohort_policy
+  historical_membership_csv: "system_csvs/machinery_historical_membership.csv"
+  historical_membership_source_id: machinery_historical_membership_seed
+  delisted_seed_csv: "system_csvs/machinery_delisted.csv"
+  delisted_source_id: machinery_delisted_calibration_seed
+  ticker_aliases_csv: "system_csvs/machinery_ticker_aliases.csv"
+  ticker_aliases_source_id: machinery_ticker_alias_seed
+  listing_dates_csv: "system_csvs/machinery_listing_dates.csv"
+  norgate_symbol_map_csv: "system_csvs/machinery_norgate_symbol_map.csv"
+  norgate_symbol_overrides_csv: "system_csvs/machinery_norgate_symbol_overrides.csv"
+  optimization_start_date: "2019-01-02"
+  delisted_default_start_date: "2019-01-02"
+  # CF-4: expected_ticker_count lives ONLY in data/machinery_universe_policy.yaml.
+  # Do not re-add a copy here; validators read the policy YAML.
+  sector: Industrials
+  industry: Machinery
+  subsector: Machinery
+  country: United States
+  currency: USD
+  benchmark_ticker: XLI
+  benchmark_tickers: [XLI, VIS, SPY]
+
+market_data_policy:
+  scoring_primary_source: yahoo_finance_adjusted
+  scoring_fallback_sources: [norgate_us_equities_total_return]
+  require_adjusted_for_scoring: true
+  max_staleness_days: 7
+  min_source_bars_for_selection: 20
+  min_trading_days_for_full_features: 252
+  min_avg_dollar_volume_60d_for_full_features: 5000000
+
+yahoo_price_ingestion:
+  source_id: yahoo_finance_adjusted
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+  start_date: "2019-01-02"
+  interval: 1d
+  events: "div,splits"
+  include_adjusted_close: true
+  user_agent: "${INDUSTRIALS_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  parallel_workers: 4
+  cache_dir: "../../output/industrials_cache/machinery/yahoo_adjusted"
+  output_csv: "../../output/industrials/machinery/stage3/yahoo_adjusted_price_coverage.csv"
+  ticker_start_date_overrides: {}
+  retry_status_codes: [429, 500, 502, 503, 504]
+
+market_data_audit:
+  output_csv: "../../output/industrials/machinery/stage3/market_data_source_audit.csv"
+
+market_feature_build:
+  source_id: yahoo_finance_adjusted
+  output_csv: "../../output/industrials/machinery/stage3/market_feature_coverage.csv"
+  secondary_benchmarks: [VIS, SPY]
+  windows:
+    one_month_days: 21
+    three_month_days: 63
+    six_month_days: 126
+    one_year_days: 252
+    skip_latest_month_days: 21
+    volatility_days: 60
+    ma_short_days: 50
+    ma_long_days: 200
+
+norgate_delisted_import:
+  source_id: norgate_us_equities_total_return
+  symbol_overrides_csv: "system_csvs/machinery_norgate_symbol_overrides.csv"
+  symbol_map_csv: "system_csvs/machinery_norgate_symbol_map.csv"
+  output_csv: "../../output/industrials/machinery/stage3/norgate_delisted_price_import.csv"
+  price_adjustment_mode: CAPITAL
+  purge_existing_range: true
+
+sec_fundamentals:
+  submissions_source_id: sec_submissions
+  companyfacts_source_id: sec_companyfacts
+  submissions_url_template: "https://data.sec.gov/submissions/CIK{cik}.json"
+  companyfacts_url_template: "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+  reporting_overrides_csv: "system_csvs/machinery_sec_reporting_overrides.csv"
+  start_date: "2019-01-02"
+  forms: [10-K, 10-K/A, 10-Q, 10-Q/A, 20-F, 20-F/A, 40-F, 40-F/A, 6-K, S-1, S-1/A, S-4, S-4/A, F-1, F-1/A, F-4, F-4/A, 424B3, 424B4, 10-12B, 10-12B/A, 10-12G, 10-12G/A, 8-K, 8-K/A]
+  include_historical_members: true
+  user_agent: "${INDUSTRIALS_SEC_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.12
+  cache_dir: "../../output/industrials_cache/machinery/sec_fundamentals"
+  raw_response_retention_days: 90
+  sync_output_csv: "../../output/industrials/machinery/stage4/sec_fundamentals_coverage.csv"
+  feature_output_csv: "../../output/industrials/machinery/stage4/financial_feature_coverage.csv"
+  metric_availability_output_csv: "../../output/industrials/machinery/stage4/financial_metric_availability.csv"
+  disclosure_candidate_output_csv: "../../output/industrials/machinery/stage4/disclosure_candidate_audit.csv"
+  disclosure_review_output_csv: "../../output/industrials/machinery/stage4/disclosure_candidate_review_required.csv"
+  supplemental_disclosure_source_ids:
+    [machinery_issuer_ir, dedicated_parser_production]
+
+issuer_ir:
+  source_id: machinery_issuer_ir
+  manifest_csv: "system_csvs/machinery_issuer_ir_documents.csv"
+  cache_dir: "../../output/industrials_cache/machinery/issuer_ir"
+  output_csv: "../../output/industrials/machinery/stage4/issuer_ir_sync.csv"
+  user_agent: "${INDUSTRIALS_IR_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_document_bytes: 50000000
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  pdf_extraction_timeout_sec: 30.0
+
+dedicated_parser:
+  python_executable: '${DEDICATED_PARSER_PYTHON:-C:/Users/josel/miniconda3/envs/scalper-staging/python.exe}'
+  # Accepted evidence is promoted through the gated supplemental source below;
+  # ambiguous and rejected evidence remains in shadow/review tables.
+  output_root: "../../output/industrials/machinery/dedicated_parser"
+  provider_state_dir: "../../tmp/edgartools"
+  production_enabled: true
+  production_source_id: dedicated_parser_production
+  production_min_confidence: 0.90
+  production_manifest_json: "../../output/industrials/machinery/dedicated_parser/dedicated_parser_production_promotion.json"
+  workers: 4
+  # Forty filings covers eight recent quarters, event filings, registration
+  # statements, and reviewed historical policy anchors such as ITW 2022.
+  max_filings_per_ticker: 40
+  max_documents_per_filing: 32
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  max_pdf_bytes: 25000000
+  pdf_extraction_timeout_seconds: 30.0
+
+financial_validation:
+  availability_policy:
+    # Applicability requires an explicit issuer definition of funded,
+    # authorized, or appropriated backlog. Government exposure alone is not
+    # sufficient. The reviewed machinery universe currently has no issuer that
+    # meets this contract; a directly reported value still wins classification.
+    funded_backlog_applicable_tickers: []
+    funded_backlog_reviewed_not_applicable_tickers: [BW, SMR, XE, NNE, OKLO, FISN]
+    # Cancelable (automotive-style) order models publish no binding backlog;
+    # their orders/backlog absences are structural, not ingestion gaps.
+    cancelable_order_model_tickers: [PCAR]
+    # Short-cycle book-and-ship issuers with no XBRL backlog/RPO disclosure
+    # history (AOS/MLI/TT/CSW/HLIO/ALSN/ATKR/OUST: zero RPO facts ever) or that
+    # ceased disclosure under the ASC 606 short-cycle expedient (SNA last
+    # tagged 2021, CARR last tagged 2020). REPORTED always wins over this
+    # classification, so historical asofs where values existed are unaffected.
+    # Round 2 (verified 2026-07-19): AIT/AYI/DCI/ENOV/ITW/TWI/PKOH have zero
+    # RPO or backlog XBRL facts ever; AGCO tagged RPO once in the 2018 ASC 606
+    # transition year and then ceased (expedient adopter). BE and TWIN are
+    # deliberately EXCLUDED: both disclose genuine backlog in filing prose
+    # (thin-tagging, not structural absence).
+    # This reviewed policy is a current-model classification. Do not leak it
+    # into historical availability snapshots before the policy lock date.
+    structural_no_backlog_valid_from: "2026-07-09"
+    structural_no_backlog_tickers: [AOS, MLI, TT, CSW, HLIO, ALSN, ATKR, OUST, SNA, CARR,
+                                    AIT, AYI, DCI, ENOV, ITW, TWI, PKOH, AGCO]
+    # SMR and XE are reviewed design/licensing-stage issuers without physical
+    # manufacturing inventory. Inventory growth is not set to zero because
+    # zero would create a synthetic negative sales-growth spread.
+    structural_no_inventory_valid_from: "2026-07-20"
+    structural_no_inventory_tickers: [SMR, XE]
+    # A YoY diluted-share comparison is not meaningful until the post-listing
+    # public share basis has a same-basis prior-year observation. Prospectus
+    # post-offering shares must not be backdated as a synthetic t-4 baseline.
+    recent_public_share_basis_valid_from: "2026-07-20"
+    recent_public_share_basis_transition_tickers: [INIO, MAIR, XE]
+
+fx_rates:
+  source_id: yahoo_fx_rates
+  chart_url_template: "https://query1.finance.yahoo.com/v8/finance/chart/{pair}"
+  start_date: "2019-01-02"
+  interval: 1d
+  user_agent: "${INDUSTRIALS_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}"
+  timeout_sec: 30.0
+  max_retries: 3
+  request_sleep_sec: 0.12
+  cache_dir: "../../output/industrials_cache/machinery/yahoo_fx_rates"
+  output_csv: "../../output/industrials/machinery/stage4/fx_rate_coverage.csv"
+  max_staleness_days: 30
+  required_pairs: []
+
+positioning_import:
+  source_id: industrials_positioning_composite
+  form4_source_id: sec_insider_upstream
+  direct_ownership_source_id: sec_ownership_direct
+  market_positioning_source_id: market_positioning_upstream
+  preferred_source_ids: [market_positioning_upstream]
+  positioning_overrides_csv: "system_csvs/machinery_positioning_overrides.csv"
+  start_date: "2019-01-02"
+  include_historical_members: true
+  positioning_universe_csv: "../../output/industrials_cache/positioning/machinery_positioning_universe.csv"
+  output_csv: "../../output/industrials/machinery/stage5/positioning_import_coverage.csv"
+  feature_output_csv: "../../output/industrials/machinery/stage5/positioning_feature_coverage.csv"
+  lookback_days: {insider: 90, short_change: 92}
+  max_13f_staleness_days: 120
+  max_borrow_staleness_days: 10
+  require_upstream_13f_for_gate: false
+  require_upstream_short_for_gate: false
+  require_short_pct_float_for_gate: false
+  require_upstream_borrow_for_gate: false
+  upstream_form4_gate_exempt_tickers: []
+  upstream_13f_gate_exempt_tickers: []
+  upstream_short_gate_exempt_tickers: []
+  upstream_short_pct_float_gate_exempt_tickers: []
+  upstream_borrow_gate_exempt_tickers: []
+  institutional_13f_data_gate: {required_period_of_report: "", anchor_tickers: [], min_anchor_tickers_with_period: 0}
+
+positioning_validation:
+  # Current machinery coverage is about 97%; a 90% floor detects a broken or
+  # misrouted Form 4 feed without requiring perfect coverage for new issuers.
+  min_form4_covered_fraction: 0.90
+
+upstream_databases:
+  form4:
+    db_path: "${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}"
+    orchestrator_script: "../../SEC_FORM4_Runner/run_sec_form4_orchestrator.py"
+    orchestrator_config: "../../SEC_FORM4_Runner/config_sec_form4_orchestrator_staging.yaml"
+  market_positioning:
+    db_path: "${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}"
+
+scoring_policy:
+  families:
+    machinery:
+      eligibility_policy_csv: "system_csvs/machinery_scoring_eligibility_policy.csv"
+      reporting_overrides_csv: "system_csvs/machinery_sec_reporting_overrides.csv"
+      eligibility_audit_csv: "../../output/industrials/machinery/stage6/scoring_eligibility_validation.csv"
+
+machinery_scoring:
+  contract_version: industrial_family_final_rank_table_v3_shadow
+  score_model_version: machinery_shadow_v0.3.0
+  model_version: machinery_shadow_2026_08
+  min_score_confidence: 0.40
+  # Loss-making issuers have no meaningful profit multiple. Cap the valuation
+  # component absolutely; do not percentile the binary condition or reward
+  # profitable peers merely for clearing it.
+  negative_profit_valuation_score_cap: 25.0
+  component_weights:
+    quality_score: 0.20
+    growth_score: 0.15
+    valuation_score: 0.15
+    risk_control_score: 0.15
+    market_behavior_score: 0.20
+    positioning_score: 0.05
+    industrial_cycle_score: 0.05
+    orders_backlog_score: 0.025
+    capex_cycle_score: 0.025
+  feature_output_root: "C:/Users/josel/OneDrive/Desktop/Investment Files/Staging_Scalper_System/output/industrials/machinery/source_amendment_20260819/scoring_features"
+  score_output_root: "C:/Users/josel/OneDrive/Desktop/Investment Files/Staging_Scalper_System/output/industrials/machinery/source_amendment_20260819/scores"
+  dashboard_root: "C:/Users/josel/OneDrive/Desktop/Investment Files/Staging_Scalper_System/output/industrials/machinery/source_amendment_20260819/dashboard"
+  history_start_date: "2019-01-02"
+  historical_policy_lock_date: "2026-07-09"
+
+machinery_lifecycle:
+  # Lifecycle is deliberately separate from calibration_cohort. The current
+  # operating_only production definition remains sealed while this policy runs
+  # in shadow and reviewed transitions accumulate.
+  enabled: true
+  mode: shadow
+  policy_version: machinery_lifecycle_v1
+  output_root: "../../output/industrials/machinery/lifecycle"
+  transitions_csv: "system_csvs/machinery_lifecycle_transitions.csv"
+  revenue_policy_csv: "system_csvs/machinery_lifecycle_revenue_policy.csv"
+  hard_events_csv: "system_csvs/machinery_lifecycle_hard_events.csv"
+  thresholds:
+    emerging_revenue_usd: 10000000
+    emerging_quarters: 4
+    emerging_financial_confidence: 0.55
+    established_revenue_usd: 50000000
+    established_quarters: 8
+    established_financial_confidence: 0.70
+    established_min_listed_days: 730
+    established_demotion_revenue_usd: 25000000
+    emerging_demotion_revenue_usd: 5000000
+    demotion_quarters: 4
+    maximum_capital_raise_dependence: 0.75
+    minimum_cash_runway_years: 2.0
+    maximum_diluted_shares_yoy_growth: 0.15
+    minimum_avg_dollar_volume_60d: 5000000
+    emerging_weight_cap: 0.025
+    minimum_precommercial_calibration_members: 15
+    maximum_period_gap_days: 150
+
+machinery_stage8:
+  # Stage 8 is report-only. It cannot alter dashboard ranks or OOS flags.
+  output_root: "../../output/industrials/machinery/stage8"
+  research_protocol_version: machinery_oos_v1.3.0
+  evaluation_policy_version: product_aligned_long_only_v1
+  # Retain development-stage names in research artifacts, but calibrate the
+  # regular core model on the same operating-company universe used in Stage 9.
+  production_universe_policy: operating_only
+  snapshot_root: "../../output/industrials/machinery/dashboard"
+  development_start_date: "2019-01-02"
+  development_end_date: "2025-12-31"
+  sealed_start_date: "2026-01-01"
+  benchmark_ticker: XLI
+  weekly_anchor_date: "2018-12-30"
+  weekly_selection: last
+  cadence_trading_days: 5
+  horizons_trading_days: [21, 63]
+  # Calibration must use the same executable D+1-open return convention as
+  # Stage 9. Close-to-close returns remain diagnostic-only.
+  calibration_return_basis: next_session_open_execution_excess
+  minimum_outcome_coverage: 0.95
+  terminal_price_max_staleness_days: 10
+  embargo_trading_days: 21
+  train_fraction: 0.60
+  validation_fraction: 0.20
+  minimum_cross_section: 30
+  top_quantile: 0.20
+  minimum_positions: 10
+  turnover_cost_bps: 20.0
+  maximum_turnover: 0.75
+  maximum_cohort_share: 0.50
+  random_seed: 357
+  calibration_trials: 6
+  objective:
+    # Net top-sleeve excess is the investable product. IC remains a secondary
+    # ranking-quality term and spread is diagnostic-only with a small soft weight.
+    top_excess_net_weights: {21: 0.30, 63: 0.30}
+    non_overlapping_top_excess_net_weights: {21: 0.10, 63: 0.10}
+    mean_ic_weights: {21: 0.075, 63: 0.075}
+    spread_diagnostic_weights: {21: 0.025, 63: 0.025}
+    return_scales: {21: 0.02, 63: 0.05}
+    spread_scales: {21: 0.02, 63: 0.05}
+    ic_scale: 0.05
+    uncertainty_penalty_weight: 0.10
+  diagnostics:
+    quantile_buckets: 10
+  candidate_registry:
+    search_policy: preregistered_only
+    maximum_specifications: 6
+    prior_same_panel_static_trials: 192
+    prior_same_panel_walk_forward_trials: 336
+    candidates:
+      equal_components:
+        quality_score: 1.0
+        growth_score: 1.0
+        valuation_score: 1.0
+        risk_control_score: 1.0
+        market_behavior_score: 1.0
+        positioning_score: 1.0
+        industrial_cycle_score: 1.0
+        orders_backlog_score: 1.0
+        capex_cycle_score: 1.0
+      quality_value:
+        quality_score: 0.25
+        growth_score: 0.10
+        valuation_score: 0.25
+        risk_control_score: 0.20
+        market_behavior_score: 0.10
+        positioning_score: 0.02
+        industrial_cycle_score: 0.04
+        orders_backlog_score: 0.02
+        capex_cycle_score: 0.02
+      market_cycle:
+        quality_score: 0.15
+        growth_score: 0.20
+        valuation_score: 0.10
+        risk_control_score: 0.10
+        market_behavior_score: 0.25
+        positioning_score: 0.05
+        industrial_cycle_score: 0.08
+        orders_backlog_score: 0.04
+        capex_cycle_score: 0.03
+      orders_capex:
+        quality_score: 0.18
+        growth_score: 0.10
+        valuation_score: 0.17
+        risk_control_score: 0.18
+        market_behavior_score: 0.12
+        positioning_score: 0.03
+        industrial_cycle_score: 0.10
+        orders_backlog_score: 0.07
+        capex_cycle_score: 0.05
+      defensive_quality:
+        quality_score: 0.30
+        growth_score: 0.05
+        valuation_score: 0.20
+        risk_control_score: 0.25
+        market_behavior_score: 0.10
+        positioning_score: 0.00
+        industrial_cycle_score: 0.05
+        orders_backlog_score: 0.025
+        capex_cycle_score: 0.025
+  component_bounds:
+    quality_score: [0.10, 0.30]
+    growth_score: [0.05, 0.25]
+    valuation_score: [0.05, 0.25]
+    risk_control_score: [0.10, 0.25]
+    market_behavior_score: [0.10, 0.30]
+    positioning_score: [0.00, 0.10]
+    industrial_cycle_score: [0.02, 0.15]
+    orders_backlog_score: [0.00, 0.10]
+    capex_cycle_score: [0.00, 0.10]
+  gates:
+    minimum_evaluation_dates: 20
+    minimum_mean_ic: 0.00
+    minimum_ic_hit_rate: 0.50
+    spread_gate_mode: diagnostic_only
+    minimum_mean_top_excess_net: 0.00
+    minimum_top_excess_net_lcb: 0.00
+    top_excess_one_sided_confidence_z: 1.281552
+    minimum_non_overlapping_top_dates: 4
+    minimum_non_overlapping_top_excess_net: 0.00
+    minimum_validation_objective_improvement: 0.001
+  walk_forward:
+    initial_train_dates: 156
+    test_block_dates: 26
+    minimum_blocks: 4
+    minimum_win_rate: 0.50
+    minimum_fold_product_pass_rate: 0.70
+    minimum_positive_top_block_rate: 0.70
+    improvement_bootstrap_confidence: 0.90
+    improvement_bootstrap_simulations: 2000
+    minimum_objective_improvement_noise_band: 0.00
+    trials_per_refit: 6
+
+machinery_stage9:
+  # Stage 9 is report-only and consumes only the sealed Stage 8 panel.
+  output_root: "../../output/industrials/machinery/stage9"
+  # The regular machinery sleeve is an operating-company model. Development-
+  # stage issuers remain scored for research but cannot enter core holdings.
+  production_universe_policy: operating_only
+  horizons_trading_days: [21, 63]
+  quantiles: [0.10, 0.20]
+  minimum_positions: 10
+  transaction_cost_bps: 20.0
+  default_borrow_fee_rate: 0.05
+  max_adv_participation: 0.05
+  # Must remain aligned with portfolio_layer.transaction_costs.aum_usd.
+  target_aum_usd: 300000
+  gates:
+    primary_horizon_days: 21
+    minimum_validation_periods: 12
+    minimum_holdout_periods: 12
+    minimum_mean_net_excess_return: 0.00
+    minimum_hit_rate: 0.50
+    maximum_drawdown: -0.35
+    maximum_average_turnover: 0.75
+    maximum_position_weight: 0.15
+    maximum_cohort_share: 0.50
+    minimum_adv_coverage: 0.95
+    minimum_capacity_multiple: 5.0
+    minimum_selected_cohorts: 3
+    minimum_candidate_excess_improvement: 0.00
+    maximum_production_weight_parity_error: 1.0e-10
+
+machinery_stage12:
+  # This stage builds a promotion candidate only. Activation remains a
+  # separate operator-approved action and may not overwrite dated history.
+  output_root: "../../output/industrials/machinery/stage12"
+  portfolio_config_path: "../../portfolio_layer/config.yaml"
+  # The activation transaction must not inherit an arbitrary caller runtime.
+  # This interpreter owns both the portfolio smoke and optional refresh child.
+  python_executable: '${PORTFOLIO_LAYER_PYTHON:-C:/Users/josel/miniconda3/envs/scalper-staging/python.exe}'
+  promotion_candidate_asof: "2026-07-28"
+  production_start_date: "2026-07-24"
+  score_model_version: "machinery_oos_v1.4.1_equal_components"
+  model_version: "machinery_production_2026_07_v1.4.1"
+  scoring_contract_version: "industrial_family_final_rank_table_v3_production"
+  # Replacement cycles preserve the active cap and switch model state only
+  # after the new candidate passes the full portfolio smoke.
+  proposed_portfolio_cap: 0.05
+  activation_approval_token: "ACTIVATE_MACHINERY_STAGE12"
+
+sec_archive:
+  enabled: true
+  all_family_members: true
+  # CompanyFacts stopped carrying PCAR's inventory after 2021 even though its
+  # primary inline filings still tag us-gaap:InventoryNet. Parse mapped inline
+  # XBRL, not only machinery disclosure text tables, for this reviewed gap.
+  core_metric_recovery_tickers: [PCAR]
+  core_metric_recovery_metrics: [inventory]
+  index_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
+  document_url_template: "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{document_name}"
+  submission_file_url_template: "https://data.sec.gov/submissions/{file_name}"
+  browse_edgar_atom_url_template: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&owner=exclude&count=100&output=atom"
+  max_submission_history_files: 0
+  # Must be zero/unlimited or at least dedicated_parser.max_filings_per_ticker
+  # so cache hydration can satisfy the parser's selected filing window.
+  max_filings_per_ticker: 40
+  supplemental_forms: [8-K, 8-K/A]
+  # Scan all event filings retained since sec_fundamentals.start_date. A fixed
+  # latest-N cap removed historical earnings releases needed for PIT orders.
+  max_supplemental_filings_per_ticker: -1
+  # Zero means all eligible documents. Machinery 8-Ks may carry separate
+  # earnings-release and presentation exhibits with different metrics.
+  max_documents_per_filing: 0
+  include_pdf_documents: true
+  pdf_ocr_enabled: true
+  max_pdf_pages: 250
+  max_pdf_bytes: 25000000
+  pdf_extraction_timeout_sec: 30.0
+  min_refetch_fact_fraction: 0.5

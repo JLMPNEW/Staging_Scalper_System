@@ -326,6 +326,9 @@ GROUPS: dict[str, list[tuple[str, str, str | None]]] = {
 # instead of resurfacing hours later at the last step. The soft-fail mechanism
 # is retained for future genuinely advisory groups.
 SOFT_GROUPS: set[str] = set()
+# These groups are semantic re-passes even when selected by themselves during
+# recovery. Their outputs must be rebuilt from the newly refreshed parent.
+INTRINSIC_REPASS_GROUPS = {"monitor_filter"}
 OPTIONAL_STEP_SCRIPTS = {"05c_collect_ib_historical_spread_samples.py"}
 # Scripts in this set do not expose a --force flag. The macro wrappers are
 # deterministic refresh entry points, while readiness is read-only.
@@ -338,8 +341,9 @@ NO_FORCE_SCRIPTS = {
 # Kept byte-identical to config.yaml `orchestration.cadences` (the shipped
 # defaults). plan_groups() logs whenever a config override differs from these
 # built-ins so cadence drift is visible in the run log. plan_groups() itself
-# normalizes one ledger pass before the first monitor group when holdings are
-# required, so ledger needs no fixed slot here beyond the config's.
+# normalizes one ledger pass before the bootstrap-final/monitor dependency chain
+# when holdings are required, so ledger needs no fixed slot here beyond the
+# config's.
 DEFAULT_CADENCES = {
     "tactical": [
         "scores", "risk", "optimizer", "costs", "rotation", "governor",
@@ -408,9 +412,9 @@ def build_step_plan(
     """Executed step plan, one inner list per planned group pass.
 
     Counts occurrences of every script basename across the WHOLE planned step
-    list: any repeat occurrence is an intentional re-pass (monitor_filter
-    re-solve, second rotation/governor pass, final after bootstrap_final) and is
-    self-forced so a non-force run can complete a shipped cadence. Each step also
+    list: any repeat occurrence, plus every pass of an intrinsically re-solving
+    group such as monitor_filter, is self-forced so both full cadences and
+    shortened recovery plans rebuild from refreshed inputs. Each step also
     carries its gate manifest: the step's own acceptance manifest when it has
     one, else the next acceptance manifest at-or-after it inside the group (the
     seal that certifies the step's outputs).
@@ -429,7 +433,8 @@ def build_step_plan(
                         break
             occurrences[script] = occurrences.get(script, 0) + 1
             occurrence = occurrences[script]
-            if occurrence > 1 and script in NO_FORCE_SCRIPTS:
+            needs_repass = occurrence > 1 or group in INTRINSIC_REPASS_GROUPS
+            if needs_repass and script in NO_FORCE_SCRIPTS:
                 # Cannot self-force a script without a --force flag; the macro
                 # wrappers/readiness are internally idempotent so a re-pass is
                 # still safe, but surface the combination explicitly.
@@ -446,7 +451,7 @@ def build_step_plan(
                     "manifest_rel": manifest_rel,
                     "gate_rel": gate_rel,
                     "occurrence": occurrence,
-                    "self_force": occurrence > 1 and script not in NO_FORCE_SCRIPTS,
+                    "self_force": needs_repass and script not in NO_FORCE_SCRIPTS,
                 }
             )
         plan.append(pass_steps)
@@ -456,14 +461,14 @@ def build_step_plan(
 def step_resume_skip(run_dir: Path, step: dict[str, Any], *, operator_force: bool) -> bool:
     """Skip-if-sealed resume predicate used by BOTH dry-run and execution.
 
-    A FIRST occurrence without operator --force is skipped when its gate
+    A non-repass step without operator --force is skipped when its gate
     acceptance manifest is already sealed PASS* for this run dir.
     manifest_acceptance() fail-closes on as-of mismatch and parent/provenance
     drift (returns DATE_MISMATCH/STALE_PARENT/... rather than PASS*), so a PASS*
-    result here certifies a same-date, drift-free seal. Re-pass occurrences are
-    never skipped: they exist to rebuild on refreshed inputs.
+    result here certifies a same-date, drift-free seal. Semantic re-pass steps
+    are never skipped: they exist to rebuild on refreshed inputs.
     """
-    if operator_force or int(step["occurrence"]) > 1:
+    if operator_force or bool(step["self_force"]):
         return False
     gate_rel = step["gate_rel"]
     if not gate_rel:
@@ -750,6 +755,11 @@ def script_args(
     if script == "20_run_macro_serving.py":
         flags.append("--refresh-industry-stock-foreign")
     if (
+        script == "37_sync_earnings_dates.py"
+        and getattr(args, "historical_catchup", False)
+    ):
+        flags.append("--historical-catchup")
+    if (
         script == "50_run_expectations_monitor_daily.py"
         and getattr(args, "historical_catchup", False)
     ):
@@ -943,23 +953,46 @@ def plan_groups_with_metadata(
     skipped_ledger_candidates: list[dict[str, str]] = []
     fallback_error = ""
 
-    if ledger_required and not ledger_ready:
-        if statement_available and "ledger" in skip:
+    if ledger_required and statement_available:
+        if not ledger_ready and "ledger" in skip:
             raise ValueError(
                 "expectations monitor requires same-date broker holdings, "
                 "but group ledger was explicitly skipped"
             )
-        if statement_available:
+        if "ledger" in planned or not ledger_ready:
             # Custom group lists and configured cadences cannot place a required
-            # source after its consumer. Normalize one ledger pass immediately
-            # before the first monitor group.
+            # source after its consumer. Ledger force-runs invalidate every
+            # downstream final-book artifact, including the monitor bootstrap.
+            # Normalize one ledger pass before the complete bootstrap/monitor
+            # dependency chain, even when an older same-date ledger seal exists.
             planned = [group for group in planned if group != "ledger"]
-            monitor_index = min(
+            consumer_index = min(
                 index
                 for index, group in enumerate(planned)
-                if group in {"monitor", "monitor_filter"}
+                if group in {"bootstrap_final", "monitor", "monitor_filter"}
             )
-            planned.insert(monitor_index, "ledger")
+            planned.insert(consumer_index, "ledger")
+
+    if monitor_planned:
+        dependency_index = min(
+            index
+            for index, group in enumerate(planned)
+            if group in {"bootstrap_final", "monitor", "monitor_filter"}
+        )
+        has_macro_contract_before_chain = any(
+            group in {"macro", "macro_contract"}
+            for group in planned[:dependency_index]
+        )
+        if not has_macro_contract_before_chain:
+            if "macro_contract" in skip:
+                raise ValueError(
+                    "expectations monitor levels require a same-date sealed macro contract, "
+                    "but group macro_contract was explicitly skipped"
+                )
+            # A contract rebuild invalidates downstream final artifacts, so it must
+            # precede bootstrap_final as well as monitor. Keep any later contract
+            # pass: monitor_filter intentionally changes optimizer outputs.
+            planned.insert(dependency_index, "macro_contract")
 
     needs_prior_ledger = (
         not ledger_ready

@@ -30,7 +30,7 @@ import build_cik_ticker_mapping as sec_mapping  # noqa: E402
 import enrich_all_tickers_biotech as identity_enrichment  # noqa: E402
 
 
-LOGGER = logging.getLogger("enrich_technology_tickers")
+LOGGER = logging.getLogger("enrich_newtickers_main")
 DEFAULT_USER_AGENT = "JL, Independent Research, jm.357@hotmail.com"
 
 OUTPUT_COLUMNS = [
@@ -195,6 +195,8 @@ def derive_investability_status(row: pd.Series) -> str:
         "ordinary_shares",
         "adr_ads",
         "american_depositary_shares",
+        "american_depositary_shares_ads",
+        "class_c_capital_stock_non_voting",
         "new_york_registry_shares",
     }
     if listing_status in non_investable_listing_statuses:
@@ -374,7 +376,7 @@ def apply_identity_fields(
     if not skip_nasdaq:
         directory = identity_enrichment.load_nasdaq_directories(cache_dir, float(timeout_sec))
         LOGGER.info("Loaded %d Nasdaq Trader symbol directory entries", len(directory))
-        identity_df = identity_enrichment.apply_nasdaq_fields(identity_df, directory, overwrite_existing)
+        identity_df = identity_enrichment.apply_nasdaq_fields(identity_df, directory, True)
     identity_df = identity_enrichment.apply_ib_fields(
         identity_df,
         host=ib_host,
@@ -418,6 +420,28 @@ def yahoo_cache_name(ticker: str) -> str:
     return f"{safe}.json"
 
 
+def yahoo_profile_is_usable(info: dict[str, Any]) -> bool:
+    """Return False for Yahoo placeholder/empty profiles that should be refreshed."""
+    if not isinstance(info, dict):
+        return False
+    quote_type = first_profile_value(info, ("quoteType",)).upper()
+    if quote_type in {"EQUITY", "ETF", "MUTUALFUND"}:
+        return True
+    useful_keys = (
+        "longName",
+        "shortName",
+        "displayName",
+        "exchange",
+        "fullExchangeName",
+        "sector",
+        "industry",
+        "country",
+        "currency",
+        "regularMarketPrice",
+    )
+    return any(clean_text(info.get(key)) for key in useful_keys)
+
+
 def load_yahoo_info(
     ticker: str,
     *,
@@ -429,7 +453,9 @@ def load_yahoo_info(
     cache_path = cache_dir / yahoo_cache_name(ticker)
     if not force_refresh and cache_is_fresh(cache_path, ttl_days):
         try:
-            return json.loads(cache_path.read_text(encoding="utf-8")), "cache", ""
+            info = json.loads(cache_path.read_text(encoding="utf-8"))
+            if yahoo_profile_is_usable(info):
+                return info, "cache", ""
         except Exception as exc:
             LOGGER.warning("Could not read Yahoo cache for %s: %s", ticker, exc)
     try:
@@ -445,7 +471,9 @@ def load_yahoo_info(
     except Exception as exc:
         if cache_path.exists():
             try:
-                return json.loads(cache_path.read_text(encoding="utf-8")), "stale_cache_after_error", str(exc)
+                stale_info = json.loads(cache_path.read_text(encoding="utf-8"))
+                if yahoo_profile_is_usable(stale_info):
+                    return stale_info, "stale_cache_after_error", str(exc)
             except Exception:
                 pass
         return {}, "error", str(exc)
@@ -463,7 +491,7 @@ def infer_security_type_from_yahoo(ticker: str, info: dict[str, Any]) -> str:
     quote_type = first_profile_value(info, ("quoteType",)).upper()
     if quote_type in {"ETF", "MUTUALFUND"}:
         return "ETF"
-    if quote_type not in {"EQUITY", ""}:
+    if quote_type not in {"EQUITY", "", "NONE"}:
         return quote_type.title()
     name_blob = first_profile_value(info, ("longName", "shortName", "displayName")).upper()
     ticker_norm = normalize_ticker(ticker)
@@ -484,6 +512,10 @@ def infer_listing_status_from_yahoo(info: dict[str, Any]) -> str:
     if quote_type.upper() == "EQUITY" and (exchange or price not in (None, "")):
         return "active"
     return ""
+
+
+def exchange_is_low_confidence(raw: Any) -> bool:
+    return normalize_status_label(raw) in {"otc", "otcqx", "otcqb", "otc_pink"}
 
 
 def apply_yahoo_fields(
@@ -519,7 +551,10 @@ def apply_yahoo_fields(
             "listing_status": infer_listing_status_from_yahoo(info),
         }
         for column, value in field_values.items():
-            if value and should_fill(row.get(column), overwrite_existing):
+            if value and (
+                should_fill(row.get(column), overwrite_existing)
+                or (column == "exchange" and exchange_is_low_confidence(row.get(column)))
+            ):
                 df.at[idx, column] = value
         audit_rows.append({"ticker": ticker, "yahoo_status": status, "yahoo_error": error[:300]})
         LOGGER.info("[%d/%d] Yahoo %s status=%s", idx + 1, total, ticker, status)
@@ -698,7 +733,10 @@ def main() -> None:
     df = standardize_input_columns(read_csv_flexible(input_path))
     LOGGER.info("Loaded %d technology tickers from %s", len(df), input_path)
 
-    panel_map = load_panel_map(args.panel, str(args.panel_sheet or ""))
+    panel_path = args.panel.expanduser().resolve() if args.panel else input_path.with_name(f"{input_path.stem}_overrides{input_path.suffix}")
+    if args.panel is None and not panel_path.exists():
+        panel_path = None
+    panel_map = load_panel_map(panel_path, str(args.panel_sheet or ""))
     df = apply_panel_fields(df, panel_map, overwrite_existing)
 
     sec_df = pd.DataFrame()
@@ -739,6 +777,8 @@ def main() -> None:
             overwrite_existing=overwrite_existing,
         )
 
+    # Authoritative panel values win after all external enrichment sources.
+    df = apply_panel_fields(df, panel_map, overwrite_existing=True)
     df = apply_default_fields(df, args, overwrite_existing=False)
     df["cik"] = df["cik"].map(normalize_cik)
     df["is_primary_listing"] = df["is_primary_listing"].map(normalize_bool)

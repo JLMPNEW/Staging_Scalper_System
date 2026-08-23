@@ -2272,10 +2272,8 @@ def run_catch_up_sector(
 
 
 def _should_retry_rc(rc: int) -> bool:
-    """Retry policy for one command attempt: never retry success, and never retry a
-    TIMEOUT (rc 124) -- re-running a command that just consumed its full per-attempt
-    ceiling doubles the sector's wall time for a near-certain repeat failure."""
-    return rc not in (0, 124)
+    """Return false for success, timeout, and deterministic policy failures."""
+    return rc not in (0, 78, 124)
 
 
 def _command_for_attempt(sector: Sector, command: list[str], attempt: int) -> list[str]:
@@ -2285,6 +2283,16 @@ def _command_for_attempt(sector: Sector, command: list[str], attempt: int) -> li
     if any(command[idx : idx + width] == sector.retry_args for idx in range(len(command) - width + 1)):
         return list(command)
     return [*command, *sector.retry_args]
+
+
+def _commands_for_master_resume(sector: Sector, commands: list[list[str]]) -> list[list[str]]:
+    """Apply native resume args only to the sector entry command."""
+    entry = sector.entry_script.replace("\\", "/").lower()
+    resumed: list[list[str]] = []
+    for command in commands:
+        is_entry = any(str(part).replace("\\", "/").lower().endswith(entry) for part in command)
+        resumed.append(_command_for_attempt(sector, command, 2) if is_entry else list(command))
+    return resumed
 
 
 def _run_one(sector: Sector, command: list[str], *, net_sem: threading.Semaphore | None, logfile) -> int:
@@ -2572,6 +2580,14 @@ def build_sector_commands(
     """Return (commands, note) for one sector under the resolved mode."""
     if args.mode == "backfill":
         cmds, note = backfill_commands(sector, args.from_date, args.to_date, reg)
+        if cmds and sector.daily_post_steps:
+            for iso_date in trading_dates_in_range(
+                reg,
+                args.from_date,
+                args.to_date,
+            ):
+                cmds.extend(daily_post_commands(sector, iso_date))
+            note = "backfill+post_steps"
         return cmds, note
     if args.mode == "repair":
         steps = repair_map.get(sector.name, [])
@@ -2595,7 +2611,16 @@ def build_sector_commands(
     daily_cmds: list[list[str]] = []
     if args.cadence == "weekly":
         daily_cmds += weekly_pre_commands(sector, target)
-    daily_cmds.append(daily_command(sector, target, force=args.force))
+    daily_cmds.append(
+        _catch_up_daily_command(
+            sector,
+            target,
+            force=args.force,
+            live_completed_session=(
+                getattr(args, "live_session", None) or latest_completed_trading_session()
+            ),
+        )
+    )
     daily_cmds += daily_post_commands(sector, target)  # finding 1: e.g. med runs script 76 after publish
     note = "daily+post_steps" if sector.daily_post_steps else ""
     return daily_cmds, note
@@ -2725,11 +2750,31 @@ def run_tier0(
                 commands, note = build_sector_commands(reg, sector, args, target, repair_map)
             cmd_hash = _command_hash(commands)
             content_hash = _content_hash(sector, args.registry)
-            if (
-                args.resume
-                and not args.dry_run
-                and resume_match(resume_records, sector, target, args.mode, cmd_hash, content_hash)
-            ):
+            resume_matched = False
+            if args.resume and not args.dry_run:
+                resume_matched = resume_match(
+                    resume_records,
+                    sector,
+                    target,
+                    args.mode,
+                    cmd_hash,
+                    content_hash,
+                )
+                if not resume_matched:
+                    resume_commands = _commands_for_master_resume(sector, commands)
+                    resume_cmd_hash = _command_hash(resume_commands)
+                    if resume_cmd_hash != cmd_hash:
+                        commands = resume_commands
+                        cmd_hash = resume_cmd_hash
+                        resume_matched = resume_match(
+                            resume_records,
+                            sector,
+                            target,
+                            args.mode,
+                            cmd_hash,
+                            content_hash,
+                        )
+            if resume_matched:
                 res = RunResult(
                     sector=sector.name,
                     status="SKIPPED_RESUME",
@@ -3727,6 +3772,15 @@ def run_selftest() -> int:
     ok("finding1_post_step_note", dnote == "daily+post_steps")
     dcmds_np, dnote_np = build_sector_commands(reg, reg.by_name("beta"), args_daily, "2026-07-17", {})
     ok("finding1_no_post_step_when_none", all("promote.py" not in " ".join(c) for c in dcmds_np) and dnote_np == "")
+    args_daily.live_session = "2026-07-18"
+    historical_daily_cmds, _ = build_sector_commands(reg, portfolio, args_daily, "2026-07-17", {})
+    ok(
+        "daily_historical_portfolio_suppresses_event_cycle",
+        "--historical-catchup" in historical_daily_cmds[0],
+    )
+    args_daily.live_session = "2026-07-17"
+    live_daily_cmds, _ = build_sector_commands(reg, portfolio, args_daily, "2026-07-17", {})
+    ok("daily_live_portfolio_keeps_event_cycle", "--historical-catchup" not in live_daily_cmds[0])
 
     # --- finding 2: repair-scoped gate (only repaired sectors decide it) ---
     gate_r, fail_r = tier0_gate(reg, {"alpha": RunResult("alpha", "PASS")}, repair_scope=["alpha"])
@@ -4009,6 +4063,23 @@ def run_selftest() -> int:
             and plan_bf.backfill_groups[-1][0][0] == "2026-07-07",
         )
         ok("cu_native_chunk_post_steps", sum("post.py" in " ".join(c) for c in plan_bf.backfill_groups[0][1]) == 2)
+        direct_bf_args = argparse.Namespace(
+            mode="backfill",
+            from_date="2026-07-14",
+            to_date="2026-07-16",
+        )
+        direct_bf_cmds, direct_bf_note = build_sector_commands(
+            reg,
+            cusec_bf,
+            direct_bf_args,
+            target_cu,
+            {},
+        )
+        ok(
+            "direct_backfill_preserves_daily_post_steps",
+            direct_bf_note == "backfill+post_steps"
+            and sum("post.py" in " ".join(c) for c in direct_bf_cmds) == 3,
+        )
 
         # execution: a failed backfill date NEVER fails the sector/master; the failed
         # date is recorded per-date and its marker failure count persisted
@@ -4265,7 +4336,7 @@ def run_selftest() -> int:
         ok("asof_reject_non_trading_day", True)
 
     # --- retry policy: success and TIMEOUT are terminal, other failures retry ---
-    ok("timeout_not_retried", not _should_retry_rc(124) and not _should_retry_rc(0) and _should_retry_rc(1))
+    ok("timeout_not_retried", not _should_retry_rc(124) and not _should_retry_rc(78) and not _should_retry_rc(0) and _should_retry_rc(1))
     retry_sector = Sector(**{**reg.by_name("alpha").__dict__, "retry_args": ["--resume"]})
     retry_base = ["python", "runner.py", "--asof", "2026-07-17"]
     ok("retry_args_absent_first_attempt", _command_for_attempt(retry_sector, retry_base, 1) == retry_base)
@@ -4276,6 +4347,15 @@ def run_selftest() -> int:
     ok(
         "retry_args_not_duplicated",
         _command_for_attempt(retry_sector, [*retry_base, "--resume"], 2) == [*retry_base, "--resume"],
+    )
+    native_resume_sector = Sector(
+        **{**retry_sector.__dict__, "entry_script": "runner.py"}
+    )
+    post_command = ["python", "post_publish.py", "--asof", "2026-07-17"]
+    ok(
+        "master_resume_only_updates_entry_command",
+        _commands_for_master_resume(native_resume_sector, [retry_base, post_command])
+        == [[*retry_base, "--resume"], post_command],
     )
 
     # --- sealed-manifest gate value preserves the BYPASSED distinction ---

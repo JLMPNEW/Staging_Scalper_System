@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from biotech_index.core.biotech_taxonomy import classify_biotech_cohort
 from biotech_index.core.config import normalize_string_list
 from biotech_index.core.http_cache import CachedHttpClient
 from biotech_index.core.market_policy import select_latest_rows_by_source_priority
+from biotech_index.core.report_inputs import (
+    resolve_dated_report_input_csv,
+    resolve_market_snapshot_universe_csv,
+)
 from biotech_index.core.scoring_math import (
     score_commercial_entry_quality,
     score_commercial_expected_return_overlay,
@@ -21,6 +26,42 @@ def test_normalize_string_list_splits_cli_delimiters_and_drops_empty_values() ->
     ]
     assert normalize_string_list([" keep ", None, "", "review"], ["default"]) == ["keep", "review"]
     assert normalize_string_list(None, ["keep", "review"]) == ["keep", "review"]
+
+
+def test_market_snapshot_universe_uses_requested_date_when_prices_roll_back(tmp_path: Path) -> None:
+    report_root = tmp_path / "reports"
+    prior = report_root / "20260821" / "ctgov_final_scoring_universe.csv"
+    requested = report_root / "20260822" / "ctgov_final_scoring_universe.csv"
+    prior.parent.mkdir(parents=True)
+    requested.parent.mkdir(parents=True)
+    prior.write_text("ticker\nOLD\n", encoding="utf-8")
+    requested.write_text("ticker\nNEW\n", encoding="utf-8")
+
+    resolved = resolve_market_snapshot_universe_csv(
+        report_root / "ctgov_final_scoring_universe.csv",
+        base_output_dir=report_root,
+        requested_asof_date="2026-08-22",
+        effective_market_asof_date="2026-08-21",
+    )
+
+    assert resolved == requested
+
+
+def test_dated_report_input_prevents_newer_root_catalyst_lookahead(tmp_path: Path) -> None:
+    report_root = tmp_path / "reports"
+    root = report_root / "forward_catalyst_calendar.csv"
+    dated = report_root / "20260821" / root.name
+    dated.parent.mkdir(parents=True)
+    root.write_text("ticker,filing_date\nAAA,2026-08-22\n", encoding="utf-8")
+    dated.write_text("ticker,filing_date\nAAA,2026-08-21\n", encoding="utf-8")
+
+    resolved = resolve_dated_report_input_csv(
+        root,
+        base_output_dir=report_root,
+        asof_date="2026-08-21",
+    )
+
+    assert resolved == dated
 
 
 def test_market_source_selection_ignores_future_rows_and_normalizes_sources() -> None:

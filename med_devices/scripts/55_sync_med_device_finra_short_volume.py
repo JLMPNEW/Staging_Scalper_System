@@ -99,9 +99,12 @@ def ensure_source(conn: Any, source_id: str) -> None:
 def load_company_map(conn: Any) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT company_id, ticker
-        FROM dim_company
-        WHERE is_active = 1
+        SELECT c.company_id, c.ticker, s.listing_start_date
+        FROM dim_company c
+        LEFT JOIN dim_security s
+          ON s.company_id = c.company_id
+         AND COALESCE(s.is_primary_listing, 0) = 1
+        WHERE c.is_active = 1
         """
     ).fetchall()
     return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
@@ -122,6 +125,9 @@ def parse_finra_lines(text: str, *, source_id: str, company_by_ticker: dict[str,
         if len(trade_date) == 8 and trade_date.isdigit():
             trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
         company = company_by_ticker[ticker]
+        listing_start = str(company.get("listing_start_date") or "")[:10]
+        if not trade_date or (listing_start and trade_date < listing_start):
+            continue
         rows.append(
             {
                 "ticker": ticker,

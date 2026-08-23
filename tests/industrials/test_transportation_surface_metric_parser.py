@@ -7,6 +7,7 @@ from dedicated_parser.semantic import parse_semantic_document
 from industrials.transportation.dedicated_parser_adapter import (
     ADAPTER_VERSION,
     _concept_patterns,
+    _surface_derivation_contracts,
     _surface_filing_profiles,
     _surface_source_map,
     applicable_parser_metrics,
@@ -84,6 +85,7 @@ def _derive_table(html: str, ticker: str, *metrics: str, form_type: str = "10-K"
         document_sha256="a" * 64,
         source_kind="sec_archive_primary",
         source_contracts=_surface_source_map(),
+        derivation_contracts=_surface_derivation_contracts(),
         filing_profiles=_surface_filing_profiles(),
         document_extraction_method="html_text",
         document_extraction_cache_status="NOT_APPLICABLE",
@@ -346,3 +348,62 @@ def test_owned_ltl_tractor_count_is_extracted_without_using_trailer_or_year_valu
     strict = [row for row in evidence if row.concept_name == "ReportedLtlTractorCount"]
     assert len(strict) == 1
     assert strict[0].value == 7700.0
+
+def test_ltl_weight_is_derived_from_daily_operands_under_explicit_contract() -> None:
+    evidence = _derive_table(
+        """
+        <h2>Item 7. Management's Discussion and Analysis</h2>
+        <p>Our LTL Operating Statistics</p>
+        <table>
+          <tr><th>Metric</th><th>2025</th></tr>
+          <tr><td>Pounds per day</td><td>1,200,000</td></tr>
+          <tr><td>Shipments per day</td><td>1,000</td></tr>
+        </table>
+        """,
+        "ODFL",
+        "freight_weight_per_shipment",
+    )
+    derived = [row for row in evidence if row.concept_name == "DerivedFreightWeightPerShipment"]
+
+    assert len(derived) == 1
+    assert derived[0].value == pytest.approx(1_200.0)
+    assert derived[0].provenance["comparability_class"] == "exact_ltl"
+
+
+def test_named_segment_operating_ratio_reconciles_expense_and_revenue() -> None:
+    evidence = _derive_table(
+        """
+        <h2>Item 7. Management's Discussion and Analysis</h2>
+        <p>JBI Intermodal segment results</p>
+        <table>
+          <tr><th>Line item</th><th>2025</th></tr>
+          <tr><td>Segment revenue</td><td>1,000</td></tr>
+          <tr><td>Segment operating expenses</td><td>900</td></tr>
+        </table>
+        """,
+        "JBHT",
+        "operating_ratio",
+    )
+    derived = [row for row in evidence if row.concept_name == "DerivedSurfaceSegmentOperatingRatio"]
+
+    assert len(derived) == 1
+    assert derived[0].value == pytest.approx(0.9)
+    assert derived[0].provenance["segment_id"] == "JBI"
+    assert derived[0].provenance["comparability_class"] == "exact_named_segment"
+
+
+def test_broad_transport_cost_proxy_is_emitted_only_for_semantic_rejection() -> None:
+    evidence = _derive_table(
+        """
+        <h2>Item 8. Financial Statements</h2>
+        <p>Airfreight services</p>
+        <table><tr><th>Line item</th><th>2025</th></tr>
+        <tr><td>Total revenue</td><td>1,000</td></tr>
+        <tr><td>Directly related cost of transportation and other expenses</td><td>700</td></tr></table>
+        """,
+        "EXPD",
+        "purchased_transportation_ratio",
+    )
+    derived = [row for row in evidence if row.concept_name == "DerivedSurfacePurchasedTransportationRatio"]
+    assert len(derived) == 1
+    assert derived[0].provenance["comparability_class"] == "broad_proxy"

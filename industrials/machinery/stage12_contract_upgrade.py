@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from hashlib import sha256
 import json
 import sqlite3
 import subprocess
@@ -29,6 +30,8 @@ from industrials.machinery.stage12_activation import (
     _active_cycle_root,
     _write_bytes_atomic,
     apply_active_production_policy,
+    changed_production_policy_sources,
+    production_policy_source_paths,
     production_policy_source_hashes,
 )
 from industrials.machinery.stage12_governance import (
@@ -56,6 +59,13 @@ FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES = frozenset(
 FINANCIAL_LINEAGE_INVARIANT_FIELDS = tuple(
     field for field in FINAL_RANK_FIELDS if field not in LINEAGE_FIELDS
 )
+MAPPED_FACT_IDEMPOTENCY_SOURCE = "08_build_industrials_financial_features.py"
+MAPPED_FACT_IDEMPOTENCY_PATCH = (
+    "             ON CONFLICT(\n"
+    "                 ticker, source_id, accession_number, taxonomy, concept_name,\n"
+    "                 canonical_metric, unit, period_start, period_end, frame\n"
+    "             ) DO NOTHING\n"
+)
 
 
 def _require_hash(path: Path, expected: object, *, label: str) -> None:
@@ -76,6 +86,76 @@ def _changed_source_keys(
         if previous.get(key) != current.get(key)
     }
 
+
+def _assert_exact_mapped_fact_idempotency_patch(
+    source_path: Path,
+    *,
+    sealed_predecessor_sha256: str,
+) -> str:
+    """Prove the current builder differs from its seal only by the conflict guard."""
+    current = source_path.read_text(encoding="utf-8")
+    occurrences = current.count(MAPPED_FACT_IDEMPOTENCY_PATCH)
+    if occurrences != 1:
+        raise ValueError(
+            "Mapped-fact idempotency amendment must occur exactly once; "
+            f"found={occurrences}"
+        )
+    predecessor = current.replace(MAPPED_FACT_IDEMPOTENCY_PATCH, "", 1)
+    predecessor_sha256 = sha256(predecessor.encode("utf-8")).hexdigest()
+    if predecessor_sha256 != sealed_predecessor_sha256:
+        raise ValueError(
+            "Mapped-fact idempotency amendment does not reconstruct the sealed "
+            "production source"
+        )
+    return predecessor_sha256
+
+
+def _mapped_fact_duplicate_group_count(
+    conn: sqlite3.Connection,
+    *,
+    tickers: Sequence[str],
+    source_ids: Sequence[str],
+    asof: str,
+) -> int:
+    """Count production-relevant raw groups that could hit the mapped UNIQUE key."""
+    if not tickers or not source_ids:
+        return 0
+    ticker_ph = ",".join("?" for _ in tickers)
+    source_ph = ",".join("?" for _ in source_ids)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT r.ticker, r.source_id, r.accession_number, r.taxonomy,
+                   r.concept_name, m.canonical_metric, r.unit,
+                   r.period_start, r.period_end, r.frame
+            FROM fact_sec_xbrl_fact_raw AS r
+            JOIN dim_xbrl_concept_map AS m
+              ON m.taxonomy = r.taxonomy
+             AND m.concept_name = r.concept_name
+             AND m.active_flag = 1
+            WHERE r.ticker IN ({ticker_ph})
+              AND r.source_id IN ({source_ph})
+              AND r.accession_number IS NOT NULL
+              AND r.unit IS NOT NULL
+              AND r.period_start IS NOT NULL
+              AND r.period_end IS NOT NULL
+              AND r.frame IS NOT NULL
+              AND r.period_end <= ?
+              AND COALESCE(
+                    NULLIF(SUBSTR(r.accepted_at, 1, 10), ''),
+                    r.filing_date,
+                    r.period_end
+                  ) <= ?
+            GROUP BY r.ticker, r.source_id, r.accession_number, r.taxonomy,
+                     r.concept_name, m.canonical_metric, r.unit,
+                     r.period_start, r.period_end, r.frame
+            HAVING COUNT(DISTINCT r.raw_fact_id) > 1
+        )
+        """,
+        (*tickers, *source_ids, asof, asof),
+    ).fetchone()
+    return int(row[0] if row is not None else 0)
 
 def _assert_rank_projection_unchanged(
     sealed_rows: Sequence[Mapping[str, Any]],
@@ -220,10 +300,8 @@ def upgrade_financial_lineage_contract(
     if not isinstance(previous_source_hashes, dict):
         raise ValueError("Machinery activation state has no source seal")
     current_source_hashes = production_policy_source_hashes()
-    changed_sources = _changed_source_keys(
-        previous_source_hashes,
-        current_source_hashes,
-    )
+    changed_sources = set(changed_production_policy_sources(previous_source_hashes))
+
     if not changed_sources:
         history = list(state.get("source_upgrade_history") or [])
         if any(
@@ -531,6 +609,257 @@ def upgrade_financial_lineage_contract(
     return report
 
 
+def upgrade_mapped_fact_idempotency_contract(
+    config: dict[str, Any],
+    *,
+    config_path: Path,
+    governance_root: Path,
+    asof: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Reseal the exact mapped-fact conflict guard when machinery is unaffected."""
+    effective_asof = parse_asof(asof)
+    state_path = Stage12Paths(governance_root).activation_state_json
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if (
+        state.get("acceptance") != "PASS"
+        or state.get("production_policy_status") != PRODUCTION_POLICY_STATUS_ACTIVE
+    ):
+        raise ValueError("Machinery activation state is not active")
+
+    previous_source_hashes = state.get("production_source_sha256")
+    if not isinstance(previous_source_hashes, dict):
+        raise ValueError("Machinery activation state has no source seal")
+    current_source_hashes = production_policy_source_hashes()
+    changed_sources = set(changed_production_policy_sources(previous_source_hashes))
+    history = list(state.get("source_upgrade_history") or [])
+    reason = "mapped_fact_idempotency_conflict_guard_v1"
+    if not changed_sources:
+        if any(
+            isinstance(item, dict) and item.get("reason") == reason
+            for item in history
+        ):
+            return {
+                "acceptance": "PASS",
+                "asof_date": effective_asof,
+                "operation": "NO_CHANGE_ALREADY_RESEALED",
+                "production_policy_status": PRODUCTION_POLICY_STATUS_ACTIVE,
+            }
+        raise ValueError("Production source seal is already current")
+    if changed_sources != {MAPPED_FACT_IDEMPOTENCY_SOURCE}:
+        raise ValueError(
+            "Mapped-fact idempotency amendment found unrelated source changes: "
+            + ",".join(sorted(changed_sources))
+        )
+
+    source_path = production_policy_source_paths()[MAPPED_FACT_IDEMPOTENCY_SOURCE]
+    predecessor_sha256 = _assert_exact_mapped_fact_idempotency_patch(
+        source_path,
+        sealed_predecessor_sha256=str(
+            previous_source_hashes[MAPPED_FACT_IDEMPOTENCY_SOURCE]
+        ),
+    )
+    activation_asof = parse_asof(str(state.get("activation_asof") or ""))
+    active_root = _active_cycle_root(state, default_root=governance_root)
+    active_paths = Stage12Paths(active_root)
+    activation_paths = ActivationPaths(active_root, activation_asof)
+    result_path = activation_paths.activation_json
+    candidate_path = activation_paths.rank_csv
+    _require_hash(
+        active_paths.lock_json,
+        state.get("governance_lock_sha256"),
+        label="governance lock",
+    )
+    _require_hash(
+        candidate_path,
+        state.get("candidate_rank_sha256"),
+        label="activation candidate",
+    )
+    _require_hash(
+        result_path,
+        state.get("activation_result_sha256"),
+        label="activation result",
+    )
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    if (
+        result.get("acceptance") != "PASS"
+        or result.get("activation_status") != ACTIVATION_STATUS_FULLY_VALIDATED
+        or result.get("asof_date") != activation_asof
+    ):
+        raise ValueError("Machinery activation result is not fully validated")
+
+    live_rank = Path(str(result.get("rank_table") or ""))
+    live_manifest = Path(str(result.get("rank_manifest") or ""))
+    _require_hash(live_rank, result.get("rank_table_sha256"), label="live rank table")
+    if file_sha256(live_rank) != file_sha256(candidate_path):
+        raise ValueError("Live machinery rank table differs from sealed candidate")
+    _require_hash(
+        live_manifest,
+        result.get("rank_manifest_sha256"),
+        label="live rank manifest",
+    )
+    rank_manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
+    sidecar_path = live_manifest.with_name(
+        "machinery_stage11_survivorship_calibration_panel.csv"
+    )
+    _require_hash(
+        sidecar_path,
+        rank_manifest.get("sidecar_sha256"),
+        label="shadow calibration sidecar",
+    )
+    lock = json.loads(active_paths.lock_json.read_text(encoding="utf-8"))
+    selection_policy = lock.get("production_selection_policy")
+    if not isinstance(selection_policy, Mapping):
+        raise ValueError("Governance lock has no production selection policy")
+    candidate_rows = read_rows(candidate_path)
+    sidecar_rows = read_rows(sidecar_path)
+    reproduced_rows = production_preview_rows(
+        sidecar_rows,
+        weights={
+            str(key): float(value)
+            for key, value in lock["recommended_weights"].items()
+        },
+        asof=activation_asof,
+        lock_date=str(lock["lockbox_start_date"]),
+        score_model_version=str(
+            cfg_get(config, "machinery_stage12.score_model_version")
+        ),
+        model_version=str(cfg_get(config, "machinery_stage12.model_version")),
+        scoring_contract_version=str(
+            cfg_get(config, "machinery_stage12.scoring_contract_version")
+        ),
+        selection_spec=strategy_spec_by_name(
+            config,
+            str(selection_policy.get("variant") or ""),
+        ),
+        minimum_positions=int(selection_policy["minimum_positions"]),
+        universe_policy=str(selection_policy["universe_policy"]),
+    )
+    _assert_rank_projection_unchanged(candidate_rows, reproduced_rows)
+
+    primary_source = str(
+        cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts")
+        or "sec_companyfacts"
+    )
+    supplemental_raw = cfg_get(
+        config,
+        "model_families.machinery.financial.supplemental_disclosure_source_ids",
+        None,
+    )
+    if supplemental_raw is None:
+        supplemental_raw = cfg_get(
+            config, "sec_fundamentals.supplemental_disclosure_source_ids", []
+        )
+    if isinstance(supplemental_raw, str):
+        supplemental = [
+            item.strip() for item in supplemental_raw.split(",") if item.strip()
+        ]
+    else:
+        supplemental = [
+            str(item).strip() for item in supplemental_raw or [] if str(item).strip()
+        ]
+    source_ids = tuple(dict.fromkeys((primary_source, *supplemental)))
+    resolved_db = (
+        db_path.expanduser().resolve()
+        if db_path is not None
+        else resolve_path(
+            cfg_get(config, "paths.database_path"),
+            base_dir=config_path.parent,
+        )
+    )
+    with closing(sqlite3.connect(f"{resolved_db.as_uri()}?mode=ro", uri=True)) as conn:
+        duplicate_groups = _mapped_fact_duplicate_group_count(
+            conn,
+            tickers=sorted(
+                str(row.get("ticker") or "")
+                for row in candidate_rows
+                if str(row.get("ticker") or "")
+            ),
+            source_ids=source_ids,
+            asof=effective_asof,
+        )
+    if duplicate_groups:
+        raise ValueError(
+            "Mapped-fact idempotency amendment affects the active machinery "
+            f"universe; duplicate_groups={duplicate_groups}"
+        )
+
+    backup_root = (
+        governance_root
+        / "activation_contract_upgrades"
+        / effective_asof
+        / reason
+    )
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_root / "activation_state_before_upgrade.json"
+    original_state = state_path.read_bytes()
+    if not backup_path.exists():
+        _write_bytes_atomic(backup_path, original_state)
+    report_path = backup_root / "mapped_fact_idempotency_source_upgrade.json"
+    upgraded_at = utc_now()
+    try:
+        history.append(
+            {
+                "upgraded_at_utc": upgraded_at,
+                "effective_asof": effective_asof,
+                "reason": reason,
+                "changed_source_files": sorted(changed_sources),
+                "sealed_predecessor_sha256": predecessor_sha256,
+                "candidate_reproduced_exactly": True,
+                "active_universe_duplicate_group_count": duplicate_groups,
+            }
+        )
+        state.update(
+            {
+                "production_source_sha256": current_source_hashes,
+                "mapped_fact_idempotency_contract_effective_asof": effective_asof,
+                "mapped_fact_idempotency_contract_upgraded_at_utc": upgraded_at,
+                "source_upgrade_history": history,
+            }
+        )
+        write_json_atomic(state_path, state)
+        regenerated_rows, policy_metadata = apply_active_production_policy(
+            config,
+            config_path=config_path,
+            governance_root=governance_root,
+            asof=activation_asof,
+            shadow_rows=sidecar_rows,
+        )
+        _assert_rank_projection_unchanged(candidate_rows, regenerated_rows)
+        validations = _validate_live_outputs(
+            config_path=config_path,
+            asof=activation_asof,
+        )
+        report = {
+            "acceptance": "PASS",
+            "asof_date": effective_asof,
+            "activation_asof": activation_asof,
+            "upgraded_at_utc": upgraded_at,
+            "operation": "MAPPED_FACT_IDEMPOTENCY_CONTRACT_RESEAL",
+            "changed_source_files": sorted(changed_sources),
+            "sealed_predecessor_sha256": predecessor_sha256,
+            "current_source_sha256": current_source_hashes[
+                MAPPED_FACT_IDEMPOTENCY_SOURCE
+            ],
+            "candidate_reproduced_exactly": True,
+            "active_universe_duplicate_group_count": duplicate_groups,
+            "source_ids_checked": list(source_ids),
+            "row_count": len(candidate_rows),
+            "production_policy_status": policy_metadata[
+                "production_policy_status"
+            ],
+            "validations": validations,
+            "activation_state": str(state_path),
+            "activation_state_sha256": file_sha256(state_path),
+            "backup_artifact": str(backup_path),
+        }
+        write_json_atomic(report_path, report)
+    except BaseException:
+        _write_bytes_atomic(state_path, original_state)
+        report_path.unlink(missing_ok=True)
+        raise
+    return report
+
 def upgrade_active_contract(
     config: dict[str, Any],
     *,
@@ -578,9 +907,9 @@ def upgrade_active_contract(
         "stage12_governance.py",
     }
     changed_semantic_sources = sorted(
-        key
-        for key in semantic_source_keys
-        if previous_source_hashes.get(key) != current_source_hashes.get(key)
+        semantic_source_keys.intersection(
+            changed_production_policy_sources(previous_source_hashes)
+        )
     )
     if changed_semantic_sources:
         raise ValueError(
@@ -885,9 +1214,8 @@ def migrate_active_adapter_semantic_seal(
     }
     unexpected_source_changes = sorted(
         key
-        for key in set(previous_source_hashes) | set(current_source_hashes)
-        if previous_source_hashes.get(key) != current_source_hashes.get(key)
-        and key not in permitted_migration_sources
+        for key in changed_production_policy_sources(previous_source_hashes)
+        if key not in permitted_migration_sources
     )
     if unexpected_source_changes:
         raise ValueError(

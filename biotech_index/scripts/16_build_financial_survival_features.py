@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path
 from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.financial_survival import cash_runway_is_reliable, proxy_field_names
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
     normalize_ticker,
@@ -33,12 +34,15 @@ from biotech_index.core.pipeline_guards import (
     validate_requested_tickers,
 )
 from biotech_index.core.report_inputs import resolve_dated_report_input_csv
+from biotech_index.core.security_identity import identity_start_dates_by_company, load_security_identity_rules
 
 
 LOGGER = logging.getLogger("build_financial_survival_features")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SQLITE_PARAM_CHUNK_SIZE = 800
 QUARTER_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
+FISCAL_QUARTER_NUMBER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 4}
+CUMULATIVE_CASH_FLOW_FORMS = {"10-Q", "10-Q/A", "10-K", "10-K/A"}
 
 
 def chunked(values: list[Any] | tuple[Any, ...], size: int = SQLITE_PARAM_CHUNK_SIZE) -> list[list[Any]]:
@@ -59,6 +63,7 @@ SURVIVAL_FIELDS = [
     "rd_expense_ttm",
     "sgna_expense_ttm",
     "cash_runway_months",
+    "cash_runway_reliable_flag",
     "working_capital",
     "working_capital_ratio",
     "debt_to_cash",
@@ -154,6 +159,47 @@ def read_screen_rows(path: Path) -> dict[str, dict[str, str]]:
         return {str(row.get("ticker") or "").strip().upper(): {str(k): str(v or "") for k, v in row.items()} for row in reader}
 
 
+SCREEN_ASOF_FIELDS = ("asof_date", "source_snapshot_asof_date", "snapshot_date")
+PERIODIC_GOING_CONCERN_FORMS = frozenset({"10-K", "10-Q", "20-F", "40-F"})
+
+
+def screen_rows_for_asof(
+    path: Path,
+    *,
+    asof_date: date,
+    current_date: date | None = None,
+) -> dict[str, dict[str, str]]:
+    """Return only screener rows whose provenance is valid at the requested date."""
+    rows = read_screen_rows(path)
+    today = current_date or datetime.now(timezone.utc).date()
+    if asof_date >= today:
+        return rows
+    filtered: dict[str, dict[str, str]] = {}
+    for ticker, row in rows.items():
+        row_asof = next(
+            (
+                parsed
+                for field in SCREEN_ASOF_FIELDS
+                if (parsed := parse_date(row.get(field))) is not None
+            ),
+            None,
+        )
+        if row_asof is not None and row_asof <= asof_date:
+            filtered[ticker] = row
+    if rows and len(filtered) != len(rows):
+        LOGGER.info(
+            "Excluded %d undated/future screener rows for historical financial-survival asof=%s",
+            len(rows) - len(filtered),
+            asof_date.isoformat(),
+        )
+    return filtered
+
+
+def going_concern_status_for_form(form: object) -> str:
+    base_form = str(form or "").strip().upper().removesuffix("/A")
+    return "confirmed" if base_form in PERIODIC_GOING_CONCERN_FORMS else "possible"
+
+
 def read_scoring_tickers(path: Path) -> set[str]:
     return read_final_scoring_tickers(path)
 
@@ -191,7 +237,13 @@ def load_companies(
     return out
 
 
-def load_fact_rows(conn: sqlite3.Connection, company_id: int, asof_date: date) -> list[dict[str, Any]]:
+def load_fact_rows(
+    conn: sqlite3.Connection,
+    company_id: int,
+    asof_date: date,
+    *,
+    identity_start_date: date | None = None,
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT *
@@ -208,16 +260,34 @@ def load_fact_rows(conn: sqlite3.Connection, company_id: int, asof_date: date) -
         """,
         (company_id, asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+        if identity_start_date is None
+        or ((period_end := parse_date(row["period_end"])) is not None and period_end >= identity_start_date)
+    ]
 
 
-def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_date: date) -> dict[int, list[dict[str, Any]]]:
+def load_fact_rows_bulk(
+    conn: sqlite3.Connection,
+    company_ids: list[int],
+    asof_date: date,
+    *,
+    identity_start_dates: dict[int, date] | None = None,
+) -> dict[int, list[dict[str, Any]]]:
     if not company_ids:
         return {}
     if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
         out: dict[int, list[dict[str, Any]]] = {int(company_id): [] for company_id in company_ids}
         for company_chunk in chunked(company_ids):
-            out.update(load_fact_rows_bulk(conn, [int(value) for value in company_chunk], asof_date))
+            out.update(
+                load_fact_rows_bulk(
+                    conn,
+                    [int(value) for value in company_chunk],
+                    asof_date,
+                    identity_start_dates=identity_start_dates,
+                )
+            )
         return out
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
@@ -237,8 +307,14 @@ def load_fact_rows_bulk(conn: sqlite3.Connection, company_ids: list[int], asof_d
         tuple(company_ids) + (asof_date.isoformat(), asof_date.isoformat(), asof_date.isoformat()),
     ).fetchall()
     out: dict[int, list[dict[str, Any]]] = {company_id: [] for company_id in company_ids}
+    floors = identity_start_dates or {}
     for row in rows:
-        out.setdefault(int(row["company_id"]), []).append(dict(row))
+        company_id = int(row["company_id"])
+        period_end = parse_date(row["period_end"])
+        identity_start = floors.get(company_id)
+        if identity_start is not None and (period_end is None or period_end < identity_start):
+            continue
+        out.setdefault(company_id, []).append(dict(row))
     for company_id, company_rows in out.items():
         out[company_id] = dedup_fact_rows(company_rows)
     return out
@@ -317,6 +393,146 @@ def amount_for_period(row: dict[str, Any], field: str, proxies: list[str]) -> fl
     return value
 
 
+def fiscal_year_key(row: dict[str, Any]) -> int | None:
+    fiscal_year = to_float(row.get("fiscal_year"))
+    if fiscal_year is not None:
+        return int(fiscal_year)
+    period_end = parse_date(row.get("period_end"))
+    return period_end.year if period_end is not None else None
+
+
+def operating_cash_flow_is_cumulative(row: dict[str, Any]) -> bool:
+    fiscal_period = str(row.get("fiscal_period") or "").upper()
+    duration_days = to_float(row.get("operating_cash_flow_duration_days"))
+    if duration_days is not None:
+        if fiscal_period == "Q2":
+            return duration_days >= 140.0
+        if fiscal_period == "Q3":
+            return duration_days >= 220.0
+        if fiscal_period == "FY":
+            return duration_days >= 300.0
+        return False
+    form = str(row.get("form") or "").upper()
+    return form in CUMULATIVE_CASH_FLOW_FORMS and fiscal_period in {"Q2", "Q3", "FY"}
+
+
+def operating_cash_flow_rows_by_quarter(
+    rows: list[dict[str, Any]],
+) -> dict[tuple[int, int], dict[str, Any]]:
+    by_quarter: dict[tuple[int, int], dict[str, Any]] = {}
+    for row in rows:
+        value = to_float(row.get("operating_cash_flow"))
+        fiscal_year = fiscal_year_key(row)
+        quarter = FISCAL_QUARTER_NUMBER.get(str(row.get("fiscal_period") or "").upper())
+        if value is None or fiscal_year is None or quarter is None:
+            continue
+        key = (fiscal_year, quarter)
+        current = by_quarter.get(key)
+        if current is None:
+            by_quarter[key] = row
+            continue
+        current_period = parse_date(current.get("period_end")) or date.min
+        candidate_period = parse_date(row.get("period_end")) or date.min
+        current_is_fy = str(current.get("fiscal_period") or "").upper() == "FY"
+        candidate_is_fy = str(row.get("fiscal_period") or "").upper() == "FY"
+        if candidate_period > current_period or (
+            candidate_period == current_period and current_is_fy and not candidate_is_fy
+        ):
+            by_quarter[key] = row
+    return by_quarter
+
+
+def discrete_operating_cash_flow_quarters(
+    rows: list[dict[str, Any]],
+    proxies: list[str],
+) -> list[tuple[dict[str, Any], float]]:
+    by_quarter = operating_cash_flow_rows_by_quarter(rows)
+    discrete: list[tuple[dict[str, Any], float]] = []
+    for (fiscal_year, quarter), row in by_quarter.items():
+        value = to_float(row.get("operating_cash_flow"))
+        if value is None:
+            continue
+        fiscal_period = str(row.get("fiscal_period") or "").upper()
+        if not operating_cash_flow_is_cumulative(row):
+            discrete_value = value
+        else:
+            prior = by_quarter.get((fiscal_year, quarter - 1))
+            prior_value = to_float((prior or {}).get("operating_cash_flow"))
+            prior_is_valid_baseline = (
+                prior is not None
+                and prior_value is not None
+                and (
+                    quarter - 1 == 1
+                    or operating_cash_flow_is_cumulative(prior)
+                )
+            )
+            if not prior_is_valid_baseline:
+                continue
+            assert prior_value is not None
+            discrete_value = value - prior_value
+            proxy = f"discrete_operating_cash_flow_{fiscal_period.lower()}_from_ytd_delta"
+            if proxy not in proxies:
+                proxies.append(proxy)
+        discrete.append((row, discrete_value))
+    discrete.sort(
+        key=lambda item: parse_date(item[0].get("period_end")) or date.min,
+        reverse=True,
+    )
+    return discrete
+
+
+def contiguous_operating_cash_flow_values(
+    discrete: list[tuple[dict[str, Any], float]],
+) -> list[float]:
+    values: list[float] = []
+    previous_ordinal: int | None = None
+    for row, value in discrete:
+        fiscal_year = fiscal_year_key(row)
+        quarter = FISCAL_QUARTER_NUMBER.get(str(row.get("fiscal_period") or "").upper())
+        if fiscal_year is None or quarter is None:
+            break
+        ordinal = fiscal_year * 4 + quarter
+        if previous_ordinal is not None and previous_ordinal - ordinal != 1:
+            break
+        values.append(value)
+        previous_ordinal = ordinal
+    return values
+
+
+def latest_operating_cash_flow_quarter(
+    rows: list[dict[str, Any]],
+    proxies: list[str],
+) -> float | None:
+    latest_row = next(
+        (row for row in rows if to_float(row.get("operating_cash_flow")) is not None),
+        None,
+    )
+    if latest_row is None:
+        return None
+    latest_key = (
+        fiscal_year_key(latest_row),
+        FISCAL_QUARTER_NUMBER.get(str(latest_row.get("fiscal_period") or "").upper()),
+    )
+    for row, value in discrete_operating_cash_flow_quarters(rows, proxies):
+        row_key = (
+            fiscal_year_key(row),
+            FISCAL_QUARTER_NUMBER.get(str(row.get("fiscal_period") or "").upper()),
+        )
+        if row_key == latest_key:
+            return value
+    value = to_float(latest_row.get("operating_cash_flow"))
+    fiscal_period = str(latest_row.get("fiscal_period") or "").upper()
+    quarter = FISCAL_QUARTER_NUMBER.get(fiscal_period)
+    if value is None or quarter is None:
+        return None
+    if operating_cash_flow_is_cumulative(latest_row):
+        proxy = "annualized_ytd_operating_cash_flow"
+        if proxy not in proxies:
+            proxies.append(proxy)
+        return value / float(quarter)
+    return value
+
+
 def ttm_amount(
     rows: list[dict[str, Any]],
     field: str,
@@ -325,21 +541,31 @@ def ttm_amount(
     asof_date: date | None = None,
     max_fy_age_days: int = 550,
 ) -> float | None:
-    quarterly_values: list[float] = []
-    for row in rows:
-        fp = str(row.get("fiscal_period") or "").upper()
-        value = to_float(row.get(field))
-        if value is None:
-            continue
-        if fp in QUARTER_PERIODS:
-            quarterly_values.append(value)
-        if len(quarterly_values) >= 4:
-            break
-    if len(quarterly_values) >= 2:
-        if len(quarterly_values) < 4:
-            proxies.append(f"partial_quarter_annualized_{field}")
-            return sum(quarterly_values) / len(quarterly_values) * 4.0
-        return sum(quarterly_values[:4])
+    if field == "operating_cash_flow":
+        discrete_values = contiguous_operating_cash_flow_values(
+            discrete_operating_cash_flow_quarters(rows, proxies)
+        )
+        if len(discrete_values) >= 4:
+            return sum(discrete_values[:4])
+        if len(discrete_values) >= 2:
+            proxies.append("partial_quarter_annualized_operating_cash_flow")
+            return sum(discrete_values) / len(discrete_values) * 4.0
+    if field != "operating_cash_flow":
+        quarterly_values: list[float] = []
+        for row in rows:
+            fp = str(row.get("fiscal_period") or "").upper()
+            value = to_float(row.get(field))
+            if value is None:
+                continue
+            if fp in QUARTER_PERIODS:
+                quarterly_values.append(value)
+            if len(quarterly_values) >= 4:
+                break
+        if len(quarterly_values) >= 2:
+            if len(quarterly_values) < 4:
+                proxies.append(f"partial_quarter_annualized_{field}")
+                return sum(quarterly_values) / len(quarterly_values) * 4.0
+            return sum(quarterly_values[:4])
     for row in rows:
         if str(row.get("fiscal_period") or "").upper() == "FY":
             period_end = parse_date(row.get("period_end"))
@@ -350,6 +576,19 @@ def ttm_amount(
             value = to_float(row.get(field))
             if value is not None:
                 return value
+    if field == "operating_cash_flow":
+        latest_row = next(
+            (row for row in rows if to_float(row.get(field)) is not None),
+            None,
+        )
+        if latest_row is not None and operating_cash_flow_is_cumulative(latest_row):
+            value = to_float(latest_row.get(field))
+            quarter = FISCAL_QUARTER_NUMBER.get(
+                str(latest_row.get("fiscal_period") or "").upper()
+            )
+            if value is not None and quarter:
+                proxies.append("annualized_ytd_operating_cash_flow")
+                return value / float(quarter) * 4.0
     return None
 
 
@@ -363,7 +602,7 @@ def burn_metrics(
     latest_ocf_row = next((row for row in rows if to_float(row.get("operating_cash_flow")) is not None), None)
     latest_burn: float | None = None
     if latest_ocf_row is not None:
-        ocf_quarter = amount_for_period(latest_ocf_row, "operating_cash_flow", proxies)
+        ocf_quarter = latest_operating_cash_flow_quarter(rows, proxies)
         latest_burn = max(0.0, -(ocf_quarter or 0.0))
     else:
         latest_net_income_row = next((row for row in rows if to_float(row.get("net_income")) is not None), None)
@@ -440,19 +679,32 @@ def load_dilution_events(conn: sqlite3.Connection, *, company_id: int, asof_date
     }
 
 
-def load_dilution_events_bulk(conn: sqlite3.Connection, *, company_ids: list[int], asof_date: date) -> dict[int, dict[str, Any]]:
+def load_dilution_events_bulk(
+    conn: sqlite3.Connection,
+    *,
+    company_ids: list[int],
+    asof_date: date,
+    identity_start_dates: dict[int, date] | None = None,
+) -> dict[int, dict[str, Any]]:
     if not company_ids:
         return {}
     if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
         out: dict[int, dict[str, Any]] = {}
         for company_chunk in chunked(company_ids):
-            out.update(load_dilution_events_bulk(conn, company_ids=[int(value) for value in company_chunk], asof_date=asof_date))
+            out.update(
+                load_dilution_events_bulk(
+                    conn,
+                    company_ids=[int(value) for value in company_chunk],
+                    asof_date=asof_date,
+                    identity_start_dates=identity_start_dates,
+                )
+            )
         return out
     cutoff = (asof_date - timedelta(days=365)).isoformat()
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
-        SELECT company_id, event_type, accession_nodash, extracted_text
+        SELECT company_id, filing_date, event_type, accession_nodash, extracted_text
         FROM sec_events
         WHERE company_id IN ({placeholders})
           AND filing_date >= ?
@@ -464,8 +716,13 @@ def load_dilution_events_bulk(conn: sqlite3.Connection, *, company_ids: list[int
     grouped: dict[int, set[tuple[str, str]]] = {company_id: set() for company_id in company_ids}
     counts_by_company: dict[int, dict[str, int]] = {company_id: {} for company_id in company_ids}
     valid_types = {"atm_program", "atm_facility", "public_offering", "pipe_financing", "shelf_registration", "financing_shelf"}
+    floors = identity_start_dates or {}
     for row in rows:
         company_id = int(row["company_id"])
+        filing_date = parse_date(row["filing_date"])
+        identity_start = floors.get(company_id)
+        if identity_start is not None and (filing_date is None or filing_date < identity_start):
+            continue
         event_type = str(row["event_type"] or "")
         if event_type not in valid_types:
             continue
@@ -487,29 +744,52 @@ def load_dilution_events_bulk(conn: sqlite3.Connection, *, company_ids: list[int
     }
 
 
-def load_going_concern_status_bulk(conn: sqlite3.Connection, *, company_ids: list[int], asof_date: date) -> dict[int, str]:
+def load_going_concern_status_bulk(
+    conn: sqlite3.Connection,
+    *,
+    company_ids: list[int],
+    asof_date: date,
+    identity_start_dates: dict[int, date] | None = None,
+) -> dict[int, str]:
     if not company_ids:
         return {}
     if len(company_ids) > SQLITE_PARAM_CHUNK_SIZE:
         out: dict[int, str] = {}
         for company_chunk in chunked(company_ids):
-            out.update(load_going_concern_status_bulk(conn, company_ids=[int(value) for value in company_chunk], asof_date=asof_date))
+            out.update(
+                load_going_concern_status_bulk(
+                    conn,
+                    company_ids=[int(value) for value in company_chunk],
+                    asof_date=asof_date,
+                    identity_start_dates=identity_start_dates,
+                )
+            )
         return out
     cutoff = (asof_date - timedelta(days=400)).isoformat()
     placeholders = ",".join("?" for _ in company_ids)
     rows = conn.execute(
         f"""
-        SELECT company_id, MAX(filing_date) AS latest_filing_date
+        SELECT company_id, filing_date, form
         FROM sec_events
         WHERE company_id IN ({placeholders})
           AND filing_date >= ?
           AND filing_date <= ?
           AND event_type = 'going_concern_confirmed'
-        GROUP BY company_id
         """,
         tuple(company_ids) + (cutoff, asof_date.isoformat()),
     ).fetchall()
-    return {int(row["company_id"]): "confirmed" for row in rows}
+    floors = identity_start_dates or {}
+    out: dict[int, str] = {}
+    for row in rows:
+        company_id = int(row["company_id"])
+        filing_date = parse_date(row["filing_date"])
+        identity_start = floors.get(company_id)
+        if identity_start is not None and (filing_date is None or filing_date < identity_start):
+            continue
+        event_status = going_concern_status_for_form(row["form"])
+        if event_status == "confirmed" or company_id not in out:
+            out[company_id] = event_status
+    return out
 
 
 def compute_survival_row(
@@ -535,6 +815,12 @@ def compute_survival_row(
             proxies.append("cash_and_equivalents_for_cash_and_investments")
     if cash is None:
         missing.append("cash_and_investments")
+    if cash_row:
+        proxies.extend(
+            proxy
+            for proxy in proxy_field_names(cash_row.get("proxy_fields_used"))
+            if "cash_and_investments" in proxy
+        )
     negative_cash_flag = int(cash is not None and cash < 0.0)
     latest_period_end = str((cash_row or {}).get("period_end") or "")
 
@@ -557,6 +843,13 @@ def compute_survival_row(
     else:
         runway = None
         missing.append("cash_runway_months")
+    cash_reliability_record = dict(cash_row or {})
+    cash_reliability_record["proxy_fields_used"] = proxies
+    cash_runway_reliable_flag = int(
+        cash is not None
+        and runway is not None
+        and cash_runway_is_reliable(cash_reliability_record)
+    )
 
     rd_ttm = ttm_amount(rows, "rd_expense", proxies, asof_date=asof_date)
     sgna_ttm = ttm_amount(rows, "sgna_expense", proxies, asof_date=asof_date)
@@ -610,8 +903,8 @@ def compute_survival_row(
     burn_acceleration = int((rd_yoy is not None and rd_yoy > rd_growth_threshold) and (cash_yoy is not None and cash_yoy < cash_decline_threshold))
     short_runway_months = float(cfg_get(config, "financial_survival.short_runway_months", 6))
     severe_runway_months = float(cfg_get(config, "financial_survival.severe_runway_months", 3))
-    short_runway_flag = int(runway is not None and runway < short_runway_months)
-    severe_runway_flag = int(runway is not None and runway < severe_runway_months)
+    short_runway_flag = int(cash_runway_reliable_flag > 0 and runway is not None and runway < short_runway_months)
+    severe_runway_flag = int(cash_runway_reliable_flag > 0 and runway is not None and runway < severe_runway_months)
 
     atm_active = int(dilution_events.get("atm_facility_active") or 0)
     offering_count = int(dilution_events.get("recent_offering_count_12m") or 0)
@@ -658,6 +951,20 @@ def compute_survival_row(
             break
     if not going_status:
         going_status = db_going_status or csv_going_status
+    latest_periodic_status = str(screen_row.get("latest_periodic_going_concern_status") or "").strip().lower()
+    if csv_going_status == "resolved" and latest_periodic_status in {"none", "resolved"}:
+        going_status = "resolved"
+    resolution_runway_months = float(
+        cfg_get(config, "financial_survival.going_concern_resolution_runway_months", 18.0)
+    )
+    runway_resolution_applied = bool(
+        going_status in {"confirmed", "possible"}
+        and cash_runway_reliable_flag > 0
+        and runway is not None
+        and runway >= resolution_runway_months
+    )
+    if runway_resolution_applied:
+        going_status = "resolved"
     # Prefer the broader 2-year NT-filing screen when present; the output keeps
     # the historical 12m field name for downstream schema compatibility.
     late_filing_raw = screen_row.get("recent_nt_filing_count_2y")
@@ -718,6 +1025,9 @@ def compute_survival_row(
         "missing_fields": missing,
         "proxy_fields_used": proxies,
         "data_quality": data_quality,
+        "cash_runway_reliable_flag": cash_runway_reliable_flag,
+        "going_concern_runway_resolution_applied": int(runway_resolution_applied),
+        "going_concern_resolution_runway_months": resolution_runway_months,
     }
     return {
         "asof_date": asof_date.isoformat(),
@@ -732,6 +1042,7 @@ def compute_survival_row(
         "rd_expense_ttm": rd_ttm,
         "sgna_expense_ttm": sgna_ttm,
         "cash_runway_months": runway,
+        "cash_runway_reliable_flag": cash_runway_reliable_flag,
         "working_capital": working_capital,
         "working_capital_ratio": working_capital_ratio,
         "debt_to_cash": debt_to_cash,
@@ -824,6 +1135,11 @@ def main() -> None:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    identity_registry_path = resolve_path(
+        cfg_get(config, "active_biotech_history.registry_csv", "data/active_biotech_historical_additions.csv"),
+        base_dir=base_dir,
+    )
+    security_identity_rules = load_security_identity_rules(identity_registry_path)
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     configured_universe_csv = resolve_path(
         cfg_get(
@@ -847,7 +1163,7 @@ def main() -> None:
     ticker_filter = {normalize_ticker(x) for x in args.tickers.split(",") if normalize_ticker(x)}
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
-    screen_rows = read_screen_rows(screen_csv)
+    screen_rows = screen_rows_for_asof(screen_csv, asof_date=asof_date)
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         init_db(conn)
         scoring_tickers = read_scoring_tickers(universe_csv)
@@ -876,9 +1192,32 @@ def main() -> None:
         try:
             run_id = start_run(conn, run_type="build_financial_survival_features", input_path=universe_csv)
             company_ids = [int(company["company_id"]) for company in companies]
-            fact_rows_by_company = load_fact_rows_bulk(conn, company_ids, asof_date)
-            dilution_events_by_company = load_dilution_events_bulk(conn, company_ids=company_ids, asof_date=asof_date)
-            going_concern_by_company = load_going_concern_status_bulk(conn, company_ids=company_ids, asof_date=asof_date)
+            company_ids_by_ticker = {
+                normalize_ticker(company["ticker"]): int(company["company_id"])
+                for company in companies
+            }
+            identity_start_dates = identity_start_dates_by_company(
+                security_identity_rules,
+                company_ids_by_ticker,
+            )
+            fact_rows_by_company = load_fact_rows_bulk(
+                conn,
+                company_ids,
+                asof_date,
+                identity_start_dates=identity_start_dates,
+            )
+            dilution_events_by_company = load_dilution_events_bulk(
+                conn,
+                company_ids=company_ids,
+                asof_date=asof_date,
+                identity_start_dates=identity_start_dates,
+            )
+            going_concern_by_company = load_going_concern_status_bulk(
+                conn,
+                company_ids=company_ids,
+                asof_date=asof_date,
+                identity_start_dates=identity_start_dates,
+            )
             rows: list[dict[str, Any]] = []
             for company in companies:
                 ticker = str(company["ticker"] or "").upper()

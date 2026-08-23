@@ -18,4 +18,5 @@ PSNL,molecular_diagnostics,Molecular diagnostics company retained in biotech uni
 SIBN,non_therapeutic_device_removed,Removed from biotech scoring as post-market device-only.
 STE,sterilization_services,Healthcare sterilization/services company retained in broad healthcare/biotech universe.
 TCMD,post_market_device_services,Post-market device/services company retained in biotech universe.
+TECH,life_science_tools_services,Commercial life-science tools company; score through the commercial-quality stack without requiring a therapeutic trial.
 TMO,life_science_tools_services,Life-science tools/services company retained in biotech universe.

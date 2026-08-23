@@ -1,0 +1,36 @@
+ticker,issuer_aliases,segment_aliases,filing_profile
+CNI,Canadian National Railway|Canadian National|CN|CNR,Railway|Rail operations,40-F
+CP,Canadian Pacific Kansas City|Canadian Pacific|CPKC,Canadian rail|Railway,40-F
+CSX,CSX Corporation|CSX,CSX Transportation|Rail,10-K
+NSC,Norfolk Southern Corporation|Norfolk Southern|NSC,Railway|Rail,10-K
+UNP,Union Pacific Corporation|Union Pacific|UNP,Union Pacific Railroad|Rail,10-K
+ARCB,ArcBest Corporation|ArcBest|ARCB,Asset-Based|LTL,10-K
+ODFL,Old Dominion Freight Line|Old Dominion|ODFL,LTL,10-K
+SAIA,Saia Inc|Saia|SAIA,LTL,10-K
+TFII,TFI International|TFII,LTL|Package and Courier|Truckload,40-F
+XPO,XPO Inc|XPO,North American LTL|LTL,10-K
+HUBG,Hub Group|HUBG,Intermodal and Transportation Solutions|Intermodal,10-K
+JBHT,J.B. Hunt Transport Services|JB Hunt|JBHT,JBI|Intermodal|JBT|Truckload,10-K
+KNX,Knight-Swift Transportation|Knight-Swift|KNX,Truckload|LTL,10-K
+SNDR,Schneider National|Schneider|SNDR,Truckload|Intermodal,10-K
+CVLG,Covenant Logistics Group|Covenant Logistics|CVLG,Freight Transportation|Managed Freight,10-K
+HTLD,Heartland Express|HTLD,Truckload,10-K
+MRTN,Marten Transport|MRTN,Truckload,10-K
+WERN,Werner Enterprises|WERN,Truckload Transportation Services|TTS,10-K
+CHRW,C.H. Robinson Worldwide|C.H. Robinson|CHRW,North American Surface Transportation|NAST,10-K
+EXPD,Expeditors International|Expeditors|EXPD,Airfreight services|Ocean freight and ocean services,10-K
+FWRD,Forward Air Corporation|Forward Air|FWRD,Expedited Freight|Intermodal,10-K
+LSTR,Landstar System|Landstar|LSTR,Transportation Logistics,10-K
+FDX,FedEx Corporation|FedEx|FDX,FedEx Freight|Federal Express,10-K
+UPS,United Parcel Service|UPS,U.S. Domestic Package|Supply Chain Solutions,10-K
+DHT,DHT Holdings|DHT,Fleet|Tankers,20-F
+ECO,Okeanis Eco Tankers|Okeanis|ECO,Fleet|Tankers,20-F
+FRO,Frontline plc|Frontline|FRO,Fleet|Tankers,20-F
+NAT,Nordic American Tankers|NAT,Fleet|Tankers,20-F
+TRMD,TORM plc|TORM|TRMD,Fleet|Tankers,20-F
+INSW,International Seaways|INSW,Fleet|Tankers,10-K
+TNK,Teekay Tankers|TNK,Fleet|Tankers,20-F
+TEN,Tsakos Energy Navigation|TEN,Fleet|Tankers,20-F
+ASC,Ardmore Shipping Corporation|Ardmore Shipping|ASC,Fleet|Tankers,10-K
+HAFN,Hafnia Limited|Hafnia|HAFNI|HAFN,Fleet|Tankers,20-F
+STNG,Scorpio Tankers|STNG,Fleet|Tankers,20-F

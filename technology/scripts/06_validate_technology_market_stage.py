@@ -18,6 +18,7 @@ from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E40
 from technology.core.db import connect, init_db  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.text_norm import normalize_ticker  # noqa: E402
+from technology.core.universe_validator import expected_current_ticker_count  # noqa: E402
 
 
 LOGGER = logging.getLogger("validate_technology_market_stage")
@@ -32,8 +33,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-family", default="", help="Technology model family to validate, e.g. semiconductors.")
     parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
     parser.add_argument("--policy", type=Path, default=None, help="Optional universe policy YAML override.")
+    parser.add_argument(
+        "--universe-csv",
+        type=Path,
+        default=None,
+        help="Optional model-family universe CSV override.",
+    )
     parser.add_argument("--asof", default="", help="Validation date for staleness checks. Defaults to today.")
-    parser.add_argument("--strict-history", action="store_true", help="Fail low-history tickers instead of review-only.")
+    parser.add_argument(
+        "--strict-history", action="store_true", help="Fail low-history tickers instead of review-only."
+    )
     return parser.parse_args()
 
 
@@ -78,12 +87,6 @@ def parse_ticker_list(raw: object) -> list[str]:
     return out
 
 
-def read_expected_ticker_count(config: dict[str, Any], base_dir: Path, policy_path: Path | None) -> int:
-    policy_path = policy_path or resolve_path(cfg_get(config, "technology_universe.policy_path"), base_dir=base_dir)
-    policy = load_yaml(policy_path)
-    return int(policy.get("expected_ticker_count") or 0)
-
-
 def load_universe(conn: Any, model_family: str) -> list[str]:
     rows = conn.execute(
         """
@@ -106,7 +109,11 @@ def validate() -> int:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
-    db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    db_path = (
+        args.db.expanduser().resolve()
+        if args.db
+        else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
+    )
     model_family = str(
         args.model_family
         or cfg_get(config, "technology_universe.initial_subsector", "semiconductors")
@@ -114,17 +121,28 @@ def validate() -> int:
     ).strip()
     if not model_family:
         raise ValueError("model_family cannot be empty")
-    source_id = str(cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted") or "yahoo_finance_adjusted")
+    source_id = str(
+        cfg_get(config, "market_data_policy.scoring_primary_source", "yahoo_finance_adjusted")
+        or "yahoo_finance_adjusted"
+    )
     benchmark_tickers = parse_ticker_list(args.benchmark_tickers) or parse_ticker_list(
         cfg_get(config, "technology_universe.benchmark_tickers", [])
     )
     policy_path = args.policy.expanduser().resolve() if args.policy else None
-    expected_count = read_expected_ticker_count(config, base_dir, policy_path)
-    min_days = int(cfg_get(config, "market_data_policy.min_trading_days_for_full_features", 252))
-    min_avg_dollar_volume_60d = float(cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 0) or 0)
-    max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
+    universe_csv_path = args.universe_csv.expanduser().resolve() if args.universe_csv else None
     audit_asof = parse_date(args.asof) or date.today()
-
+    expected_count = expected_current_ticker_count(
+        config,
+        base_dir=base_dir,
+        policy_path=policy_path,
+        universe_csv_path=universe_csv_path,
+        effective_date=audit_asof,
+    )
+    min_days = int(cfg_get(config, "market_data_policy.min_trading_days_for_full_features", 252))
+    min_avg_dollar_volume_60d = float(
+        cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 0) or 0
+    )
+    max_staleness_days = int(cfg_get(config, "market_data_policy.max_staleness_days", 7))
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -209,7 +227,9 @@ def validate() -> int:
             params_all,
         )
         if snapshot_tickers != len(all_tickers):
-            errors.append(f"Market snapshot ticker coverage mismatch: expected={len(all_tickers)} actual={snapshot_tickers}")
+            errors.append(
+                f"Market snapshot ticker coverage mismatch: expected={len(all_tickers)} actual={snapshot_tickers}"
+            )
 
         corporate_actions = scalar(
             conn,
@@ -262,11 +282,11 @@ def validate() -> int:
                 if str(row["market_data_quality"] or "") != "complete"
             ]
             stale_features = [str(row["ticker"]) for row in feature_rows if int(row["stale_flag"] or 0) == 1]
-            low_liquidity_features = [str(row["ticker"]) for row in feature_rows if int(row["low_liquidity_flag"] or 0) == 1]
+            low_liquidity_features = [
+                str(row["ticker"]) for row in feature_rows if int(row["low_liquidity_flag"] or 0) == 1
+            ]
             missing_quality = [
-                str(row["ticker"])
-                for row in feature_rows
-                if str(row["market_data_quality"] or "") in {"", "missing"}
+                str(row["ticker"]) for row in feature_rows if str(row["market_data_quality"] or "") in {"", "missing"}
             ]
             if feature_count != len(universe):
                 errors.append(f"Market feature row count mismatch: expected={len(universe)} actual={feature_count}")
@@ -291,14 +311,18 @@ def validate() -> int:
         if feature_asof and len(review_features) != review_issue_count:
             errors.append(f"Feature review issue mismatch: features={len(review_features)} issues={review_issue_count}")
 
-        total_bars = scalar(conn, f"SELECT COUNT(*) FROM fact_price_ohlcv WHERE source_id = ? AND ticker IN ({ph_all})", params_all)
+        total_bars = scalar(
+            conn, f"SELECT COUNT(*) FROM fact_price_ohlcv WHERE source_id = ? AND ticker IN ({ph_all})", params_all
+        )
         raw_response_count = scalar(
             conn,
             "SELECT COUNT(DISTINCT endpoint || COALESCE(query_params_json, '')) FROM raw_api_responses WHERE source_id = ? AND asof_date = ?",
             (source_id, audit_asof.isoformat()),
         )
 
-        warnings.append(f"Universe tickers={len(universe)} benchmarks={len(benchmark_tickers)} total_symbols={len(all_tickers)}")
+        warnings.append(
+            f"Universe tickers={len(universe)} benchmarks={len(benchmark_tickers)} total_symbols={len(all_tickers)}"
+        )
         warnings.append(f"Adjusted OHLCV rows={total_bars} covered_symbols={len(price_by_ticker)}")
         warnings.append(f"Market snapshots covered_symbols={snapshot_tickers}")
         warnings.append(f"Corporate actions rows={corporate_actions}")

@@ -1,0 +1,17 @@
+policy_version,cohort,metric_id,comparison_domain_id,applicable_tickers,minimum_accepted_breadth,calibration_eligibility,normalization_scope,notes
+transportation_tanker_metric_domains_v1,tanker,vessel_count,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Operating fleet scope retained and checked semantically
+transportation_tanker_metric_domains_v1,tanker,fleet_capacity,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,DWT scope and inclusion policy retained
+transportation_tanker_metric_domains_v1,tanker,tce_day_rate,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Issuer TCE day definition retained
+transportation_tanker_metric_domains_v1,tanker,spot_or_charter_day_rate,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Spot and fixed charter definitions cannot be pooled
+transportation_tanker_metric_domains_v1,tanker,fleet_utilization,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Revenue or earning day denominator retained
+transportation_tanker_metric_domains_v1,tanker,charter_coverage_next_12m,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Forward 365-day vessel-day definition required
+transportation_tanker_metric_domains_v1,tanker,contracted_revenue_backlog,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Remaining charter revenue scope retained
+transportation_tanker_metric_domains_v1,tanker,weighted_average_charter_term,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Remaining charter duration definition retained
+transportation_tanker_metric_domains_v1,tanker,fleet_age,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Simple and DWT-weighted definitions remain separate
+transportation_tanker_metric_domains_v1,tanker,newbuild_capacity_commitments,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Absent newbuilds are not imputed as missing values
+transportation_tanker_metric_domains_v1,tanker,capex_commitments,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Contracted commitment scope retained
+transportation_tanker_metric_domains_v1,tanker,vessel_opex_per_day,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Operating-day denominator required
+transportation_tanker_metric_domains_v1,tanker,cash_breakeven_per_day,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Operating and all-in definitions remain separate
+transportation_tanker_metric_domains_v1,tanker,offhire_or_drydock_ratio,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Offhire divided by available days
+transportation_tanker_metric_domains_v1,tanker,revenue_days,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Revenue and earning day definition retained
+transportation_tanker_metric_domains_v1,tanker,spot_exposure_ratio,oil_tanker_operators,DHT|ECO|FRO|NAT|ASC|HAFN|STNG|TRMD|INSW|TNK|TEN,8,CANDIDATE,within_metric_domain,Spot vessel-day exposure definition retained

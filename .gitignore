@@ -82,6 +82,7 @@ tmpomvpuh6h/
 !med_devices/data/fda_product_family_exposure.csv
 !med_devices/data/fda_product_family_mapping.csv
 !med_devices/data/fda_regulatory_review_overrides.csv
+!med_devices/data/clinical_trial_mapping_reviews.csv
 !portfolio_layer/data/*.csv
 !portfolio_layer/MacroLayer/*.csv
 !SEC_fundamentals/sec_issuer_metric_override_seed.csv
@@ -99,9 +100,15 @@ tmpomvpuh6h/
 !industrials/transportation/data/transportation_tanker_exact_xbrl_concepts_v1.csv
 !industrials/transportation/data/transportation_tanker_filing_profiles_v1.csv
 !industrials/transportation/data/transportation_surface_metric_source_map_v1.csv
+!industrials/transportation/data/transportation_surface_metric_source_map_v2.csv
 !industrials/transportation/data/transportation_surface_xbrl_operand_map_v1.csv
 !industrials/transportation/data/transportation_surface_filing_profiles_v1.csv
+!industrials/transportation/data/transportation_surface_filing_profiles_v2.csv
 !industrials/transportation/data/transportation_surface_metric_comparison_domains_v1.csv
+!industrials/transportation/data/transportation_tanker_metric_comparison_domains_v1.csv
+!industrials/transportation/data/transportation_metric_extraction_overrides_v1.csv
+!industrials/transportation/data/transportation_metric_derivation_contracts_v1.csv
+!industrials/transportation/data/transportation_issuer_aliases_v1.csv
 !industrials/transportation/data/transportation_operating_archetypes.csv
 !industrials/transportation/data/transportation_dedicated_parser_scope.csv
 !industrials/transportation/data/transportation_dedicated_parser_support_scope.csv

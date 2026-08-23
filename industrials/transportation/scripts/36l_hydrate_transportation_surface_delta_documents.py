@@ -18,7 +18,7 @@ from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG  # noqa: E402
 
 
-EXPECTED_MANIFEST_VERSION = "transportation_surface_delta_census_v1"
+EXPECTED_MANIFEST_VERSION = "transportation_surface_delta_census_v2"
 DEFAULT_OUTPUT_ROOT = (
     PROJECT_ROOT
     / "output"
@@ -32,7 +32,7 @@ DEFAULT_OUTPUT_ROOT = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Hydrate only exact document rows in the sealed 19-name "
+            "Hydrate only exact document rows in the sealed 24-name "
             "surface-freight cache-gap manifest."
         )
     )

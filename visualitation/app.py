@@ -1124,8 +1124,19 @@ with ib_chart_left:
                 font=dict(color=INK_SECONDARY, size=13),
             )
         base_layout(fig, height=max(380, 28 * len(pos) + 130))
-        fig.update_layout(barmode="stack", xaxis_tickprefix="$", xaxis_tickformat=",.0f",
-                          margin=dict(r=150))
+        fig.update_layout(
+            barmode="stack",
+            xaxis_tickprefix="$",
+            xaxis_tickformat=",.0f",
+            margin=dict(l=8, r=150, t=82, b=8),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.06,
+                xanchor="left",
+                x=0.0,
+            ),
+        )
         fig.update_yaxes(tickfont=dict(color=INK, size=13))
         st.plotly_chart(fig, width="stretch")
         st.caption(

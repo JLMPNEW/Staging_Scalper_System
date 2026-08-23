@@ -520,8 +520,13 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
         if not ticker or native is None:
             skipped += 1
             continue
-        score_zero_is_missing = _truthy(r.get("score_zero_is_missing_flag"))
-        missing_score = score_zero_is_missing or bool(zero_is_missing and native == 0.0)
+        score_missing_raw = str(r.get("score_zero_is_missing_flag") or "").strip()
+        if has_standard_contract and score_missing_raw:
+            # Standardized sector files explicitly adjudicate whether a numeric zero is
+            # computed or missing. Do not re-interpret an explicit 0 as a sentinel.
+            missing_score = _truthy(score_missing_raw)
+        else:
+            missing_score = bool(zero_is_missing and native == 0.0)
         calibration_ok = _truthy(r.get("calibration_eligible_flag")) if has_standard_contract else True
         price_data_available = bool(
             str(r.get("price_data_asof_date") or r.get("latest_price_date") or "").strip()

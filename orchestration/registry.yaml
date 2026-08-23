@@ -165,6 +165,10 @@ sectors:
     # remain 76's exclusive path via the backfill pipeline. run_all executes daily_post_steps
     # sequentially after the publish and fails the sector on any non-zero rc.
     daily_post_steps:
+      # Rebuild the governed sidecar after every publish mode. The live pipeline already
+      # runs this step, but historical chunk generation does not.
+      - script: med_devices/scripts/81_build_med_device_source_incorporation.py
+        args_template: ["--asof", "{date}"]
       - script: med_devices/scripts/76_mark_med_device_oos_provenance.py
         args_template: ["--asof", "{date}"]
     backfill:

@@ -51,7 +51,10 @@ EVENT_METADATA_PATTERN = re.compile(
     r"quarterly\s+results|annual\s+results|results\s+release|"
     r"earnings\s+release|press\s+release|investor\s+presentation|"
     r"traffic\s+release|operating\s+statistics|railroad\s+performance|"
-    r"network\s+velocity|terminal\s+dwell|service\s+reliability|"
+    r"network\s+velocity|car\s+velocity|terminal\s+dwell|service\s+reliability|"
+    r"tce|time\s+charter\s+equivalent|cash\s+break[- ]?even|"
+    r"earning\s+days|revenue\s+days|charter\s+coverage|fleet\s+(?:list|overview)|"
+    r"pounds\s+per\s+day|shipments\s+per\s+day|fuel\s+efficiency|"
     r"sustainability|ESG|driver\s+turnover|empty\s+miles)\b",
     re.IGNORECASE,
 )

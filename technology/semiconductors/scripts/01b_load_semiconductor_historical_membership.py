@@ -357,6 +357,43 @@ def load_historical_rows(conn: Any, rows: list[dict[str, str]], *, model_family:
     return count
 
 
+def truncate_prices_after_membership_end(
+    conn: Any,
+    rows: list[dict[str, str]],
+    *,
+    price_source: str,
+) -> tuple[int, int]:
+    """Remove provider rows after a governed last-tradable membership date."""
+    price_rows_deleted = 0
+    snapshot_rows_deleted = 0
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        end_date = str(row["end_date"])
+        before = conn.total_changes
+        conn.execute(
+            """
+            DELETE FROM fact_price_ohlcv
+            WHERE ticker = ?
+              AND source_id = ?
+              AND bar_date > ?
+            """,
+            (ticker, price_source, end_date),
+        )
+        price_rows_deleted += conn.total_changes - before
+        before = conn.total_changes
+        conn.execute(
+            """
+            DELETE FROM fact_market_snapshot
+            WHERE ticker = ?
+              AND source_id = ?
+              AND asof_date > ?
+            """,
+            (ticker, price_source, end_date),
+        )
+        snapshot_rows_deleted += conn.total_changes - before
+    return price_rows_deleted, snapshot_rows_deleted
+
+
 def main() -> int:
     configure_utc_logging()
     args = parse_args()
@@ -396,17 +433,31 @@ def main() -> int:
                     optimization_start=optimization_start,
                 )
                 historical_count = load_historical_rows(conn, rows, model_family=model_family, source_id=source_id)
+                price_rows_deleted, snapshot_rows_deleted = truncate_prices_after_membership_end(
+                    conn,
+                    rows,
+                    price_source=price_source,
+                )
             finish_run(
                 conn,
                 run_id=run_id,
                 status="success",
                 row_count=current_count + historical_count,
-                message=f"current_pit={current_count} historical={historical_count} source_id={source_id}",
+                message=(
+                    f"current_pit={current_count} historical={historical_count} "
+                    f"post_end_prices_deleted={price_rows_deleted} "
+                    f"post_end_snapshots_deleted={snapshot_rows_deleted} source_id={source_id}"
+                ),
             )
             LOGGER.info(
-                "Loaded semiconductor PIT membership: current=%d historical=%d db=%s",
+                (
+                    "Loaded semiconductor PIT membership: current=%d historical=%d "
+                    "post_end_prices_deleted=%d post_end_snapshots_deleted=%d db=%s"
+                ),
                 current_count,
                 historical_count,
+                price_rows_deleted,
+                snapshot_rows_deleted,
                 db_path,
             )
         except BaseException as exc:

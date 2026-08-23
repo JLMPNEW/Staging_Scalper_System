@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,14 @@ from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
 import pandas as pd
+
+def _https_context() -> ssl.SSLContext:
+    """Build a verified HTTPS context without depending on a broken Windows trust store."""
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 SEC_TICKERS_EXCHANGE_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
@@ -324,7 +333,7 @@ def _http_get_json(url: str, *, timeout: float, user_agent: str) -> Any:
             "Accept": "application/json,text/plain,*/*",
         },
     )
-    with urlopen(req, timeout=timeout) as resp:
+    with urlopen(req, timeout=timeout, context=_https_context()) as resp:
         data = resp.read()
     return json.loads(data.decode("utf-8"))
 
@@ -337,7 +346,7 @@ def _http_get_text(url: str, *, timeout: float, user_agent: str) -> str:
             "Accept": "text/html,text/plain,*/*",
         },
     )
-    with urlopen(req, timeout=timeout) as resp:
+    with urlopen(req, timeout=timeout, context=_https_context()) as resp:
         data = resp.read()
     return data.decode("utf-8", errors="replace")
 

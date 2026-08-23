@@ -20,6 +20,7 @@ from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E4
 from industrials.core.reports import write_csv_atomic, write_text_atomic  # noqa: E402
 from industrials.transportation.investable_universe import load_investable_universe_policy  # noqa: E402
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG  # noqa: E402
+from industrials.transportation.tanker_semantic_review import definition_signature  # noqa: E402
 
 
 DATA_ROOT = PROJECT_ROOT / "industrials" / "transportation" / "data"
@@ -66,13 +67,7 @@ def _normalized(value: object) -> str:
 
 
 def _signature(row: Mapping[str, object]) -> tuple[str, ...]:
-    return (
-        str(row.get("source_lane") or ""), str(row.get("ticker") or ""),
-        str(row.get("metric_id") or ""), _normalized(row.get("concept_name")),
-        _normalized(row.get("unit")), _normalized(row.get("extraction_method")),
-        _normalized(row.get("status_reason")), _normalized(row.get("formula")),
-        _normalized(row.get("numerator_concept")), _normalized(row.get("denominator_concept")),
-    )
+    return definition_signature(row)
 
 
 def _priority(method: str, reason: str) -> str:

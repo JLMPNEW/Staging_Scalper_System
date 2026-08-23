@@ -547,6 +547,170 @@ def prune_removed_current_universe_rows(
     return conn.total_changes - before
 
 
+def apply_lifecycle_overrides(
+    conn: Any,
+    *,
+    policy: dict[str, Any],
+    model_family: str,
+    membership_source_id: str | None,
+    price_source_id: str,
+    effective_date: date | None = None,
+) -> dict[str, int]:
+    """Apply reviewed delisting/acquisition endpoints after the current seed load."""
+    raw_overrides = policy.get("lifecycle_overrides", [])
+    if raw_overrides is None:
+        raw_overrides = []
+    if not isinstance(raw_overrides, list):
+        raise ValueError("lifecycle_overrides must be a list")
+    today = effective_date or date.today()
+    counts = {
+        "applied": 0,
+        "prices_deleted": 0,
+        "snapshots_deleted": 0,
+    }
+    seen: set[str] = set()
+    now = utc_now()
+    for index, raw in enumerate(raw_overrides, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"lifecycle_overrides row {index} must be a mapping")
+        ticker = normalize_ticker(raw.get("ticker"))
+        if not ticker or ticker in seen:
+            raise ValueError(f"Invalid or duplicate lifecycle override ticker: {ticker!r}")
+        seen.add(ticker)
+        start_text = str(raw.get("start_date") or "").strip()[:10]
+        end_text = str(raw.get("last_tradable_date") or "").strip()[:10]
+        try:
+            start_date = date.fromisoformat(start_text)
+            end_date = date.fromisoformat(end_text)
+        except ValueError as exc:
+            raise ValueError(
+                f"{ticker}: lifecycle start_date and last_tradable_date must be YYYY-MM-DD"
+            ) from exc
+        if end_date < start_date:
+            raise ValueError(f"{ticker}: lifecycle end precedes start")
+        if end_date >= today:
+            continue
+        company = conn.execute(
+            "SELECT company_id FROM dim_company WHERE ticker = ?",
+            (ticker,),
+        ).fetchone()
+        if company is None:
+            raise ValueError(f"{ticker}: lifecycle override is absent from the universe seed")
+        company_id = int(company["company_id"])
+        other_current = conn.execute(
+            """
+            SELECT DISTINCT model_family
+            FROM dim_universe_membership
+            WHERE ticker = ?
+              AND model_family <> ?
+              AND is_current_member = 1
+            """,
+            (ticker, model_family),
+        ).fetchall()
+        if other_current:
+            families = ",".join(sorted(str(row["model_family"]) for row in other_current))
+            raise ValueError(
+                f"{ticker}: lifecycle override conflicts with active families: {families}"
+            )
+        reason = str(raw.get("reason") or "governed lifecycle override").strip()
+        source_url = str(raw.get("source_url") or "").strip()
+        event_type = str(raw.get("event_type") or "delisted").strip()
+        detail = "; ".join(part for part in (event_type, reason, source_url) if part)
+
+        conn.execute(
+            """
+            UPDATE dim_universe_membership
+            SET end_date = ?,
+                membership_status = 'historical',
+                is_current_member = 0,
+                reason = CASE
+                    WHEN COALESCE(reason, '') = '' THEN ?
+                    ELSE reason || '; ' || ?
+                END,
+                updated_at = ?
+            WHERE ticker = ?
+              AND model_family = ?
+              AND (is_current_member = 1 OR end_date IS NULL)
+            """,
+            (end_text, detail, detail, now, ticker, model_family),
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_universe_membership(
+                company_id, ticker, model_family, membership_source_id,
+                membership_basis, start_date, end_date, membership_status,
+                is_current_member, point_in_time_flag, confidence, reason,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'governed_lifecycle_override', ?, ?,
+                    'historical', 0, 1, ?, ?, ?, ?)
+            ON CONFLICT(ticker, model_family, membership_source_id, start_date)
+            DO UPDATE SET
+                company_id = excluded.company_id,
+                membership_basis = excluded.membership_basis,
+                end_date = excluded.end_date,
+                membership_status = excluded.membership_status,
+                is_current_member = excluded.is_current_member,
+                point_in_time_flag = excluded.point_in_time_flag,
+                confidence = excluded.confidence,
+                reason = excluded.reason,
+                updated_at = excluded.updated_at
+            """,
+            (
+                company_id,
+                ticker,
+                model_family,
+                membership_source_id,
+                start_text,
+                end_text,
+                float(raw.get("confidence") or 1.0),
+                detail,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE dim_company
+            SET universe_status = 'historical',
+                is_active = 0,
+                data_quality_status = 'retired_by_governed_lifecycle',
+                updated_at = ?
+            WHERE company_id = ?
+            """,
+            (now, company_id),
+        )
+        conn.execute(
+            """
+            UPDATE dim_security
+            SET listing_status = 'historical_delisted',
+                updated_at = ?
+            WHERE company_id = ?
+            """,
+            (now, company_id),
+        )
+        before = conn.total_changes
+        conn.execute(
+            """
+            DELETE FROM fact_price_ohlcv
+            WHERE ticker = ? AND source_id = ? AND bar_date > ?
+            """,
+            (ticker, price_source_id, end_text),
+        )
+        counts["prices_deleted"] += conn.total_changes - before
+        before = conn.total_changes
+        conn.execute(
+            """
+            DELETE FROM fact_market_snapshot
+            WHERE ticker = ? AND source_id = ? AND asof_date > ?
+            """,
+            (ticker, price_source_id, end_text),
+        )
+        counts["snapshots_deleted"] += conn.total_changes - before
+        counts["applied"] += 1
+    return counts
+
+
 def upsert_universe(
     conn: Any,
     companies: list[UniverseCompany],
@@ -826,6 +990,19 @@ def run_universe_load(settings: UniverseLoadSettings, argv: list[str] | None = N
                     settings=settings,
                     unassigned_cohort_id=unassigned_cohort_id,
                 )
+                lifecycle = apply_lifecycle_overrides(
+                    conn,
+                    policy=policy,
+                    model_family=model_family,
+                    membership_source_id=source_id_or_none(conn, settings.seed_source_id),
+                    price_source_id=str(
+                        cfg_get(
+                            config,
+                            "market_feature_build.source_id",
+                            "yahoo_finance_adjusted",
+                        )
+                    ),
+                )
             missing_cik = sum(1 for company in companies if not company.cik)
             unassigned = sum(1 for company in companies if company.calibration_cohort_id == unassigned_cohort_id)
             finish_run(
@@ -835,7 +1012,10 @@ def run_universe_load(settings: UniverseLoadSettings, argv: list[str] | None = N
                 row_count=row_count,
                 message=(
                     f"model_family={model_family} rows={row_count} "
-                    f"missing_cik={missing_cik} unassigned_cohort={unassigned}"
+                    f"missing_cik={missing_cik} unassigned_cohort={unassigned} "
+                    f"lifecycle_applied={lifecycle['applied']} "
+                    f"post_end_prices_deleted={lifecycle['prices_deleted']} "
+                    f"post_end_snapshots_deleted={lifecycle['snapshots_deleted']}"
                 ),
             )
             LOGGER.info("Loaded technology universe: db=%s model_family=%s rows=%d", db_path, model_family, row_count)

@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = PROJECT_ROOT / "industrials" / "transportation" / "data"
 
 
-def test_surface_delta_contract_is_exactly_19_tickers_and_23_direct_metrics() -> None:
+def test_surface_delta_contract_is_exactly_24_tickers_and_23_direct_metrics() -> None:
     module = importlib.import_module(
         "industrials.transportation.scripts.36j_build_transportation_surface_delta_census"
     )
@@ -41,6 +41,11 @@ def test_surface_delta_contract_is_exactly_19_tickers_and_23_direct_metrics() ->
         "FDX",
         "LSTR",
         "UPS",
+        "CVLG",
+        "FWRD",
+        "HTLD",
+        "MRTN",
+        "WERN",
     )
     assert len(metrics) == 23
     assert len(set(metrics)) == len(metrics)
@@ -62,4 +67,4 @@ def test_surface_delta_contract_is_exactly_19_tickers_and_23_direct_metrics() ->
 
 
 def test_surface_parser_release_is_incremented_for_new_work_identity() -> None:
-    assert ADAPTER_VERSION == "transportation_specialized_metrics_v3.discovery8"
+    assert ADAPTER_VERSION == "transportation_specialized_metrics_v3.discovery9"

@@ -158,6 +158,14 @@ def load_transactions(conn: Any, *, asof: str, lookback_days: int, config: dict[
           AND transaction_date <= ?
           AND transaction_date > ?
           AND COALESCE(derivative_flag, 0) = 0
+          AND NOT EXISTS (
+                SELECT 1
+                FROM dim_security identity_security
+                WHERE identity_security.company_id = fact_sec_form4_transaction.company_id
+                  AND COALESCE(identity_security.is_primary_listing, 0) = 1
+                  AND COALESCE(TRIM(identity_security.listing_start_date), '') <> ''
+                  AND fact_sec_form4_transaction.transaction_date < identity_security.listing_start_date
+              )
         """,
         (asof, start),
     ).fetchall()

@@ -38,6 +38,7 @@ DEFAULT_COLUMNS = [
     "source",
     "error",
 ]
+DEFAULT_COLUMN_INDEX = pd.Index(DEFAULT_COLUMNS)
 
 
 @dataclass(frozen=True)
@@ -181,15 +182,15 @@ def empty_result(
 
 def read_cache(cache_file: Path) -> pd.DataFrame:
     if not cache_file.exists():
-        return pd.DataFrame(columns=DEFAULT_COLUMNS)
+        return pd.DataFrame(columns=DEFAULT_COLUMN_INDEX)
     try:
         df = pd.read_csv(cache_file, dtype=str).fillna("")
     except pd.errors.EmptyDataError:
-        return pd.DataFrame(columns=DEFAULT_COLUMNS)
+        return pd.DataFrame(columns=DEFAULT_COLUMN_INDEX)
     for col in DEFAULT_COLUMNS:
         if col not in df.columns:
             df[col] = ""
-    return df[DEFAULT_COLUMNS].copy()
+    return df.reindex(columns=DEFAULT_COLUMN_INDEX).copy()
 
 
 def write_cache(cache_file: Path, cache_df: pd.DataFrame) -> None:
@@ -198,7 +199,7 @@ def write_cache(cache_file: Path, cache_df: pd.DataFrame) -> None:
     for col in DEFAULT_COLUMNS:
         if col not in cache_df.columns:
             cache_df[col] = ""
-    cache_df = cache_df[DEFAULT_COLUMNS]
+    cache_df = cache_df.reindex(columns=DEFAULT_COLUMN_INDEX)
     cache_df["ticker_norm"] = cache_df["ticker"].map(normalize_ticker)
     cache_df["classification_norm"] = cache_df["classification"].astype(str).str.strip().str.lower()
     cache_df["prompt_version_norm"] = cache_df["prompt_version"].astype(str)
@@ -499,7 +500,7 @@ def confirm_candidates(
     config: GoogleScreenerConfig,
 ) -> pd.DataFrame:
     if not config.enabled or not candidates or not classifications:
-        return pd.DataFrame(columns=DEFAULT_COLUMNS)
+        return pd.DataFrame(columns=DEFAULT_COLUMN_INDEX)
     api_key = os.environ.get(config.api_key_env, "").strip()
     if not api_key:
         LOGGER.warning("Google confirmation skipped: environment variable %s is not set", config.api_key_env)
@@ -517,7 +518,7 @@ def confirm_candidates(
             for classification in classifications
             for candidate in candidates
         ]
-        return pd.DataFrame(rows, columns=DEFAULT_COLUMNS)
+        return pd.DataFrame(rows, columns=DEFAULT_COLUMN_INDEX)
 
     cache_df = read_cache(config.cache_file)
     output_rows: list[dict[str, Any]] = []
@@ -595,7 +596,7 @@ def confirm_candidates(
     for col in DEFAULT_COLUMNS:
         if col not in out_df.columns:
             out_df[col] = ""
-    return out_df[DEFAULT_COLUMNS].copy()
+    return out_df.reindex(columns=DEFAULT_COLUMN_INDEX).copy()
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,0 +1,178 @@
+policy_version: transportation_subgroup_score_policy_v8
+model_version: transportation_hierarchical_subgroup_score_v8
+effective_from: "2026-08-21"
+evidence_class: outcome_blind_economic_specification
+universe_policy: transportation_investable_universe_v5
+
+controls:
+  percentile_normalization: within_comparison_group
+  winsor_lower: 0.05
+  winsor_upper: 0.95
+  neutral_missing_score: 50.0
+  missing_optional_metric_policy: fixed_slot_neutral_no_cross_metric_renormalization
+  metric_availability_basis: filing_date_point_in_time
+  source_definition_stability_required_for_change_metrics: true
+  group_weights_use_outcomes: false
+  component_weights_use_outcomes: false
+  historical_results_can_authorize_production: false
+  revealed_history_role: diagnostic_only
+  minimum_specialized_date_fraction: 0.75
+
+historical_calibration_only:
+  KSU: {cohort: surface_freight_core, group: rail_networks, effective_from: "2019-01-02", effective_to: "2021-12-13"}
+  GWR: {cohort: surface_freight_core, group: rail_networks, effective_from: "2019-01-02", effective_to: "2019-12-27"}
+  USX: {cohort: surface_freight_core, group: truckload_intermodal, effective_from: "2019-01-02", effective_to: "2023-06-30"}
+  CGI: {cohort: surface_freight_core, group: truckload_intermodal, effective_from: "2019-01-02", effective_to: "2019-12-09"}
+  USAK: {cohort: surface_freight_core, group: truckload_intermodal, effective_from: "2019-01-02", effective_to: "2022-09-14"}
+  DSKE: {cohort: surface_freight_core, group: truckload_intermodal, effective_from: "2019-01-02", effective_to: "2024-04-01"}
+  YELL: {cohort: surface_freight_core, group: ltl_carriers, effective_from: "2019-01-02", effective_to: "2023-07-28"}
+  ECHO: {cohort: surface_freight_core, group: asset_light_logistics, effective_from: "2019-01-02", effective_to: "2021-11-22"}
+  OSG: {cohort: oil_tanker_operators, group: oil_tankers, effective_from: "2019-01-02", effective_to: "2024-07-09"}
+
+generic_metric_recipes:
+  market_trend:
+    ret_3m: {weight: 0.25, direction: 1}
+    ret_6m: {weight: 0.25, direction: 1}
+    ret_12m_ex_1m: {weight: 0.25, direction: 1}
+    relative_strength_3m: {weight: 0.25, direction: 1}
+  quality:
+    operating_margin: {weight: 0.40, direction: 1}
+    fcf_margin: {weight: 0.40, direction: 1}
+    fcf_conversion: {weight: 0.20, direction: 1}
+  growth:
+    revenue_growth: {weight: 0.50, direction: 1}
+    operating_income_growth: {weight: 0.50, direction: 1}
+  valuation:
+    fcf_yield: {weight: 0.50, direction: 1}
+    ev_operating_income: {weight: 0.50, direction: -1}
+  operating_efficiency:
+    asset_turnover: {weight: 1.00, direction: 1}
+  capital_risk:
+    realized_volatility_60d: {weight: 0.20, direction: -1}
+    maximum_drawdown_12m: {weight: 0.20, direction: 1}
+    average_dollar_volume_60d: {weight: 0.10, direction: 1}
+    capex_to_revenue: {weight: 0.20, direction: -1}
+    net_debt_to_ebitda: {weight: 0.15, direction: -1}
+    interest_coverage: {weight: 0.15, direction: 1}
+
+cohorts:
+  surface_freight_core:
+    calibration_cohort: north_american_surface_freight_and_logistics_v5
+    aggregate_group_weights:
+      rail_networks: 0.25
+      ltl_carriers: 0.25
+      truckload_intermodal: 0.25
+      asset_light_logistics: 0.15
+      integrated_parcel: 0.10
+    groups:
+      rail_networks:
+        tickers: [CNI, CP, CSX, NSC, UNP]
+        ranking_mode: ranked
+        minimum_cross_section: 4
+        minimum_specialized_breadth: 4
+        specialized_activation: coverage_gated_optional
+        component_weights_active: {market_trend: 0.15, quality: 0.10, growth: 0.10, valuation: 0.10, operating_efficiency: 0.15, capital_risk: 0.10, positioning: 0.10, specialized: 0.20}
+        component_weights_fallback: {market_trend: 0.20, quality: 0.15, growth: 0.10, valuation: 0.15, operating_efficiency: 0.15, capital_risk: 0.15, positioning: 0.10, specialized: 0.00}
+        specialized_pack:
+          operating_ratio_yoy_improvement: {weight: 0.60, source_metric: operating_ratio, transform: yoy_improvement, direction: 1}
+          rail_network_velocity_yoy_growth: {weight: 0.20, source_metric: rail_network_velocity, transform: yoy_growth, direction: 1}
+          rail_fuel_efficiency_yoy_improvement: {weight: 0.20, source_metric: rail_fuel_efficiency, transform: yoy_improvement, direction: 1}
+      ltl_carriers:
+        tickers: [ARCB, ODFL, SAIA, TFII, XPO]
+        ranking_mode: ranked
+        minimum_cross_section: 4
+        minimum_specialized_breadth: 3
+        specialized_activation: coverage_gated_optional
+        component_weights_active: {market_trend: 0.15, quality: 0.10, growth: 0.15, valuation: 0.10, operating_efficiency: 0.10, capital_risk: 0.10, positioning: 0.05, specialized: 0.25}
+        component_weights_fallback: {market_trend: 0.20, quality: 0.15, growth: 0.20, valuation: 0.10, operating_efficiency: 0.15, capital_risk: 0.15, positioning: 0.05, specialized: 0.00}
+        specialized_pack:
+          pricing_or_yield_growth: {weight: 0.40, source_metric: pricing_or_yield_growth, transform: identity, direction: 1}
+          shipment_or_load_growth: {weight: 0.30, source_metric: shipment_or_load_growth, transform: identity, direction: 1}
+          operating_ratio_yoy_improvement: {weight: 0.20, source_metric: operating_ratio, transform: yoy_improvement, direction: 1}
+          revenue_per_shipment_yoy_growth: {weight: 0.10, source_metric: revenue_per_shipment_or_load, transform: yoy_growth, direction: 1}
+      truckload_intermodal:
+        tickers: [HUBG, JBHT, KNX, SNDR, CVLG, HTLD, MRTN, WERN]
+        ranking_mode: ranked
+        minimum_cross_section: 6
+        minimum_specialized_breadth: 6
+        specialized_activation: coverage_gated_optional
+        component_weights_active: {market_trend: 0.20, quality: 0.10, growth: 0.15, valuation: 0.10, operating_efficiency: 0.10, capital_risk: 0.10, positioning: 0.05, specialized: 0.20}
+        component_weights_fallback: {market_trend: 0.25, quality: 0.15, growth: 0.15, valuation: 0.10, operating_efficiency: 0.15, capital_risk: 0.15, positioning: 0.05, specialized: 0.00}
+        specialized_pack:
+          pricing_or_yield_growth: {weight: 0.30, source_metric: pricing_or_yield_growth, transform: identity, direction: 1}
+          shipment_or_load_growth: {weight: 0.25, source_metric: shipment_or_load_growth, transform: identity, direction: 1}
+          operating_ratio_yoy_improvement: {weight: 0.25, source_metric: operating_ratio, transform: yoy_improvement, direction: 1}
+          equipment_utilization_yoy_growth: {weight: 0.20, source_metric: equipment_utilization, transform: yoy_growth, direction: 1}
+      asset_light_logistics:
+        tickers: [CHRW, EXPD, LSTR, FWRD]
+        ranking_mode: ranked
+        minimum_cross_section: 4
+        minimum_specialized_breadth: 4
+        specialized_activation: coverage_gated_optional
+        component_weights_active: {market_trend: 0.15, quality: 0.15, growth: 0.15, valuation: 0.10, operating_efficiency: 0.10, capital_risk: 0.10, positioning: 0.05, specialized: 0.20}
+        component_weights_fallback: {market_trend: 0.20, quality: 0.20, growth: 0.15, valuation: 0.15, operating_efficiency: 0.10, capital_risk: 0.15, positioning: 0.05, specialized: 0.00}
+        specialized_pack:
+          logistics_net_revenue_margin_yoy_change: {weight: 0.45, source_metric: logistics_net_revenue_margin, transform: yoy_change, direction: 1}
+          purchased_transportation_ratio_yoy_improvement: {weight: 0.35, source_metric: purchased_transportation_ratio, transform: yoy_improvement, direction: 1}
+          shipment_or_load_growth: {weight: 0.20, source_metric: shipment_or_load_growth, transform: identity, direction: 1}
+      integrated_parcel:
+        tickers: [FDX, UPS]
+        ranking_mode: eligibility_equal_weight
+        minimum_cross_section: 2
+        minimum_specialized_breadth: 2
+        specialized_activation: excluded_insufficient_independent_cross_section
+        component_weights_active: {market_trend: 0.20, quality: 0.20, growth: 0.10, valuation: 0.15, operating_efficiency: 0.10, capital_risk: 0.15, positioning: 0.10, specialized: 0.00}
+        component_weights_fallback: {market_trend: 0.20, quality: 0.20, growth: 0.10, valuation: 0.15, operating_efficiency: 0.10, capital_risk: 0.15, positioning: 0.10, specialized: 0.00}
+        specialized_pack: {}
+
+  oil_tanker_operators:
+    calibration_cohort: oil_tanker_operators_v5
+    aggregate_group_weights:
+      oil_tankers: 1.00
+    generic_component_exclusions: [valuation, operating_efficiency]
+    groups:
+      oil_tankers:
+        tickers: [DHT, ECO, FRO, NAT, ASC, HAFN, STNG, TRMD, INSW, TNK, TEN]
+        ranking_mode: ranked
+        minimum_cross_section: 8
+        minimum_specialized_breadth: 8
+        specialized_activation: required_for_calibration
+        component_weights_active: {market_trend: 0.20, quality: 0.15, growth: 0.10, valuation: 0.00, operating_efficiency: 0.00, capital_risk: 0.15, positioning: 0.10, specialized: 0.30}
+        component_weights_fallback: {market_trend: 0.30, quality: 0.20, growth: 0.15, valuation: 0.00, operating_efficiency: 0.00, capital_risk: 0.25, positioning: 0.10, specialized: 0.00}
+        specialized_pack:
+          tce_rate_yoy_growth: {weight: 0.40, source_metric: tce_day_rate, transform: yoy_growth, direction: 1}
+          tce_cash_breakeven_spread: {weight: 0.30, source_metrics: [tce_day_rate, cash_breakeven_per_day], transform: spread_over_second, direction: 1}
+          revenue_days_yoy_growth: {weight: 0.15, source_metric: revenue_days, transform: yoy_growth, direction: 1}
+          fleet_utilization: {weight: 0.15, source_metric: fleet_utilization, transform: identity, direction: 1}
+
+aggregation:
+  selection_fraction: 0.20
+  group_selection_rule: top_ceiling_fraction_minimum_one_for_ranked_groups
+  equal_weight_group_rule: include_all_eligible_names
+  selected_name_weighting: equal_within_group_then_fixed_group_weight
+  missing_group_policy: fail_closed_no_cross_group_weight_redistribution
+  require_group_gate_before_cohort_aggregation: true
+
+calibration_gates:
+  minimum_ic: 0.0
+  minimum_top_minus_group_net: 0.0
+  minimum_top_minus_bottom_gross: 0.0
+  minimum_hit_rate: 0.50
+  minimum_non_overlapping_snapshots_per_block: 6
+  horizons_sessions: [21, 63]
+  primary_horizon_sessions: 63
+  transaction_cost_bps: 20.0
+  fixed_calendar_blocks:
+    - {block_id: diagnostic_block_1, start_date: "2019-01-01", end_date: "2021-12-31"}
+    - {block_id: diagnostic_block_2, start_date: "2022-01-01", end_date: "2023-12-31"}
+    - {block_id: diagnostic_block_3, start_date: "2024-01-01", end_date: "2026-07-30"}
+
+governance:
+  membership_selection_uses_outcomes: false
+  metric_definition_selection_uses_outcomes: false
+  weights_frozen_before_v8_diagnostic: true
+  historical_rebuild_count_limit: 1
+  parser_invocation_after_semantic_review_limit: 0
+  cohort_promotion_independent: true
+  group_failure_cannot_be_hidden_by_aggregate_result: true
+  production_activation_authorized: false

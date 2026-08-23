@@ -269,6 +269,114 @@ def test_ib_performance_reconciles_realized_income_and_consistent_total(
         enricher._ib_performance(statement, as_of="2026-07-31")
 
 
+def test_daily_ib_statement_uses_latest_prior_sealed_cumulative_performance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enricher = _load_enricher()
+    runs_root = tmp_path / "runs"
+    current_dir = runs_root / "2026-08-17" / "ledger"
+    prior_dir = runs_root / "2026-08-14" / "ledger"
+    current_dir.mkdir(parents=True)
+    prior_dir.mkdir(parents=True)
+    daily = tmp_path / "daily.csv"
+    daily.write_text(
+        "Cash Report,Header,Currency Summary,Currency,Total,Securities,Futures,Paxos,\n"
+        "Cash Report,Data,Dividends,Base Currency Summary,113.4,113.4,0,0,\n",
+        encoding="utf-8",
+    )
+    cumulative = tmp_path / "cumulative.csv"
+    cumulative.write_text(
+        "\n".join(
+            [
+                (
+                    "Month & Year to Date Performance Summary,Header,"
+                    "Asset Category,Symbol,Description,Mark-to-Market MTD,"
+                    "Mark-to-Market YTD,Realized S/T MTD,Realized S/T YTD,"
+                    "Realized L/T MTD,Realized L/T YTD"
+                ),
+                (
+                    "Month & Year to Date Performance Summary,Data,"
+                    "Total (All Assets),,,100,200,10,20,1,2"
+                ),
+                (
+                    "Cash Report,Header,Currency Summary,Currency,Total,"
+                    "Securities,Futures,Paxos,Month to Date,Year to Date"
+                ),
+                "Cash Report,Data,Dividends,Base Currency Summary,0,0,0,0,3,4",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for path in (
+        prior_dir / "broker_statement_sources.csv",
+        prior_dir / "ledger_manifest.json",
+    ):
+        path.write_text("sealed\n", encoding="utf-8")
+    prior_source = {
+        "period_end": "2026-08-14",
+        "source_file": str(cumulative),
+        "source_sha256": enricher.sha256_file(cumulative),
+        "base_currency": "USD",
+    }
+    monkeypatch.setattr(
+        enricher,
+        "_sealed_csv",
+        lambda *_args, **_kwargs: ([prior_source], {}),
+    )
+
+    result, source, source_path, inputs, age = (
+        enricher._cumulative_ib_performance_from_ledger_history(
+            runs_root=runs_root,
+            ledger_as_of="2026-08-17",
+            current_statement_source={
+                "period_end": "2026-08-17",
+                "source_file": str(daily),
+                "source_sha256": enricher.sha256_file(daily),
+                "base_currency": "USD",
+            },
+            max_staleness_days=7,
+        )
+    )
+
+    assert result["ib_profit_as_of_date"] == "2026-08-14"
+    assert result["ib_realized_profit_loss_mtd"] == pytest.approx(14.0)
+    assert source == prior_source
+    assert source_path == cumulative.resolve()
+    assert cumulative.resolve() in inputs
+    assert age == 3
+
+
+def test_cumulative_performance_fallback_never_crosses_month_boundary(
+    tmp_path: Path,
+) -> None:
+    enricher = _load_enricher()
+    current_dir = tmp_path / "runs" / "2026-08-03" / "ledger"
+    prior_dir = tmp_path / "runs" / "2026-07-31" / "ledger"
+    current_dir.mkdir(parents=True)
+    prior_dir.mkdir(parents=True)
+    daily = tmp_path / "daily.csv"
+    daily.write_text(
+        "Cash Report,Header,Currency Summary,Currency,Total,Securities,Futures,Paxos,\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        enricher.CumulativePerformanceUnavailable,
+        match="No same-month sealed IB statement",
+    ):
+        enricher._cumulative_ib_performance_from_ledger_history(
+            runs_root=tmp_path / "runs",
+            ledger_as_of="2026-08-03",
+            current_statement_source={
+                "period_end": "2026-08-03",
+                "source_file": str(daily),
+                "source_sha256": enricher.sha256_file(daily),
+            },
+            max_staleness_days=7,
+        )
+
 def test_target_weight_parser_fails_closed() -> None:
     enricher = _load_enricher()
 

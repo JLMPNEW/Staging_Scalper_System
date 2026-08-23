@@ -1,0 +1,138 @@
+parser_version: consumer_defensive_stage6b_extraction_terms_v8
+metrics:
+  organic_revenue_growth_pct: [base business net sales, organic sales growth, organic revenue growth, organic net sales, organic net sales growth, organic net sales movement, underlying sales growth, underlying net sales growth]
+  volume_growth_pct: [volume growth, volume up, volume down, volume was up, volume was down, volumes increased, volumes decreased, sales volume, organic volume, organic volume growth, reported volume, shipment volume, shipment volume growth, underlying volume growth, physical volume growth]
+  price_mix_growth_pct: [price mix, pricing and mix, pricing growth, price/mix, price and mix, price/mix/other, net price realization, underlying price growth, underlying pricing growth]
+  gross_margin_change_bps: [gross margin, gross profit margin, gross margin percentage]
+  advertising_promotion_pct_sales: [advertising and promotion, advertising expense, marketing expense, advertising and promotional expense, advertising and sales promotion, brand and marketing investment]
+  market_share_change_bps: [market share, category share]
+  revenue_per_unit_growth_pct: [revenue per unit, revenue per unit case, net revenue per case, revenue per case]
+  distribution_points_growth_pct: [distribution points, points of distribution, distribution growth]
+  alcohol_depletion_growth_pct: [depletion growth, depletions, distributor depletion]
+  non_alcohol_unit_case_growth_pct: [unit case volume, unit case growth, unit case volume growth, case volume growth, standard physical case volume, comparable standard physical case volume]
+  comparable_sales_growth_pct: [comparable sales, comparable store sales, comp sales, same store sales, same-store sales, inside same-store sales, identical sales, identical sales excluding fuel, like-for-like sales, like for like sales, lfl sales]
+  traffic_growth_pct: [customer traffic, comparable traffic, transaction growth, customer transaction growth, comparable transactions, transaction count]
+  average_ticket_growth_pct: [average ticket, average transaction, average transaction value, average order value, basket size, average basket]
+  net_store_growth_pct: [net store growth, net new stores, store count, ending store count, total store count, operated location count, total operated locations, number of locations, retail unit count]
+  sales_per_square_foot: [sales per square foot, sales per selling square foot, net sales per square foot]
+  shrink_change_bps: [inventory shrink, shrink rate, shrink expense, shrink impact, shrink rate change]
+  private_label_sales_mix_pct: [private label sales, private brand sales mix, private brand penetration, own brand sales, our brands, store brand sales, performance brands, proprietary-branded products]
+  digital_sales_mix_pct: [digital sales, digital sales mix, digital penetration, digitally originated sales, net sales for e-commerce, e-commerce represented, e-commerce sales, e-commerce penetration, ecommerce sales mix, online sales]
+  inventory_turnover: [inventory turnover, inventory turns]
+  case_volume_growth_pct: [case volume, total case volume, cases sold, case growth, case volume increase]
+  gross_profit_per_case: [gross profit per case, adjusted gross profit per case, gross profit dollars per case, adjusted gross profit dollars per case, gross margin per case]
+  independent_customer_mix_pct: [independent customer, independent restaurants, independent restaurant sales, independent operator]
+  lease_adjusted_net_leverage: [lease adjusted leverage, lease-adjusted leverage, adjusted net leverage, lease-adjusted net leverage ratio, total debt less cash to adjusted ebitda]
+  fixed_charge_coverage: [fixed charge coverage, fixed-charge coverage, fixed charge coverage ratio, fixed charges coverage ratio]
+  innovation_sales_mix_pct: [innovation sales, new product sales, innovation portfolio]
+  active_customer_growth_pct: [active customers, active customer growth, active customer count]
+  active_representative_growth_pct: [active representatives, active distributors]
+  tobacco_shipment_volume_growth_pct: [shipment volume, cigarette volume, cigarette shipment volume, total cigarette volume, tobacco volume, sticks volume]
+  tobacco_price_mix_growth_pct: [tobacco price mix, price realization, pricing and mix]
+  reduced_risk_sales_mix_pct: [reduced-risk products, smoke-free products, smoke-free net revenues, new categories revenue, next generation products, oral tobacco mix]
+  excise_tax_impact_bps: [excise tax impact, excise tax burden, excise taxes, tobacco tax]
+  branded_sales_mix_pct: [branded sales, branded net sales mix, branded products represented, sales of our branded products represented, branded portfolio, brand sales mix]
+  commodity_cost_impact_bps: [commodity costs, commodity inflation, commodity inflation impact, input cost inflation, raw material inflation]
+  capacity_utilization_pct: [capacity utilization, production capacity utilized]
+  production_volume_growth_pct: [production volume, production volume growth, production growth, throughput volume, throughput growth]
+  agricultural_processing_margin: [processing margin, crush margin, crush margins, origination margin]
+  livestock_feed_cost_change_pct: [feed costs, feed cost inflation, feed cost change, livestock feed]
+  net_debt_to_ebitda: [net debt to ebitda, net leverage ratio, net debt/ebitda, net debt to adjusted ebitda, net funded debt to adjusted ebitda, consolidated total net leverage ratio, covenant net leverage ratio]
+contextual_aliases:
+  organic_revenue_growth_pct:
+    - {term: organic revenue, require_any: [growth, grew, increased, decreased, change, yoy, year over year, percent, '%'], exclude_any: [risk factor, market growth, category growth]}
+    - {term: organic revenues, require_any: [growth, grew, increased, decreased, change, yoy, year over year, percent, '%'], exclude_any: [risk factor, market growth, category growth]}
+    - {term: organic sales, require_any: [growth, grew, increased, decreased, change, yoy, year over year, percent, '%'], exclude_any: [risk factor, market growth, category growth]}
+    - {term: organic net revenue, require_any: [growth, grew, increased, decreased, change, yoy, year over year, percent, '%'], exclude_any: [risk factor, market growth, category growth]}
+    - {term: constant currency sales, require_any: [growth, grew, increased, decreased, change, yoy, year over year, percent, "%"]}
+    - {term: like-for-like sales, require_any: [growth, grew, increased, decreased, change, percent, "%"]}
+    - {term: organic growth, require_any: [sales, revenue, net sales], exclude_any: [risk factor, market growth, category growth]}
+    - {term: underlying revenue, require_any: [growth, grew, increased, decreased, change, yoy, year over year, percent, "%"], exclude_any: [risk factor, market growth, category growth]}
+    - {term: underlying sales, require_any: [growth, grew, increased, decreased, change, yoy, year over year, percent, "%"], exclude_any: [risk factor, market growth, category growth]}
+  price_mix_growth_pct:
+    - {term: pricing, require_any: [sales, revenue, volume, mix, contribution, growth, grew, increased, decreased, impact, percent, '%'], exclude_any: [debt, securities, contract, stock price, transfer pricing]}
+    - {term: net pricing, require_any: [sales, revenue, volume, mix, contribution, growth, percent, "%"], exclude_any: [debt, securities, contract, stock price]}
+    - {term: pricing contribution, require_any: [sales, revenue, volume, mix, growth, percent, "%"]}
+    - {term: price-volume-mix, require_any: [sales, revenue, growth, change, percent, "%"]}
+    - {term: pvm, require_any: [sales, revenue, price, volume, mix, growth, change, percent, "%"], exclude_any: [securities, valuation, contract]}
+    - {term: net price realization, require_any: [sales, revenue, volume, growth, change, percent, "%"], exclude_any: [securities, contract]}
+    - {term: premiumization, require_any: [sales, revenue, price, mix, growth, percent, "%"]}
+  volume_growth_pct:
+    - {term: shipments, require_any: [growth, grew, increased, decreased, change, versus, yoy, percent, "%"], exclude_any: [tax incentive, compensation, volume-weighted stock price]}
+    - {term: cases sold, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: case equivalents, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: hectoliters, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+  traffic_growth_pct:
+    - {term: transactions, require_any: [comparable, growth, increased, decreased, yoy, year over year, percent, "%"], exclude_any: [legal, securities, payment processing]}
+    - {term: customer visits, require_any: [growth, increased, decreased, comparable, percent, "%"]}
+    - {term: shopping trips, require_any: [growth, increased, decreased, comparable, percent, "%"]}
+    - {term: store visits, require_any: [growth, increased, decreased, comparable, yoy, percent, "%"], exclude_any: [site selection, real estate]}
+    - {term: customer count, require_any: [growth, increased, decreased, comparable, transactions, yoy, percent, "%"], exclude_any: [accounts, credit, loan]}
+  commodity_cost_impact_bps:
+    - {term: raw material costs, require_any: [margin, cost of sales, operating income, impact, increase, decrease, inflation, basis points, bps]}
+    - {term: input costs, require_any: [margin, cost of sales, operating income, impact, increase, decrease, inflation, basis points, bps]}
+    - {term: ingredient costs, require_any: [margin, cost of sales, operating income, impact, increase, decrease, inflation, basis points, bps]}
+    - {term: packaging input costs, require_any: [margin, cost of sales, operating income, impact, increase, decrease, inflation, basis points, bps]}
+    - {term: agricultural commodity costs, require_any: [margin, cost of sales, operating income, impact, increase, decrease, inflation, deflation, basis points, bps]}
+    - {term: grain costs, require_any: [margin, cost of sales, operating income, impact, increase, decrease, inflation, deflation, basis points, bps]}
+    - {term: dairy costs, require_any: [margin, cost of sales, operating income, impact, increase, decrease, inflation, deflation, basis points, bps]}
+    - {term: cost deflation, require_any: [commodity, input, ingredient, raw material, margin, cost of sales, operating income, impact, basis points, bps]}
+  non_alcohol_unit_case_growth_pct:
+    - {term: non-alcoholic volume, require_any: [growth, increased, decreased, unit case, cases, percent, "%"]}
+    - {term: nab volume, require_any: [growth, increased, decreased, unit case, cases, percent, "%"]}
+    - {term: nartd, require_any: [volume, unit case, sales, growth, percent, "%"]}
+  alcohol_depletion_growth_pct:
+    - {term: wholesaler depletions, require_any: [growth, increased, decreased, cases, percent, "%"]}
+    - {term: consumer depletions, require_any: [growth, increased, decreased, cases, percent, "%"]}
+    - {term: 9-liter depletion, require_any: [growth, increased, decreased, cases, percent, "%"]}
+    - {term: case depletions, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: 9-liter depletions, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+  tobacco_price_mix_growth_pct:
+    - {term: revenue per pack, require_any: [growth, increased, decreased, change, pricing, mix, percent, "%"]}
+    - {term: combustible pricing, require_any: [revenue, sales, mix, growth, change, percent, "%"]}
+    - {term: tobacco mix, require_any: [revenue, sales, pricing, growth, change, percent, "%"]}
+  gross_profit_per_case:
+    - {term: profit per case, require_any: [gross, adjusted, dollar, dollars, change, increased, decreased]}
+    - {term: case economics, require_any: [gross profit, margin, dollar, dollars, per case]}
+    - {term: profit/case, require_any: [gross, adjusted, dollar, dollars, change, increased, decreased]}
+  agricultural_processing_margin:
+    - {term: crush spread, require_any: [margin, bushel, gallon, increase, decrease, improved, compressed]}
+    - {term: soy crush margin, require_any: [bushel, increase, decrease, improved, compressed, dollar, dollars]}
+    - {term: oilseed processing margin, require_any: [increase, decrease, improved, compressed, dollar, dollars, percent, "%"]}
+  shrink_change_bps:
+    - {term: shrink, require_any: [margin, profit, basis points, bps, rate, increased, decreased, lower, higher], exclude_any: [shrink-wrap, packaging shrink]}
+    - {term: shrink headwind, require_any: [margin, profit, basis points, bps, rate, percent, "%"]}
+  production_volume_growth_pct:
+    - {term: processed volume, require_any: [growth, grew, increased, decreased, change, versus, prior year, percent, '%']}
+    - {term: processed volumes, require_any: [growth, grew, increased, decreased, change, versus, prior year, percent, '%']}
+    - {term: processing volume, require_any: [growth, grew, increased, decreased, change, versus, prior year, percent, '%']}
+    - {term: processing volumes, require_any: [growth, grew, increased, decreased, change, versus, prior year, percent, '%']}
+    - {term: units produced, require_any: [growth, increased, decreased, versus, prior year, percent, "%"], exclude_any: [capacity plan, compensation]}
+    - {term: plant throughput, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: pounds produced, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: manufacturing volume, require_any: [growth, grew, increased, decreased, change, versus, prior year, percent, "%"], exclude_any: [capacity plan, compensation]}
+    - {term: output volume, require_any: [growth, grew, increased, decreased, change, versus, prior year, percent, "%"], exclude_any: [capacity plan, compensation]}
+    - {term: tons produced, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: barrels produced, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+  revenue_per_unit_growth_pct:
+    - {term: revenue per hectoliter, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: nr/hl, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: average revenue per case, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: sales per case, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: net revenue per hectoliter, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: revenue per liter, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: revenue per gallon, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: revenue per pound, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: revenue per ton, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+    - {term: average net sales per case, require_any: [growth, increased, decreased, versus, prior year, percent, "%"]}
+  reduced_risk_sales_mix_pct:
+    - {term: rrp, require_any: [sales, revenue, mix, percentage, percent, "%", volume]}
+    - {term: heated tobacco, require_any: [sales, revenue, mix, percentage, percent, "%", volume]}
+    - {term: nicotine pouches, require_any: [sales, revenue, mix, percentage, percent, "%", volume]}
+    - {term: non-combustible products, require_any: [sales, revenue, mix, percentage, percent, "%", volume]}
+  market_share_change_bps:
+    - {term: value share, require_any: [gain, loss, increase, decrease, change, points, percent, "%"]}
+    - {term: volume share, require_any: [gain, loss, increase, decrease, change, points, percent, "%"]}
+    - {term: share points, require_any: [gain, loss, increase, decrease, change, basis points, bps]}
+    - {term: nielsen share, require_any: [gain, loss, increase, decrease, change, points, percent, "%"]}
+    - {term: circana share, require_any: [gain, loss, increase, decrease, change, points, percent, "%"]}

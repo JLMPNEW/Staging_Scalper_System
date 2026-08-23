@@ -321,8 +321,13 @@ def load_linkable_company_rows(conn: Any, *, asof: str | None = None) -> list[An
                     FROM dim_company_model_taxonomy t
                     WHERE t.company_id = c.company_id
                       AND t.model_family = 'med_devices'
-                      AND (NULLIF(t.valid_from, '') IS NULL OR SUBSTR(t.valid_from, 1, 10) <= ?)
-                      AND (NULLIF(t.reviewed_at, '') IS NULL OR SUBSTR(t.reviewed_at, 1, 10) < ?)
+                      AND (
+                            (NULLIF(t.valid_from, '') IS NOT NULL AND SUBSTR(t.valid_from, 1, 10) <= ?)
+                            OR (
+                                NULLIF(t.valid_from, '') IS NULL
+                                AND (NULLIF(t.reviewed_at, '') IS NULL OR SUBSTR(t.reviewed_at, 1, 10) < ?)
+                            )
+                      )
                       AND (NULLIF(t.valid_to, '') IS NULL OR SUBSTR(t.valid_to, 1, 10) >= ?)
                 )
               )

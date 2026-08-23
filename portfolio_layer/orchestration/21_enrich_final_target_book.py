@@ -47,6 +47,12 @@ from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 LOGGER = logging.getLogger("enrich_final_target_book")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 NON_SECURITY_TICKERS = {"CASH", "PAYOUT_RESERVED"}
+
+
+class CumulativePerformanceUnavailable(ValueError):
+    """The sealed IB statement omits cumulative MTD/YTD performance sections."""
+
+
 MACRO_FIELDS = [
     "active_current_regime",
     "active_next_regime",
@@ -301,6 +307,13 @@ def _ib_performance(path: Path, *, as_of: str) -> dict[str, Any]:
             header = headers.get(section)
             if row[1] != "Data" or header is None:
                 continue
+            if section == cash_section and not {
+                "Month to Date",
+                "Year to Date",
+            }.issubset(header):
+                # One-day IB statements may legitimately omit cumulative columns.
+                # They are valid holding sources but cannot support MTD/YTD reporting.
+                continue
             mapped = {
                 field.strip(): (
                     row[index + 2].strip() if index + 2 < len(row) else ""
@@ -357,12 +370,15 @@ def _ib_performance(path: Path, *, as_of: str) -> dict[str, Any]:
                     f"mtd={mapped.get('Month to Date')!r} ytd={mapped.get('Year to Date')!r}"
                 )
             cash_values[component].append((mtd, ytd))
-    if not totals:
-        raise ValueError(
-            f"IB statement has no {performance_section!r} Total (All Assets) row"
+    if performance_section not in headers or not totals:
+        raise CumulativePerformanceUnavailable(
+            f"IB statement has no cumulative {performance_section!r} Total (All Assets) row"
         )
-    if cash_section not in headers:
-        raise ValueError("IB statement has no Cash Report section")
+    cash_header = headers.get(cash_section, [])
+    if not {"Month to Date", "Year to Date"}.issubset(cash_header):
+        raise CumulativePerformanceUnavailable(
+            "IB statement Cash Report has no cumulative Month to Date / Year to Date columns"
+        )
     expected = totals[0]
     if any(
         any(
@@ -422,6 +438,95 @@ def _ib_performance(path: Path, *, as_of: str) -> dict[str, Any]:
         "ib_net_broker_interest_ytd": interest_ytd,
         "ib_profit_as_of_date": as_of,
     }
+
+
+def _cumulative_ib_performance_from_ledger_history(
+    *,
+    runs_root: Path,
+    ledger_as_of: str,
+    current_statement_source: dict[str, str],
+    max_staleness_days: int,
+) -> tuple[dict[str, Any], dict[str, str], Path, list[Path], int]:
+    """Use the newest PIT-sealed statement with cumulative MTD/YTD fields."""
+    target = date.fromisoformat(ledger_as_of)
+    dated_runs: list[tuple[date, Path]] = []
+    for run_dir in runs_root.iterdir():
+        if not run_dir.is_dir():
+            continue
+        try:
+            run_date = date.fromisoformat(run_dir.name)
+        except ValueError:
+            continue
+        age_days = (target - run_date).days
+        if (
+            age_days < 0
+            or age_days > max_staleness_days
+            or (run_date.year, run_date.month) != (target.year, target.month)
+        ):
+            continue
+        dated_runs.append((run_date, run_dir))
+    dated_runs.sort(key=lambda item: item[0], reverse=True)
+
+    unavailable: list[str] = []
+    for run_date, run_dir in dated_runs:
+        ledger_dir = run_dir / "ledger"
+        if run_date == target:
+            source = dict(current_statement_source)
+            seal_paths = [
+                ledger_dir / "broker_statement_sources.csv",
+                ledger_dir / "ledger_manifest.json",
+            ]
+        else:
+            manifest_path = ledger_dir / "ledger_manifest.json"
+            source_path = ledger_dir / "broker_statement_sources.csv"
+            if not manifest_path.is_file() or not source_path.is_file():
+                continue
+            source_rows, _ = _sealed_csv(
+                source_path,
+                manifest_path,
+                keys=("broker_statement_sources", "broker_statement_sources.csv"),
+                run_as_of=run_date.isoformat(),
+                accepted={"PASS"},
+            )
+            if len(source_rows) != 1:
+                raise ValueError(
+                    f"Expected one sealed IB statement source for {run_date}, got {len(source_rows)}"
+                )
+            source = source_rows[0]
+            seal_paths = [source_path, manifest_path]
+        if str(source.get("period_end", "")).strip() != run_date.isoformat():
+            raise ValueError(
+                f"IB cumulative-performance source period mismatch for {run_date}"
+            )
+        statement_path = Path(str(source.get("source_file", ""))).resolve()
+        expected_hash = str(source.get("source_sha256", "")).strip()
+        if (
+            not statement_path.is_file()
+            or not expected_hash
+            or sha256_file(statement_path) != expected_hash
+        ):
+            raise ValueError(
+                f"Raw IB cumulative-performance statement is missing or differs from its ledger seal: {run_date}"
+            )
+        try:
+            performance = _ib_performance(
+                statement_path,
+                as_of=run_date.isoformat(),
+            )
+        except CumulativePerformanceUnavailable as exc:
+            unavailable.append(f"{run_date}:{exc}")
+            continue
+        return (
+            performance,
+            source,
+            statement_path,
+            [*seal_paths, statement_path],
+            (target - run_date).days,
+        )
+    raise CumulativePerformanceUnavailable(
+        "No same-month sealed IB statement with cumulative MTD/YTD performance "
+        f"within {max_staleness_days} days of {ledger_as_of}; checked={unavailable}"
+    )
 
 
 def _keyed(
@@ -1024,16 +1129,38 @@ def main() -> int:  # noqa: C901
     if str(statement_source.get("period_end", "")).strip() != ledger_as_of:
         raise ValueError("IB statement source period does not match ledger as-of")
     raw_statement_path = Path(str(statement_source.get("source_file", ""))).resolve()
-    expected_statement_hash = str(
-        statement_source.get("source_sha256", "")
+    raw_performance_staleness = cfg_get(
+        config,
+        "holdings_ledger.max_performance_staleness_days",
+        max_staleness_days,
+    )
+    try:
+        max_performance_staleness_days = int(str(raw_performance_staleness))
+    except ValueError as exc:
+        raise ValueError(
+            "holdings_ledger.max_performance_staleness_days must be an integer, "
+            f"got {raw_performance_staleness!r}"
+        ) from exc
+    if max_performance_staleness_days < 0:
+        raise ValueError(
+            "holdings_ledger.max_performance_staleness_days must be >= 0, "
+            f"got {max_performance_staleness_days}"
+        )
+    (
+        ib_performance,
+        performance_statement_source,
+        performance_statement_path,
+        performance_input_paths,
+        performance_age_days,
+    ) = _cumulative_ib_performance_from_ledger_history(
+        runs_root=runs_root,
+        ledger_as_of=ledger_as_of,
+        current_statement_source=statement_source,
+        max_staleness_days=max_performance_staleness_days,
+    )
+    performance_statement_hash = str(
+        performance_statement_source.get("source_sha256", "")
     ).strip()
-    if (
-        not raw_statement_path.is_file()
-        or not expected_statement_hash
-        or sha256_file(raw_statement_path) != expected_statement_hash
-    ):
-        raise ValueError("Raw IB statement is missing or differs from its ledger seal")
-    ib_performance = _ib_performance(raw_statement_path, as_of=ledger_as_of)
     holding_rows, _ = _sealed_csv(
         ledger_dir / "broker_net_stock_positions.csv",
         ledger_dir / "ledger_manifest.json",
@@ -1055,6 +1182,7 @@ def main() -> int:  # noqa: C901
             ledger_dir / "broker_statement_sources.csv",
             ledger_dir / "ledger_manifest.json",
             raw_statement_path,
+            *performance_input_paths,
         ]
     )
 
@@ -1143,7 +1271,8 @@ def main() -> int:  # noqa: C901
             "check": "ib_mark_to_market_profit_sealed",
             "status": "PASS",
             "detail": (
-                f"as_of={ledger_as_of}; "
+                f"as_of={ib_performance['ib_profit_as_of_date']}; "
+                f"age_days={performance_age_days}; "
                 f"mtd={ib_performance['ib_mark_to_market_mtd_profit']}; "
                 f"ytd={ib_performance['ib_mark_to_market_ytd_profit']}"
             ),
@@ -1248,7 +1377,7 @@ def main() -> int:  # noqa: C901
     )
     manifest = {
         "stage": "stage12b_enriched_final_target_book",
-        "schema_version": "final_target_book_report_v6_price_source_ib_symbol",
+        "schema_version": "final_target_book_report_v7_pit_performance_fallback",
         "generated_at": utc_now(),
         "run_as_of": run_as_of,
         "acceptance": acceptance,
@@ -1306,8 +1435,12 @@ def main() -> int:  # noqa: C901
                 "IB Cash Report / Base Currency Summary / Month to Date and "
                 "Year to Date"
             ),
-            "currency": str(statement_source.get("base_currency", "")),
-            "source_sha256": expected_statement_hash,
+            "currency": str(performance_statement_source.get("base_currency", "")),
+            "source_file": str(performance_statement_path),
+            "source_sha256": performance_statement_hash,
+            "source_age_days": performance_age_days,
+            "max_source_staleness_days": max_performance_staleness_days,
+            "same_month_required": True,
         },
         "macro_context": {
             field: macro.get(field, "")

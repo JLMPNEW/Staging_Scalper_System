@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS sec_parser_review_evaluation (
     arelle_invocation_count INTEGER NOT NULL DEFAULT 0,
     edgartools_invocation_count INTEGER NOT NULL DEFAULT 0,
     ocr_invocation_count INTEGER NOT NULL DEFAULT 0,
+    materialized_run_id INTEGER,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     UNIQUE(base_run_id, policy_sha256, evaluation_contract_version),
     FOREIGN KEY(base_run_id) REFERENCES sec_parser_run(run_id) ON DELETE CASCADE
@@ -143,6 +144,18 @@ class ReviewReplaySummary:
 
 def ensure_review_replay_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_REPLAY_SCHEMA_SQL)
+    columns = {
+        str(row[1])
+        for row in conn.execute(
+            'PRAGMA table_info(sec_parser_review_evaluation)'
+        )
+    }
+    if 'materialized_run_id' not in columns:
+        conn.execute(
+            'ALTER TABLE sec_parser_review_evaluation '
+            'ADD COLUMN materialized_run_id INTEGER'
+        )
+        conn.commit()
 
 
 def _json_object(value: object, *, label: str) -> dict[str, Any]:
@@ -841,3 +854,165 @@ def load_review_evidence(
         params.extend(selected)
     sql += " ORDER BY ticker, metric_name, period_end, accession_number, evaluated_evidence_key"
     return [dict(row) for row in conn.execute(sql, params)]
+
+
+def materialize_review_evaluation_run(
+    conn: sqlite3.Connection,
+    *,
+    evaluation_id: int,
+) -> int:
+    """Publish immutable review output as a normal zero-provider parser run."""
+    ensure_review_replay_schema(conn)
+    evaluation_row = conn.execute(
+        '''
+        SELECT evaluation.*, base.asof_date, base.parser_release
+        FROM sec_parser_review_evaluation AS evaluation
+        JOIN sec_parser_run AS base ON base.run_id=evaluation.base_run_id
+        WHERE evaluation.evaluation_id=?
+        ''',
+        (evaluation_id,),
+    ).fetchone()
+    if evaluation_row is None:
+        raise ValueError(f'review evaluation_id={evaluation_id} does not exist')
+    evaluation = dict(evaluation_row)
+    if str(evaluation['status']) != 'COMPLETED':
+        raise ValueError(f'review evaluation_id={evaluation_id} is not COMPLETED')
+    current_hash = base_run_scope_hash(
+        conn, base_run_id=int(evaluation['base_run_id'])
+    )
+    if current_hash != str(evaluation['base_scope_hash_after'] or ''):
+        raise RuntimeError('Base run scope changed after review evaluation')
+    existing_run_id = int(evaluation.get('materialized_run_id') or 0)
+    if existing_run_id:
+        existing = conn.execute(
+            '''SELECT status,metadata_json FROM sec_parser_run WHERE run_id=?''',
+            (existing_run_id,),
+        ).fetchone()
+        if existing is None or str(existing['status']) != 'COMPLETED':
+            raise RuntimeError('Materialized review run is missing or incomplete')
+        metadata = _json_object(
+            existing['metadata_json'], label='materialized run metadata_json'
+        )
+        if int(metadata.get('review_evaluation_id') or 0) != evaluation_id:
+            raise RuntimeError('Materialized review run identity does not match')
+        linked_count = int(conn.execute(
+            '''SELECT COUNT(*) FROM sec_parser_run_metric_evidence WHERE run_id=?''',
+            (existing_run_id,),
+        ).fetchone()[0])
+        if linked_count != int(evaluation['evaluated_evidence_count']):
+            raise RuntimeError('Materialized review run evidence is incomplete')
+        return existing_run_id
+
+    savepoint = 'materialize_review_evaluation'
+    conn.execute(f'SAVEPOINT {savepoint}')
+    try:
+        now = utc_now()
+        metadata_json = json.dumps(
+            {
+                'base_run_id': int(evaluation['base_run_id']),
+                'base_scope_hash': current_hash,
+                'policy_sha256': str(evaluation['policy_sha256']),
+                'review_evaluation_id': evaluation_id,
+                'zero_provider_contract': True,
+            },
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+        work_count = int(conn.execute(
+            'SELECT COUNT(*) FROM sec_parser_run_work WHERE run_id=?',
+            (int(evaluation['base_run_id']),),
+        ).fetchone()[0])
+        cursor = conn.execute(
+            '''
+            INSERT INTO sec_parser_run(
+                model_family,asof_date,parser_release,adapter_version,
+                mode,worker_count,started_at,completed_at,status,
+                planned_work_count,completed_work_count,failed_work_count,
+                metadata_json
+            ) VALUES (?,?,?,?,?,0,?,?,'COMPLETED',?,?,0,?)
+            ''',
+            (
+                str(evaluation['model_family']),
+                str(evaluation['asof_date']),
+                str(evaluation['parser_release']),
+                str(evaluation['adapter_version']),
+                'review_replay',
+                now,
+                now,
+                work_count,
+                work_count,
+                metadata_json,
+            ),
+        )
+        if cursor.lastrowid is None:
+            raise RuntimeError('Failed to allocate materialized review run')
+        run_id = int(cursor.lastrowid)
+        conn.execute(
+            '''
+            INSERT INTO sec_parser_run_work(
+                run_id,work_key,ticker,accession_number
+            )
+            SELECT ?,work_key,ticker,accession_number
+            FROM sec_parser_run_work WHERE run_id=?
+            ''',
+            (run_id, int(evaluation['base_run_id'])),
+        )
+        conn.execute(
+            '''
+            INSERT INTO sec_parser_run_normalized_fact(run_id,fact_fingerprint)
+            SELECT ?,fact_fingerprint FROM sec_parser_run_normalized_fact
+            WHERE run_id=?
+            ''',
+            (run_id, int(evaluation['base_run_id'])),
+        )
+        conn.execute(
+            '''
+            INSERT INTO sec_parser_metric_evidence_shadow(
+                evidence_key,run_id,work_key,model_family,adapter_version,
+                ticker,cik,accession_number,form_type,filing_date,accepted_at,
+                report_date,metric_name,concept_name,candidate_value,unit,
+                period_start,period_end,scope,confidence,candidate_status,
+                status_reason,evidence_text,source_document,extraction_method,
+                provenance_json,parser_release,created_at
+            )
+            SELECT evaluated_evidence_key,?,work_key,?, ?,ticker,cik,
+                   accession_number,form_type,filing_date,accepted_at,
+                   report_date,metric_name,concept_name,candidate_value,unit,
+                   period_start,period_end,scope,confidence,candidate_status,
+                   status_reason,evidence_text,source_document,
+                   extraction_method,provenance_json,?,created_at
+            FROM sec_parser_review_evidence WHERE evaluation_id=?
+            ''',
+            (
+                run_id,
+                str(evaluation['model_family']),
+                str(evaluation['adapter_version']),
+                str(evaluation['parser_release']),
+                evaluation_id,
+            ),
+        )
+        conn.execute(
+            '''
+            INSERT INTO sec_parser_run_metric_evidence(run_id,evidence_key)
+            SELECT ?,evaluated_evidence_key FROM sec_parser_review_evidence
+            WHERE evaluation_id=?
+            ''',
+            (run_id, evaluation_id),
+        )
+        linked_count = int(conn.execute(
+            'SELECT COUNT(*) FROM sec_parser_run_metric_evidence WHERE run_id=?',
+            (run_id,),
+        ).fetchone()[0])
+        if linked_count != int(evaluation['evaluated_evidence_count']):
+            raise RuntimeError('Materialized review evidence count mismatch')
+        conn.execute(
+            '''UPDATE sec_parser_review_evaluation
+               SET materialized_run_id=? WHERE evaluation_id=?''',
+            (run_id, evaluation_id),
+        )
+        conn.execute(f'RELEASE SAVEPOINT {savepoint}')
+    except Exception:
+        conn.execute(f'ROLLBACK TO SAVEPOINT {savepoint}')
+        conn.execute(f'RELEASE SAVEPOINT {savepoint}')
+        raise
+    return run_id

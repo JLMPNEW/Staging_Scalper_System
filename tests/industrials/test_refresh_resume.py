@@ -8,10 +8,17 @@ import pytest
 from industrials.core.refresh_resume import load_resume_plan
 
 
-def _write_manifest(path: Path, *, asof: str, statuses: list[str]) -> None:
+def _write_manifest(
+    path: Path,
+    *,
+    asof: str,
+    statuses: list[str],
+    step_ids: tuple[str, ...] = ("one", "two", "three"),
+    resume_start_step: str = "",
+) -> None:
     steps = [
         {"step_id": step_id, "status": status}
-        for step_id, status in zip(("one", "two", "three"), statuses, strict=True)
+        for step_id, status in zip(step_ids, statuses, strict=True)
     ]
     path.write_text(
         json.dumps(
@@ -20,6 +27,7 @@ def _write_manifest(path: Path, *, asof: str, statuses: list[str]) -> None:
                 "dry_run": False,
                 "asof_date": asof,
                 "run_id": "failed-run",
+                "resume_start_step": resume_start_step,
                 "steps": steps,
             }
         ),
@@ -38,6 +46,24 @@ def test_resume_starts_at_terminal_failed_step(tmp_path: Path) -> None:
     assert plan.start_step == "three"
     assert plan.source_run_id == "failed-run"
     assert plan.completed_prefix_steps == ("one", "two")
+
+
+def test_resume_can_continue_after_a_resumed_attempt_fails_later(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest,
+        asof="2026-08-11",
+        statuses=["PASS", "PASS", "FAIL"],
+        step_ids=("two", "three", "four"),
+        resume_start_step="two",
+    )
+    plan = load_resume_plan(
+        manifest,
+        asof="2026-08-11",
+        current_step_ids=["one", "two", "three", "four", "five"],
+    )
+    assert plan.start_step == "four"
+    assert plan.completed_prefix_steps == ("two", "three")
 
 
 def test_resume_rejects_pipeline_drift_and_nonterminal_failure(tmp_path: Path) -> None:

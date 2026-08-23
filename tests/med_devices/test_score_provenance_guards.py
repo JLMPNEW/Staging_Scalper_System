@@ -231,6 +231,116 @@ def test_tmdx_governance_promotion_is_effective_only_on_or_after_august_17() -> 
     assert row.portfolio_candidate_reason.startswith("fda_manual_review_or_hard_red;")
 
 
+def test_allocation_candidate_policy_separates_candidate_from_tier1() -> None:
+    module = load_script(
+        "13_build_med_device_daily_scores.py",
+        "med_device_allocation_candidate_policy_test",
+    )
+    config = {
+        "scoring": {
+            "portfolio_candidate_policy": {
+                "enabled": True,
+                "effective_from": "2026-08-24",
+                "reviewed_at": "2026-08-22",
+                "min_composite_score": 50.0,
+                "high_confidence_composite_score": 55.0,
+                "min_score_confidence": 0.75,
+                "min_listing_history_calendar_days": 180,
+                "require_tier1_eligible_template": True,
+            }
+        }
+    }
+    gates = {"value_trap_hard_max": 85.0}
+    row = module.ScoreRow(
+        asof_date="2026-08-24",
+        ticker="BLLN",
+        composite_score=67.11,
+        score_confidence=0.87,
+        price_start_date="2025-11-06",
+        cohort_score_template_id="diagnostics_liquidity_value_quality_v1",
+        cohort_score_template_tier1_eligible=1,
+        legacy_all_gates_gate=1,
+        passed_tier1_safety_gate=0,
+        passed_data_quality_gate=1,
+        passed_liquidity_gate=1,
+        passed_fda_manual_review_gate=1,
+        value_trap_score=10.0,
+        tier1_safety_reason=(
+            "valuation_below_tier1_safety_min;durable_growth_below_tier1_safety_min;technical_breakdown"
+        ),
+    )
+
+    module.apply_portfolio_candidate_policy(row, config=config, gates=gates)
+
+    assert row.portfolio_candidate_gate == 1
+    assert row.portfolio_candidate_status == "high_confidence_allocation_candidate"
+    assert "sources=allocation_policy" in row.portfolio_candidate_reason
+    assert "legacy_all_gates_pass" in row.portfolio_candidate_reason
+    assert row.passed_tier1_safety_gate == 0
+
+
+def test_allocation_candidate_policy_is_pit_and_hard_gate_bounded() -> None:
+    module = load_script(
+        "13_build_med_device_daily_scores.py",
+        "med_device_allocation_candidate_policy_bounds_test",
+    )
+    config = {
+        "scoring": {
+            "portfolio_candidate_policy": {
+                "enabled": True,
+                "effective_from": "2026-08-24",
+                "reviewed_at": "2026-08-22",
+                "min_composite_score": 50.0,
+                "high_confidence_composite_score": 55.0,
+                "min_score_confidence": 0.75,
+                "min_listing_history_calendar_days": 180,
+                "require_tier1_eligible_template": True,
+            }
+        }
+    }
+    gates = {"value_trap_hard_max": 85.0}
+    base = dict(
+        ticker="TEST",
+        composite_score=57.0,
+        score_confidence=0.90,
+        price_start_date="2025-01-01",
+        cohort_score_template_id="safe_template",
+        cohort_score_template_tier1_eligible=1,
+        legacy_all_gates_gate=1,
+        passed_data_quality_gate=1,
+        passed_liquidity_gate=1,
+        passed_fda_manual_review_gate=1,
+        value_trap_score=10.0,
+    )
+
+    pre_effective = module.ScoreRow(asof_date="2026-08-21", **base)
+    module.apply_portfolio_candidate_policy(pre_effective, config=config, gates=gates)
+    assert pre_effective.portfolio_candidate_gate == 0
+
+    research_template = module.ScoreRow(
+        asof_date="2026-08-24",
+        **{**base, "cohort_score_template_tier1_eligible": 0},
+    )
+    module.apply_portfolio_candidate_policy(research_template, config=config, gates=gates)
+    assert research_template.portfolio_candidate_gate == 0
+
+    missing_data = module.ScoreRow(
+        asof_date="2026-08-24",
+        **{**base, "passed_data_quality_gate": 0},
+    )
+    module.apply_portfolio_candidate_policy(missing_data, config=config, gates=gates)
+    assert missing_data.portfolio_candidate_gate == 0
+    assert missing_data.portfolio_candidate_reason.startswith("data_quality_below_gate;")
+
+    calibration_only = module.ScoreRow(
+        asof_date="2026-08-24",
+        **{**base, "calibration_only": 1},
+    )
+    module.apply_portfolio_candidate_policy(calibration_only, config=config, gates=gates)
+    assert calibration_only.portfolio_candidate_gate == 0
+    assert calibration_only.portfolio_candidate_reason.startswith("calibration_only_security;")
+
+
 def insert_company(conn: sqlite3.Connection) -> None:
     conn.execute(
         """

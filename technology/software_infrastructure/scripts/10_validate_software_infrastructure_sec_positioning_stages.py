@@ -17,7 +17,7 @@ if __name__ == "__main__":
         "--model-family",
         MODEL_FAMILY,
         "--13f-exempt-tickers",
-        "FATN",
+        "FATN,OCTV",
         *sys.argv[1:],
     ]
     runpy.run_path(str(SHARED_SCRIPT), run_name="__main__")

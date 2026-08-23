@@ -37,6 +37,7 @@ from industrials.machinery.scoring import parse_asof  # noqa: E402
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 COVERAGE_AUDIT_STEP_ID = "21_coverage_audit"
+NON_RETRYABLE_POLICY_FAILURE = 78
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,7 @@ def build_steps(
     asof: str,
     *,
     force: bool,
+    overwrite_outputs: bool = False,
     include_norgate_backfill: bool,
     refresh_sec_insider: bool = True,
     full_positioning_refresh: bool = False,
@@ -237,8 +239,11 @@ def build_steps(
     history_start_date: str = "2019-01-02",
     history_frequency: str = "daily",
 ) -> list[Step]:
-    force_args = ["--force"] if force else []
-    publish_force = ["--allow-overwrite"] if force else []
+    source_force_args = ["--force"] if force else []
+    derived_force_args = ["--force"] if (force or overwrite_outputs) else []
+    publish_force = (
+        ["--allow-overwrite"] if (force or overwrite_outputs) else []
+    )
     sec_args = ["--force", "--allow-partial", "--asof", asof] if force else [
         "--incremental",
         "--allow-partial",
@@ -249,6 +254,13 @@ def build_steps(
         sec_args.append("--archive-bootstrap")
     positioning_args = ["--end-date", asof] if full_positioning_refresh else ["--daily-refresh", "--end-date", asof]
     steps = [
+        Step(
+            "00a_validate_production_source_seal",
+            "stage_0",
+            "00a_validate_machinery_production_source_seal.py",
+            ["--asof", asof],
+            pass_db=False,
+        ),
         Step("00_validate_seed", "stage_0", "00_validate_machinery_seed.py", pass_db=False),
         Step("00_init_db", "stage_0", "00_init_machinery_db.py"),
         Step("01_load_universe", "stage_1", "01_load_machinery_universe.py"),
@@ -276,10 +288,10 @@ def build_steps(
             "07b_sync_issuer_ir",
             "stage_4",
             "07b_sync_machinery_issuer_ir_disclosures.py",
-            ["--asof", asof, "--allow-partial", *force_args],
+            ["--asof", asof, "--allow-partial", *source_force_args],
             True,
         ),
-        Step("11_sync_fx", "stage_4", "11_sync_machinery_fx_rates.py", ["--end-date", asof, "--allow-partial", *force_args], True),
+        Step("11_sync_fx", "stage_4", "11_sync_machinery_fx_rates.py", ["--end-date", asof, "--allow-partial", *source_force_args], True),
         Step(
             "08b_scan_disclosures",
             "stage_4",
@@ -329,13 +341,13 @@ def build_steps(
         Step("09_import_positioning", "stage_5", "09_import_machinery_positioning.py", ["--asof", asof]),
         Step("14_validate_positioning", "stage_5", "14_validate_machinery_positioning.py"),
         Step("10_validate_eligibility", "stage_6", "10_validate_machinery_scoring_eligibility.py", ["--asof", asof]),
-        Step("06a_build_scoring", "stage_6", "06a_build_machinery_scoring_features.py", ["--asof", asof, *force_args]),
+        Step("06a_build_scoring", "stage_6", "06a_build_machinery_scoring_features.py", ["--asof", asof, *derived_force_args]),
         Step("06a_validate_scoring", "stage_6", "06a_validate_machinery_scoring_features.py", ["--asof", asof]),
         Step(
             "10_build_scores",
             "stage_7",
             "10_build_machinery_calibrated_scores.py",
-            ["--asof", asof, *force_args],
+            ["--asof", asof, *derived_force_args],
             pass_db=False,
         ),
         Step(
@@ -437,11 +449,17 @@ def build_steps(
                     history_frequency,
                     "--exclude-end-date",
                     "--rebuild-features",
-                    *force_args,
+                    *derived_force_args,
                 ],
             ),
         )
     return steps
+
+
+def overwrite_tail_on_resume(*, force: bool, resume: bool) -> bool:
+    """Return whether derived outputs may replace a prior partial tail."""
+
+    return bool(force or resume)
 
 
 def select_steps(steps: list[Step], args: argparse.Namespace) -> list[Step]:
@@ -604,6 +622,9 @@ def main() -> int:
     steps = build_steps(
         asof,
         force=args.force,
+        overwrite_outputs=overwrite_tail_on_resume(
+            force=args.force, resume=args.resume
+        ),
         include_norgate_backfill=args.include_norgate_backfill,
         refresh_sec_insider=not args.skip_sec_insider_refresh,
         full_positioning_refresh=args.full_positioning_refresh,
@@ -797,8 +818,11 @@ def main() -> int:
             failures=failures,
         )
     print(json.dumps({key: summary[key] for key in ("acceptance", "run_id", "dry_run", "failed_step_count")}, indent=2))
-    return 0 if not failures else 1
-
+    if not failures:
+        return 0
+    if any(row.get("return_code") == NON_RETRYABLE_POLICY_FAILURE for row in failures):
+        return NON_RETRYABLE_POLICY_FAILURE
+    return 1
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -727,6 +727,10 @@ def backfill_mapped_xbrl_facts(
                     WHERE f.raw_fact_id = r.raw_fact_id
                       AND f.canonical_metric = m.canonical_metric
               )
+             ON CONFLICT(
+                 ticker, source_id, accession_number, taxonomy, concept_name,
+                 canonical_metric, unit, period_start, period_end, frame
+             ) DO NOTHING
             """,
             (
                 now,

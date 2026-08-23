@@ -7,7 +7,10 @@ from pathlib import Path
 
 from dedicated_parser.adapters import load_registry
 from dedicated_parser.atomic_io import atomic_write_text
-from dedicated_parser.review_replay import replay_review_policies
+from dedicated_parser.review_replay import (
+    materialize_review_evaluation_run,
+    replay_review_policies,
+)
 from dedicated_parser.storage import connect_database
 
 
@@ -24,6 +27,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--policy-replay-run-id", type=int, required=True)
     parser.add_argument("--review-policy", type=Path, default=None)
     parser.add_argument("--output-json", type=Path, default=None)
+    parser.add_argument('--materialize-parser-run', action='store_true')
     return parser.parse_args(argv)
 
 
@@ -43,7 +47,18 @@ def main(argv: list[str] | None = None) -> int:
             policy_path=policy_path,
             expected_model_family=registry.model_family,
         )
-    payload = {"mode": "policy_replay", **summary.as_dict()}
+        materialized_run_id = (
+            materialize_review_evaluation_run(
+                conn, evaluation_id=summary.evaluation_id
+            )
+            if args.materialize_parser_run
+            else 0
+        )
+    payload = {
+        "mode": "policy_replay",
+        **summary.as_dict(),
+        'materialized_parser_run_id': materialized_run_id,
+    }
     if args.output_json is not None:
         atomic_write_text(
             args.output_json,
