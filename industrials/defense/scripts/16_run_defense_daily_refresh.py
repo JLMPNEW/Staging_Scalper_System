@@ -150,6 +150,45 @@ def build_steps(
         steps.extend(
             [
                 Step(
+                    "01_load_universe",
+                    "stage_1",
+                    "load governed current universe",
+                    ["industrials/defense/scripts/01_load_defense_universe.py"],
+                    accepts_config=True,
+                ),
+                Step(
+                    "01b_load_historical_membership",
+                    "stage_1",
+                    "load exact-dated historical membership",
+                    ["industrials/defense/scripts/01b_load_defense_historical_membership.py"],
+                    accepts_config=True,
+                ),
+                Step(
+                    "01c_load_ticker_aliases",
+                    "stage_1",
+                    "load governed ticker aliases",
+                    ["industrials/defense/scripts/01c_load_defense_ticker_aliases.py"],
+                    accepts_config=True,
+                ),
+                Step(
+                    "02_validate_universe",
+                    "stage_2",
+                    "validate current and historical universe",
+                    ["industrials/defense/scripts/02_validate_defense_universe.py"],
+                    accepts_config=True,
+                ),
+                Step(
+                    "02b_validate_identity",
+                    "stage_2",
+                    "validate ticker and issuer continuity",
+                    [
+                        "industrials/defense/scripts/02b_validate_defense_identity_reconciliation.py",
+                        "--asof",
+                        asof,
+                    ],
+                    accepts_config=True,
+                ),
+                Step(
                     "03_sync_prices",
                     "stage_3",
                     "sync prices",
@@ -546,9 +585,9 @@ def run_selftest() -> int:
         positioning_through_publish_only=False,
         include_dedicated_parser_shadow=True,
     )
-    assert len(full) == 15, f"expected 15 full steps, got {len(full)}"
+    assert len(full) == 20, f"expected 20 full steps, got {len(full)}"
     assert len(fast) == 6, f"expected 6 publish-only steps, got {len(fast)}"
-    assert len(shadow) == 18, f"expected 18 parser-production steps, got {len(shadow)}"
+    assert len(shadow) == 23, f"expected 23 parser-production steps, got {len(shadow)}"
     shadow_ids = [step.step_id for step in shadow]
     assert shadow_ids.index("07_sync_sec") < shadow_ids.index("07c_recover_financial_lineage")
     assert shadow_ids.index("07c_recover_financial_lineage") < shadow_ids.index(
@@ -564,7 +603,14 @@ def run_selftest() -> int:
         "08f_compare_specialized_metrics"
     )
     full_ids = [step.step_id for step in full]
-    assert full_ids[0] == "03_sync_prices", full_ids
+    assert full_ids[:5] == [
+        "01_load_universe",
+        "01b_load_historical_membership",
+        "01c_load_ticker_aliases",
+        "02_validate_universe",
+        "02b_validate_identity",
+    ], full_ids
+    assert full_ids[5] == "03_sync_prices", full_ids
     assert full_ids[-3:] == ["17_publish", "18_validate_publish", "20_validate_portfolio"], full_ids
     # publish-only mode must skip the market/financial block but keep publish+validate.
     assert [step.step_id for step in fast] == [
@@ -644,6 +690,11 @@ def run_selftest() -> int:
     cfg = Path("industrials/config.yaml")
     config_aware = {s.step_id for s in full if s.accepts_config}
     assert config_aware == {
+        "01_load_universe",
+        "01b_load_historical_membership",
+        "01c_load_ticker_aliases",
+        "02_validate_universe",
+        "02b_validate_identity",
         "07c_recover_financial_lineage",
         "13_sync_positioning", "14_validate_positioning", "17_publish", "18_validate_publish", "20_validate_portfolio",
     }, f"config-forwarding step set drifted: {config_aware}"
@@ -685,7 +736,7 @@ def run_selftest() -> int:
     # steps passed but audit never recorded (crash before folding it in) -> completed < planned -> FAIL
     assert compute_manifest_acceptance(planned_step_count=steps_plus_audit, report_rows=[_row("PASS") for _ in range(len(full))], failures=[], dry_run=False) == "FAIL"
 
-    print("SELFTEST PASS: 15 base / 18 parser-production / 6 publish-only steps; "
+    print("SELFTEST PASS: 20 base / 23 parser-production / 6 publish-only steps; "
           "manifest keys OK; acceptance fail-closed; "
           "config forwarding + gated coverage audit + crash-safe lock OK; lock=" + str(lock_path))
     return 0

@@ -6,15 +6,100 @@ from pathlib import Path
 import pytest
 
 from industrials.transportation.selected_feature_history import (
+    DISCOVERY_METRIC_COUNT,
+    GENERIC_METRIC_COUNT,
     Evidence,
     build_preflight_rows,
     choose_point_in_time_evidence,
     evidence_lineage,
+    materialize_panels,
     normalized_accepted_evidence,
     sha256,
     stable_json_sha256,
     verify_v2_snapshots,
 )
+
+
+def _empty_specialized_contract() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    registry = [
+        {
+            "metric_id": f"special_{index}",
+            "metric_pack": "test",
+            "source_lane": "test",
+        }
+        for index in range(DISCOVERY_METRIC_COUNT)
+    ]
+    dispositions = [
+        {
+            "metric_id": row["metric_id"],
+            "metric_disposition": "NOT_APPLICABLE",
+            "calibration_candidate": "0",
+        }
+        for row in registry
+    ]
+    return registry, dispositions
+
+
+def test_current_panel_can_exclude_names_outside_frozen_scope(
+    tmp_path: Path,
+) -> None:
+    historical_root = tmp_path / "history"
+    snapshot = historical_root / "2026-08-24"
+    snapshot.mkdir(parents=True)
+    (snapshot / "metric_availability.csv").write_text(
+        "ticker,metric_name,availability_status,metric_value,unit,source_id,"
+        "accession_number,filing_date,period_start,period_end,taxonomy,"
+        "concept_name,extraction_method,confidence,status_reason,provenance_json\n"
+        "NEW,generic_metric,REPORTED,1,ratio,source,,,,,,concept,method,1,ok,\n",
+        encoding="utf-8",
+    )
+    discovery_path = tmp_path / "discovery.csv.gz"
+    complete_path = tmp_path / "complete.csv.gz"
+    registry, dispositions = _empty_specialized_contract()
+    result = materialize_panels(
+        historical_root=historical_root,
+        dates=["2026-08-24"],
+        scope_rows=[],
+        coverage_rows=[],
+        disposition_rows=dispositions,
+        discovery_registry_rows=registry,
+        generic_metric_ids=[
+            f"metric_{index}" for index in range(GENERIC_METRIC_COUNT)
+        ],
+        accepted={},
+        discovery_path=discovery_path,
+        complete_path=complete_path,
+        allow_out_of_scope_tickers=True,
+    )
+    assert result["membership_row_count"] == 0
+    assert result["out_of_scope_tickers"] == ["NEW"]
+    assert result["complete_row_count"] == 0
+
+
+def test_frozen_panel_still_rejects_names_outside_scope(tmp_path: Path) -> None:
+    historical_root = tmp_path / "history"
+    snapshot = historical_root / "2026-08-24"
+    snapshot.mkdir(parents=True)
+    (snapshot / "metric_availability.csv").write_text(
+        "ticker,metric_name\nNEW,generic_metric\n",
+        encoding="utf-8",
+    )
+    registry, dispositions = _empty_specialized_contract()
+    with pytest.raises(ValueError, match="ticker absent from v3 scope=NEW"):
+        materialize_panels(
+            historical_root=historical_root,
+            dates=["2026-08-24"],
+            scope_rows=[],
+            coverage_rows=[],
+            disposition_rows=dispositions,
+            discovery_registry_rows=registry,
+            generic_metric_ids=[
+                f"metric_{index}" for index in range(GENERIC_METRIC_COUNT)
+            ],
+            accepted={},
+            discovery_path=tmp_path / "discovery.csv.gz",
+            complete_path=tmp_path / "complete.csv.gz",
+        )
 
 
 def test_point_in_time_evidence_excludes_future_and_stale_values() -> None:

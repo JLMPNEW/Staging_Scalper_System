@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,22 @@ VALID_STATUSES = frozenset(
         "PARSER_FAILURE",
     }
 )
+
+
+def is_rankable_metric_value(metric_id: str, value: object) -> bool:
+    """Reject values whose ratio domain makes ordinal ranking misleading."""
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(parsed):
+        return False
+    # EV / operating income changes meaning at a non-positive denominator (or
+    # negative enterprise value). Such observations are not economically
+    # ordered multiples and must not be rewarded as superficially "cheap".
+    if str(metric_id) == "ev_operating_income":
+        return parsed > 0.0
+    return True
 
 
 @dataclass(frozen=True)

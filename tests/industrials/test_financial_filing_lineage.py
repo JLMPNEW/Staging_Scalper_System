@@ -7,11 +7,21 @@ from industrials.core.financial_filing_lineage import (
     _document_has_financial_disclosure,
     apply_financial_lineage_gate,
     build_financial_filing_lineage,
+    filing_market_availability_date,
     validate_financial_lineage_rank_rows,
 )
 
 
 ASOF = "2026-08-13"
+
+
+def test_filing_market_availability_moves_friday_after_close_to_monday() -> None:
+    assert filing_market_availability_date(
+        {
+            "accepted_at": "2026-08-28T21:15:00Z",
+            "filing_date": "2026-08-28",
+        }
+    ) == "2026-08-31"
 
 
 def _connection() -> sqlite3.Connection:

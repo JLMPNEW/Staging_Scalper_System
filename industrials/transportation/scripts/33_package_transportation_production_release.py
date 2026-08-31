@@ -22,6 +22,9 @@ from industrials.transportation.release_contract import (  # noqa: E402
     iter_existing_files,
     required_release_source_paths,
 )
+from industrials.transportation.legacy_production_routes import (  # noqa: E402
+    block_legacy_route,
+)
 from industrials.transportation.selected_feature_history import (  # noqa: E402
     read_json,
     sha256,
@@ -68,6 +71,7 @@ def lock_rows(path: Path) -> list[dict[str, str]]:
 
 
 def portfolio_contract() -> dict[str, object]:
+    block_legacy_route("33_package_transportation_production_release:portfolio_contract")
     config_path = PROJECT_ROOT / "portfolio_layer" / "config.yaml"
     config = load_yaml(config_path)
     sectors = (config.get("score_contract") or {}).get("sectors") or []
@@ -89,7 +93,7 @@ def portfolio_contract() -> dict[str, object]:
         )
     )
     if not (
-        source.get("adapter") == "industrial_family"
+        source.get("adapter") == "transportation_subgroup"
         and source.get("enabled") is True
         and source.get("required") is True
         and source.get("require_oos_score_valid") is True
@@ -110,6 +114,7 @@ def portfolio_contract() -> dict[str, object]:
 
 
 def validate_evidence(asof: str) -> dict[str, object]:
+    block_legacy_route("33_package_transportation_production_release:validate_evidence")
     root = PROJECT_ROOT / "output" / "industrials" / MODEL_FAMILY
     promotion = root / "production_promotion" / asof
     dashboard = root / "dashboard" / asof
@@ -239,6 +244,7 @@ def inventory(asof: str) -> list[tuple[Path, Path, bool]]:
 
 
 def main() -> int:
+    block_legacy_route("33_package_transportation_production_release")
     args = parse_args()
     asof = str(args.asof)[:10]
     release_name = str(args.release_name).strip()

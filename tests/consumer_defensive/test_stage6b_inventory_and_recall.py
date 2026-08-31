@@ -13,6 +13,7 @@ from consumer_defensive.core.historical_filing_inventory import (
     _parse_event_filing_index_html,
     _parse_event_index,
     _select_event_documents,
+    _validate_selected_event_document_membership,
     execute_historical_filing_replay,
     load_historical_replay_plan,
 )
@@ -122,13 +123,17 @@ def test_event_index_selects_only_primary_and_governed_results_documents() -> No
 
 
 def test_real_sec_filing_index_html_supplies_exhibit_types_and_descriptions() -> None:
+    accession = '0000000001-24-000001'
+    archive_root = '/Archives/edgar/data/1/000000000124000001'
     payload = b'''<html><body><table class="tableFile">
       <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th>
           <th>Size</th></tr>
-      <tr><td>1</td><td>Current report</td><td><a>event.htm</a>
+      <tr><td>1</td><td>Current report</td><td><a
+          href="/Archives/edgar/data/1/000000000124000001/event.htm">event.htm</a>
           <span class="inlineXBRL"> iXBRL</span></td>
           <td>8-K</td><td>100</td></tr>
-      <tr><td>2</td><td>Earnings release</td><td><a>earnings.htm</a></td>
+      <tr><td>2</td><td>Earnings release</td><td><a
+          href="/Archives/edgar/data/1/000000000124000001/earnings.htm">earnings.htm</a></td>
           <td>EX-99.1</td><td>200</td></tr>
       <tr><td>3</td><td>Material contract</td><td><a>contract.htm</a></td>
           <td>EX-10.1</td><td>300</td></tr>
@@ -143,6 +148,70 @@ def test_real_sec_filing_index_html_supplies_exhibit_types_and_descriptions() ->
         ('event.htm', '8-K', 'primary_event_filing'),
         ('earnings.htm', 'EX-99.1', 'earnings_exhibit'),
     ]
+    assert items[1]['href'] == f'{archive_root}/earnings.htm'
+
+    # Historical EDGAR directory JSON can omit a real exhibit.  Its exact
+    # same-accession HTML anchor is a narrowly scoped secondary authority.
+    directory_items = ({'name': 'event.htm'},)
+    assert _validate_selected_event_document_membership(
+        directory_items,
+        selected,
+        archive_cik='0000000001',
+        accession_number=accession,
+        context=f'TEST/{accession}',
+    ) == ('earnings.htm',)
+
+    cross_accession = [dict(item) for item in selected]
+    cross_accession[1]['href'] = (
+        '/Archives/edgar/data/1/000000000124999999/earnings.htm'
+    )
+    with pytest.raises(RuntimeError, match='exact same-accession SEC href'):
+        _validate_selected_event_document_membership(
+            directory_items,
+            cross_accession,
+            archive_cik='0000000001',
+            accession_number=accession,
+            context=f'TEST/{accession}',
+        )
+
+
+def test_event_index_accepts_only_exact_same_accession_ix_viewer_href() -> None:
+    accession = '0001193125-19-222571'
+    exact_path = (
+        '/Archives/edgar/data/1646972/000119312519222571/'
+        'd782157d8k.htm'
+    )
+    item = {
+        'name': 'd782157d8k.htm',
+        'href': f'/ix?doc={exact_path}',
+    }
+    assert _validate_selected_event_document_membership(
+        (), (item,), archive_cik='0001646972',
+        accession_number=accession, context=f'ACI/{accession}',
+    ) == ('d782157d8k.htm',)
+
+    unsafe_hrefs = (
+        # Same filename, different accession.
+        '/ix?doc=/Archives/edgar/data/1646972/'
+        '000119312519999999/d782157d8k.htm',
+        # No additional viewer query parameters are permitted.
+        f'/ix?doc={exact_path}&output=1',
+        f'/ix?output=1&doc={exact_path}',
+        # An exact path on any non-SEC host is not an authority.
+        f'https://example.com/ix?doc={exact_path}',
+        # Fragments are not part of the exact attested document target.
+        f'/ix?doc={exact_path}#fragment',
+    )
+    for href in unsafe_hrefs:
+        with pytest.raises(
+            RuntimeError, match='exact same-accession SEC href'
+        ):
+            _validate_selected_event_document_membership(
+                (), ({**item, 'href': href},),
+                archive_cik='0001646972',
+                accession_number=accession,
+                context=f'ACI/{accession}',
+            )
 
 
 @pytest.mark.parametrize('name', ['../escape.htm', 'CON.htm', 'x\\bad.htm'])

@@ -14,6 +14,8 @@ from technology.software_infrastructure.optuna_calibration import (  # noqa: E40
     run_software_infrastructure_walk_forward_calibration,
 )
 
+from technology.core.optuna_artifact_governance import run_walk_forward_with_governance  # noqa: E402
+
 
 if __name__ == "__main__":
-    run_software_infrastructure_walk_forward_calibration()
+    run_walk_forward_with_governance(run_software_infrastructure_walk_forward_calibration, "software_infrastructure")

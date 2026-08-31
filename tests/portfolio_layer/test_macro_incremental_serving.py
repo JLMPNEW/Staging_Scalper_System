@@ -95,6 +95,47 @@ def test_macro_incremental_start_falls_back_closed_when_table_missing(
     ) is None
 
 
+def test_exact_date_tables_complete_requires_every_table_on_requested_date(
+    tmp_path: Path,
+) -> None:
+    module = _load_runner()
+    db_path = tmp_path / "macro.sqlite"
+    _seed_tables(
+        db_path,
+        module.CORE_WATERMARK_TABLES,
+        watermark="2026-08-19",
+    )
+
+    assert module.exact_date_tables_complete(
+        db_path,
+        module.CORE_WATERMARK_TABLES,
+        as_of="2026-08-19",
+    )
+    assert not module.exact_date_tables_complete(
+        db_path,
+        module.CORE_WATERMARK_TABLES,
+        as_of="2026-08-18",
+    )
+
+
+def test_exact_date_tables_complete_fails_closed_when_one_table_is_missing(
+    tmp_path: Path,
+) -> None:
+    module = _load_runner()
+    db_path = tmp_path / "macro.sqlite"
+    _seed_tables(
+        db_path,
+        module.CORE_WATERMARK_TABLES[:-1],
+        watermark="2026-08-19",
+    )
+
+    assert not module.exact_date_tables_complete(
+        db_path,
+        module.CORE_WATERMARK_TABLES,
+        as_of="2026-08-19",
+    )
+
+
 def test_policy_rebuild_disables_incremental_range(tmp_path: Path) -> None:
     module = _load_runner()
 

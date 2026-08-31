@@ -8,7 +8,8 @@ and runs `portfolio_layer` only after every required sector passes its health ga
 
 The scheduled entry is `run_nightly.py`. It:
 
-1. validates the independent FMP/Alpha provider store;
+1. validates the independent FMP/Alpha provider store with the bounded
+   head/chain/artifact check;
 2. scans the configured IB statement directory and reconciles any newly arrived
    statement into an existing dated portfolio run;
 3. runs `run_all.py --catch-up` for the latest completed market session;
@@ -16,6 +17,14 @@ The scheduled entry is `run_nightly.py`. It:
    `orchestration/nightly_runs/<timestamp>/`;
 5. returns non-zero unless reconciliation and the new master manifest both seal
    `PASS`.
+
+If an operator-started master already owns the verified global orchestration
+lock, the scheduled entry does not duplicate provider validation, broker
+reconciliation, or sector work. It seals `DEFERRED_BUSY` with the owner PID and
+live child PIDs, then exits zero because the same production DAG is already in
+progress. Dead or stale owners are not treated as busy; `run_all.py` retains the
+authoritative serialized stale-lock recovery and the normal nightly remains
+fail-closed for every real execution failure.
 
 Install or inspect the Windows task:
 
@@ -28,6 +37,21 @@ The default task runs Monday-Friday at 23:00 local machine time. It is
 start-when-available, prevents overlapping instances, retries twice, and has an
 18-hour ceiling. API keys and other credentials are inherited from the task
 user's environment; they are never placed in task arguments or manifests.
+
+The bounded provider check is intentional. Every accepted provider capture runs
+the exhaustive append-only store validator before it can seal, while the nightly
+checks the newest run digest, accepted-run chain edge, latest scheduler record,
+and latest scheduler artifact hash. Run
+`portfolio_layer/provider_ingestion/validate.py --verification-mode exhaustive`
+for an explicit full-history audit; the nightly does not duplicate that multi-GB
+scan.
+
+Catch-up is source-aware and idempotent. Healthy dated artifacts whose sealed
+inputs still match are skipped; historical portfolio gaps do not force a replay
+of the healthy current target. Likewise, an old gap outside the actionable
+catch-up window cannot repeatedly trigger a sector's weekly prerequisite. An
+explicit `--catch-up-from` moves requested dates into the actionable window when
+a historical repair is actually intended.
 
 ## Financial-lineage hybrid rollout
 

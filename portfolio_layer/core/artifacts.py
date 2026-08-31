@@ -3,6 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from portfolio_layer.core.contracts import write_text_atomic
+
+
+FINAL_REPORT_STALE_MARKER = ".final_report_stale"
+
 
 DEPENDENCIES: dict[str, set[str]] = {
     "scores": {"risk", "optimizer", "costs", "rotation", "macro", "blacklitterman", "sleeves", "exits", "payout", "governor", "final"},
@@ -56,24 +61,48 @@ CONSUMER_FILES: dict[str, tuple[str, ...]] = {
     "final": (
         "final/final_weights_manifest.json",
         "final/final_target_weights.csv",
-        "final/final_manifest.json",
-        "final/final_target_book.csv",
         # The monitor bootstrap book (39_sync_monitor_universe prefers it when
         # present) must be invalidated with the deployable book: a forced
         # upstream rerun would otherwise leave a stale sealed bootstrap book.
         "final/bootstrap_target_weights.csv",
         "final/bootstrap_final_weights_manifest.json",
     ),
-    "final_report": ("final/final_manifest.json", "final/final_target_book.csv"),
+    # Accepted human/Streamlit reports are blue/green artifacts. Dependency
+    # invalidation marks them stale but preserves the last accepted pair until
+    # Stage 12b has a fully passing replacement ready.
+    "final_report": (),
 }
+
+
+def final_report_stale_marker(run_dir: Path) -> Path:
+    return run_dir / "final" / FINAL_REPORT_STALE_MARKER
+
+
+def mark_final_report_stale(run_dir: Path, producer: str) -> Path:
+    marker = final_report_stale_marker(run_dir)
+    write_text_atomic(marker, f"invalidated_by={producer}\n")
+    return marker
+
+
+def clear_final_report_stale(run_dir: Path) -> None:
+    final_report_stale_marker(run_dir).unlink(missing_ok=True)
+
+
+def final_report_is_stale(run_dir: Path) -> bool:
+    return final_report_stale_marker(run_dir).is_file()
 
 
 def invalidate_dependents(run_dir: Path, producer: str) -> list[Path]:
     """Invalidate every accepted artifact that transitively consumes `producer` outputs."""
     if producer not in DEPENDENCIES:
         raise ValueError(f"unknown artifact producer {producer!r}")
+    consumers = DEPENDENCIES[producer]
+    if consumers & {"final", "final_report"}:
+        # Write first: a crash during invalidation must never leave the old
+        # report looking current to the resume gate.
+        mark_final_report_stale(run_dir, producer)
     removed: list[Path] = []
-    for consumer in sorted(DEPENDENCIES[producer]):
+    for consumer in sorted(consumers):
         for relative in CONSUMER_FILES.get(consumer, ()):
             path = run_dir / relative
             if path.is_file():

@@ -123,6 +123,38 @@ def _append_multi_arg(cmd: list[str], flag: str, values: list[str] | None) -> No
         cmd.extend(items)
 
 
+def resolve_pipeline_end_date(
+    conn,
+    *,
+    requested_end_date: str | None,
+) -> str:
+    """Return the authoritative calendar end for this invocation.
+
+    Incremental calendar builds preserve rows outside their requested range. A
+    table-wide MAX therefore leaks the latest cached date into an older catch-up
+    invocation and makes every historical session rebuild all newer dates. Bound
+    the lookup to the caller's end date and fail closed unless that exact date was
+    materialized by the calendar step.
+    """
+    requested = str(requested_end_date or "").strip()
+    if requested:
+        row = conn.execute(
+            "SELECT MAX(as_of_date) FROM macro_calendar_daily WHERE as_of_date <= ?",
+            (requested,),
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT MAX(as_of_date) FROM macro_calendar_daily").fetchone()
+    resolved = str(row[0] or "") if row is not None else ""
+    if not resolved:
+        raise RuntimeError("Calendar build completed without an authoritative end date.")
+    if requested and resolved != requested:
+        raise RuntimeError(
+            "Calendar build did not materialize the requested end date: "
+            f"requested={requested} resolved={resolved}"
+        )
+    return resolved
+
+
 def _run_step(*, step_name: str, command: list[str], required: bool = True) -> bool:
     logger.info("Running serving step=%s command=%s", step_name, subprocess.list2cmdline(command))
     try:
@@ -315,12 +347,12 @@ def main() -> None:
     resolved_serving_db_path = resolve_serving_db_path(cfg, config_path, override=args.serving_db_path)
     horizon_conn = connect_sqlite(resolved_serving_db_path)
     try:
-        horizon_row = horizon_conn.execute("SELECT MAX(as_of_date) FROM macro_calendar_daily").fetchone()
+        pipeline_end_date = resolve_pipeline_end_date(
+            horizon_conn,
+            requested_end_date=args.end_date,
+        )
     finally:
         horizon_conn.close()
-    pipeline_end_date = str(horizon_row[0] or "") if horizon_row is not None else ""
-    if not pipeline_end_date:
-        raise RuntimeError("Calendar build completed without an authoritative end date.")
     pit_cmd = [str(args.python_executable), str(SCRIPT_DIR / "build_macro_observation_daily_pit.py"), *common_cfg]
     _append_path_arg(pit_cmd, "--raw-db-path", args.raw_db_path)
     _append_path_arg(pit_cmd, "--serving-db-path", args.serving_db_path)

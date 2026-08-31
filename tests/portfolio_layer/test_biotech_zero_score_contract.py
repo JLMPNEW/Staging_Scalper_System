@@ -35,6 +35,11 @@ def _row(*, missing_flag: str) -> dict[str, str]:
         "oos_score_valid_flag": "0",
         "survivorship_corrected_panel_flag": "1",
         "score_confidence": "1.0",
+        "biotech_selection_reliability_class": "medium",
+        "biotech_active_sleeve_weight": "0.55",
+        "biotech_xbi_residual_weight": "0.45",
+        "biotech_promotion_contract_id": "contract-v1",
+        "biotech_promotion_contract_sha256": "a" * 64,
     }
 
 
@@ -46,6 +51,10 @@ def test_explicit_computed_zero_is_not_reinterpreted_as_missing() -> None:
     assert scores[0].missing_score_flag == 0
     assert scores[0].investable_eligible == 0
     assert scores[0].calibration_research_eligible == 1
+    assert scores[0].selection_reliability_class == "medium"
+    assert scores[0].active_sleeve_weight == 0.55
+    assert scores[0].benchmark_residual_weight == 0.45
+    assert scores[0].benchmark_residual_ticker == "XBI"
 
 
 def test_explicit_missing_zero_remains_missing() -> None:

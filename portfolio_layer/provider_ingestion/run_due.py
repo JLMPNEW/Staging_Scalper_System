@@ -20,7 +20,7 @@ import sys
 import tempfile
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 
@@ -53,7 +53,7 @@ from portfolio_layer.provider_ingestion.store import (  # noqa: E402
     finalize_dispatch_attempt,
     record_dispatch_started,
     interrupt_stale_dispatch_attempts,
-    verify_store,
+    verify_store_head,
     writer_lock,
 )
 
@@ -164,6 +164,7 @@ def _successful_phase_rows(
         row = conn.execute(
             "SELECT cr.*,cu.member_count FROM capture_runs cr "
             "JOIN capture_universes cu ON cu.universe_id=cr.universe_id "
+            "JOIN scheduled_dispatch_attempts da ON da.cycle_id=cr.cycle_id AND da.state='PASS' "
             "WHERE cr.actual_capture_date=? AND cr.capture_phase=? "
             "AND cr.cycle_id LIKE 'scheduled-%' "
             "AND cr.status IN ('PASS','PASS_WITH_WARNINGS') "
@@ -173,6 +174,24 @@ def _successful_phase_rows(
         if row is not None:
             rows[phase] = dict(row)
     return rows
+
+
+def accepted_scheduled_cycle_ids(
+    capture_attempts: Sequence[Mapping[str, Any]],
+    dispatch_attempts: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    """Return cycles whose persisted capture and scheduler child both passed."""
+    dispatched_pass = {
+        str(row.get("cycle_id") or "")
+        for row in dispatch_attempts
+        if str(row.get("state") or "") == "PASS"
+    }
+    return {
+        str(row.get("cycle_id") or "")
+        for row in capture_attempts
+        if str(row.get("status") or "") in {"PASS", "PASS_WITH_WARNINGS"}
+        and str(row.get("cycle_id") or "") in dispatched_pass
+    }
 
 
 def _capture_manifest_errors(
@@ -522,7 +541,7 @@ def _emit_verified_summary(
                     store_path=store_path,
                 )
                 recovery_errors.extend(errors)
-        store_errors = verify_store(conn)
+        store_errors = verify_store_head(conn)
     finally:
         conn.rollback()
         conn.close()
@@ -808,9 +827,10 @@ def main() -> int:
     selected_phase: str | None = None
     selected_attempt_ids: set[str] = set()
     exhausted: list[str] = []
+    accepted_cycles = accepted_scheduled_cycle_ids(capture_attempts, dispatch_attempts)
     for candidate in phases:
         candidate_captures = [row for row in capture_attempts if str(row["capture_phase"]) == candidate]
-        if any(str(row["status"]) in {"PASS", "PASS_WITH_WARNINGS"} for row in candidate_captures):
+        if any(str(row["cycle_id"]) in accepted_cycles for row in candidate_captures):
             continue
         database_ids = {
             str(row["cycle_id"])

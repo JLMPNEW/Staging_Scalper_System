@@ -17,6 +17,7 @@ def test_recent_company_status_overrides_apply_only_on_effective_date() -> None:
     )
 
     expected = {
+        "COEP": "2026-04-27",
         "LIXT": "2026-07-06",
         "ESPR": "2026-07-13",
         "NUVL": "2026-07-15",
@@ -26,6 +27,39 @@ def test_recent_company_status_overrides_apply_only_on_effective_date() -> None:
         prior_date = date.fromisoformat(effective_date) - timedelta(days=1)
         assert module.status_override_is_effective(override, asof_date=prior_date.isoformat()) is False
         assert module.status_override_is_effective(override, asof_date=effective_date) is True
+
+
+def test_coep_non_biotech_transition_ends_membership_without_synthesizing_zsqr() -> None:
+    module = load_script_module("02_build_company_master.py", "company_master_coep_transition")
+    actions = module.load_ticker_actions(PROJECT_ROOT / "biotech_index" / "data" / "company_ticker_actions.csv")
+    action = next(item for item in actions if item.old_ticker == "COEP")
+    company = module.ScreenCompany(
+        ticker="COEP",
+        cik="0001759186",
+        company_name="Coeptis Therapeutics Holdings, Inc.",
+        exchange="NASDAQ",
+        sector="Health Care",
+        industry="Biotechnology",
+        industry_aggregate="Biotechnology",
+        security_type="Common Stock",
+        is_primary_listing="true",
+        listing_status="active",
+        country="US",
+        currency="USD",
+        decision="keep",
+        manual_include="true",
+        manual_exclude="",
+        manual_review="",
+        reason_codes="",
+        match_type="test",
+        notes="",
+        source="test",
+    )
+
+    assert action.new_ticker == "ZSQR"
+    assert action.effective_date == "2026-04-27"
+    assert action.retain_in_biotech is False
+    assert module.synthesize_successor_companies([company], actions, asof_date="2026-04-27") == [company]
 
 
 def test_historical_universe_ends_nonretained_membership_on_effective_date() -> None:

@@ -170,6 +170,8 @@ def main() -> int:
                 errors.append("Stage 8 is marked production; expected 0.")
             if int(promotion.get("latest_research_candidate_promoted") or 0) != 0:
                 errors.append("Latest research candidate was promoted automatically; expected 0.")
+            if int(lockbox.get("production_binding_valid") or 0) != 1:
+                errors.append(f"Invalid production binding: {lockbox.get('production_binding_status')} {lockbox.get('production_binding_reasons')}")
             if lockbox.get("missing_required_artifacts") or []:
                 errors.append(f"Lockbox reports missing required artifacts: {lockbox.get('missing_required_artifacts')}")
             registry_summary = lockbox.get("signal_registry_summary") or {}

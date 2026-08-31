@@ -44,7 +44,8 @@ HII,2011-03-22,,first_loaded_price_date,loaded_price_history_and_reviewed_overri
 HOVR,2023-04-03,,first_loaded_price_date,loaded_price_history_and_reviewed_overrides,0.70,first_loaded_price=2023-04-03; prior_membership_start=2010-01-01; prior_membership_end=
 HWM,2016-11-01,,first_loaded_price_date,loaded_price_history_and_reviewed_overrides,0.70,first_loaded_price=2016-11-01; prior_membership_start=2010-01-01; prior_membership_end=
 HXL,2010-01-04,,first_loaded_price_date,loaded_price_history_and_reviewed_overrides,0.70,first_loaded_price=2010-01-04; prior_membership_start=2010-01-01; prior_membership_end=
-ISSC,2010-01-04,,first_loaded_price_date,loaded_price_history_and_reviewed_overrides,0.70,first_loaded_price=2010-01-04; prior_membership_start=2010-01-01; prior_membership_end=
+IA,2026-08-18,,nasdaq_ticker_symbol_change,nasdaq_ticker_change_notice,1.00,Current ticker effective at the 2026-08-18 market open; predecessor=ISSC.
+ISSC,2010-01-04,2026-08-17,nasdaq_ticker_symbol_change,nasdaq_ticker_change_notice,1.00,Predecessor ticker ended after 2026-08-17; successor=IA.
 KBR,2010-01-04,,first_loaded_price_date,loaded_price_history_and_reviewed_overrides,0.70,first_loaded_price=2010-01-04; prior_membership_start=2010-01-01; prior_membership_end=
 KRMN,2025-02-13,,first_loaded_price_date,loaded_price_history_and_reviewed_overrides,0.70,first_loaded_price=2025-02-13; prior_membership_start=2010-01-01; prior_membership_end=
 KTOS,2010-01-04,,first_loaded_price_date,loaded_price_history_and_reviewed_overrides,0.70,first_loaded_price=2010-01-04; prior_membership_start=2010-01-01; prior_membership_end=

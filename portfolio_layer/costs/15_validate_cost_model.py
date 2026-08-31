@@ -17,6 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.capital_reservation import (  # noqa: E402
+    consumer_defensive_reserved_cash_fraction,
+)
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -104,6 +107,16 @@ def main() -> int:  # noqa: C901
         comm_worst = commission(config, "worst_case")
         half_spread_bps = f(cfg_get(config, "transaction_costs.half_spread_bps_default", 5.0),
                             "transaction_costs.half_spread_bps_default")
+        cash_target_fraction = f(
+            cfg_get(config, "transaction_costs.cash_target_fraction", 0.0),
+            "transaction_costs.cash_target_fraction",
+        )
+        consumer_reserved_cash_fraction = consumer_defensive_reserved_cash_fraction(config)
+        effective_cash_target_fraction = cash_target_fraction + consumer_reserved_cash_fraction
+        if not 0.0 <= cash_target_fraction < 1.0:
+            raise ValueError("transaction_costs.cash_target_fraction must be within [0, 1)")
+        if not 0.0 <= effective_cash_target_fraction < 1.0:
+            raise ValueError("Base plus Consumer-reserved cash must be within [0, 1)")
     except ValueError as exc:
         LOGGER.error("%s", exc)
         return 1
@@ -160,6 +173,17 @@ def main() -> int:  # noqa: C901
         adjusted_bad.append(f"sum={asset_sum + cash:.10f}!={gross}")
     rec("adjusted_book_valid", "PASS" if not adjusted_bad else "FAIL",
         f"sum(assets)={asset_sum:.8f} + cash={cash:.8f} == gross={gross}" if not adjusted_bad else "; ".join(adjusted_bad[:5]))
+
+    # A cohort without production authority retains its equal sector slot as CASH. This is checked
+    # separately from book conservation so a configuration drift cannot silently fund other sectors.
+    cash_floor_ok = cash + 1e-10 >= effective_cash_target_fraction
+    rec(
+        "cash_reservations_enforced",
+        "PASS" if cash_floor_ok else "FAIL",
+        f"cash={cash:.8f} >= base={cash_target_fraction:.8f} + "
+        f"consumer_reserved={consumer_reserved_cash_fraction:.8f} = "
+        f"{effective_cash_target_fraction:.8f}",
+    )
 
     # 3. Cost report rows exactly match trade rows and formulas.
     trade_by_ticker = {str(r["ticker"]).strip(): r for r in trades}
@@ -463,6 +487,9 @@ def main() -> int:  # noqa: C901
             "liquidity_panel": cfg_get(config, "liquidity_panel", {}),
             "impact_model": cfg_get(config, "transaction_costs.impact_model", "none"),
             "min_position_commission_fraction": cfg_get(config, "transaction_costs.min_position_commission_fraction", 0.005),
+            "cash_target_fraction": cash_target_fraction,
+            "consumer_reserved_cash_fraction": consumer_reserved_cash_fraction,
+            "effective_cash_target_fraction": effective_cash_target_fraction,
         },
         "cost_summary": summary,
         "cash_weight": round(cash, 10),

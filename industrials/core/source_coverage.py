@@ -61,14 +61,19 @@ def audit_industrials_source_coverage(
     if not family:
         raise ValueError("model_family is required for source coverage")
     active_sql = """
-        SELECT DISTINCT c.ticker
-        FROM dim_company c
-        JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id
-        WHERE c.is_active = 1 AND t.model_family = ?
+        SELECT DISTINCT m.ticker
+        FROM dim_universe_membership m
+        JOIN dim_company c ON c.company_id = m.company_id
+        JOIN dim_industrials_taxonomy t
+          ON t.company_id = m.company_id AND t.model_family = m.model_family
+        WHERE m.model_family = ?
+          AND m.membership_basis = 'current_source_of_truth'
+          AND m.is_current_member = 1
+          AND c.is_active = 1
     """
     active_tickers = tuple(
         str(row[0])
-        for row in conn.execute(active_sql + " ORDER BY c.ticker", (family,)).fetchall()
+        for row in conn.execute(active_sql + " ORDER BY m.ticker", (family,)).fetchall()
     )
     active_count = len(active_tickers)
     errors: list[str] = []

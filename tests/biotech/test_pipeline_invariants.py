@@ -156,9 +156,13 @@ def test_final_validation_market_snapshot_uses_latest_nonfuture_trading_date() -
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """
-        CREATE TABLE market_features_daily(asof_date TEXT NOT NULL, source TEXT NOT NULL);
-        INSERT INTO market_features_daily VALUES ('2026-08-21', 'yahoo_adjusted');
-        INSERT INTO market_features_daily VALUES ('2026-08-23', 'yahoo_adjusted');
+        CREATE TABLE market_features_daily(
+            asof_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            last_bar_date TEXT
+        );
+        INSERT INTO market_features_daily VALUES ('2026-08-21', 'yahoo_adjusted', '2026-08-21');
+        INSERT INTO market_features_daily VALUES ('2026-08-23', 'yahoo_adjusted', '2026-08-23');
         """
     )
 
@@ -177,6 +181,68 @@ def test_final_validation_market_snapshot_uses_latest_nonfuture_trading_date() -
             report_asof="2026-08-22",
             max_lag_calendar_days=0,
         )
+    conn.execute(
+        "UPDATE market_features_daily SET last_bar_date='2026-08-10' WHERE asof_date='2026-08-21'"
+    )
+    with pytest.raises(RuntimeError, match="latest underlying bar"):
+        module.validated_market_feature_snapshot_asof(
+            conn,
+            source="yahoo_adjusted",
+            report_asof="2026-08-22",
+            max_lag_calendar_days=4,
+        )
+    conn.execute(
+        "UPDATE market_features_daily SET last_bar_date='2026-08-24' WHERE asof_date='2026-08-21'"
+    )
+    with pytest.raises(RuntimeError, match="-2 calendar day"):
+        module.validated_market_feature_snapshot_asof(
+            conn,
+            source="yahoo_adjusted",
+            report_asof="2026-08-22",
+            max_lag_calendar_days=4,
+        )
+
+
+def test_ibkr_preflight_fallback_routes_only_market_prices_offline() -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_ibkr_offline_fallback")
+    steps = module.pipeline_steps(
+        "daily_delta",
+        skip_ctgov=False,
+        skip_ib=False,
+        skip_yahoo=False,
+        skip_market_positioning=False,
+    )
+
+    rewritten = module.apply_ibkr_market_fallback(
+        steps,
+        {"status": "warning", "failed_labels": ["ib_market_data"]},
+    )
+
+    original_by_name = {step.name: step for step in steps}
+    rewritten_by_name = {step.name: step for step in rewritten}
+    assert rewritten_by_name["ib_market"].args == (
+        *original_by_name["ib_market"].args,
+        "--offline-existing-bars",
+    )
+    assert rewritten_by_name["market_positioning"] == original_by_name["market_positioning"]
+    assert (
+        module.apply_ibkr_market_fallback(
+            rewritten,
+            {"status": "warning", "failed_labels": ["ib_market_data"]},
+        )
+        == rewritten
+    )
+    assert (
+        module.apply_ibkr_market_fallback(
+            steps,
+            {"status": "warning", "failed_labels": ["market_positioning.ibkr_borrow"]},
+        )
+        == steps
+    )
+    assert module.apply_ibkr_market_fallback(
+        steps,
+        {"status": "success", "failed_labels": []},
+    ) == steps
 
 
 def test_weekly_reconcile_does_not_force_sec_event_full_rescan() -> None:
@@ -509,6 +575,36 @@ def test_explicit_weekend_asof_normalizes_to_prior_market_date(tmp_path: Path) -
     )
 
     assert normalized.isoformat() == "2026-08-21"
+
+
+def test_explicit_xnys_session_is_not_backdated_by_missing_local_bars(tmp_path: Path) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_session_asof_regression")
+    db_path = tmp_path / "stale.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE market_bars_daily(bar_date TEXT, source TEXT)")
+        conn.execute(
+            "INSERT INTO market_bars_daily(bar_date, source) VALUES ('2026-08-27', 'yahoo_adjusted')"
+        )
+
+    normalized = module.normalize_requested_pipeline_asof(
+        datetime(2026, 8, 28).date(),
+        db_path=db_path,
+        config={},
+    )
+
+    assert normalized.isoformat() == "2026-08-28"
+
+
+def test_explicit_weekday_exchange_holiday_uses_prior_xnys_session(tmp_path: Path) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_holiday_asof_regression")
+
+    normalized = module.normalize_requested_pipeline_asof(
+        datetime(2026, 12, 25).date(),
+        db_path=tmp_path / "missing.sqlite",
+        config={},
+    )
+
+    assert normalized.isoformat() == "2026-12-24"
 
 def test_sec_filing_backfill_cap_override(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_script_module("06_sync_sec_filings.py", "sec_filing_backfill_cap_override")

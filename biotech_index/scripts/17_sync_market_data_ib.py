@@ -1145,6 +1145,7 @@ def main() -> None:
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
         run_id: int | None = None
+        run_finalized = False
         ib: Any | None = None
         try:
             init_db(conn)
@@ -1443,11 +1444,12 @@ def main() -> None:
             if benchmark_refresh_failed:
                 message += " benchmark_refresh_failed=1"
             finish_run(conn, run_id=run_id, status=status, row_count=len(features), message=message)
+            run_finalized = True
             LOGGER.info("IB market sync complete: rows=%d output=%s", len(features), output_csv)
             if status != "success" and not args.allow_partial:
                 raise SystemExit(2)
         except BaseException as exc:
-            if run_id is not None and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            if run_id is not None and not run_finalized and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
                 finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise
         finally:

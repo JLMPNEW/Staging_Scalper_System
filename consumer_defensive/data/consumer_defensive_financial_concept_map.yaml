@@ -1,11 +1,17 @@
-definition_version: consumer_defensive_financial_v3
+definition_version: consumer_defensive_financial_v4
 metrics:
   revenue:
     statement_type: income
-    concepts: [RevenueFromContractWithCustomerExcludingAssessedTax, Revenues, SalesRevenueNet, Revenue]
+    concepts: [RevenueFromContractWithCustomerExcludingAssessedTax, RevenueFromContractWithCustomerIncludingAssessedTax, RevenueFromContractsWithCustomers, Revenues, SalesRevenueNet, Revenue]
   cost_of_revenue:
     statement_type: income
-    concepts: [CostOfRevenue, CostOfGoodsAndServicesSold, CostOfGoodsSold, CostOfSales]
+    components:
+      total:
+        concepts: [CostOfRevenue, CostOfGoodsAndServicesSold, CostOfGoodsSold, CostOfSales]
+      excluding_depreciation_depletion_amortization:
+        concepts: [CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization]
+      depreciation_amortization:
+        concepts: [CostOfGoodsAndServicesSoldDepreciationAndAmortization]
   gross_profit:
     statement_type: income
     concepts: [GrossProfit]
@@ -20,7 +26,7 @@ metrics:
     concepts: [NetCashProvidedByUsedInOperatingActivities, CashFlowsFromUsedInOperatingActivities]
   capital_expenditures:
     statement_type: cash_flow
-    concepts: [PaymentsToAcquirePropertyPlantAndEquipment, PurchaseOfPropertyPlantAndEquipment]
+    concepts: [PaymentsToAcquirePropertyPlantAndEquipment, PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities, PurchaseOfPropertyPlantAndEquipment]
   cash:
     statement_type: balance_sheet
     concepts: [CashAndCashEquivalentsAtCarryingValue, CashAndCashEquivalents]

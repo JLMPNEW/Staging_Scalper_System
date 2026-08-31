@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import json
 import sys
 
 import pytest
@@ -52,7 +53,10 @@ def test_current_refresh_step_graph_is_bounded_and_complete() -> None:
     assert "--active-only" not in disclosure_step.args
     scoring_step = next(step for step in steps if step.step_id == "06a_build_scoring")
     assert "--force" in scoring_step.args
+    publisher_step = next(step for step in steps if step.step_id == "17_publish_shadow")
+    assert "--force" not in publisher_step.args
     pit_step = next(step for step in steps if step.step_id == "19_build_exact_pit")
+    assert "--rebuild-existing" in pit_step.args
     assert "--output-csv" in pit_step.args
     assert "--output-json" in pit_step.args
     assert any("current_panels/2026-07-30" in value for value in pit_step.args)
@@ -63,6 +67,20 @@ def test_current_refresh_step_graph_is_bounded_and_complete() -> None:
     assert not any("19c_materialize" in step.script for step in steps)
     assert not any("19h_run" in step.script for step in steps)
     assert not any("walk_forward_outcome" in step.script for step in steps)
+
+
+def test_current_refresh_force_publish_is_explicit_and_scoped() -> None:
+    module = _module()
+    steps = module.build_steps("2026-07-30", force_publish=True)
+    publisher_step = next(
+        step for step in steps if step.step_id == "17_publish_shadow"
+    )
+    assert publisher_step.args == ["--asof", "2026-07-30", "--force"]
+    assert all(
+        "--force" not in step.args
+        for step in steps
+        if step.step_id not in {"06a_build_scoring", "17_publish_shadow"}
+    )
 
 
 def test_current_refresh_can_reuse_already_refreshed_positioning_raw() -> None:
@@ -97,3 +115,69 @@ def test_step_selection_is_ordered_and_rejects_reverse_range() -> None:
             from_step="17_publish_shadow",
             to_step="03_sync_prices",
         )
+
+
+def test_resume_requires_exact_compatible_failed_manifest(tmp_path: Path) -> None:
+    module = _module()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "acceptance": "FAIL",
+                "asof_date": "2026-08-24",
+                "orchestrator_version": module.ORCHESTRATOR_VERSION,
+                "config_sha256": "config",
+                "orchestrator_source_sha256": "source",
+                "failed_step_ids": ["08c_validate_disclosures"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    valid_steps = [
+        step.step_id for step in module.build_steps("2026-08-24")
+    ]
+    assert module.resume_step_from_manifest(
+        manifest,
+        asof="2026-08-24",
+        valid_step_ids=valid_steps,
+        config_sha256="config",
+        orchestrator_source_sha256="source",
+    ) == "08c_validate_disclosures"
+    with pytest.raises(ValueError, match="stale or incompatible"):
+        module.resume_step_from_manifest(
+            manifest,
+            asof="2026-08-24",
+            valid_step_ids=valid_steps,
+            config_sha256="changed",
+            orchestrator_source_sha256="source",
+        )
+
+
+def test_resume_rewinds_read_only_validator_to_local_producer(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "acceptance": "FAIL",
+                "asof_date": "2026-08-24",
+                "orchestrator_version": module.ORCHESTRATOR_VERSION,
+                "config_sha256": "config",
+                "orchestrator_source_sha256": "source",
+                "failed_step_ids": ["08a_validate_metrics"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    valid_steps = [
+        step.step_id for step in module.build_steps("2026-08-24")
+    ]
+    assert module.resume_step_from_manifest(
+        manifest,
+        asof="2026-08-24",
+        valid_step_ids=valid_steps,
+        config_sha256="config",
+        orchestrator_source_sha256="source",
+    ) == "19_build_exact_pit"

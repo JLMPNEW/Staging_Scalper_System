@@ -14,8 +14,13 @@ lockbox_policy:
   optuna_promotion: manual_only
   report_only_models:
     - stage7_challenger_v1
-  current_production_model: stage8_promoted_production_v1
+    - stage8_production_v1_rollback_shadow
+  current_production_model: stage8_promoted_production_v2
   current_challenger_model: stage7_challenger_v1
+  current_rollback_model: stage8_production_v1_rollback_shadow
+  promotion_decision_type: manual_economic_override
+  promotion_effective_date: "2026-08-31"
+  forward_probation_sessions: 21
 
 signals:
   - signal: gross_margin
@@ -212,8 +217,8 @@ signals:
     components: [growth]
     source_layer: sec_financials
     source_ids: [sec_companyfacts]
-    production_policy: measurement_only_zero_weight
-    notes: RPO coverage ratio; initial measurement suggested promise but still requires promotion review.
+    production_policy: production_allowed_stage8_v2_manual_override
+    notes: RPO coverage ratio promoted within the sealed Stage 8 v2 contract; subject to the 21-session rollback probation.
 
   - signal: annual_recurring_revenue_yoy_growth
     score_key: annual_recurring_revenue_yoy_growth_score

@@ -277,6 +277,21 @@ def _upsert_company(
     universe_status: str,
     quality_status: str,
 ) -> int:
+    existing = conn.execute(
+        "SELECT cik, company_name FROM dim_company WHERE ticker = ?",
+        (ticker,),
+    ).fetchone()
+    if existing is not None:
+        existing_cik = normalize_cik(existing["cik"])
+        incoming_cik = normalize_cik(cik)
+        if existing_cik and incoming_cik and existing_cik != incoming_cik:
+            raise ValueError(
+                "Ticker identity collision requires a collision-safe internal ticker: "
+                f"ticker={ticker} existing_cik={existing_cik} "
+                f"incoming_cik={incoming_cik} "
+                f"existing_company={existing['company_name']!r} "
+                f"incoming_company={company_name!r}"
+            )
     now = utc_now()
     conn.execute(
         """
@@ -476,6 +491,52 @@ def _upsert_membership(
     )
 
 
+def _reconcile_company_activity(conn: sqlite3.Connection, *, model_family: str) -> None:
+    """Derive issuer activity from governed current memberships across all families."""
+    conn.execute(
+        """
+        UPDATE dim_company
+        SET is_active = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM dim_universe_membership AS current_membership
+                    WHERE current_membership.company_id = dim_company.company_id
+                      AND current_membership.is_current_member = 1
+                ) THEN 1
+                ELSE 0
+            END,
+            universe_status = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM dim_universe_membership AS current_membership
+                    WHERE current_membership.company_id = dim_company.company_id
+                      AND current_membership.is_current_member = 1
+                ) THEN 'investable'
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM dim_universe_membership AS ended_membership
+                    WHERE ended_membership.company_id = dim_company.company_id
+                      AND ended_membership.is_current_member = 0
+                      AND (
+                          ended_membership.end_date IS NOT NULL
+                          OR ended_membership.membership_status IN (
+                              'delisted', 'historical_delisted'
+                          )
+                      )
+                ) THEN 'historical_delisted'
+                ELSE universe_status
+            END,
+            updated_at = ?
+        WHERE company_id IN (
+            SELECT company_id
+            FROM dim_industrials_taxonomy
+            WHERE model_family = ?
+        )
+        """,
+        (utc_now(), model_family),
+    )
+
+
 def load_active_universe(
     conn: sqlite3.Connection,
     *,
@@ -587,6 +648,7 @@ def load_active_universe(
                 "DELETE FROM dim_industrials_taxonomy WHERE model_family=? AND ticker=?",
                 (model_family, ticker),
             )
+    _reconcile_company_activity(conn, model_family=model_family)
     if counts["active"] != len(tickers):
         raise RuntimeError("Active seed count changed during normalization")
     return len(tickers)
@@ -641,8 +703,64 @@ def load_historical_and_delisted(
         for row in historical
         if normalize_ticker(row["exchange_ticker"]) and str(row.get("end_date") or "").strip()
     }
+    internalized_exchange_tickers = sorted(
+        {
+            exchange_ticker
+            for row in historical
+            if (exchange_ticker := normalize_ticker(row["exchange_ticker"]))
+            and (internal_ticker := normalize_ticker(row["internal_ticker"]))
+            and exchange_ticker != internal_ticker
+        }
+    )
+    authoritative_taxonomy = {
+        normalize_ticker(row["ticker"]): dict(row)
+        for row in conn.execute(
+            """
+            SELECT ticker, sector, industry, subsector, taxonomy_source
+            FROM dim_industrials_taxonomy
+            WHERE model_family=? AND taxonomy_source NOT IN (?, ?)
+            """,
+            (model_family, historical_source_id, delisted_source_id),
+        ).fetchall()
+    }
     conn.execute(
         "DELETE FROM dim_universe_membership WHERE model_family=? AND membership_source_id IN (?, ?)",
+        (model_family, historical_source_id, delisted_source_id),
+    )
+    stale_taxonomy_company_ids = [
+        int(row["company_id"])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT company_id
+            FROM dim_industrials_taxonomy
+            WHERE model_family=? AND taxonomy_source IN (?, ?)
+            """,
+            (model_family, historical_source_id, delisted_source_id),
+        ).fetchall()
+    ]
+    if stale_taxonomy_company_ids:
+        placeholders = ",".join("?" for _ in stale_taxonomy_company_ids)
+        conn.execute(
+            f"DELETE FROM dim_security "
+            f"WHERE exchange='historical_delisted' AND company_id IN ({placeholders})",
+            stale_taxonomy_company_ids,
+        )
+    if internalized_exchange_tickers:
+        placeholders = ",".join("?" for _ in internalized_exchange_tickers)
+        conn.execute(
+            f"DELETE FROM dim_security "
+            f"WHERE exchange='historical_delisted' AND ticker IN ({placeholders})",
+            internalized_exchange_tickers,
+        )
+    conn.execute(
+        "DELETE FROM dim_identifier WHERE source_id IN (?, ?)",
+        (historical_source_id, delisted_source_id),
+    )
+    conn.execute(
+        """
+        DELETE FROM dim_industrials_taxonomy
+        WHERE model_family=? AND taxonomy_source IN (?, ?)
+        """,
         (model_family, historical_source_id, delisted_source_id),
     )
     conn.execute("DELETE FROM dim_delisted_calibration_seed WHERE model_family=?", (model_family,))
@@ -660,18 +778,24 @@ def load_historical_and_delisted(
         # historical-only issuers. Otherwise this second-stage loader would
         # replace Railroads, Trucking, Airlines, and Marine Shipping with the
         # generic family label and silently break metric applicability.
-        existing_taxonomy = conn.execute(
+        existing_taxonomy = authoritative_taxonomy.get(ticker)
+        if existing_taxonomy is None:
+            existing_row = conn.execute(
             """
-            SELECT sector, industry, subsector
+            SELECT sector, industry, subsector, taxonomy_source
             FROM dim_industrials_taxonomy
             WHERE ticker=? AND model_family=?
             """,
             (ticker, model_family),
-        ).fetchone()
+            ).fetchone()
+            existing_taxonomy = dict(existing_row) if existing_row is not None else None
         if not end and existing_taxonomy is not None:
             sector = str(existing_taxonomy["sector"] or "Industrials")
             industry = str(existing_taxonomy["industry"] or "Transportation")
             subsector = str(existing_taxonomy["subsector"] or "Transportation")
+            taxonomy_source_id = str(
+                existing_taxonomy["taxonomy_source"] or historical_source_id
+            )
         else:
             sector = "Industrials"
             industry = historical_industry_by_ticker.get(
@@ -679,6 +803,7 @@ def load_historical_and_delisted(
                 "Transportation",
             )
             subsector = "Transportation"
+            taxonomy_source_id = historical_source_id
         company_id = _upsert_company(
             conn,
             ticker=ticker,
@@ -703,7 +828,7 @@ def load_historical_and_delisted(
             subsector=subsector,
             cohort_id=cohort_id,
             cohort=cohorts[cohort_id],
-            source_id=historical_source_id,
+            source_id=taxonomy_source_id,
             historical=bool(end),
         )
         _upsert_membership(
@@ -858,6 +983,7 @@ def load_historical_and_delisted(
                 now,
             ),
         )
+    _reconcile_company_activity(conn, model_family=model_family)
     return len(historical), len(delisted)
 
 

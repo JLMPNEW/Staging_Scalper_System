@@ -220,6 +220,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--to-step", default="")
     parser.add_argument("--only", default="")
     parser.add_argument("--skip-step", action="append", default=[])
+    parser.add_argument(
+        "--overwrite-outputs",
+        action="store_true",
+        help=(
+            "Replace derived score/report outputs for the requested date without "
+            "forcing provider downloads or historical SEC/archive reparsing."
+        ),
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -622,8 +630,9 @@ def main() -> int:
     steps = build_steps(
         asof,
         force=args.force,
-        overwrite_outputs=overwrite_tail_on_resume(
-            force=args.force, resume=args.resume
+        overwrite_outputs=bool(
+            args.overwrite_outputs
+            or overwrite_tail_on_resume(force=args.force, resume=args.resume)
         ),
         include_norgate_backfill=args.include_norgate_backfill,
         refresh_sec_insider=not args.skip_sec_insider_refresh,

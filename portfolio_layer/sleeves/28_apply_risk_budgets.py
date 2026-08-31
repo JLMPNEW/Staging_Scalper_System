@@ -41,7 +41,7 @@ from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 from portfolio_layer.sleeves.risk_model import (  # noqa: E402
     build_sleeve_risk_proposal,
     effective_number_of_bets,
-    enforce_rc_cap_to_cash,
+    enforce_rc_cap_with_enb_guard,
     factor_decomposition,
     information_ratios,
     risk_contributions,
@@ -234,7 +234,7 @@ def main() -> int:  # noqa: C901
         tilt=tilt,
         rc_cap=rc_cap,
     )
-    weights, allocation_mode, active_sleeves = build_sleeve_risk_proposal(
+    weights, proposed_allocation_mode, active_sleeves = build_sleeve_risk_proposal(
         cov,
         target_b,
         prior_weights=prior,
@@ -246,10 +246,26 @@ def main() -> int:  # noqa: C901
     rec(
         "cross_sleeve_allocation_mode",
         "PASS",
-        f"mode={allocation_mode}; active_sleeves={list(active_sleeves)}",
+        f"mode={proposed_allocation_mode}; active_sleeves={list(active_sleeves)}",
     )
-    rc_enforcement = enforce_rc_cap_to_cash(weights, cov, rc_cap=rc_cap, max_iter=max_iter)
+    enb_guard = enforce_rc_cap_with_enb_guard(
+        weights,
+        prior,
+        cov,
+        rc_cap=rc_cap,
+        allocation_mode=proposed_allocation_mode,
+        max_iter=max_iter,
+    )
+    rc_enforcement = enb_guard.enforcement
     weights = rc_enforcement.weights
+    allocation_mode = enb_guard.allocation_mode
+    rec(
+        "enb_no_harm_guard",
+        "PASS",
+        f"mode={allocation_mode}; fallback={enb_guard.fallback_applied}; "
+        f"proposal_enb={enb_guard.proposal_enb:.4f}; "
+        f"required_enb={enb_guard.required_enb:.4f}; final_enb={enb_guard.final_enb:.4f}",
+    )
 
     # ---- Phase 2 drawdown throttle: measured on the proposal, state-chained, applied on opt-in ----
     # Uniform de-risking after the RC trim preserves RC shares (scale-invariant) and only frees
@@ -489,6 +505,7 @@ def main() -> int:  # noqa: C901
         "cash_after": final_cash,
         "drawdown_throttle_simulation": simulated_throttle,
         "within_sleeve_ir_tilt": tilt,
+        "proposed_allocation_mode": proposed_allocation_mode,
         "allocation_mode": allocation_mode,
         "active_sleeves": list(active_sleeves),
         "per_name_risk_contribution_cap": rc_cap,
@@ -498,6 +515,13 @@ def main() -> int:  # noqa: C901
             "cash_added": round(rc_enforcement.cash_added, 10),
             "max_rc": round(rc_enforcement.max_rc, 10),
             "trimmed": list(rc_enforcement.trimmed),
+        },
+        "enb_guard": {
+            "fallback_applied": enb_guard.fallback_applied,
+            "baseline_enb": enb_guard.baseline_enb,
+            "proposal_enb": enb_guard.proposal_enb,
+            "required_enb": enb_guard.required_enb,
+            "final_enb": enb_guard.final_enb,
         },
         "sleeve_feasibility_bounds": feasible_bounds,
         "diagnostics": {

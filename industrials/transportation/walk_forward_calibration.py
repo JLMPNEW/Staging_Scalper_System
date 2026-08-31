@@ -4,6 +4,7 @@ import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from statistics import mean
 from typing import Any
 
@@ -63,14 +64,24 @@ def percentile_scores(
         key: min(high, max(low, value))
         for key, value in finite.items()
     }
-    unique = sorted(set(clipped.values()))
-    if len(unique) == 1:
+    if len(clipped) == 1:
         return {key: 50.0 for key in clipped}
-    positions = {value: index for index, value in enumerate(unique)}
-    scale = 100.0 / (len(unique) - 1)
-    return {
-        key: positions[value] * scale for key, value in clipped.items()
-    }
+    ordered_items = sorted(clipped.items(), key=lambda item: (item[1], item[0]))
+    ranks: dict[str, float] = {}
+    cursor = 0
+    while cursor < len(ordered_items):
+        end = cursor + 1
+        while (
+            end < len(ordered_items)
+            and ordered_items[end][1] == ordered_items[cursor][1]
+        ):
+            end += 1
+        average_rank = (cursor + end - 1) / 2.0
+        for key, _value in ordered_items[cursor:end]:
+            ranks[key] = average_rank
+        cursor = end
+    scale = 100.0 / (len(ordered_items) - 1)
+    return {key: ranks[key] * scale for key in clipped}
 
 
 def generic_baseline_scores(
@@ -306,6 +317,86 @@ def turnover(
     )
     one_way = traded_notional if previous is None else traded_notional / 2.0
     return one_way, traded_notional
+
+
+def purged_expanding_walk_forward_blocks(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    horizon_sessions: int,
+    block_count: int = 4,
+    minimum_initial_dates: int = 52,
+) -> list[dict[str, tuple[str, ...] | str | int]]:
+    """Build expanding walk-forward blocks with outcome-window purging.
+
+    A training signal is admissible only when its realized benchmark exit
+    precedes the first test signal. This uses the actual stored outcome window
+    rather than approximating a trading-session horizon with calendar days.
+    """
+    if block_count < 1:
+        raise ValueError("block_count must be positive")
+    exits_by_date: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        try:
+            row_horizon = int(float(str(row.get("horizon_sessions") or 0)))
+        except ValueError:
+            continue
+        if row_horizon != horizon_sessions:
+            continue
+        if str(row.get("calibration_eligible_flag") or "") != "1":
+            continue
+        if str(row.get("outcome_available_flag") or "") != "1":
+            continue
+        asof = str(row.get("asof_date") or "")[:10]
+        exit_date = str(row.get("benchmark_exit_date") or "")[:10]
+        if not asof or not exit_date:
+            continue
+        date.fromisoformat(asof)
+        date.fromisoformat(exit_date)
+        exits_by_date[asof].add(exit_date)
+    dates = sorted(exits_by_date)
+    initial = max(minimum_initial_dates, int(len(dates) * 0.50))
+    if initial >= len(dates):
+        return []
+    remaining = dates[initial:]
+    block_size = max(1, len(remaining) // block_count)
+    output: list[dict[str, tuple[str, ...] | str | int]] = []
+    for block_index in range(block_count):
+        start_index = initial + block_index * block_size
+        end_index = (
+            len(dates)
+            if block_index == block_count - 1
+            else min(len(dates), start_index + block_size)
+        )
+        evaluation_dates = tuple(dates[start_index:end_index])
+        if not evaluation_dates:
+            continue
+        test_start = evaluation_dates[0]
+        raw_training_dates = dates[:start_index]
+        training_dates = tuple(
+            signal_date
+            for signal_date in raw_training_dates
+            if max(exits_by_date[signal_date]) < test_start
+        )
+        embargo_dates = tuple(
+            signal_date
+            for signal_date in raw_training_dates
+            if signal_date not in set(training_dates)
+        )
+        if not training_dates:
+            continue
+        output.append(
+            {
+                "block": block_index + 1,
+                "training_dates": training_dates,
+                "embargo_dates": embargo_dates,
+                "evaluation_dates": evaluation_dates,
+                "train_start": training_dates[0],
+                "train_end": training_dates[-1],
+                "test_start": test_start,
+                "test_end": evaluation_dates[-1],
+            }
+        )
+    return output
 
 
 def aggregate_period_rows(

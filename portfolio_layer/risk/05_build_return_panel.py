@@ -27,8 +27,12 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
-from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
-from portfolio_layer.core.config import resolve_path  # noqa: E402
+from portfolio_layer.core.config import (  # noqa: E402
+    active_score_sectors,
+    cfg_get,
+    load_yaml,
+    resolve_path,
+)
 from portfolio_layer.core.contracts import (  # noqa: E402
     fail_if_exists,
     read_csv,
@@ -426,9 +430,12 @@ def main() -> int:
     expected = []
     per_pipeline_tolerance = {}
     optional_pipelines: set[str] = set()
-    for sector in cfg_get(config, "score_contract.sectors", []):
-        if not bool(sector.get("enabled", True)):
-            continue
+    try:
+        active_sectors = active_score_sectors(config, run_as_of)
+    except ValueError as exc:
+        LOGGER.error("Invalid score-sector activation contract: %s", exc)
+        return 1
+    for sector in active_sectors:
         pipe = str(sector["model_family"])
         per_pipeline_tolerance[pipe] = int(sector.get("staleness_tolerance_days", tolerance))
         if bool(sector.get("required", True)):

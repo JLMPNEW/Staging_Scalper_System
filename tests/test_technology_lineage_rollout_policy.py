@@ -121,3 +121,16 @@ def test_global_repair_rebuilds_lineage_shadow_for_all_technology_families() -> 
         assert steps.index("10c_financial_lineage_shadow") < steps.index(
             "10b_validate_dashboard"
         )
+
+
+def test_semiconductor_asof_refresh_skips_both_latest_only_governance_steps() -> None:
+    namespace = runpy.run_path(str(PROJECT_ROOT / "orchestration" / "run_all.py"))
+    registry = namespace["load_registry"](PROJECT_ROOT / "orchestration" / "registry.yaml")
+    arguments = registry.by_name("semiconductors").args_template
+
+    skipped = {
+        arguments[index + 1]
+        for index, value in enumerate(arguments[:-1])
+        if value == "--skip-step"
+    }
+    assert skipped == {"16_publish_governance", "16_validate_governance"}

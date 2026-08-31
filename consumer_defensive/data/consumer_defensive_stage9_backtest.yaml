@@ -1,0 +1,23 @@
+schema_version: 'consumer_defensive_stage9_backtest_policy_v1'
+
+stage9_backtest:
+  mode: 'report_only'
+  production_promotion_enabled: false
+  portfolio_write_enabled: false
+  oos_score_valid_flag: 0
+  evaluation_horizon_days: 21
+  nonoverlap_policy: 'earliest_start_greedy'
+  top_quantile: 0.20
+  minimum_positions: 3
+  minimum_sector_cross_section: 30
+  minimum_cohort_cross_section: 8
+  weight_methods: ['equal_weight', 'score_weight']
+  exposure_modes: ['long_only', 'dollar_neutral']
+  transaction_cost_bps: 20.0
+  unavailable_borrow_stress_annual_rate: 0.05
+  reference_nav_usd: 100000000.0
+  adv_participation_rate: 0.10
+  stress_adv_participation_rate: 0.05
+  maximum_exit_days: 5.0
+  require_terminal_value_reconciliation: true
+  candidate_scope: 'all_registered_stage8_candidates'

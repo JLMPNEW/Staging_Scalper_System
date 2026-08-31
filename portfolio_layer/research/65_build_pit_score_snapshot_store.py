@@ -34,7 +34,12 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from portfolio_layer.core.config import (  # noqa: E402
+    active_score_sectors,
+    cfg_get,
+    load_yaml,
+    resolve_path,
+)
 from portfolio_layer.core.contracts import read_csv, sha256_file, write_csv, write_manifest  # noqa: E402
 from portfolio_layer.core.db import add_issue, connect, init_db, utc_now  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
@@ -373,7 +378,7 @@ def _cmd_replay(*, config: dict[str, Any], config_path: Path, runs_root: Path, s
     sector_root = resolve_path(
         cfg_get(config, "score_contract.sector_output_root", "../output"), base_dir=config_path.parent
     )
-    sectors = [s for s in cfg_get(config, "score_contract.sectors", []) if bool(s.get("enabled", True))]
+    sectors = active_score_sectors(config, None)
     non_dated = [str(s.get("model_family")) for s in sectors if str(s.get("file_mode", "flat")) != "dated"]
     if non_dated:
         LOGGER.error("Replay needs dated sector sources; non-dated: %s", non_dated)
@@ -391,19 +396,30 @@ def _cmd_replay(*, config: dict[str, Any], config_path: Path, runs_root: Path, s
         LOGGER.info("coverage %-24s dates=%-4d range=[%s .. %s]", pipe, len(avail[pipe]), first, last)
 
     union = set().union(*avail.values()) if avail else set()
-    inter = set.intersection(*avail.values()) if avail else set()
-    LOGGER.info("coverage union=%d intersection=%d (range %s..%s)", len(union), len(inter), lo, hi)
-    for d in sorted(union - inter)[:10]:
-        missing = sorted(p for p, ds in avail.items() if d not in ds)
+    complete = {
+        d
+        for d in union
+        if all(
+            d in avail[str(sector.get("model_family"))]
+            for sector in active_score_sectors(config, d)
+        )
+    }
+    LOGGER.info("coverage union=%d date_effective_complete=%d (range %s..%s)", len(union), len(complete), lo, hi)
+    for d in sorted(union - complete)[:10]:
+        active_pipelines = {
+            str(sector.get("model_family"))
+            for sector in active_score_sectors(config, d)
+        }
+        missing = sorted(p for p in active_pipelines if d not in avail[p])
         LOGGER.info("  incomplete %s missing=%s", d, missing)
-    if len(union - inter) > 10:
-        LOGGER.info("  ... %d more incomplete dates", len(union - inter) - 10)
+    if len(union - complete) > 10:
+        LOGGER.info("  ... %d more incomplete dates", len(union - complete) - 10)
 
     archived_dates = {str(r["as_of_date"]) for r in conn.execute("SELECT as_of_date FROM score_snapshots")}
     plan: list[str] = []
     partial_blocked: list[str] = []
     sealed_existing = 0
-    for d in sorted(inter):
+    for d in sorted(complete):
         if d in archived_dates:
             continue
         run_dir = runs_root / d
@@ -420,7 +436,7 @@ def _cmd_replay(*, config: dict[str, Any], config_path: Path, runs_root: Path, s
         plan = plan[:limit]
     LOGGER.info(
         "Replay plan: %d dates%s (already_archived=%d, sealed_runs_for_archive_mode=%d, partial_blocked=%d)",
-        len(plan), f" (limit {limit})" if limit else "", len(inter & archived_dates), sealed_existing,
+        len(plan), f" (limit {limit})" if limit else "", len(complete & archived_dates), sealed_existing,
         len(partial_blocked),
     )
     if dry_run:
@@ -521,16 +537,6 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
         checks.append({"check": name, "status": status, "detail": detail})
 
     rows = [dict(r) for r in conn.execute("SELECT * FROM score_snapshots ORDER BY as_of_date").fetchall()]
-    enabled_sectors = [
-        s for s in cfg_get(config, "score_contract.sectors", [])
-        if bool(s.get("enabled", True))
-    ]
-    expected = sorted(str(s.get("model_family")) for s in enabled_sectors)
-    required = {
-        str(s.get("model_family")) for s in enabled_sectors
-        if bool(s.get("required", True))
-    }
-    optional = set(expected) - required
     rec("lockbox_config_protocol_consistent", "PASS",
         f"protocol sha={lockbox['protocol_sha256'][:12]} sealed_start={lockbox['sealed_start']} "
         f"opened={lockbox['lockbox_opened']}")
@@ -565,6 +571,13 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
             run_diverged.append(as_of)
         if str(r["hard_gate_acceptance"]) != "PASS" or str(r["acceptance"]) not in {"PASS", "PASS_WITH_DEFERRED"}:
             bad_accept.append(f"{as_of}:{r['acceptance']}/{r['hard_gate_acceptance']}")
+        enabled_sectors = active_score_sectors(config, as_of)
+        expected = sorted(str(s.get("model_family")) for s in enabled_sectors)
+        required = {
+            str(s.get("model_family")) for s in enabled_sectors
+            if bool(s.get("required", True))
+        }
+        optional = set(expected) - required
         stats = json.loads(str(r["sector_stats_json"]))
         stats_set = set(stats)
         unknown = stats_set - set(expected)
@@ -607,7 +620,7 @@ def _cmd_validate(*, config: dict[str, Any], runs_root: Path, store_dir: Path, c
     rec("snapshots_accepted", "PASS" if not bad_accept else "FAIL",
         "all snapshots sealed PASS" if not bad_accept else f"{bad_accept[:8]}")
     rec("sector_coverage_complete", "PASS" if not bad_sectors else "FAIL",
-        f"required sectors covered: {sorted(required)}" if not bad_sectors else f"{bad_sectors[:8]}")
+        "date-effective required sectors covered" if not bad_sectors else f"{bad_sectors[:8]}")
     rec("sector_set_drift_live_captures", "PASS" if not drifted_sectors else "WARN",
         "none" if not drifted_sectors else
         f"{len(drifted_sectors)} live captures predate a later-added sector: {drifted_sectors[:8]}")

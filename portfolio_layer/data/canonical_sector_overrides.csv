@@ -1,12 +1,13 @@
 ticker,company,canonical_pipeline,note
 AORT,Artivion,med_devices,
 AVNS,Avanos Medical,med_devices,
+BBNX,Beta Bionics,med_devices,
 BSX,Boston Scientific,med_devices,
 BVS,Bioventus,med_devices,
 CATX,Perspective Therapeutics,biotech,
 CBLL,Ceribell,med_devices,
-CDNA,CareDx,biotech,
-CERS,Cerus,biotech,
+CDNA,CareDx,med_devices,
+CERS,Cerus,med_devices,
 CNMD,CONMED,med_devices,
 CVRX,CVRx,med_devices,
 DCTH,Delcath Systems,biotech,drug/device hybrid; US-approved as a drug
@@ -17,11 +18,11 @@ EW,Edwards Lifesciences,med_devices,
 FTAI,FTAI Aviation Ltd.,defense,dual-scored with transportation; defense owns the aerospace engine and MRO exposure
 GKOS,Glaukos,med_devices,
 IART,Integra LifeSciences,med_devices,
-IQV,IQVIA,biotech,
+IQV,IQVIA,med_devices,
 LIVN,LivaNova,med_devices,
 MDT,Medtronic,med_devices,
-MYGN,Myriad Genetics,biotech,
-NEO,NeoGenomics,biotech,
+MYGN,Myriad Genetics,med_devices,
+NEO,NeoGenomics,med_devices,
 NPCE,NeuroPace,med_devices,
 NTAP,NetApp,technology_hardware,storage hardware vendor
 OPK,OPKO Health,biotech,
@@ -30,12 +31,19 @@ OUST,"Ouster, Inc.",technology_hardware,dual-scored with machinery; technology h
 PLTR,Palantir Technologies,software_infrastructure,dual-scored with defense; software infrastructure remains canonical after defense promotion
 PODD,Insulet,med_devices,
 PRCT,PROCEPT BioRobotics,med_devices,
-PSNL,Personalis,biotech,
-RCEL,AVITA Medical,biotech,
+PSNL,Personalis,med_devices,
+RCEL,AVITA Medical,med_devices,
 SGHT,Sight Sciences,med_devices,
 STE,STERIS,med_devices,
 TCMD,Tactile Systems Technology,med_devices,
 TLSI,TriSalus Life Sciences,med_devices,
 TMDX,TransMedics,med_devices,
 TMO,Thermo Fisher Scientific,med_devices,
+VCYT,Veracyte,med_devices,
 ZBH,Zimmer Biomet,med_devices,
+MDXG,"MiMedx Group, Inc.",med_devices,Med-device scoring is canonical after governed security-identity and cohort onboarding.
+ORGO,Organogenesis Holdings Inc.,med_devices,Med-device scoring is canonical after governed security-identity and cohort onboarding.
+CAI,"Caris Life Sciences, Inc.",med_devices,Med-device scoring is canonical after governed security-identity and cohort onboarding.
+LNTH,"Lantheus Holdings, Inc.",med_devices,Med-device scoring is canonical after governed security-identity and cohort onboarding.
+ANIK,"Anika Therapeutics, Inc.",med_devices,Med-device scoring is canonical after governed security-identity and cohort onboarding.
+TECH,Bio-Techne Corporation,med_devices,Med-device scoring is canonical after governed security-identity and cohort onboarding.

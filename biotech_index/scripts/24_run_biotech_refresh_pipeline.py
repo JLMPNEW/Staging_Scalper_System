@@ -81,6 +81,11 @@ BIOTECH_SCORE_CSV_REQUIRED_COLUMNS = [
 
 BIOTECH_SCORE_CSV_PRESENT_COLUMNS = [
     "core_structural_veto_reasons",
+    "biotech_selection_reliability_class",
+    "biotech_active_sleeve_weight",
+    "biotech_xbi_residual_weight",
+    "biotech_promotion_contract_id",
+    "biotech_promotion_contract_sha256",
 ]
 
 MULTIBAGGER_SCORE_BASE_REQUIRED_COLUMNS = [
@@ -558,75 +563,27 @@ def snap_asof_to_latest_trading_date(
     config: dict[str, Any],
     max_snap_gap_days: int = 4,
 ) -> date:
-    """Snap a weekday-derived asof candidate to the latest available market bar date.
+    """Normalize ``candidate`` with the authoritative XNYS session calendar.
 
-    Sat/Sun-only weekday logic resolves a weekday market holiday to a non-trading
-    day, which fails downstream coverage validation and inflates Form 4 staleness.
-    Prefer the primary scoring source's bars; fall back to any source. Keep the
-    weekday-based candidate (with a warning) when the DB has no usable bars yet
-    (fresh install) or the newest bar is more than max_snap_gap_days behind the
-    candidate (stale market data; this run will sync the missing dates).
+    Market-bar availability is evidence freshness, not a calendar oracle. The
+    prior implementation silently relabeled an ordinary trading day as a
+    holiday whenever ingestion lagged by one day. Keep the legacy parameters so
+    callers remain compatible; downstream freshness gates own missing-bar
+    failures.
     """
-    if not db_path.exists():
+    del db_path, config, max_snap_gap_days
+    import exchange_calendars as exchange_calendar  # type: ignore[import-untyped]
+
+    calendar = exchange_calendar.get_calendar("XNYS")
+    normalized = calendar.date_to_session(candidate.isoformat(), direction="previous")
+    resolved = normalized.date()
+    if resolved != candidate:
         LOGGER.warning(
-            "Cannot snap asof %s to a trading date because the database does not exist yet: %s",
+            "Normalized non-XNYS date %s to prior XNYS session %s.",
             candidate.isoformat(),
-            db_path,
+            resolved.isoformat(),
         )
-        return candidate
-    latest: date | None = None
-    try:
-        with connect(db_path) as conn:
-            table_row = conn.execute(
-                "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='market_bars_daily'"
-            ).fetchone()
-            if not table_row or int(table_row["n"]) <= 0:
-                LOGGER.warning(
-                    "Cannot snap asof %s to a trading date because market_bars_daily does not exist yet (fresh install?).",
-                    candidate.isoformat(),
-                )
-                return candidate
-            for source in scoring_market_sources(config):
-                row = conn.execute(
-                    "SELECT MAX(bar_date) AS latest FROM market_bars_daily WHERE source = ? AND bar_date <= ?",
-                    (source, candidate.isoformat()),
-                ).fetchone()
-                latest = parse_db_date(row["latest"] if row else None)
-                if latest is not None:
-                    break
-            if latest is None:
-                row = conn.execute(
-                    "SELECT MAX(bar_date) AS latest FROM market_bars_daily WHERE bar_date <= ?",
-                    (candidate.isoformat(),),
-                ).fetchone()
-                latest = parse_db_date(row["latest"] if row else None)
-    except sqlite3.Error as exc:
-        LOGGER.warning("Cannot snap asof %s to a trading date: %s", candidate.isoformat(), exc)
-        return candidate
-    if latest is None:
-        LOGGER.warning(
-            "No market bars found at or before %s; keeping weekday-based asof (fresh install?).",
-            candidate.isoformat(),
-        )
-        return candidate
-    if latest == candidate:
-        return candidate
-    gap_days = (candidate - latest).days
-    if gap_days > max_snap_gap_days:
-        LOGGER.warning(
-            "Newest market bar %s is %d calendar day(s) before candidate asof %s; keeping weekday-based asof "
-            "because the market data looks stale rather than the candidate being a holiday.",
-            latest.isoformat(),
-            gap_days,
-            candidate.isoformat(),
-        )
-        return candidate
-    LOGGER.warning(
-        "Snapped pipeline asof from weekday-based %s to latest available trading date %s (weekday market holiday).",
-        candidate.isoformat(),
-        latest.isoformat(),
-    )
-    return latest
+    return resolved
 
 
 def normalize_requested_pipeline_asof(
@@ -636,11 +593,7 @@ def normalize_requested_pipeline_asof(
     config: dict[str, Any],
 ) -> date:
     """Normalize an explicit report date to an authoritative market date."""
-    market_timezone = str(cfg_get(config, "ib_market_data.market_timezone", "America/New_York"))
-    local_today = datetime.now(timezone.utc).astimezone(ZoneInfo(market_timezone)).date()
-    normalized = previous_business_day(candidate) if candidate.weekday() >= 5 else candidate
-    if normalized < local_today or normalized != candidate:
-        normalized = snap_asof_to_latest_trading_date(normalized, db_path=db_path, config=config)
+    normalized = snap_asof_to_latest_trading_date(candidate, db_path=db_path, config=config)
     if normalized != candidate:
         LOGGER.warning(
             "Normalized explicit pipeline asof from non-trading date %s to %s.",
@@ -660,11 +613,9 @@ def default_pipeline_asof(config: dict[str, Any], db_path: Path | None = None) -
         candidate = previous_business_day(local_today)
     else:
         candidate = local_today
-    # Weekday logic alone treats a weekday market holiday as a trading day. A past
-    # candidate's bars must already be synced if it was a trading day, so snap it to
-    # the latest available bar date. A same-day candidate is left as-is because this
-    # run has not synced today's bars yet, so absence of bars proves nothing.
-    if db_path is not None and candidate < local_today:
+    # Resolve exchange holidays from XNYS itself. Local bar availability is
+    # validated later and must never backdate the pipeline's requested session.
+    if db_path is not None:
         candidate = snap_asof_to_latest_trading_date(candidate, db_path=db_path, config=config)
     return candidate
 
@@ -930,7 +881,7 @@ def text_tail(raw: str, limit: int = 4000) -> str:
 # the sealed marker only, never on rc alone; date-mismatch, args/mode-mismatch,
 # FAIL or unreadable markers never skip.
 # --------------------------------------------------------------------------- #
-STEP_STATE_SCHEMA_VERSION = 1
+STEP_STATE_SCHEMA_VERSION = 2
 ALREADY_COMPLETE_STATUS = "already_complete"
 
 STEP_COVERAGE_TABLES = {
@@ -968,6 +919,42 @@ def load_step_marker(path: Path) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
+def file_sha256_or_missing(path: Path) -> str:
+    if not path.is_file():
+        return "MISSING"
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def step_resume_fingerprint(
+    step: Step,
+    *,
+    config: dict[str, Any],
+    config_path: Path,
+    base_dir: Path,
+) -> dict[str, str]:
+    """Hash code/config and governed step inputs that can change same-asof output."""
+    fingerprint = {
+        "runner_source": file_sha256_or_missing(Path(__file__).resolve()),
+        "step_source": file_sha256_or_missing(PACKAGE_ROOT / "scripts" / step.script),
+        "config": file_sha256_or_missing(config_path),
+    }
+    if step.name == "company_master":
+        for key in (
+            "screen_results_csv",
+            "manual_alias_overrides_csv",
+            "company_status_overrides_csv",
+            "company_ticker_actions_csv",
+        ):
+            configured = cfg_get(config, f"paths.{key}")
+            if configured:
+                fingerprint[f"input:{key}"] = file_sha256_or_missing(resolve_path(configured, base_dir=base_dir))
+    return fingerprint
+
+
 def record_step_marker(
     path: Path,
     *,
@@ -976,6 +963,7 @@ def record_step_marker(
     mode: str,
     row: dict[str, Any],
     run_started_at: str,
+    resume_fingerprint: dict[str, str] | None = None,
 ) -> None:
     """Atomically seal the step's completion marker from its finished timing row.
 
@@ -998,6 +986,7 @@ def record_step_marker(
         "run_started_at": run_started_at,
         "completed_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "command": str(row.get("command") or ""),
+        "resume_fingerprint": dict(sorted((resume_fingerprint or {}).items())),
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1014,6 +1003,7 @@ def step_resume_skip(
     *,
     asof: str,
     mode: str,
+    resume_fingerprint: dict[str, str] | None = None,
 ) -> bool:
     """True only when a sealed PASS marker certifies this exact step run.
 
@@ -1041,6 +1031,8 @@ def step_resume_skip(
     if str(marker.get("script")) != step.script:
         return False
     if list(marker.get("args") or []) != list(step.args):
+        return False
+    if dict(marker.get("resume_fingerprint") or {}) != dict(resume_fingerprint or {}):
         return False
     return True
 
@@ -2026,12 +2018,14 @@ def validate_ibkr_preflight(
     timeout_sec = float(cfg_get(config, "biotech_refresh.ibkr_preflight.timeout_sec", 5.0))
     required = as_bool(cfg_get(config, "biotech_refresh.ibkr_preflight.required", True), True)
     failures: list[str] = []
+    failed_labels: list[str] = []
     successes: list[str] = []
     for label, host, port in targets:
         try:
             with socket.create_connection((host, port), timeout=timeout_sec):
                 successes.append(f"{label}={host}:{port}")
         except OSError as exc:
+            failed_labels.append(label)
             failures.append(f"{label}={host}:{port} unavailable ({type(exc).__name__}: {exc})")
     elapsed = round(time.monotonic() - start, 3)
     if failures and required:
@@ -2064,7 +2058,36 @@ def validate_ibkr_preflight(
             "validate IBKR/TWS TCP connectivity targets="
             + (",".join(f"{label}={host}:{port}" for label, host, port in targets) if targets else "<none>")
         ),
+        "failed_labels": failed_labels,
     }
+
+
+def apply_ibkr_market_fallback(steps: list[Step], preflight: dict[str, Any]) -> list[Step]:
+    """Route only an unavailable IB price step to sealed bars.
+
+    Market positioning keeps running so FINRA and SEC feeds remain current; its
+    IBKR borrow collector owns a separate, staleness-gated degraded mode.
+    """
+    if str(preflight.get("status") or "").strip().lower() != "warning":
+        return steps
+    failed_labels = {str(value) for value in preflight.get("failed_labels") or []}
+    if "ib_market_data" not in failed_labels:
+        return steps
+    rewritten: list[Step] = []
+    for step in steps:
+        if step.name != "ib_market" or "--offline-existing-bars" in step.args:
+            rewritten.append(step)
+            continue
+        rewritten.append(
+            Step(
+                name=step.name,
+                script=step.script,
+                args=(*step.args, "--offline-existing-bars"),
+                supports_asof=step.supports_asof,
+                always_rerun=step.always_rerun,
+            )
+        )
+    return rewritten
 
 
 def analyze_db(db_path: Path, *, run_started_at: str, mode: str) -> dict[str, Any]:
@@ -2127,6 +2150,27 @@ def validated_market_feature_snapshot_asof(
         raise RuntimeError(
             f"market_features_daily:{source} latest snapshot {snapshot_date.isoformat()} is "
             f"{lag_days} calendar day(s) behind report asof={report_asof}; "
+            f"maximum={max_lag_calendar_days}"
+        )
+    bar_row = conn.execute(
+        """
+        SELECT MAX(last_bar_date) AS latest_bar_date
+        FROM market_features_daily
+        WHERE source = ? AND asof_date = ?
+        """,
+        (source, snapshot_date.isoformat()),
+    ).fetchone()
+    latest_bar_date = parse_db_date(bar_row["latest_bar_date"] if bar_row else None)
+    if latest_bar_date is None:
+        raise RuntimeError(
+            f"market_features_daily:{source} snapshot {snapshot_date.isoformat()} "
+            "has no underlying last_bar_date"
+        )
+    bar_lag_days = (report_date - latest_bar_date).days
+    if bar_lag_days < 0 or bar_lag_days > max_lag_calendar_days:
+        raise RuntimeError(
+            f"market_features_daily:{source} latest underlying bar {latest_bar_date.isoformat()} is "
+            f"{bar_lag_days} calendar day(s) behind report asof={report_asof}; "
             f"maximum={max_lag_calendar_days}"
         )
     return snapshot_date.isoformat()
@@ -2306,6 +2350,46 @@ def validate_score_csv(
         ):
             if tickers:
                 failures.append(f"{label} for {len(tickers)} row(s): {format_ticker_sample(tickers)}")
+    promotion_fields = {
+        "biotech_selection_reliability_class",
+        "biotech_active_sleeve_weight",
+        "biotech_xbi_residual_weight",
+        "biotech_promotion_contract_id",
+        "biotech_promotion_contract_sha256",
+    }
+    if promotion_fields.issubset(fieldnames):
+        contract_ids = {
+            str(row.get("biotech_promotion_contract_id") or "").strip()
+            for row in rows
+            if str(row.get("biotech_promotion_contract_id") or "").strip()
+        }
+        contract_hashes = {
+            str(row.get("biotech_promotion_contract_sha256") or "").strip().lower()
+            for row in rows
+            if str(row.get("biotech_promotion_contract_sha256") or "").strip()
+        }
+        promotion_populated = bool(contract_ids or contract_hashes)
+        if promotion_populated:
+            if len(contract_ids) != 1:
+                failures.append(f"promotion_contract_id_count={len(contract_ids)}, expected 1")
+            if len(contract_hashes) != 1:
+                failures.append(f"promotion_contract_sha256_count={len(contract_hashes)}, expected 1")
+            incomplete_tickers = [
+                str(row.get("ticker") or "")
+                for row in rows
+                if any(is_blank(row.get(field)) for field in promotion_fields)
+            ]
+            if incomplete_tickers:
+                failures.append(
+                    "promotion_contract_fields_incomplete for "
+                    f"{len(incomplete_tickers)} row(s): {format_ticker_sample(incomplete_tickers)}"
+                )
+            for row in rows:
+                active = to_float(row.get("biotech_active_sleeve_weight"), -1.0)
+                residual = to_float(row.get("biotech_xbi_residual_weight"), -1.0)
+                if active < 0.0 or residual < 0.0 or abs(active + residual - 1.0) > 1e-9:
+                    failures.append(f"invalid_biotech_sleeve_weights:{row.get('ticker')}")
+                    break
     if failures:
         raise RuntimeError(f"{path} validation failed: " + " | ".join(failures))
 
@@ -2632,6 +2716,16 @@ def run_selftest() -> int:
         assert pass_marker is not None
         ok("marker_success_row_seals_pass", pass_marker["status"] == "PASS")
         ok("resume_sealed_pass_skips", step_resume_skip(pass_marker, sec_events, asof=asof, mode=mode))
+        ok(
+            "resume_source_fingerprint_mismatch_never_skips",
+            not step_resume_skip(
+                pass_marker,
+                sec_events,
+                asof=asof,
+                mode=mode,
+                resume_fingerprint={"step_source": "changed"},
+            ),
+        )
 
         # mismatches never skip: date, mode, args (mode-dependent), script, schema
         ok(
@@ -2879,12 +2973,26 @@ def main() -> None:
             )
             write_timing_csv(timing_csv, timing_rows)
             try:
-                timing_rows[-1] = validate_ibkr_preflight(
+                preflight_result = validate_ibkr_preflight(
                     config,
                     steps=steps,
                     run_started_at=run_started_at,
                     mode=args.mode,
                 )
+                timing_rows[-1] = preflight_result
+                fallback_enabled = as_bool(
+                    cfg_get(config, "biotech_refresh.ibkr_preflight.fallback_to_existing_bars", False),
+                    False,
+                )
+                if fallback_enabled:
+                    fallback_steps = apply_ibkr_market_fallback(steps, preflight_result)
+                    if fallback_steps != steps:
+                        steps = fallback_steps
+                        timing_rows[-1]["command"] += " fallback=ib_market:offline_existing_bars"
+                        LOGGER.warning(
+                            "IBKR market socket unavailable; using sealed existing IB bars for this run. "
+                            "Yahoo scoring-primary and final freshness/coverage gates remain authoritative."
+                        )
             except Exception as exc:
                 timing_rows[-1] = {
                     "run_started_at": run_started_at,
@@ -3066,6 +3174,12 @@ def main() -> None:
                     write_timing_csv(timing_csv, timing_rows)
                     continue
                 marker_path = step_marker_path(state_dir, run_asof, step.name) if resume_tracking else None
+                resume_fingerprint = step_resume_fingerprint(
+                    step,
+                    config=config,
+                    config_path=config_path,
+                    base_dir=base_dir,
+                )
                 if resume_enabled and marker_path is not None:
                     marker = load_step_marker(marker_path)
                     marker_matches = step_resume_skip(
@@ -3073,6 +3187,7 @@ def main() -> None:
                         step,
                         asof=run_asof,
                         mode=effective_mode,
+                        resume_fingerprint=resume_fingerprint,
                     )
                     output_current = (
                         marker_matches
@@ -3138,6 +3253,7 @@ def main() -> None:
                         mode=effective_mode,
                         row=timing_rows[-1],
                         run_started_at=run_started_at,
+                        resume_fingerprint=resume_fingerprint,
                     )
                 write_timing_csv(timing_csv, timing_rows)
                 if timing_rows[-1]["status"] != "success":
@@ -3146,8 +3262,11 @@ def main() -> None:
                     except (TypeError, ValueError):
                         step_returncode = 1
                     raise SystemExit(step_returncode if step_returncode > 0 else 1)
-                if not step.always_rerun:
-                    deterministic_tail_dirty = True
+                # Every executed step can change the local inputs consumed by
+                # later deterministic steps. Provider-refresh steps are the
+                # most important case: a retry must never reuse a derived PASS
+                # marker produced before newly fetched provider data arrived.
+                deterministic_tail_dirty = True
         if not args.skip_analyze:
             timing_rows.append(analyze_db(db_path, run_started_at=run_started_at, mode=effective_mode))
             write_timing_csv(timing_csv, timing_rows)

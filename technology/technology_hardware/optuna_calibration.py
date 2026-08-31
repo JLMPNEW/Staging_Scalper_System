@@ -1299,15 +1299,22 @@ def validate_technology_hardware_walk_forward_calibration() -> int:
 
 
 if __name__ == "__main__":
+    from technology.core.optuna_artifact_governance import (
+        run_stage8_with_governance,
+        run_walk_forward_with_governance,
+        validate_stage8_from_argv,
+        validate_walk_forward_from_argv,
+    )
+
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "validate":
         sys.argv.pop(1)
-        raise SystemExit(validate_technology_hardware_optuna_calibration())
+        raise SystemExit(max(validate_technology_hardware_optuna_calibration(), validate_stage8_from_argv("technology_hardware")))
     if command == "walk-forward":
         sys.argv.pop(1)
-        run_technology_hardware_walk_forward_calibration()
+        run_walk_forward_with_governance(run_technology_hardware_walk_forward_calibration, "technology_hardware")
         raise SystemExit(0)
     if command == "validate-walk-forward":
         sys.argv.pop(1)
-        raise SystemExit(validate_technology_hardware_walk_forward_calibration())
-    run_technology_hardware_optuna_calibration()
+        raise SystemExit(max(validate_technology_hardware_walk_forward_calibration(), validate_walk_forward_from_argv("technology_hardware")))
+    run_stage8_with_governance(run_technology_hardware_optuna_calibration, "technology_hardware")

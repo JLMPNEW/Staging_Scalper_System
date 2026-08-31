@@ -83,7 +83,7 @@ def main() -> int:
     timeout = float(cfg_get(bundle.payload, "runtime.sqlite_timeout_sec", 30.0))
     with connect(db_path, timeout_sec=timeout) as conn:
         bootstrap_stage3(conn, bundle)
-        readiness = assert_stage2_ready(conn, bundle)
+        readiness = assert_stage2_ready(conn, bundle, as_of=args.as_of)
         run_id = start_run(conn, run_type="consumer_defensive_stage3_prices", input_path=args.market_policy)
         try:
             with cache_only_environment(args.cache_only):

@@ -55,12 +55,22 @@ def main() -> int:
         errors.append(f"expected exactly one portfolio transportation source, found {len(sources)}")
     else:
         source = dict(sources[0])
-        if source.get("adapter") != "industrial_family":
-            errors.append("transportation portfolio source must use industrial_family")
+        if source.get("adapter") != "transportation_subgroup":
+            errors.append(
+                "transportation portfolio source must use transportation_subgroup"
+            )
+        if bool(source.get("enabled")):
+            errors.append("shadow transportation source must remain disabled")
         if bool(source.get("required")):
             errors.append("shadow transportation source must remain optional")
         if not bool(source.get("require_oos_score_valid")):
             errors.append("transportation source must fail closed on OOS validity")
+        alpha = float(
+            ((source.get("calibration") or {}).get("expected_alpha_at_full"))
+            or 0.0
+        )
+        if abs(alpha) > 1e-12:
+            errors.append("shadow transportation source must use zero expected alpha")
         root = args.sector_output_root.expanduser().resolve() if args.sector_output_root else resolve_path(
             config["score_contract"]["sector_output_root"], base_dir=config_path.parent
         )
@@ -76,7 +86,7 @@ def main() -> int:
     if result is not None:
         if result.source_pipeline != MODEL_FAMILY:
             errors.append(f"source_pipeline={result.source_pipeline!r}")
-        if result.adapter != "industrial_family":
+        if result.adapter != "transportation_subgroup":
             errors.append(f"adapter={result.adapter!r}")
         if result.source_asof_date != asof:
             errors.append(f"source_asof_date={result.source_asof_date!r} expected={asof}")

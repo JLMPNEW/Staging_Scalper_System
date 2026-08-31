@@ -1,5 +1,13 @@
 # Consumer Defensive Scoring Model
 
+> **V2 status (2026-08-26):** Consumer Defensive now has an isolated,
+> Consumer-owned calibration and promotion foundation. The legacy shared
+> prospective-evidence/Stage12 route is retired. All four cohorts remain in
+> `benchmark_production` with zero active capital until a fresh v2 calibration
+> decision passes profitability, alpha, overfitting, tail-risk, cost, liquidity,
+> and concentration gates. See
+> [CONSUMER_DEFENSIVE_V2_IMPLEMENTATION_PATH.md](CONSUMER_DEFENSIVE_V2_IMPLEMENTATION_PATH.md).
+
 This package is the independent implementation namespace for Consumer Defensive stock scoring. It owns its configuration, SQLite database, source registry, security master, point-in-time universe, parser state, features, scores, reports, and orchestration lane.
 
 The implementation sequence follows `technology/README.md` and `technology/STAGE_GATES.md`. Consumer Defensive does not import from or write to Technology, Industrials, Medical Devices, or Biotech sector packages.
@@ -198,12 +206,22 @@ The Stage 6B measurement build now deterministically rebuilds and verifies its e
 
 `13e_audit_consumer_defensive_specialized_recall.py` normalizes reviewed issuer/metric matrices and reports measured, review-required, parser-rejected, current-document miss, historical-document miss, and non-SEC-excluded outcomes. The two supplied distribution/retail and packaged-food/agriculture matrices normalize to 459 reviewed issuer-metric labels across 61 issuers without unknown terms. Run 7 measures 182/421 SEC-expected pairs (`43.23%`), versus 119/421 (`28.27%`) in the pre-event baseline; 35 pairs remain correctly excluded from the SEC denominator, 219 are not found, eight are policy-rejected/suppressed, ten require review, and two lack a sealed document. These matrices are recall expectations, not accepted filing evidence.
 
-The remaining binding order is:
+The remaining binding **promotion** order supersedes the older implementation
+checklist. Legacy Stage 10B governance and the disabled Stage 11 adapter already
+exist, but neither is a promotion authority:
 
-1. adjudicate the exact 26-pair pack and the separate 29-row OCR pack, preserve accepted/rejected decisions in the golden corpus, and retain the four byte/page-cap failures unless a separately reviewed extraction policy supports them;
-2. rerun the unchanged Stage 6A matrix on a transaction-consistent Stage 5 copy at the latest fully supported scoring cutoff; the Stage 6B document-seal date may be later and is not a substitute for Stage 5 inputs;
-3. build and validate the definitive Stage 6C PIT historical feature panel before signal diagnostics; and
-4. continue through calibration, scoring, publishing, and orchestration only after those gates pass.
+1. configure and independently approve the canonical three-authority trust
+   roots for evidence sealing, external append-only timestamping, and independent
+   market-data export attestation;
+2. register and timestamp the frozen future-only contract before target access,
+   then perform target-blind captures on true completed month ends;
+3. accumulate and evaluate the required 12/6/4 independent 21/63/126-session
+   outcomes without reusing the burned historical holdout;
+4. issue a new promotion candidate only after a separate independent review of
+   a passing evaluation hash; and
+5. complete clean-room acceptance, a production-backup migration rehearsal,
+   rollback verification, and explicit governance approval before touching
+   production.
 
 The Stage 4 terminology review checks whether the discovery census is directionally useful; it does not attempt numeric specialized-metric extraction. Full parser validation waits for Stage 6B because the parser needs the final metric applicability policy and the stable Stage 6A downstream contract. The definitive historical-readiness audit runs in Stage 6C, after Stage 6B fixes the exact feature inventory.
 
@@ -213,9 +231,78 @@ The latest measured post-baseline is schema v6, adapter v3.18, and extraction te
 
 The v3.18 contract adds context-gated exhibit/table aliases for price/mix, traffic, commodity costs, depletion, production volume, revenue per unit, and gross profit per case; generic pricing, volume, traffic, shrink, and share language still cannot qualify alone. Stage 6B also rebuilds historical inventory-turnover, net-debt/EBITDA, advertising, gross-margin, and applicable retail financial derivations separately at each filing acceptance date from facts available at that date. The optional `13k` recovery path can address at most the four remaining SEC-addressable parser-failure pairs, so it is not the next material coverage lever.
 
-Stage 6C run 1 is the first measured immutable historical panel: 81,221 rows, 30,309 numeric rows, 86 monthly evaluation dates, all 38 metrics, and panel SHA-256 `1c83868c680e5cb9e5a5533760c25a03df3824dfdc22abd2eb946c188dc5e479`. All ten panel checks pass. Shared factor-validation campaign `cdfv_20260814_1c83868c680e_0b1ba11163e0` registered 276 sector/cohort cells; 77 met the evidence floor, none survived the sealed 5% family FDR gate, and the best raw p-value was `0.155087`. Specialized production weights therefore remain zero. Scoring-feature definition v2 freezes the cohort/missing-data policy: cohort-specific overlays may be calibrated independently only after accepted evidence exists; missing applicable metrics contribute no score and do not redistribute weight, while nonapplicable metrics are excluded from completeness denominators.
+Corrected Stage 6C run 3 is the current immutable historical research panel:
+81,221 rows, 28,487 valid numeric rows, 86 monthly evaluation dates, all 38
+metrics, and panel SHA-256
+`d2c7155be91cf21c2826e911e083e662bf203119ee087baf12f754ac2d2adcf0`.
+All 18 panel checks pass. Corrected shared factor-validation campaign
+`cdfv_20260814_d2c7155be91c_2498172c7161_a6495192b5` registered 174 routed
+cells; 90 were evidence-eligible across eight metrics. One alcohol-depletion
+cell passed 5% family FDR (`p=q=0.0117267`) but failed its pre-registered
+direction gate, leaving zero accepted cells and zero specialized weights.
+Scoring-feature definition v2 freezes the cohort/missing-data policy:
+cohort-specific overlays may be calibrated independently only after accepted
+evidence exists; missing applicable specialized metrics contribute no score
+and do not redistribute weight, while nonapplicable metrics are excluded from
+completeness denominators.
 
-The retained Stage 6B replay database is intentionally a specialized-extraction database and contains no Stage 5 `feature_positioning` rows. A fresh Stage 6A v2 rebuild on that database therefore remains 0/108 rank-ready and fails only the frozen 85% readiness check; its other 19 checks pass. Stage 7 must run on a full-stack isolated clone containing the completed Stage 5 positioning inputs, then rebuild Stage 6A v2 and reapply the Stage 6B overlay. The specialized Stage 6C/factor result remains valid because that panel uses sealed specialized observations and PIT price/return targets rather than Stage 5 positioning.
+The retained Stage 6B replay database remains a specialized-extraction
+database, but the required full-stack Stage 7 rehearsal is now complete. A
+transaction-consistent `2026-08-14` clone was enriched with the four Stage 5
+fact tables through a read-only production connection, rebuilt Stage 6A v2,
+and reapplied 505 exact-run Stage 6B component measurements. Production was
+unchanged. The overlay audit exposed and fixed canonical ordering, sealed-run,
+and future-period lineage defects; Stage 6A passes its complete gate before
+Stage 7 v3 is built.
+
+Stage 7 shadow baseline v3 is implemented by `core/stage7_schema.py`,
+`core/stage7_scoring.py`, script `16`, and validator `16a`. The isolated
+real-data run passes 15/15 checks with 108/108 deterministic outputs, 94
+rank-ready and 14 explicitly review-required. Cohort readiness is 19/22
+beverages, 19/22 distribution/retail, 22/25 household/personal/tobacco, and
+34/39 packaged foods/agriculture. All specialized weights remain zero under
+the corrected campaign; every row is `shadow_monitor` with
+`portfolio_candidate_gate=0` and `oos_score_valid_flag=0`. Contract SHA-256 is
+`d5184d007b89f3be62c61277cd4ddcb864f15ff0ccd09d9234de31922cf909c8`;
+exact input/output manifests are
+`ad90697b81c020c3666d47b04aa2ece231a2d8b7793dc00d23e27dd907f2500a` and
+`abcca120e948d45a440b5f421809f3fb98b656484a4439d8b493e8a852fe93e8`.
+The legacy Stage 8 report-only calibration is reproducible but is not valid
+promotion evidence. Run `cds8_2a94264294f4b58b1444fb2d` passes 24/24 internal
+artifact-integrity checks across a 9,036-row, 86-date panel and 320 candidates.
+Those checks do not establish preregistration or strict OOS validity: all 320
+candidates touched the final holdout, only two were authorized to do so, and
+the other 318 account for 5,088 unauthorized holdout-period rows. Candidate-
+dependent samples, stale positioning data, incomplete source and historical-
+membership identity, and a partial panel month add independent blockers. The
+corrected calendar-independent core-baseline evidence is positive but
+underpowered at 3/2/1 observations for 21/63/126 sessions versus required
+12/6/4. Stage 9 run `cds9_63065740a60179d1a1abc968` likewise passes 31/31
+internal reconstruction checks, but it reuses that burned holdout, discards 16
+schedule slots, and evaluates a fixed 21-session target that differs from the
+Stage 8 21/63/126-session objective. Both runs are retrospective diagnostics;
+production remains unchanged and the Stage 7 baseline remains non-investable.
+
+Stage 10 deterministic publishing is now complete through isolated acceptance.
+Run `cds10_729cbfd933b3c0ddc912b999` passes 17/17 checks after a fresh 31/31
+Stage 9 artifact-integrity validation and publishes 108 deterministic
+score/review rows. Overall
+specialized measurement coverage is 543/971 applicable pairs (55.92%), while
+zero specialized metrics are model-weight qualified. All OOS, portfolio and
+production gates remain zero/off. Desktop and responsive render QA pass, and
+an exact replay leaves all 28 dated/latest hashes unchanged. The legacy Stage
+10B shadow-governance package and disabled Portfolio Layer adapter are
+implemented, but the package predates the corrected V6 audit and is superseded
+for promotion use. Capital activation requires fresh evidence through the
+canonical three-authority protocol and a separately reviewed promotion lock.
+
+The paragraph above records the superseded Stage 10 state. The current v3
+standard-allocation registry is now reviewed and pinned: all four cohorts are
+active_full, Consumer Defensive is a required Portfolio Layer source with a
+12.5% sector ceiling, and the Consumer-owned Stage 31/32 publisher-refresh lane
+is registered ahead of Portfolio in the global orchestrator. See
+CONSUMER_DEFENSIVE_PROMOTION_ENGINE_V3.md for the current hashes, authority
+window, allocation rules, and fail-closed daily operating contract.
 
 `13k_build_consumer_defensive_pdf_recovery_manifest.py` is the last-resort image-PDF path. It verifies the source-manifest hash against a passing Stage 6B run and emits only sealed PDF rows for exact ticker/metric pairs classified as `parser_failure`. Running script `13a` against that manifest with `--enable-pdf-ocr` keeps OCR bounded and review-required; it cannot expand to unrelated tickers, documents, or metrics.
 

@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -995,6 +996,17 @@ def load_filing_texts_full(
     return fetch_filing_texts(conn, candidates)
 
 
+def incremental_queue_drained(
+    processed_accessions: set[str],
+    quarantined_accessions: set[str],
+    eligible_count: int,
+) -> bool:
+    """Return true once every accession counted at queue start is resolved."""
+    return eligible_count > 0 and len(
+        processed_accessions | quarantined_accessions
+    ) >= eligible_count
+
+
 def replace_events(conn: sqlite3.Connection, events: list[SecEvent], *, filings: Iterable[FilingText], parser_signature: str) -> None:
     now = utc_now()
     filing_list = [filing for filing in filings if filing.accession_nodash]
@@ -1207,25 +1219,6 @@ def export_events_from_db(
             FROM sec_events e
             JOIN companies c ON c.company_id = e.company_id
             {row_where}
-        ),
-        doc_urls AS (
-            SELECT accession_nodash, document_url
-            FROM (
-                SELECT
-                    d.accession_nodash,
-                    d.document_url,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY d.accession_nodash
-                        ORDER BY
-                            CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
-                            COALESCE(d.fetched_at, d.updated_at, d.created_at) DESC,
-                            d.document_id DESC
-                    ) AS rn
-                FROM sec_filing_documents d
-                JOIN (SELECT DISTINCT accession_nodash FROM event_rows) a
-                  ON a.accession_nodash = d.accession_nodash
-            )
-            WHERE rn = 1
         )
         SELECT
             e.ticker,
@@ -1241,35 +1234,42 @@ def export_events_from_db(
             e.extracted_text,
             COALESCE(d.document_url, f.archive_url, '') AS document_url
         FROM event_rows e
-        LEFT JOIN doc_urls d ON d.accession_nodash = e.accession_nodash
+        LEFT JOIN sec_filing_latest_document d ON d.accession_nodash = e.accession_nodash
         LEFT JOIN sec_filings f ON f.accession_nodash = e.accession_nodash
         ORDER BY e.ticker, e.filing_date, e.event_type, e.accession_nodash
         """,
         row_params,
     )
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+    temporary_csv = output_csv.with_name(f".{output_csv.name}.{os.getpid()}.tmp")
     row_count = 0
-    with output_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, lineterminator="\n", extrasaction="ignore")
-        writer.writeheader()
-        for row in cursor:
-            writer.writerow(
-                {
-                    "ticker": str(row["ticker"] or ""),
-                    "company_name": str(row["company_name"] or ""),
-                    "accession_nodash": str(row["accession_nodash"] or ""),
-                    "filing_date": str(row["filing_date"] or ""),
-                    "form": str(row["form"] or ""),
-                    "event_type": str(row["event_type"] or ""),
-                    "event_date": str(row["event_date"] or ""),
-                    "event_value": str(row["event_value"] or ""),
-                    "polarity": str(row["polarity"] or ""),
-                    "confidence": float(row["confidence"] or 0.0),
-                    "extracted_text": str(row["extracted_text"] or ""),
-                    "document_url": str(row["document_url"] or ""),
-                }
-            )
-            row_count += 1
+    try:
+        with temporary_csv.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, lineterminator="\n", extrasaction="ignore")
+            writer.writeheader()
+            for row in cursor:
+                writer.writerow(
+                    {
+                        "ticker": str(row["ticker"] or ""),
+                        "company_name": str(row["company_name"] or ""),
+                        "accession_nodash": str(row["accession_nodash"] or ""),
+                        "filing_date": str(row["filing_date"] or ""),
+                        "form": str(row["form"] or ""),
+                        "event_type": str(row["event_type"] or ""),
+                        "event_date": str(row["event_date"] or ""),
+                        "event_value": str(row["event_value"] or ""),
+                        "polarity": str(row["polarity"] or ""),
+                        "confidence": float(row["confidence"] or 0.0),
+                        "extracted_text": str(row["extracted_text"] or ""),
+                        "document_url": str(row["document_url"] or ""),
+                    }
+                )
+                row_count += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_csv, output_csv)
+    finally:
+        temporary_csv.unlink(missing_ok=True)
     return row_count
 
 
@@ -1284,7 +1284,8 @@ def _selftest_connection() -> sqlite3.Connection:
             accession_nodash TEXT PRIMARY KEY,
             filing_date TEXT NOT NULL,
             form TEXT NOT NULL,
-            text_hash TEXT
+            text_hash TEXT,
+            archive_url TEXT
         );
         CREATE TABLE sec_filing_documents(
             document_id INTEGER PRIMARY KEY,
@@ -1403,6 +1404,24 @@ def _selftest() -> None:
     # Legacy manifest rows (text_length=0 but hash/text present) must be untouched.
     assert int(conn.execute("SELECT COUNT(*) FROM sec_events").fetchone()[0]) == len(text_by_accession)
 
+    # Export must use the canonical latest-document table, never rescan document
+    # bodies or choose a different URL from the canonical parser input.
+    trace.clear()
+    conn.set_trace_callback(trace.append)
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as temporary_dir:
+        export_path = Path(temporary_dir) / "sec_events.csv"
+        export_count = export_events_from_db(conn, export_path, **scan_kwargs)
+        with export_path.open("r", encoding="utf-8", newline="") as handle:
+            exported = list(csv.DictReader(handle))
+    conn.set_trace_callback(None)
+    assert export_count == len(text_by_accession) and len(exported) == len(text_by_accession)
+    assert {row["document_url"] for row in exported} == {
+        f"https://example.test/{accession}.txt" for accession in text_by_accession
+    }
+    assert not any("text_content" in statement.lower() for statement in trace), "SEC export read filing bodies"
+
     # Case 2: one changed filing -> text is fetched only for that filing, and the
     # FilingText fed to the parser is identical to the full-rescan load.
     changed_text = "Topline results: the FDA accepted the BLA for review and the primary endpoint was met."
@@ -1492,6 +1511,8 @@ def _selftest() -> None:
         **scan_kwargs,
     )
     assert filings == [] and phantoms == [], "excluded phantom accession was re-selected"
+    assert incremental_queue_drained({"A0001"}, {"A0002"}, 2)
+    assert not incremental_queue_drained({"A0001"}, set(), 2)
     conn.close()
     print("SELFTEST PASS: sec-event incremental scan (zero-work no-text-read, eligible parity, phantom reset)")
 
@@ -1694,6 +1715,12 @@ def main() -> None:
                         page_offset += batch_size
                     if not filings:
                         if phantoms:
+                            if incremental_only and incremental_queue_drained(
+                                processed_incremental_accessions,
+                                phantom_skip,
+                                total_available,
+                            ):
+                                break
                             # The whole page was blank-text phantoms; they are now
                             # cleared and excluded, so keep draining real work.
                             continue
@@ -1715,6 +1742,12 @@ def main() -> None:
                     event_count += parsed_events
                     if incremental_only:
                         processed_incremental_accessions.update(batch_accessions)
+                        if incremental_queue_drained(
+                            processed_incremental_accessions,
+                            phantom_skip,
+                            total_available,
+                        ):
+                            break
                     if total_filings % max(500, batch_size) == 0 or total_filings >= total_available:
                         LOGGER.info(
                             "Parsed %d/%d SEC filing texts; events=%d max_workers=%d",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -13,10 +14,21 @@ ENV_DEFAULT_RE = re.compile(
     + r"([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?"
     + re.escape("}")
 )
+CONSUMER_COHORT_IDS = frozenset(
+    {
+        "beverages",
+        "consumer_staples_distribution_retail",
+        "household_personal_tobacco",
+        "packaged_foods_agricultural_products",
+    }
+)
 ALLOWED_ROOT_KEYS = frozenset(
     {
         'positioning',
         'scoring_features',
+        'stage7_scoring',
+        'stage8_calibration',
+        'calibration_scope',
         'stage6b',
         "paths",
         "runtime",
@@ -33,6 +45,9 @@ ALLOWED_ROOT_KEYS = frozenset(
         "dedicated_parser",
         "factor_validation",
         "portfolio_layer",
+        "promotion_framework_v2",
+        "promotion_framework_v3",
+        "production_score_publisher_v3",
     }
 )
 REQUIRED_ROOT_KEYS = ALLOWED_ROOT_KEYS
@@ -40,7 +55,7 @@ ALLOWED_SECTION_KEYS = {
     'positioning': {
         'ownership_source_id', 'market_positioning_source_id', 'feature_source_id',
         'form4_upstream_db', 'market_positioning_upstream_db', 'upstream_universe_csv',
-        'source_identifier_map',
+        'source_identifier_map', 'market_positioning_cache_root',
         'start_date', 'source_birthdates', 'maximum_age_days',
         'minimum_current_coverage', 'lookback_days', 'upstream_source_names',
     },
@@ -50,6 +65,43 @@ ALLOWED_SECTION_KEYS = {
         'accepted_market_quality_statuses', 'accepted_financial_quality_statuses',
         'accepted_positioning_quality_statuses', 'specialized_default_availability',
         'component_weight_default',
+    },
+    'stage7_scoring': {
+        'source_id', 'baseline_source_id', 'model_version', 'promotion_state',
+        'portfolio_candidate_gate', 'oos_score_valid_flag', 'neutral_score',
+        'minimum_data_quality_confidence',
+        'maximum_missing_component_weight', 'minimum_rank_ready_fraction',
+        'require_stage6b_measurement_overlay', 'specialized_weight_default',
+        'specialized_weight_policy', 'factor_validation_campaign_id',
+        'factor_validation_verdict', 'component_weights',
+    },
+    'stage8_calibration': {
+        'mode', 'production_promotion_enabled', 'portfolio_write_enabled',
+        'candidate_seed', 'candidate_count_per_scope',
+        'candidate_perturbation_scale', 'component_weight_cap',
+        'weight_l1_turnover_cap', 'minimum_factor_breadth',
+        'maximum_factor_breadth', 'maximum_specialized_weight',
+        'cohort_shrinkage_strength', 'maximum_cohort_deviation_fraction',
+        'minimum_train_dates', 'validation_dates', 'holdout_dates',
+        'embargo_panel_dates', 'walk_forward_initial_train_dates',
+        'walk_forward_test_dates', 'minimum_sector_cross_section',
+        'minimum_cohort_cross_section', 'top_quantile',
+        'minimum_top_positions', 'maximum_top_turnover',
+        'maximum_top_cohort_share', 'transaction_cost_bps',
+        'horizon_weights', 'minimum_validation_objective_improvement',
+        'minimum_holdout_objective_improvement',
+        'minimum_holdout_mean_ic', 'minimum_walk_forward_win_fraction',
+    },
+    'calibration_scope': {
+        'mode', 'enforcement_stage', 'selection_basis',
+        'evidence_classification', 'strict_oos_eligible',
+        'preserve_source_history',
+        'production_promotion_requires_fresh_post_scope_evidence',
+        'reviewed_as_of', 'expected_excluded_ticker_count',
+        'expected_remaining_current_ticker_count',
+        'expected_remaining_current_tickers_sha256',
+        'expected_remaining_current_by_cohort',
+        'excluded_tickers_by_cohort',
     },
     'stage6b': {
         'adapter_path', 'parser_source_id', 'measurement_source_id',
@@ -115,10 +167,26 @@ ALLOWED_SECTION_KEYS = {
         "sector_adapter", "primary_target", "robustness_target", "horizons",
         "sector_minimum_cross_section", "cohort_target_cross_section",
         "cohort_exploratory_minimum_cross_section",
+        "subtype_exploratory_minimum_cross_section",
     },
     "portfolio_layer": {
         "adapter", "canonical_sector", "sector_etf", "file_mode", "final_rank_path",
         "require_oos_score_valid", "enabled", "required", "sector_weight_cap", "promotion_state",
+    },
+    "promotion_framework_v2": {
+        "framework_path", "shared_service_contract_path", "status", "legacy_protocol_status",
+    },
+    "promotion_framework_v3": {
+        "framework_path", "engine_module", "status",
+        "portfolio_activation_requires_pinned_registry",
+    },
+    "production_score_publisher_v3": {
+        "schema_version", "source_database_path", "output_root",
+        "activation_registry_path", "activation_registry_file_sha256",
+        "activation_registry_payload_sha256", "candidate_registry_path",
+        "candidate_registry_file_sha256", "candidate_registry_payload_sha256",
+        "scoring_contract_version", "entry_lag_trading_sessions",
+        "selected_candidate_id_by_cohort", "model_contract_sha256_by_cohort",
     },
 }
 
@@ -211,6 +279,30 @@ def _validate_nested_keys(config: dict[str, Any]) -> None:
                 raise ValueError(
                     f"universe.cohorts.{cohort_id} must contain exactly {sorted(cohort_keys)}."
                 )
+    subtype_minimum = int(cfg_get(
+        config,
+        'factor_validation.subtype_exploratory_minimum_cross_section',
+        0,
+    ))
+    cohort_minimum = int(cfg_get(
+        config,
+        'factor_validation.cohort_exploratory_minimum_cross_section',
+        0,
+    ))
+    cohort_target = int(cfg_get(
+        config, 'factor_validation.cohort_target_cross_section', 0
+    ))
+    sector_minimum = int(cfg_get(
+        config, 'factor_validation.sector_minimum_cross_section', 0
+    ))
+    if not (
+        3 <= subtype_minimum <= cohort_minimum
+        <= cohort_target <= sector_minimum
+    ):
+        raise ValueError(
+            'Factor-validation cross-section floors must satisfy '
+            '3 <= subtype <= cohort minimum <= cohort target <= sector.'
+        )
     exemptions = cfg_get(config, "fx_rates.redenomination_exemptions")
     if not isinstance(exemptions, list):
         raise ValueError("fx_rates.redenomination_exemptions must be a list.")
@@ -252,6 +344,9 @@ def _validate_positioning_contract(config: dict[str, Any]) -> None:
     identifier_map = cfg_get(config, 'positioning.source_identifier_map')
     if not isinstance(identifier_map, str) or not identifier_map.strip():
         raise ValueError('positioning.source_identifier_map must be a nonblank path.')
+    cache_root = cfg_get(config, 'positioning.market_positioning_cache_root')
+    if not isinstance(cache_root, str) or not cache_root.strip():
+        raise ValueError('positioning.market_positioning_cache_root must be a nonblank path.')
 
 
 def _validate_scoring_feature_contract(config: dict[str, Any]) -> None:
@@ -259,10 +354,10 @@ def _validate_scoring_feature_contract(config: dict[str, Any]) -> None:
     version = cfg_get(config, 'scoring_features.definition_version')
     if not isinstance(source_id, str) or not source_id.strip():
         raise ValueError('scoring_features.source_id must be nonblank.')
-    if version != 'consumer_defensive_scoring_features_v2':
+    if version != 'consumer_defensive_scoring_features_v3':
         raise ValueError(
             'scoring_features.definition_version must be '
-            "'consumer_defensive_scoring_features_v2'."
+            "'consumer_defensive_scoring_features_v3'."
         )
     if int(cfg_get(config, 'scoring_features.minimum_normalization_peer_count', 0)) < 2:
         raise ValueError('scoring_features.minimum_normalization_peer_count must be at least 2.')
@@ -283,6 +378,325 @@ def _validate_scoring_feature_contract(config: dict[str, Any]) -> None:
         raise ValueError('Specialized scoring components must default to not_loaded.')
     if float(cfg_get(config, 'scoring_features.component_weight_default', 1.0)) != 0.0:
         raise ValueError('Stage 6A scoring component weights must remain zero.')
+
+
+def _validate_stage7_contract(config: dict[str, Any]) -> None:
+    expected = {
+        'source_id': 'consumer_defensive_stage7_baseline_v4',
+        'baseline_source_id': 'consumer_defensive_scoring_contract',
+        'model_version': 'consumer_defensive_stage7_baseline_v4',
+        'promotion_state': 'shadow_monitor',
+        'portfolio_candidate_gate': 0,
+        'oos_score_valid_flag': 0,
+        'require_stage6b_measurement_overlay': True,
+        'specialized_weight_default': 0.0,
+        'specialized_weight_policy': (
+            'shared_factor_validation_acceptance_required'
+        ),
+        'factor_validation_verdict': (
+            'corrected_campaign_zero_accepted_8_metrics_testable_1_fdr_wrong_direction'
+        ),
+    }
+    for key, required in expected.items():
+        actual = cfg_get(config, f'stage7_scoring.{key}')
+        if actual != required:
+            raise ValueError(
+                f'stage7_scoring.{key} must be {required!r}; got {actual!r}'
+            )
+    campaign_id = str(
+        cfg_get(config, 'stage7_scoring.factor_validation_campaign_id', '')
+        or ''
+    )
+    if not campaign_id.strip():
+        raise ValueError(
+            'stage7_scoring.factor_validation_campaign_id must be nonblank.'
+        )
+    neutral = float(cfg_get(config, 'stage7_scoring.neutral_score', -1.0))
+    if not 0.0 <= neutral <= 100.0:
+        raise ValueError('stage7_scoring.neutral_score must be in [0,100].')
+    minimum_quality = float(
+        cfg_get(config, 'stage7_scoring.minimum_data_quality_confidence', -1.0)
+    )
+    maximum_missing = float(
+        cfg_get(config, 'stage7_scoring.maximum_missing_component_weight', -1.0)
+    )
+    minimum_ready = float(
+        cfg_get(config, 'stage7_scoring.minimum_rank_ready_fraction', -1.0)
+    )
+    for label, value in {
+        'minimum_data_quality_confidence': minimum_quality,
+        'maximum_missing_component_weight': maximum_missing,
+        'minimum_rank_ready_fraction': minimum_ready,
+    }.items():
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f'stage7_scoring.{label} must be in [0,1].')
+    weights = cfg_get(config, 'stage7_scoring.component_weights')
+    if not isinstance(weights, dict) or not weights:
+        raise ValueError('stage7_scoring.component_weights must be non-empty.')
+    values: list[float] = []
+    for name, raw in weights.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                'stage7_scoring.component_weights has a blank component name.'
+            )
+        value = float(raw)
+        if value < 0.0 or value > 1.0:
+            raise ValueError(
+                f'stage7_scoring.component_weights.{name} must be in [0,1].'
+            )
+        values.append(value)
+    if abs(sum(values) - 1.0) > 1e-12:
+        raise ValueError(
+            'stage7_scoring.component_weights must sum exactly to 1.0; '
+            f'found {sum(values):.12f}.'
+        )
+
+
+def _validate_stage8_contract(config: dict[str, Any]) -> None:
+    expected = {
+        'mode': 'report_only',
+        'production_promotion_enabled': False,
+        'portfolio_write_enabled': False,
+    }
+    for key, required in expected.items():
+        actual = cfg_get(config, f'stage8_calibration.{key}')
+        if actual != required:
+            raise ValueError(
+                f'stage8_calibration.{key} must be {required!r}; '
+                f'got {actual!r}'
+            )
+    positive_integers = (
+        'candidate_count_per_scope',
+        'minimum_factor_breadth',
+        'maximum_factor_breadth',
+        'minimum_train_dates',
+        'validation_dates',
+        'holdout_dates',
+        'embargo_panel_dates',
+        'walk_forward_initial_train_dates',
+        'walk_forward_test_dates',
+        'minimum_sector_cross_section',
+        'minimum_cohort_cross_section',
+        'minimum_top_positions',
+    )
+    for key in positive_integers:
+        if int(cfg_get(config, f'stage8_calibration.{key}', 0)) < 1:
+            raise ValueError(
+                f'stage8_calibration.{key} must be a positive integer.'
+            )
+    if int(cfg_get(
+        config, 'stage8_calibration.minimum_factor_breadth'
+    )) > int(cfg_get(config, 'stage8_calibration.maximum_factor_breadth')):
+        raise ValueError(
+            'stage8_calibration minimum_factor_breadth cannot exceed '
+            'maximum_factor_breadth.'
+        )
+    bounded = (
+        'component_weight_cap',
+        'weight_l1_turnover_cap',
+        'maximum_specialized_weight',
+        'maximum_cohort_deviation_fraction',
+        'top_quantile',
+        'maximum_top_turnover',
+        'maximum_top_cohort_share',
+        'minimum_walk_forward_win_fraction',
+    )
+    for key in bounded:
+        value = float(cfg_get(config, f'stage8_calibration.{key}', -1.0))
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f'stage8_calibration.{key} must be in [0,1].')
+    if float(cfg_get(
+        config, 'stage8_calibration.candidate_perturbation_scale', 0.0
+    )) <= 0.0:
+        raise ValueError(
+            'stage8_calibration.candidate_perturbation_scale must be positive.'
+        )
+    if float(cfg_get(
+        config, 'stage8_calibration.cohort_shrinkage_strength', 0.0
+    )) <= 0.0:
+        raise ValueError(
+            'stage8_calibration.cohort_shrinkage_strength must be positive.'
+        )
+    if float(cfg_get(
+        config, 'stage8_calibration.transaction_cost_bps', -1.0
+    )) < 0.0:
+        raise ValueError(
+            'stage8_calibration.transaction_cost_bps cannot be negative.'
+        )
+    horizons = cfg_get(config, 'stage8_calibration.horizon_weights')
+    if not isinstance(horizons, dict) or set(horizons) != {'21', '63', '126'}:
+        raise ValueError(
+            'stage8_calibration.horizon_weights must contain exactly '
+            '21, 63, and 126.'
+        )
+    horizon_total = sum(float(value) for value in horizons.values())
+    if abs(horizon_total - 1.0) > 1e-12:
+        raise ValueError(
+            'stage8_calibration.horizon_weights must sum exactly to 1.0.'
+        )
+    holdout_ic = cfg_get(config, 'stage8_calibration.minimum_holdout_mean_ic')
+    if not isinstance(holdout_ic, dict) or set(holdout_ic) != {'63', '126'}:
+        raise ValueError(
+            'stage8_calibration.minimum_holdout_mean_ic must contain '
+            'exactly 63 and 126.'
+        )
+    minimum_embargo = math.ceil(126 / 21) + 1
+    if int(cfg_get(
+        config, 'stage8_calibration.embargo_panel_dates'
+    )) < minimum_embargo:
+        raise ValueError(
+            'stage8_calibration.embargo_panel_dates is shorter than the '
+            '126-session label-isolation minimum.'
+        )
+    minimum_top = int(cfg_get(
+        config, 'stage8_calibration.minimum_top_positions'
+    ))
+    if minimum_top < 3:
+        raise ValueError(
+            'stage8_calibration.minimum_top_positions must be at least 3.'
+        )
+    for scope in ('sector', 'cohort'):
+        cross_section = int(cfg_get(
+            config, f'stage8_calibration.minimum_{scope}_cross_section'
+        ))
+        if cross_section < 2 * minimum_top:
+            raise ValueError(
+                f'stage8_calibration.minimum_{scope}_cross_section must '
+                'support disjoint top and bottom portfolios.'
+            )
+    walk_initial = int(cfg_get(
+        config, 'stage8_calibration.walk_forward_initial_train_dates'
+    ))
+    minimum_train = int(cfg_get(
+        config, 'stage8_calibration.minimum_train_dates'
+    ))
+    if walk_initial >= minimum_train:
+        raise ValueError(
+            'stage8_calibration.walk_forward_initial_train_dates must be '
+            'shorter than minimum_train_dates.'
+        )
+
+
+def _validate_calibration_scope_contract(config: dict[str, Any]) -> None:
+    expected = {
+        'mode': 'explicit_ticker_exclusions',
+        'enforcement_stage': 'before_cross_section_normalization',
+        'selection_basis': (
+            'user_directed_after_review_of_realized_ticker_performance'
+        ),
+        'evidence_classification': 'performance_informed_model_selection',
+        'strict_oos_eligible': False,
+        'preserve_source_history': True,
+        'production_promotion_requires_fresh_post_scope_evidence': True,
+    }
+    for key, required in expected.items():
+        actual = cfg_get(config, f'calibration_scope.{key}')
+        if actual != required:
+            raise ValueError(
+                f'calibration_scope.{key} must be {required!r}; '
+                f'got {actual!r}'
+            )
+
+    reviewed_as_of = cfg_get(config, 'calibration_scope.reviewed_as_of')
+    if not isinstance(reviewed_as_of, str):
+        raise ValueError(
+            'calibration_scope.reviewed_as_of must be a canonical ISO date.'
+        )
+    try:
+        parsed_review_date = date.fromisoformat(reviewed_as_of)
+    except ValueError as exc:
+        raise ValueError(
+            'calibration_scope.reviewed_as_of must be a canonical ISO date.'
+        ) from exc
+    if parsed_review_date.isoformat() != reviewed_as_of:
+        raise ValueError(
+            'calibration_scope.reviewed_as_of must be a canonical ISO date.'
+        )
+
+    cohort_ids = set(cfg_get(config, 'universe.cohorts'))
+    excluded = cfg_get(config, 'calibration_scope.excluded_tickers_by_cohort')
+    remaining = cfg_get(
+        config, 'calibration_scope.expected_remaining_current_by_cohort'
+    )
+    if not isinstance(excluded, dict) or set(excluded) != cohort_ids:
+        raise ValueError(
+            'calibration_scope.excluded_tickers_by_cohort must contain '
+            'exactly the configured cohort ids.'
+        )
+    if not isinstance(remaining, dict) or set(remaining) != cohort_ids:
+        raise ValueError(
+            'calibration_scope.expected_remaining_current_by_cohort must '
+            'contain exactly the configured cohort ids.'
+        )
+
+    observed: set[str] = set()
+    excluded_count = 0
+    ticker_pattern = re.compile(r'^[A-Z0-9][A-Z0-9.\-]*$')
+    for cohort_id in sorted(cohort_ids):
+        tickers = excluded[cohort_id]
+        if not isinstance(tickers, list):
+            raise ValueError(
+                'calibration_scope.excluded_tickers_by_cohort.'
+                f'{cohort_id} must be a list.'
+            )
+        if tickers != sorted(tickers):
+            raise ValueError(
+                'Calibration-scope ticker exclusions must be sorted.'
+            )
+        if len(tickers) != len(set(tickers)):
+            raise ValueError(
+                'Calibration-scope exclusions contain duplicates in '
+                f'{cohort_id}.'
+            )
+        for ticker in tickers:
+            if (
+                not isinstance(ticker, str)
+                or not ticker_pattern.fullmatch(ticker)
+            ):
+                raise ValueError(
+                    f'Invalid calibration-scope ticker {ticker!r}.'
+                )
+            if ticker in observed:
+                raise ValueError(
+                    f'Calibration-scope ticker {ticker} appears in more '
+                    'than one cohort.'
+                )
+            observed.add(ticker)
+        excluded_count += len(tickers)
+        if int(remaining[cohort_id]) < 1:
+            raise ValueError(
+                'Each cohort must retain at least one current ticker after '
+                'calibration exclusions.'
+            )
+
+    expected_excluded = int(cfg_get(
+        config, 'calibration_scope.expected_excluded_ticker_count'
+    ))
+    if excluded_count != expected_excluded:
+        raise ValueError(
+            'calibration_scope.expected_excluded_ticker_count does not tie '
+            'to excluded_tickers_by_cohort.'
+        )
+    expected_remaining = int(cfg_get(
+        config, 'calibration_scope.expected_remaining_current_ticker_count'
+    ))
+    if sum(int(value) for value in remaining.values()) != expected_remaining:
+        raise ValueError(
+            'calibration_scope.expected_remaining_current_ticker_count does '
+            'not tie to expected_remaining_current_by_cohort.'
+        )
+    remaining_sha = cfg_get(
+        config,
+        'calibration_scope.expected_remaining_current_tickers_sha256',
+    )
+    if (
+        not isinstance(remaining_sha, str)
+        or not re.fullmatch(r'[0-9a-f]{64}', remaining_sha)
+    ):
+        raise ValueError(
+            'calibration_scope.expected_remaining_current_tickers_sha256 '
+            'must be a lowercase SHA-256 digest.'
+        )
 
 
 def _validate_stage6b_contract(config: dict[str, Any]) -> None:
@@ -361,6 +775,68 @@ def _validate_stage6b_contract(config: dict[str, Any]) -> None:
         )
 
 
+def _validate_production_score_publisher_contract(config: dict[str, Any]) -> None:
+    section = cfg_get(config, "production_score_publisher_v3")
+    if not isinstance(section, dict):
+        raise ValueError("production_score_publisher_v3 must be a mapping.")
+    if section.get("schema_version") != "consumer_defensive_production_score_publisher_v3":
+        raise ValueError(
+            "production_score_publisher_v3.schema_version must identify the v3 publisher."
+        )
+    for key in (
+        "source_database_path",
+        "output_root",
+        "activation_registry_path",
+        "candidate_registry_path",
+    ):
+        if not isinstance(section.get(key), str) or not str(section[key]).strip():
+            raise ValueError(f"production_score_publisher_v3.{key} must be a nonblank path.")
+    if section["source_database_path"] != cfg_get(config, "paths.database_path"):
+        raise ValueError(
+            "production_score_publisher_v3.source_database_path must use the canonical "
+            "Consumer database."
+        )
+    for key in (
+        "activation_registry_file_sha256",
+        "activation_registry_payload_sha256",
+        "candidate_registry_file_sha256",
+        "candidate_registry_payload_sha256",
+        "scoring_contract_version",
+    ):
+        value = section.get(key)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(
+                f"production_score_publisher_v3.{key} must be a lowercase SHA-256 digest."
+            )
+    if section.get("entry_lag_trading_sessions") != 1:
+        raise ValueError(
+            "production_score_publisher_v3.entry_lag_trading_sessions must equal one."
+        )
+    for key in (
+        "selected_candidate_id_by_cohort",
+        "model_contract_sha256_by_cohort",
+    ):
+        values = section.get(key)
+        if not isinstance(values, dict) or set(values) != CONSUMER_COHORT_IDS:
+            raise ValueError(
+                f"production_score_publisher_v3.{key} must contain exactly the four "
+                "Consumer cohorts."
+            )
+    candidate_ids = section["selected_candidate_id_by_cohort"]
+    if any(not isinstance(value, str) or not value.strip() for value in candidate_ids.values()):
+        raise ValueError(
+            "production_score_publisher_v3 selected candidate IDs must be nonblank."
+        )
+    model_hashes = section["model_contract_sha256_by_cohort"]
+    if any(
+        not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for value in model_hashes.values()
+    ):
+        raise ValueError(
+            "production_score_publisher_v3 model-contract pins must be lowercase SHA-256 digests."
+        )
+
+
 def _assert_contract_equal(label: str, left: Any, right: Any) -> None:
     if left != right:
         raise ValueError(f"Consumer Defensive contract drift for {label}: config={left!r}, policy={right!r}")
@@ -421,7 +897,11 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_nested_keys(config)
     _validate_positioning_contract(config)
     _validate_scoring_feature_contract(config)
+    _validate_stage7_contract(config)
+    _validate_stage8_contract(config)
+    _validate_calibration_scope_contract(config)
     _validate_stage6b_contract(config)
+    _validate_production_score_publisher_contract(config)
 
     expected_values = {
         "runtime.model_family": "consumer_defensive",
@@ -434,6 +914,19 @@ def validate_config(config: dict[str, Any]) -> None:
         "dedicated_parser.model_family": "consumer_defensive",
         "portfolio_layer.adapter": "consumer_defensive",
         "portfolio_layer.canonical_sector": "Consumer Staples",
+        "promotion_framework_v2.framework_path": "data/consumer_defensive_promotion_framework_v2.yaml",
+        "promotion_framework_v2.shared_service_contract_path": "data/consumer_defensive_shared_service_contract_v1.yaml",
+        "promotion_framework_v2.status": "recalibration_required",
+        "promotion_framework_v2.legacy_protocol_status": "retired_archived",
+        "promotion_framework_v3.framework_path": "data/consumer_defensive_promotion_framework_v3.yaml",
+        "promotion_framework_v3.engine_module": "consumer_defensive.core.promotion_engine_v3",
+        "promotion_framework_v3.status": "active_standard_allocation_pinned_registry",
+        "promotion_framework_v3.portfolio_activation_requires_pinned_registry": True,
+        "portfolio_layer.enabled": True,
+        "portfolio_layer.required": True,
+        "portfolio_layer.sector_weight_cap": 0.125,
+        "portfolio_layer.promotion_state": "active",
+        "production_score_publisher_v3.output_root": "../output",
     }
     for dotted_key, expected in expected_values.items():
         actual = cfg_get(config, dotted_key)
@@ -473,13 +966,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("An active Portfolio Layer must be enabled, required, and have a cap in (0, 1].")
 
     cohorts = cfg_get(config, "universe.cohorts", {})
-    expected_cohorts = {
-        "beverages",
-        "consumer_staples_distribution_retail",
-        "household_personal_tobacco",
-        "packaged_foods_agricultural_products",
-    }
-    if not isinstance(cohorts, dict) or set(cohorts) != expected_cohorts:
+    if not isinstance(cohorts, dict) or set(cohorts) != CONSUMER_COHORT_IDS:
         raise ValueError("Consumer Defensive config must define exactly the four reviewed cohort IDs.")
 
 

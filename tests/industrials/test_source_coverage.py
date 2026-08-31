@@ -21,6 +21,13 @@ def _connection() -> sqlite3.Connection:
             company_id INTEGER,
             model_family TEXT
         );
+        CREATE TABLE dim_universe_membership (
+            company_id INTEGER,
+            ticker TEXT,
+            model_family TEXT,
+            membership_basis TEXT,
+            is_current_member INTEGER
+        );
         CREATE TABLE fact_price_ohlcv (ticker TEXT, bar_date TEXT);
         CREATE TABLE fact_market_snapshot (ticker TEXT, asof_date TEXT);
         CREATE TABLE feature_market_technical (ticker TEXT, asof_date TEXT);
@@ -31,11 +38,15 @@ def _connection() -> sqlite3.Connection:
     )
     conn.executemany(
         "INSERT INTO dim_company VALUES (?,?,1)",
-        [(1, "AAA"), (2, "BBB")],
+        [(1, "AAA"), (2, "BBB"), (3, "STALE")],
     )
     conn.executemany(
         "INSERT INTO dim_industrials_taxonomy VALUES (?,?)",
-        [(1, "machinery"), (2, "machinery")],
+        [(1, "machinery"), (2, "machinery"), (3, "machinery")],
+    )
+    conn.executemany(
+        "INSERT INTO dim_universe_membership VALUES (?,?,'machinery','current_source_of_truth',1)",
+        [(1, "AAA"), (2, "BBB")],
     )
     for table, date_column in (
         ("fact_price_ohlcv", "bar_date"),

@@ -703,6 +703,11 @@ weights and applies only the hard realized-RC cap (trim-to-CASH). In this cap-on
 safety means ENB is not materially worse and absolute total/systematic variance cannot increase; relative factor
 shares remain reported because a de-risking trim can move a ratio while reducing every absolute risk amount.
 
+If a multi-sleeve risk-budget proposal materially worsens ENB, Stage 8 rejects that rewrite and falls back to
+the sealed Stage 7 weights with only the hard realized-RC cap trimmed to CASH. Stage 29 independently replays
+both candidates and verifies the selected mode and complete weight vector. Intermediate blends are not used
+because blending two RC-cap-compliant books can itself breach the nonlinear realized-RC cap.
+
 **Build (`sleeves/`, clean):**
 - `sleeves/risk_model.py` — RC, Σ-based factor decomposition, ENB, betas, IR, realized RC-cap trimming,
   sleeve feasibility bounds (pure functions).

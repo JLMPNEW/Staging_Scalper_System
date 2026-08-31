@@ -14,6 +14,7 @@ if str(MACRO_LAYER_ROOT) not in sys.path:
     sys.path.insert(0, str(MACRO_LAYER_ROOT))
 
 from macro_serving_common import release_staleness_days  # noqa: E402
+from run_macro_serving_pipeline import resolve_pipeline_end_date  # noqa: E402
 from portfolio_layer.macro.contract import (  # noqa: E402
     regime_application_errors,
     regime_table_for_source,
@@ -36,6 +37,40 @@ def test_lower_frequency_staleness_remains_calendar_based() -> None:
         anchor=date(2026, 7, 2),
         frequency="weekly",
     ) == 5
+
+
+def test_incremental_macro_end_is_bounded_by_requested_date() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE macro_calendar_daily (as_of_date TEXT NOT NULL)")
+        conn.executemany(
+            "INSERT INTO macro_calendar_daily VALUES (?)",
+            [("2026-08-25",), ("2026-08-26",), ("2026-08-28",)],
+        )
+        assert resolve_pipeline_end_date(
+            conn,
+            requested_end_date="2026-08-25",
+        ) == "2026-08-25"
+    finally:
+        conn.close()
+
+
+def test_incremental_macro_end_requires_requested_calendar_row() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE macro_calendar_daily (as_of_date TEXT NOT NULL)")
+        conn.executemany(
+            "INSERT INTO macro_calendar_daily VALUES (?)",
+            [("2026-08-24",), ("2026-08-28",)],
+        )
+        try:
+            resolve_pipeline_end_date(conn, requested_end_date="2026-08-25")
+        except RuntimeError as exc:
+            assert "requested=2026-08-25 resolved=2026-08-24" in str(exc)
+        else:
+            raise AssertionError("missing requested calendar row must fail closed")
+    finally:
+        conn.close()
 
 
 def test_covered_regime_is_allocation_safe() -> None:

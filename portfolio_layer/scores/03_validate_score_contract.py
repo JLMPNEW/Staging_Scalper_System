@@ -24,15 +24,25 @@ from orchestration_contracts.financial_lineage import (  # noqa: E402
     evaluate_financial_lineage_rows,
     policy_for_model_family,
 )
-from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from portfolio_layer.core.config import (  # noqa: E402
+    active_score_sectors,
+    cfg_get,
+    load_yaml,
+    resolve_path,
+)
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
-    CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, fail_if_exists, percentiles_within,
-    rating_for_percentile, read_csv, sha256_file, validate_rating_bands, write_csv, write_manifest,
+    CONTRACT_FIELDS, DEFAULT_RATING_BANDS, calibration_scope_key, contract_version,
+    fail_if_exists, percentiles_within, rating_for_percentile, read_csv, sha256_file,
+    validate_rating_bands, write_csv, write_manifest,
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
-from portfolio_layer.scores.adapters import _truthy as adapter_truthy  # noqa: E402
+from portfolio_layer.scores.adapters import (  # noqa: E402
+    _truthy as adapter_truthy,
+    validate_consumer_v3_optimizer_cap_binding,
+    validate_consumer_v3_runtime_authority,
+)
 
 
 LOGGER = logging.getLogger("validate_score_contract")
@@ -88,6 +98,78 @@ def row_flag(row: dict[str, str], field: str) -> bool:
         return int(float(str(row.get(field, "0")).strip() or "0")) != 0
     except (TypeError, ValueError):
         return False
+
+
+def calibration_population_errors(
+    rows: list[dict[str, str]], bands: dict[str, float]
+) -> tuple[list[str], list[str]]:
+    """Validate monotonicity and ranks in the same model scopes used by calibration."""
+    by_scope: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in rows:
+        key = calibration_scope_key(row)
+        if key[0]:
+            by_scope.setdefault(key, []).append(row)
+
+    non_monotone: list[str] = []
+    bad_pct_rating: list[str] = []
+    for (pipeline, scope), scope_rows in by_scope.items():
+        label = pipeline if scope == pipeline else f"{pipeline}/{scope}"
+        pairs = [
+            (native, final)
+            for native, final in (
+                (parse_float(row.get("native_score")), parse_float(row.get("final_score")))
+                for row in scope_rows
+                if not row_flag(row, "missing_score_flag")
+            )
+            if native is not None and final is not None
+        ]
+        ordered = sorted(pairs, key=lambda pair: pair[0])
+        if any(
+            ordered[index][1] < ordered[index - 1][1] - 1e-9
+            for index in range(1, len(ordered))
+        ):
+            non_monotone.append(label)
+
+        native_values: list[float] = []
+        valid_rows: list[dict[str, str]] = []
+        for row in scope_rows:
+            native = parse_float(row.get("native_score"))
+            if row_flag(row, "missing_score_flag"):
+                actual_pct = parse_float(row.get("within_sector_percentile"))
+                actual_rating = str(row.get("rating", "")).strip()
+                final_score = parse_float(row.get("final_score"))
+                if (
+                    actual_pct != 0.0
+                    or actual_rating != "avoid"
+                    or final_score is None
+                    or abs(final_score) > 1e-12
+                ):
+                    bad_pct_rating.append(
+                        f"{row.get('ticker', '<missing>')}:{label}:missing_score_not_neutral_avoid"
+                    )
+                continue
+            if native is None:
+                bad_pct_rating.append(
+                    f"{row.get('ticker', '<missing>')}:{label}:native_score_unparseable"
+                )
+                continue
+            native_values.append(native)
+            valid_rows.append(row)
+        for row, pct in zip(valid_rows, percentiles_within(native_values)):
+            expected_pct = round(pct, 4)
+            actual_pct = parse_float(row.get("within_sector_percentile"))
+            if actual_pct is None or abs(actual_pct - expected_pct) > 0.0001:
+                bad_pct_rating.append(
+                    f"{row.get('ticker', '<missing>')}:{label}:pct "
+                    f"expected={expected_pct} actual={actual_pct}"
+                )
+            expected_rating = rating_for_percentile(pct, bands)
+            if str(row.get("rating", "")).strip() != expected_rating:
+                bad_pct_rating.append(
+                    f"{row.get('ticker', '<missing>')}:{label}:rating "
+                    f"expected={expected_rating} actual={row.get('rating')}"
+                )
+    return sorted(non_monotone), bad_pct_rating
 
 
 # Contract eligibility_reason prefixes that legitimately demote an upstream gate=1 row: the adapter
@@ -182,7 +264,9 @@ def validate_med_devices_handoff(
             top_non_candidate_tickers,
         )
     warnings: list[str] = []
-    if gate_tickers and not stage1_tickers:
+    if not gate_tickers:
+        warnings.append("upstream_portfolio_candidate_gate_is_empty")
+    elif not stage1_tickers:
         warnings.append(f"all_gate_tickers_demoted_or_reassigned:{sorted(gate_tickers)[:20]}")
     return errors, warnings
 
@@ -221,7 +305,11 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         return 1
     rows = read_csv(scores_path)
     duplicate_rows = read_csv(duplicate_path) if duplicate_path.exists() else []
-    enabled_sectors = [s for s in cfg_get(config, "score_contract.sectors", []) if bool(s.get("enabled", True))]
+    try:
+        enabled_sectors = active_score_sectors(config, run_as_of)
+    except ValueError as exc:
+        LOGGER.error("Invalid score-sector activation contract: %s", exc)
+        return 1
     expected_pipelines = {str(s.get("model_family", "")) for s in enabled_sectors if str(s.get("model_family", ""))}
     required_pipelines = {
         str(s.get("model_family", ""))
@@ -388,58 +476,62 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         pipe = str(r.get("source_pipeline", "")).strip()
         if pipe:
             by_pipe_rows.setdefault(pipe, []).append(r)
-    non_monotone = []
-    for pipe, srows in by_pipe_rows.items():
-        pairs = [
-            (native, final)
-            for native, final in (
-                (parse_float(r.get("native_score")), parse_float(r.get("final_score")))
-                for r in srows
-                if not row_flag(r, "missing_score_flag")
+    non_monotone, bad_pct_rating = calibration_population_errors(rows, bands)
+    consumer_cfg = next(
+        (
+            sector
+            for sector in enabled_sectors
+            if str(sector.get("model_family") or "").strip() == "consumer_defensive"
+        ),
+        None,
+    )
+    if consumer_cfg is None:
+        record("consumer_v3_cap_authority_bound", "PASS", "Consumer Defensive is not enabled")
+    else:
+        consumer_authority_error = ""
+        try:
+            validate_consumer_v3_optimizer_cap_binding(
+                consumer_cfg, cfg_get(config, "optimizer", {})
             )
-            if native is not None and final is not None
-        ]
-        ordered = sorted(pairs, key=lambda p: p[0])
-        if any(ordered[i][1] < ordered[i - 1][1] - 1e-9 for i in range(1, len(ordered))):
-            non_monotone.append(pipe)
+            configured_caps = consumer_cfg.get("optimizer_cap_by_scope") or {}
+            has_positive_authority = any(
+                float(value) > 0.0 for value in configured_caps.values()
+            )
+            if has_positive_authority and not str(
+                consumer_cfg.get("production_activation_registry_file_path") or ""
+            ).strip():
+                raise ValueError("positive Consumer authority requires a pinned registry")
+            sector_root = resolve_path(
+                cfg_get(config, "score_contract.sector_output_root", "../output"),
+                base_dir=config_path.parent,
+            )
+            source_dates = {
+                str(row.get("source_asof_date") or "").strip()
+                for row in by_pipe_rows.get("consumer_defensive", [])
+                if str(row.get("source_asof_date") or "").strip()
+            } or {run_as_of}
+            for source_asof in sorted(source_dates):
+                validate_consumer_v3_runtime_authority(
+                    dict(consumer_cfg),
+                    sector_root,
+                    source_asof=source_asof,
+                    portfolio_asof=run_as_of,
+                )
+        except (TypeError, ValueError) as exc:
+            consumer_authority_error = str(exc)
+        record(
+            "consumer_v3_cap_authority_bound",
+            "PASS" if not consumer_authority_error else "FAIL",
+            "Consumer caps, alpha, registry, and run dates are bound"
+            if not consumer_authority_error
+            else consumer_authority_error,
+        )
     record("monotonic_calibration", "PASS" if not non_monotone else "FAIL",
-           "final_score monotonic in native per sector" if not non_monotone else f"violations: {non_monotone}")
+           "final_score monotonic in native per model scope" if not non_monotone else f"violations: {non_monotone}")
 
-    # 8. percentile/rating computed against final deduplicated sector population
-    bad_pct_rating: list[str] = []
-    for pipe, srows in by_pipe_rows.items():
-        native_values: list[float] = []
-        valid_rows: list[dict] = []
-        for r in srows:
-            native = parse_float(r.get("native_score"))
-            if row_flag(r, "missing_score_flag"):
-                actual_pct = parse_float(r.get("within_sector_percentile"))
-                actual_rating = str(r.get("rating", "")).strip()
-                final_score = parse_float(r.get("final_score"))
-                if actual_pct != 0.0 or actual_rating != "avoid" or final_score is None or abs(final_score) > 1e-12:
-                    bad_pct_rating.append(f"{r.get('ticker', '<missing>')}:{pipe}:missing_score_not_neutral_avoid")
-                continue
-            if native is None:
-                bad_pct_rating.append(f"{r.get('ticker', '<missing>')}:{pipe}:native_score_unparseable")
-                continue
-            native_values.append(native)
-            valid_rows.append(r)
-        if not valid_rows:
-            continue
-        for r, pct in zip(valid_rows, percentiles_within(native_values)):
-            expected_pct = round(pct, 4)
-            actual_pct = parse_float(r.get("within_sector_percentile"))
-            if actual_pct is None or abs(actual_pct - expected_pct) > 0.0001:
-                bad_pct_rating.append(
-                    f"{r.get('ticker', '<missing>')}:{pipe}:pct expected={expected_pct} actual={actual_pct}"
-                )
-            expected_rating = rating_for_percentile(pct, bands)
-            if str(r.get("rating", "")).strip() != expected_rating:
-                bad_pct_rating.append(
-                    f"{r.get('ticker', '<missing>')}:{pipe}:rating expected={expected_rating} actual={r.get('rating')}"
-                )
+    # 8. percentile/rating computed against final deduplicated model-scope population
     record("percentile_rating_final_population", "PASS" if not bad_pct_rating else "FAIL",
-           "percentile/rating recompute from final sector populations" if not bad_pct_rating else (
+           "percentile/rating recompute from final model-scope populations" if not bad_pct_rating else (
                f"{len(bad_pct_rating)} mismatches; first={bad_pct_rating[:10]}"
            ))
 
@@ -519,7 +611,7 @@ def main() -> int:  # noqa: C901 - linear sequence of acceptance checks
         "PASS" if not med_handoff_warnings else "WARN",
         "at least one upstream gate ticker reaches investable_eligible=1"
         if not med_handoff_warnings
-        else f"optimizer receives zero investable med-device names; {med_handoff_warnings[0]}",
+        else f"med-device optimizer participation is degraded; {med_handoff_warnings[0]}",
     )
 
     # 10. point-in-time source dates and staleness

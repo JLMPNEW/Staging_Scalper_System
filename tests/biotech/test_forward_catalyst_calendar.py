@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
 import csv
+import importlib.util
+import json
+from datetime import date
+from pathlib import Path
 
 from biotech_index.core.db import connect, init_db
 
@@ -12,6 +14,40 @@ SPEC = importlib.util.spec_from_file_location("build_forward_catalyst_calendar",
 assert SPEC is not None and SPEC.loader is not None
 calendar = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(calendar)
+
+
+def test_calendar_publication_writes_hash_sealed_same_day_snapshot(tmp_path: Path) -> None:
+    root_path = tmp_path / "forward_catalyst_calendar.csv"
+    published = calendar.publish_calendar_outputs(
+        root_path,
+        [{"ticker": "TEST", "event_type": "pdufa_date", "event_date": "2026-08-29"}],
+        {"asof_date": "2026-08-28", "event_count": 1},
+        asof_date=date(2026, 8, 28),
+        publish_dated_snapshot=True,
+    )
+
+    dated_path = tmp_path / "20260828" / root_path.name
+    assert [item[0] for item in published] == [root_path, dated_path]
+    assert dated_path.read_bytes() == root_path.read_bytes()
+    for csv_path, manifest_path in published:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["schema_version"] == 2
+        assert manifest["output_csv"] == str(csv_path)
+        assert manifest["output_sha256"] == calendar.file_sha256(csv_path)
+
+
+def test_calendar_output_override_does_not_publish_production_snapshot(tmp_path: Path) -> None:
+    override_path = tmp_path / "smoke" / "calendar.csv"
+    published = calendar.publish_calendar_outputs(
+        override_path,
+        [],
+        {"asof_date": "2026-08-28", "event_count": 0},
+        asof_date=date(2026, 8, 28),
+        publish_dated_snapshot=False,
+    )
+
+    assert [item[0] for item in published] == [override_path]
+    assert not (override_path.parent / "20260828").exists()
 
 
 def insert_company(conn, ticker: str, company_name: str) -> int:

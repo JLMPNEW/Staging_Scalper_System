@@ -6,7 +6,8 @@ import csv
 import hashlib
 import logging
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -633,6 +634,54 @@ def sync_company(
         return CompanySyncResult(company=company, filings=[], error=f"{type(exc).__name__}: {exc}")
 
 
+def iter_bounded_company_results(
+    companies: list[Company],
+    *,
+    max_workers: int,
+    sync_kwargs: dict[str, Any],
+    sync_fn: Callable[..., CompanySyncResult] = sync_company,
+) -> Iterator[tuple[int, int, Company, CompanySyncResult]]:
+    """Yield completed companies while retaining at most one task per worker.
+
+    Filing payloads can contain large submission text. Submitting the complete
+    universe at once lets completed Future objects retain every company's text
+    until the executor exits, even after SQLite persistence. Keeping only
+    max_workers futures live bounds memory to the active batch.
+    """
+    worker_count = max(1, int(max_workers))
+    indexed_companies = iter(enumerate(companies, start=1))
+    completed = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        pending: dict[Future[CompanySyncResult], tuple[int, Company]] = {}
+
+        def submit_next() -> bool:
+            try:
+                idx, company = next(indexed_companies)
+            except StopIteration:
+                return False
+            pending[executor.submit(sync_fn, company, **sync_kwargs)] = (idx, company)
+            return True
+
+        for _ in range(worker_count):
+            if not submit_next():
+                break
+        while pending:
+            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in done:
+                idx, company = pending.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = CompanySyncResult(
+                        company=company,
+                        filings=[],
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                completed += 1
+                yield completed, idx, company, result
+                submit_next()
+
+
 def persist_company_result(
     conn,
     result: CompanySyncResult,
@@ -818,38 +867,46 @@ def main() -> None:
                         result.text_errors,
                     )
             else:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(sync_company, company, **sync_kwargs): (idx, company)
-                        for idx, company in enumerate(companies, start=1)
-                    }
-                    for done_count, future in enumerate(as_completed(futures), start=1):
-                        idx, company = futures[future]
-                        try:
-                            result = future.result()
-                        except Exception as exc:
-                            result = CompanySyncResult(company=company, filings=[], error=f"{type(exc).__name__}: {exc}")
-                        if result.error:
-                            error_count += 1
-                            LOGGER.warning("[%d/%d complete=%d] %s skipped: %s", idx, len(companies), done_count, company.ticker, result.error)
-                        text_error_count += int(result.text_errors)
-                        persist_company_result(
-                            conn,
-                            result,
-                            rows_out=rows_out,
-                            existing_documents=existing_documents,
-                            existing_documents_lock=existing_documents_lock,
-                        )
-                        LOGGER.info(
-                            "[%d/%d complete=%d] %s cik=%s filings=%d text_errors=%d",
+                for done_count, idx, company, result in iter_bounded_company_results(
+                    companies,
+                    max_workers=max_workers,
+                    sync_kwargs=sync_kwargs,
+                ):
+                    if result.error:
+                        error_count += 1
+                        LOGGER.warning(
+                            "[%d/%d complete=%d] %s skipped: %s",
                             idx,
                             len(companies),
                             done_count,
                             company.ticker,
-                            company.cik,
-                            len(result.filings),
-                            result.text_errors,
+                            result.error,
                         )
+                    text_error_count += int(result.text_errors)
+                    persist_company_result(
+                        conn,
+                        result,
+                        rows_out=rows_out,
+                        existing_documents=existing_documents,
+                        existing_documents_lock=existing_documents_lock,
+                    )
+                    LOGGER.info(
+                        "[%d/%d complete=%d] %s cik=%s filings=%d text_errors=%d",
+                        idx,
+                        len(companies),
+                        done_count,
+                        company.ticker,
+                        company.cik,
+                        len(result.filings),
+                        result.text_errors,
+                    )
+            rows_out.sort(
+                key=lambda row: (
+                    str(row.get("ticker") or ""),
+                    str(row.get("filing_date") or ""),
+                    str(row.get("accession_nodash") or ""),
+                )
+            )
             write_csv(output_csv, rows_out)
             total_filings = len(rows_out)
             # Isolated filing-text fetch failures should not fail the whole run:

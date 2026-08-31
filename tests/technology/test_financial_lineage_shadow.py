@@ -89,15 +89,15 @@ def _seed_safe_filing(conn: sqlite3.Connection) -> None:
             "1",
             "safe-2026",
             "10-Q",
-            "2026-08-01",
-            "2026-08-01T09:30:00",
+            "2026-08-03",
+            "2026-08-03T09:30:00",
             "2026-06-30",
             "safe.htm",
         ),
     )
     conn.executemany(
         "INSERT INTO fact_financial_statement_canonical VALUES (?,?,?,?)",
-        [("SAFE", metric, "safe-2026", "2026-08-01") for metric in ("revenue", "assets", "operating_income")],
+        [("SAFE", metric, "safe-2026", "2026-08-03") for metric in ("revenue", "assets", "operating_income")],
     )
     conn.executemany(
         "INSERT INTO feature_financial_statement VALUES (?,?,?)",
@@ -109,7 +109,7 @@ def _seed_safe_filing(conn: sqlite3.Connection) -> None:
             "SAFE",
             "semiconductors",
             ASOF,
-            "2026-08-01",
+            "2026-08-03",
             "safe-2026",
             "2026-06-30",
             "2026-08-14T12:01:00Z",

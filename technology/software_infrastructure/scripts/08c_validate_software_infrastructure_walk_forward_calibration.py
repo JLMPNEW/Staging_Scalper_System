@@ -14,6 +14,10 @@ from technology.software_infrastructure.optuna_calibration import (  # noqa: E40
     validate_software_infrastructure_walk_forward_calibration,
 )
 
+from technology.core.optuna_artifact_governance import validate_walk_forward_from_argv  # noqa: E402
+
 
 if __name__ == "__main__":
-    raise SystemExit(validate_software_infrastructure_walk_forward_calibration())
+    native_status = validate_software_infrastructure_walk_forward_calibration()
+    hardened_status = validate_walk_forward_from_argv("software_infrastructure")
+    raise SystemExit(max(native_status, hardened_status))

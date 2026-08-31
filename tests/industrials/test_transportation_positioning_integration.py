@@ -22,7 +22,9 @@ def test_transportation_positioning_config_is_family_scoped() -> None:
     assert positioning["require_upstream_short_for_gate"] is True
     assert positioning["require_short_pct_float_for_gate"] is False
     assert positioning["require_upstream_borrow_for_gate"] is True
-    for value in result["paths"].values():
+    paths = result["paths"]
+    assert isinstance(paths, dict)
+    for value in paths.values():
         lowered = str(value).lower()
         assert "transportation" in lowered
         assert "defense" not in lowered
@@ -44,6 +46,24 @@ def test_azul_post_restructuring_13f_gap_is_explicit_and_time_bounded() -> None:
         == "POST_RESTRUCTURING_NO_Q1_2026_13F_HOLDINGS"
     )
     assert azul["institutional_13f_exempt_until"] == "2026-10-15"
+
+
+def test_fro_form4_gap_is_governed_as_foreign_private_issuer() -> None:
+    overrides_path = (
+        DEFAULT_POSITIONING_CONFIG.parent
+        / "system_csvs"
+        / "transportation_positioning_overrides.csv"
+    )
+    with overrides_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = {row["ticker"]: row for row in csv.DictReader(handle)}
+    fro = rows["FRO"]
+    assert fro["form4_exempt"] == "1"
+    assert (
+        fro["form4_exemption_reason"]
+        == "FOREIGN_PRIVATE_ISSUER_SECTION16_NOT_APPLICABLE"
+    )
+    assert fro["valid_from"] == "2026-08-24"
+    assert fro["reviewed_at"] == "2026-08-29"
 
 
 def test_positioning_wrapper_pins_family_and_config() -> None:

@@ -12,6 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from technology.semiconductors.optuna_calibration import run_semiconductor_walk_forward_calibration  # noqa: E402
 
+from technology.core.optuna_artifact_governance import run_walk_forward_with_governance  # noqa: E402
+
 
 if __name__ == "__main__":
-    run_semiconductor_walk_forward_calibration()
+    run_walk_forward_with_governance(run_semiconductor_walk_forward_calibration, "semiconductors")

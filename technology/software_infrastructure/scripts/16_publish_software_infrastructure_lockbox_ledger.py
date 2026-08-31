@@ -27,8 +27,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.calibrated_scoring import component_weight_specs, subfeature_weight_specs  # noqa: E402
+from technology.core.calibration_governance import weight_fingerprint  # noqa: E402
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.promotion_governance import resolve_production_binding  # noqa: E402
 from technology.core.scoring_features import SUBFEATURE_SPECS  # noqa: E402
 from technology.software_infrastructure.calibrated_scoring import SETTINGS  # noqa: E402
 from technology.software_infrastructure.optuna_calibration import write_csv  # noqa: E402
@@ -548,6 +550,18 @@ def main() -> int:
         ),
         base_dir=config_path.parent,
     )
+    rollback_scores_path = resolve_path(
+        cfg_get(config, "software_infrastructure_stage8_v1_rollback_shadow_scoring.output_csv"),
+        base_dir=config_path.parent,
+    )
+    rollback_validation_path = resolve_path(
+        cfg_get(config, "software_infrastructure_stage8_v1_rollback_shadow_scoring.validation_output_csv"),
+        base_dir=config_path.parent,
+    )
+    probation_dir = resolve_path(
+        cfg_get(config, "software_infrastructure_promotion_probation.output_dir"),
+        base_dir=config_path.parent,
+    )
     challenger_reference = matching_backtest(backtest_rows, challenger_model_name, "top_decile", "score_weight", "long_only")
     production_reference = matching_backtest(backtest_rows, production_model_name, "top_decile", "score_weight", "long_only")
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -562,11 +576,17 @@ def main() -> int:
         artifact_row("production_validation", "validation", scoring_dir / "software_infrastructure_production_validation.csv"),
         artifact_row("stage7_challenger_scores", "challenger_scores", challenger_scores_path),
         artifact_row("stage7_challenger_validation", "challenger_validation", challenger_validation_path),
+        artifact_row("stage8_v1_rollback_shadow_scores", "rollback_scores", rollback_scores_path),
+        artifact_row("stage8_v1_rollback_shadow_validation", "rollback_validation", rollback_validation_path),
+        artifact_row("promotion_probation_status", "promotion_probation", probation_dir / "software_infrastructure_promotion_probation_status.json"),
+        artifact_row("promotion_probation_manifest", "promotion_probation", probation_dir / "software_infrastructure_promotion_probation_manifest.json"),
         artifact_row("stage8a_summary", "diagnostics", diagnostics_dir / "stage8a_summary.json"),
         artifact_row("subfeature_ic", "diagnostics", diagnostics_dir / "subfeature_ic.csv"),
         artifact_row("component_ic", "diagnostics", diagnostics_dir / "component_ic.csv"),
         artifact_row("signal_birthdates", "diagnostics", diagnostics_dir / "signal_birthdates.csv"),
         artifact_row("stage8_best_weights", "research_calibration", optuna_dir / "stage8_best_weights.json"),
+        artifact_row("stage8_run_manifest", "research_calibration", optuna_dir / "stage8_run_manifest.json", required=False),
+        artifact_row("walk_forward_run_manifest", "research_calibration", optuna_dir / "walk_forward" / "walk_forward_run_manifest.json", required=False),
         artifact_row("stage8_best_summary", "research_calibration", optuna_dir / "stage8_best_summary.csv"),
         artifact_row("stage8_candidate_current_scores", "research_calibration", optuna_dir / "stage8_candidate_current_scores.csv"),
         artifact_row("walk_forward_summary", "research_calibration", optuna_dir / "walk_forward" / "walk_forward_summary.json"),
@@ -578,25 +598,51 @@ def main() -> int:
         artifact_row("signal_registry_report", "governance", signal_registry_csv),
     ]
 
+    production_binding = resolve_production_binding(
+        config,
+        config_path=config_path,
+        family="software_infrastructure",
+        governance_config_key="software_infrastructure_governance_reports",
+    )
+    if production_binding.receipt_path:
+        artifacts.append(
+            artifact_row(
+                "active_manual_promotion_receipt",
+                "promotion_receipt",
+                Path(production_binding.receipt_path),
+            )
+        )
     production_model_status = str(cfg_get(config, f"{CONFIG_KEY}.production_model_status", "stage7_active"))
     configured_stage8_status = str(cfg_get(config, f"{CONFIG_KEY}.stage8_candidate_status", "manual_review_required"))
     manual_promotion_approved = int(bool(cfg_get(config, f"{CONFIG_KEY}.manual_promotion_approved", False)))
     stage8_is_current_production = int(
         production_model_status == "stage8_active"
-        and configured_stage8_status == "promoted_to_production"
+        and configured_stage8_status in {"promoted_to_production", "manual_economic_override_promoted"}
         and manual_promotion_approved == 1
     )
-    latest_stage8_research_promotion_candidate = int(stage8_weights.get("promotion_candidate") or 0)
+    active_receipt = read_json(Path(production_binding.receipt_path)) if production_binding.receipt_path else {}
+    latest_candidate_promoted = int(
+        bool(stage8_is_current_production)
+        and production_binding.valid
+        and active_receipt.get("weights_sha256") == weight_fingerprint(stage8_weights)
+    )
+    latest_stage8_research_promotion_candidate = int(walk_forward_summary.get("final_promotion_eligible") or 0)
     latest_stage8_research_status = (
+        "manual_economic_override_promoted"
+        if latest_candidate_promoted
+        else
         "promotable_pending_manual_review"
         if latest_stage8_research_promotion_candidate
         else "report_only_not_promoted"
     )
     promotion_reason = (
-        "Configured Stage 8 production model remains active from the recorded manual promotion. "
-        "The latest Stage 8 research file is tracked separately and does not overwrite production state."
-        if stage8_is_current_production
-        else "Latest Stage 8 research candidate did not pass configured promotion gates; existing production model remains unchanged."
+        "The latest sealed Stage 8 candidate is production under an explicit manual economic override. "
+        "Strict statistical gate failure is acknowledged and v1 remains frozen for the 21-session rollback probation."
+        if latest_candidate_promoted
+        else "Configured production remains active; the latest research candidate is not the bound production model."
+    )
+    probation_status = read_json(
+        probation_dir / "software_infrastructure_promotion_probation_status.json"
     )
     lockbox = {
         "generated_at_utc": generated_at,
@@ -606,6 +652,13 @@ def main() -> int:
         "config_sha256": sha256_file(config_path),
         "registry_sha256": sha256_file(registry_path),
         "model_family": model_family,
+        "production_binding_valid": int(production_binding.valid),
+        "production_binding_status": production_binding.status,
+        "production_binding_reasons": list(production_binding.reasons),
+        "active_promotion_receipt_path": production_binding.receipt_path,
+        "active_promotion_receipt_sha256": production_binding.receipt_sha256,
+        "promotion_decision_type": active_receipt.get("decision_type", ""),
+        "strict_gate_failure_acknowledged": active_receipt.get("strict_gate_failure_acknowledged", 0),
         "production_source_id": stage7_source_id,
         "production_model_status": production_model_status,
         "production_model_name": production_model_name,
@@ -619,12 +672,13 @@ def main() -> int:
         "recommended_stage8_use_case": cfg_get(config, f"{CONFIG_KEY}.recommended_stage8_use_case", "score_weighted_long_only"),
         "promotion_confidence": cfg_get(config, f"{CONFIG_KEY}.promotion_confidence", "moderate"),
         "promotion_decision": {
-            "decision": "stage8_promoted_to_production" if stage8_is_current_production else "manual_review_required",
+            "decision": "stage8_manual_economic_override_promoted" if latest_candidate_promoted else "manual_review_required",
             "stage8_is_production": stage8_is_current_production,
-            "latest_research_candidate_promoted": 0,
+            "latest_research_candidate_promoted": latest_candidate_promoted,
             "stage7_is_challenger": 1,
             "reason": promotion_reason,
         },
+        "promotion_probation": probation_status,
         "stage7_summary": stage7_summary,
         "top10_stage7_rank_ready": top10_stage7,
         "top10_stage8_candidate": top_stage8_candidates(stage8_candidate_scores, limit=10),
@@ -697,6 +751,9 @@ def main() -> int:
         "previous_snapshot_sha256": lockbox["previous_snapshot_sha256"],
         "ledger_content_sha256": lockbox["ledger_content_sha256"],
         "database_path": str(db_path),
+        "production_binding_valid": int(production_binding.valid),
+        "production_binding_status": production_binding.status,
+        "production_binding_reasons": list(production_binding.reasons),
         "production_model_status": lockbox["production_model_status"],
         "production_model_name": lockbox["production_model_name"],
         "stage7_challenger_status": lockbox["stage7_challenger_status"],
@@ -706,6 +763,9 @@ def main() -> int:
         "automatic_promotion_applied": 0,
         "manual_promotion_approved": lockbox["manual_promotion_approved"],
         "promotion_effective_date": lockbox["promotion_effective_date"],
+        "promotion_decision_type": lockbox["promotion_decision_type"],
+        "strict_gate_failure_acknowledged": lockbox["strict_gate_failure_acknowledged"],
+        "promotion_probation": lockbox["promotion_probation"],
         "outputs": {
             "signal_registry_csv": str(signal_registry_csv),
             "signal_registry_json": str(signal_registry_json),
@@ -724,7 +784,7 @@ def main() -> int:
         output_dir,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True, default=str))
-    return 1 if lockbox["missing_required_artifacts"] else 0
+    return 1 if lockbox["missing_required_artifacts"] or not production_binding.valid else 0
 
 
 if __name__ == "__main__":

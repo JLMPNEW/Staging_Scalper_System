@@ -89,7 +89,7 @@ def main() -> int:
 
     with connect(db_path, timeout_sec=timeout) as conn:
         bootstrap_stage3(conn, bundle)
-        readiness = assert_stage2_ready(conn, bundle)
+        readiness = assert_stage2_ready(conn, bundle, as_of=args.as_of)
         run_id = start_run(
             conn,
             run_type="consumer_defensive_terminal_event_reconciliation",

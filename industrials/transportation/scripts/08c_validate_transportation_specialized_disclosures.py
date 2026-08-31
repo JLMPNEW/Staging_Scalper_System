@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import csv
 import json
 import math
@@ -92,6 +93,53 @@ def _read_only_connection(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _expected_universe_roles(
+    conn: sqlite3.Connection,
+    *,
+    asof: str,
+    active_source_id: str,
+    historical_source_id: str,
+    include_historical: bool,
+) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT t.ticker,
+               CASE
+                 WHEN EXISTS (
+                   SELECT 1 FROM dim_universe_membership AS active
+                   WHERE active.ticker=t.ticker
+                     AND active.model_family=t.model_family
+                     AND active.membership_source_id=?
+                     AND active.membership_status='active'
+                     AND active.start_date<=?
+                     AND COALESCE(active.end_date, '9999-12-31')>=?
+                 ) THEN 'active'
+                 WHEN EXISTS (
+                   SELECT 1 FROM dim_universe_membership AS historical
+                   WHERE historical.ticker=t.ticker
+                     AND historical.model_family=t.model_family
+                     AND historical.membership_source_id=?
+                 ) THEN 'delisted_usable'
+                 ELSE 'delisted_excluded'
+               END AS universe_role
+        FROM dim_industrials_taxonomy AS t
+        WHERE t.model_family=?
+        ORDER BY t.ticker
+        """,
+        (
+            active_source_id,
+            asof,
+            asof,
+            historical_source_id,
+            MODEL_FAMILY,
+        ),
+    ).fetchall()
+    roles = {str(row["ticker"]): str(row["universe_role"]) for row in rows}
+    if include_historical:
+        return roles
+    return {ticker: role for ticker, role in roles.items() if role == "active"}
+
+
 def main() -> int:
     args = parse_args()
     config_path = args.config.expanduser().resolve()
@@ -138,15 +186,52 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
     gates: dict[str, dict[str, Any]] = {}
-    expected_total = 160 if bool(specialized.get("include_historical", True)) else 112
-    if len(rows) != expected_total:
-        errors.append(f"sync coverage rows={len(rows)} expected={expected_total}")
+    include_historical = bool(specialized.get("include_historical", True))
+    with closing(_read_only_connection(db_path)) as conn:
+        expected_roles = _expected_universe_roles(
+            conn,
+            asof=args.asof[:10],
+            active_source_id=str(universe["seed_source_id"]),
+            historical_source_id=str(
+                universe["historical_membership_source_id"]
+            ),
+            include_historical=include_historical,
+        )
     tickers = [str(row.get("ticker") or "") for row in rows]
     if len(set(tickers)) != len(tickers) or not all(tickers):
         errors.append("sync coverage must contain unique non-blank tickers")
+    observed_roles = {
+        str(row.get("ticker") or ""): str(row.get("universe_role") or "")
+        for row in rows
+        if str(row.get("ticker") or "")
+    }
+    missing_tickers = sorted(set(expected_roles) - set(observed_roles))
+    unexpected_tickers = sorted(set(observed_roles) - set(expected_roles))
+    role_mismatches = sorted(
+        ticker
+        for ticker in set(expected_roles).intersection(observed_roles)
+        if observed_roles[ticker] != expected_roles[ticker]
+    )
+    if missing_tickers or unexpected_tickers or role_mismatches:
+        errors.append(
+            "sync universe differs from governed taxonomy: "
+            f"missing={missing_tickers[:20]} "
+            f"unexpected={unexpected_tickers[:20]} "
+            f"role_mismatch={role_mismatches[:20]}"
+        )
     active_rows = [row for row in rows if row.get("universe_role") == "active"]
-    if len(active_rows) != 112:
-        errors.append(f"active sync coverage rows={len(active_rows)} expected=112")
+    expected_active = {
+        ticker for ticker, role in expected_roles.items() if role == "active"
+    }
+    observed_active = {
+        str(row.get("ticker") or "") for row in active_rows
+    }
+    if observed_active != expected_active:
+        errors.append(
+            "active sync coverage differs from governed membership: "
+            f"missing={sorted(expected_active - observed_active)[:20]} "
+            f"unexpected={sorted(observed_active - expected_active)[:20]}"
+        )
     generic_active = sorted(
         row["ticker"]
         for row in active_rows

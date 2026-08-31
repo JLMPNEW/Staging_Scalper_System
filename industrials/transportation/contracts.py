@@ -85,6 +85,31 @@ SCORING_FEATURE_FIELDS = [
     "model_status",
 ]
 
+TRANSPORTATION_SUBGROUP_LINEAGE_FIELDS = [
+    "transportation_scoring_mode",
+    "transportation_production_state",
+    "transportation_group_recipe_version",
+    "transportation_subgroup_policy_sha256",
+    "transportation_cohort_id",
+    "transportation_group_id",
+    "transportation_group_recipe_key",
+    "transportation_group_recipe_sha256",
+    "transportation_group_ranking_mode",
+    "transportation_group_aggregate_weight",
+    "transportation_group_rank",
+    "transportation_membership_scope",
+    "transportation_membership_effective_from",
+    "transportation_membership_effective_to",
+    "transportation_component_recipe_state",
+    "transportation_applied_component_weights_sha256",
+    "transportation_subgroup_score_sha256",
+    "transportation_expected_group_count",
+    "transportation_expected_ticker_count",
+    "transportation_group_expected_ticker_count",
+    "transportation_production_lock_id",
+    "transportation_decision_manifest_sha256",
+]
+
 FINAL_RANK_FIELDS = [
     *SCORING_FEATURE_FIELDS,
     "final_rank",
@@ -108,6 +133,7 @@ FINAL_RANK_FIELDS = [
     "oos_score_asof_date",
     "oos_invalid_reason",
     "calibration_lock_date",
+    *TRANSPORTATION_SUBGROUP_LINEAGE_FIELDS,
 ]
 
 
@@ -271,6 +297,37 @@ def validate_rank_rows(rows: list[dict[str, str]], *, asof: str) -> list[str]:
             errors.append(f"{ticker}: oos_score_valid_flag must be 0 or 1")
         if str(row.get("survivorship_corrected_panel_flag") or "") != "0":
             errors.append(f"{ticker}: current dashboard cannot claim survivorship correction")
+        if str(row.get("transportation_scoring_mode") or "") == "subgroup_v8":
+            required_lineage = {
+                field
+                for field in TRANSPORTATION_SUBGROUP_LINEAGE_FIELDS
+                if field
+                not in {
+                    "transportation_membership_effective_from",
+                    "transportation_membership_effective_to",
+                    "transportation_production_lock_id",
+                    "transportation_decision_manifest_sha256",
+                }
+            }
+            blank = sorted(
+                field
+                for field in required_lineage
+                if not str(row.get(field) or "").strip()
+            )
+            if blank:
+                errors.append(
+                    f"{ticker}: subgroup scoring lineage is incomplete={blank}"
+                )
+            state = str(row.get("transportation_production_state") or "")
+            if state == "shadow" and (
+                str(row.get("portfolio_candidate_gate") or "") != "0"
+                or oos_valid != "0"
+            ):
+                errors.append(f"{ticker}: shadow subgroup row cannot assert gates")
+            elif state not in {"shadow", "promoted"}:
+                errors.append(
+                    f"{ticker}: invalid transportation_production_state={state!r}"
+                )
     if sorted(ranks) != list(range(1, len(rows) + 1)):
         errors.append("final_rank must be contiguous")
     for cohort, values in cohort_ranks.items():

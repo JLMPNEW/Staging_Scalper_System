@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from biotech_index.core.db import connect  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("generate_historical_biotech_score_csvs")
@@ -38,6 +39,40 @@ ALLOWED_CALIBRATION_COHORTS = frozenset(
         "early_clinical_speculative_or_single_asset_pipeline",
     }
 )
+
+CALIBRATION_EXCLUSION_REASON = "excluded_from_current_calibration_universe"
+
+
+def parse_config_ticker_set(raw: object) -> set[str]:
+    if raw is None:
+        return set()
+    if isinstance(raw, str):
+        parts = re.split(r"[,;\s]+", raw)
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        parts = [str(value) for value in raw]
+    else:
+        raise TypeError(
+            "calibration.exclude_tickers must be a string or sequence; "
+            f"got {type(raw).__name__}"
+        )
+    return {ticker for part in parts if (ticker := normalize_ticker(part))}
+
+
+def row_matches_calibration_exclusion(
+    row: dict[str, Any],
+    excluded_tickers: set[str],
+    *,
+    canonical_ticker: str = "",
+) -> bool:
+    if not excluded_tickers:
+        return False
+    identities = {
+        normalize_ticker(row.get("ticker")),
+        normalize_ticker(row.get("historical_price_ticker")),
+        normalize_ticker(canonical_ticker),
+    }
+    identities.discard("")
+    return bool(identities & excluded_tickers)
 
 REQUIRED_PRESENT_COLUMNS = [
     "asof_date",
@@ -884,9 +919,11 @@ def prepare_score_rows_for_export(
     delisted_metadata: dict[str, dict[str, Any]] | None = None,
     survivorship_corrected_panel: bool = False,
     strict_oos_start_date: date | None = None,
+    calibration_excluded_tickers: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     market_context = market_context or {}
     delisted_metadata = delisted_metadata or {}
+    calibration_excluded_tickers = calibration_excluded_tickers or set()
     rows = [dict(row) for row in rows]
     enrich = getattr(export_module, "enrich_portfolio_layer_contract_rows", None)
     if callable(enrich):
@@ -934,6 +971,11 @@ def prepare_score_rows_for_export(
             mapped_bar_ticker = str(delisted_info.get("canonical_ticker") or "").strip().upper()
             if mapped_bar_ticker:
                 price_bar_ticker = mapped_bar_ticker
+        excluded_from_calibration = row_matches_calibration_exclusion(
+            row,
+            calibration_excluded_tickers,
+            canonical_ticker=price_bar_ticker,
+        )
         ticker_market = market_context.get(price_bar_ticker) or market_context.get(ticker) or {}
         latest_price_date = str(ticker_market.get("latest_price_date") or "")
         avg60 = to_float(ticker_market.get("avg_dollar_volume_60d"), None)
@@ -965,6 +1007,10 @@ def prepare_score_rows_for_export(
         calibration_eligible = to_float(row.get("calibration_eligible_flag"), None)
         if calibration_eligible is None:
             calibration_eligible = to_float(row.get("biotech_cohort_calibration_eligible_flag"), 0.0)
+        if excluded_from_calibration:
+            calibration_eligible = 0.0
+            row["calibration_eligible_flag"] = 0.0
+            row["biotech_cohort_calibration_eligible_flag"] = 0.0
         calibration_eligible_value = calibration_eligible if calibration_eligible is not None else 0.0
         investible_value = to_float(row.get("biotech_cohort_investible_flag"), 0.0)
         core_veto_value = to_float(row.get("core_structural_veto_flag"), 0.0)
@@ -1054,7 +1100,10 @@ def prepare_score_rows_for_export(
         )
         row["portfolio_candidate_status"] = candidate_status
         row["portfolio_candidate_reason"] = candidate_reason
-        fill_blank("calibration_eligible_flag", calibration_eligible)
+        if excluded_from_calibration:
+            row["calibration_eligible_flag"] = 0.0
+        else:
+            fill_blank("calibration_eligible_flag", calibration_eligible)
         fill_blank("score_confidence", row.get("data_quality_confidence_multiplier") or "")
         if avg60 is not None and avg60 > 0.0:
             row["avg_dollar_volume_60d"] = round(avg60, 4)
@@ -1086,7 +1135,10 @@ def prepare_score_rows_for_export(
         fill_blank("insider_data_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
         fill_blank("borrow_data_asof_date", row.get("feature_data_asof_date") or row.get("source_snapshot_asof_date") or asof)
         fill_blank("calibration_cohort", row.get("biotech_primary_cohort") or "")
-        if calibration_eligible_value <= 0.0:
+        if excluded_from_calibration:
+            calibration_status = "excluded"
+            calibration_status_reason = CALIBRATION_EXCLUSION_REASON
+        elif calibration_eligible_value <= 0.0:
             calibration_status = "excluded"
             calibration_status_reason = row.get("biotech_cohort_exclusion_reason") or "not_calibration_eligible"
         elif missing_score:
@@ -1124,6 +1176,7 @@ def prepare_score_rows_for_export(
             pit_valid = False
         research_eligible = bool(
             ticker
+            and not excluded_from_calibration
             and calibration_eligible_value > 0.0
             and not missing_score
             and not score_zeroed_by_veto
@@ -1136,6 +1189,9 @@ def prepare_score_rows_for_export(
         elif not ticker:
             research_status = "missing_ticker"
             research_reason = "missing_ticker"
+        elif excluded_from_calibration:
+            research_status = "not_calibration_eligible"
+            research_reason = CALIBRATION_EXCLUSION_REASON
         elif calibration_eligible_value <= 0.0:
             research_status = "not_calibration_eligible"
             research_reason = calibration_status_reason
@@ -1233,8 +1289,10 @@ def validate_score_csv(
     min_rows: int,
     terminal_events: dict[str, list[dict[str, Any]]],
     calibration_tickers: set[str],
+    calibration_excluded_tickers: set[str] | None = None,
 ) -> list[str]:
     failures: list[str] = []
+    calibration_excluded_tickers = calibration_excluded_tickers or set()
     if not path.exists():
         return [f"missing_csv:{path}"]
     fieldnames, rows = read_csv_rows(path)
@@ -1284,6 +1342,28 @@ def validate_score_csv(
         survivorship_flag = (to_float(row.get("survivorship_corrected_panel_flag"), 0.0) or 0.0) > 0.0
         score_missing = (to_float(row.get("score_zero_is_missing_flag"), 0.0) or 0.0) > 0.0
         native_score = to_float(row.get("native_score_value"), None)
+        excluded_from_calibration = row_matches_calibration_exclusion(
+            row,
+            calibration_excluded_tickers,
+        )
+        if excluded_from_calibration:
+            for flag_name in (
+                "calibration_eligible_flag",
+                "biotech_cohort_calibration_eligible_flag",
+                "research_calibration_input_eligible_flag",
+                "stage11_calibration_input_eligible_flag",
+            ):
+                if (to_float(row.get(flag_name), 0.0) or 0.0) > 0.0:
+                    failures.append(f"excluded_ticker_{flag_name}_true:{ticker}")
+            for reason_name in (
+                "calibration_status_reason",
+                "research_calibration_reason",
+                "stage11_calibration_input_reason",
+            ):
+                if str(row.get(reason_name) or "").strip() != CALIBRATION_EXCLUSION_REASON:
+                    failures.append(
+                        f"excluded_ticker_wrong_{reason_name}:{ticker}:{row.get(reason_name)}"
+                    )
         if research_eligible:
             if str(row.get("research_calibration_reason") or "").strip() != "ok":
                 failures.append(f"research_eligible_reason_not_ok:{ticker}:{row.get('research_calibration_reason')}")
@@ -1365,6 +1445,9 @@ def main() -> None:
     terminal_events = load_terminal_events(config_path)
     delisted_metadata = load_delisted_universe_metadata(config_path)
     calibration_tickers = load_calibration_tickers(config, config_path=config_path)
+    calibration_excluded_tickers = parse_config_ticker_set(
+        cfg_get(config, "calibration.exclude_tickers", [])
+    )
     survivorship_corrected_panel = (
         bool(args.survivorship_corrected_panel)
         if args.survivorship_corrected_panel is not None
@@ -1437,6 +1520,7 @@ def main() -> None:
             stage11_eligible_count = 0
             research_eligible_count = 0
             delisted_row_count = 0
+            calibration_excluded_row_count = 0
             if not args.validate_only and (args.overwrite or not output_path.exists()):
                 resolved_snapshot = resolve_score_snapshot_asof(
                     conn,
@@ -1498,6 +1582,7 @@ def main() -> None:
                         delisted_metadata=delisted_metadata,
                         survivorship_corrected_panel=survivorship_corrected_panel,
                         strict_oos_start_date=strict_oos_start_date,
+                        calibration_excluded_tickers=calibration_excluded_tickers,
                     )
                     export_module.apply_promoted_portfolio_candidate_policy(score_rows, config)
                     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1513,6 +1598,7 @@ def main() -> None:
                 min_rows=max(1, int(args.min_rows)),
                 terminal_events=terminal_events,
                 calibration_tickers=calibration_tickers,
+                calibration_excluded_tickers=calibration_excluded_tickers,
             )
             if validation_path.exists():
                 fieldnames, csv_rows = read_csv_rows(validation_path)
@@ -1532,6 +1618,11 @@ def main() -> None:
                     1
                     for row in csv_rows
                     if str(row.get("universe_status") or "").strip().lower() == "delisted_calibration"
+                )
+                calibration_excluded_row_count = sum(
+                    1
+                    for row in csv_rows
+                    if row_matches_calibration_exclusion(row, calibration_excluded_tickers)
                 )
             status = "PASS" if not failures else "FAIL"
             if failures:
@@ -1558,6 +1649,7 @@ def main() -> None:
                     "research_calibration_input_eligible_count": research_eligible_count,
                     "stage11_calibration_input_eligible_count": stage11_eligible_count,
                     "delisted_calibration_row_count": delisted_row_count,
+                    "calibration_excluded_row_count": calibration_excluded_row_count,
                     "score_snapshot_asof": score_snapshot_asof,
                     "carry_forwarded": carry_forwarded,
                     "csv_path": str(output_path),
@@ -1592,6 +1684,8 @@ def main() -> None:
         ),
         "stage11_sidecar_name": str(args.stage11_sidecar_name),
         "delisted_calibration_universe_count": len(delisted_metadata),
+        "calibration_excluded_ticker_count": len(calibration_excluded_tickers),
+        "calibration_excluded_tickers": sorted(calibration_excluded_tickers),
         "oos_contract_rules": {
             "dated_folder_format": "YYYYMMDD",
             "all_rows_match_asof_date": True,
@@ -1599,6 +1693,7 @@ def main() -> None:
             "five_calibration_cohorts_only": sorted(ALLOWED_CALIBRATION_COHORTS),
             "production_rank_source": "legacy_allocation/opportunity_score",
             "no_post_terminal_delisted_rows": True,
+            "calibration_excluded_tickers_never_eligible": True,
             "selected_source_date_columns_not_after_asof": SOURCE_DATE_COLUMNS_NOT_AFTER_ASOF,
         },
     }

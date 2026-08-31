@@ -24,7 +24,13 @@ from industrials.core.production_lock import (  # noqa: E402
 )
 from industrials.core.reports import write_text_atomic  # noqa: E402
 from industrials.transportation.contracts import read_rows  # noqa: E402
+from industrials.transportation.legacy_production_routes import (  # noqa: E402
+    block_legacy_route,
+)
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG  # noqa: E402
+from industrials.transportation.subgroup_production_lock import (  # noqa: E402
+    validate_subgroup_lock_payload,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,7 +75,23 @@ def relative_to_config(path: Path, *, base_dir: Path) -> str:
     return Path(os.path.relpath(path, start=base_dir)).as_posix()
 
 
+def validate_activation_scoring_mode(
+    decision: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    scoring_mode = str(decision.get("scoring_mode") or "")
+    if scoring_mode == "subgroup_v8":
+        # Structural validation remains useful to diagnostics, but this legacy
+        # generic-lock writer may never activate either scoring mode.
+        validate_subgroup_lock_payload(payload)
+    block_legacy_route(
+        "31_activate_transportation_oos_production:"
+        + (scoring_mode or "missing_scoring_mode")
+    )
+
+
 def main() -> int:
+    block_legacy_route("31_activate_transportation_oos_production")
     args = parse_args()
     research = date.fromisoformat(args.research_asof[:10])
     effective = date.fromisoformat(args.effective_date[:10])
@@ -109,6 +131,7 @@ def main() -> int:
         or payload.get("research_asof_date") != research.isoformat()
     ):
         raise ValueError("Promotion decision does not match activation dates")
+    validate_activation_scoring_mode(decision, payload)
 
     readiness_path = Path(str(payload.get("readiness_audit_path") or ""))
     calibration_path = Path(str(payload.get("calibration_manifest_path") or ""))

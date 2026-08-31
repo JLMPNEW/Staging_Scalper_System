@@ -12,6 +12,9 @@ from typing import Any, Sequence
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from industrials.transportation.legacy_production_routes import (  # noqa: E402
+    block_legacy_route,
+)
 
 from industrials.core.reports import write_text_atomic  # noqa: E402
 from industrials.transportation.selected_feature_history import sha256  # noqa: E402
@@ -133,6 +136,7 @@ def artifact(path: Path) -> dict[str, Any]:
 
 
 def main() -> int:
+    block_legacy_route("35_run_transportation_production_release_acceptance")
     args = parse_args()
     asof = str(args.asof)[:10]
     release_name = str(args.release_name).strip()

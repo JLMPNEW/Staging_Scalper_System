@@ -1,0 +1,119 @@
+schema_version: consumer_defensive_promotion_framework_v2
+model_family: consumer_defensive
+framework_version: consumer_defensive_calibration_and_promotion_v2
+status: recalibration_required
+
+ownership:
+  sector_owner: consumer_defensive
+  cross_sector_code_imports_allowed: false
+  shared_service_contract_path: consumer_defensive/data/consumer_defensive_shared_service_contract_v1.yaml
+  shared_service_contract_sha256: 5037eee0aae23bb280b9a833ffa1d889b356d10e82145adb1e615263b3923839
+  allowed_shared_services:
+    - dedicated_parser
+    - factor_validation
+    - global_orchestrator
+    - market_positioning
+    - norgate
+    - portfolio_layer
+    - sec_edgar
+    - sec_insider
+    - ticker_mapping
+    - yahoo_finance
+
+legacy_evidence:
+  stage8_v1: diagnostic_only_burned_holdout
+  stage9_v1: diagnostic_only_burned_holdout
+  future_only_evidence_protocol: retired_not_admissible
+  biotech_framework: conceptual_reference_only_no_code_or_runtime_dependency
+
+cohorts:
+  beverages:
+    calibrated_independently: true
+  consumer_staples_distribution_retail:
+    calibrated_independently: true
+  household_personal_tobacco:
+    calibrated_independently: true
+  packaged_foods_agricultural_products:
+    calibrated_independently: true
+
+evaluation:
+  benchmark: XLP
+  broad_market_benchmark: SPY
+  horizons_sessions: [21, 63, 126]
+  splitter: nested_purged_walk_forward
+  purge_uses_label_completion_date: true
+  outer_folds_are_selection_blind: true
+  returns_are_net_of_costs: true
+  candidates_are_preregistered: true
+  all_horizons_required_for_active: true
+  estimator_settings:
+    bootstrap_confidence: 0.95
+    bootstrap_samples: 2000
+    bootstrap_seed: 17
+    block_size_by_horizon:
+      "21": 1
+      "63": 3
+      "126": 6
+    winsor_fraction: 0.05
+    expected_shortfall_tail_probability: 0.05
+    maximum_pbo_combinations: 65536
+    require_even_pbo_folds: true
+    maximum_portfolio_gross_exposure: 1.0
+    candidate_matrix_measure: paired_net_alpha_by_outer_fold
+  required_performance_metrics:
+    - paired_net_alpha_lcb
+    - net_alpha_mean
+    - absolute_profit_factor
+    - relative_profit_factor
+    - robust_profit_factor
+    - deflated_sharpe_ratio
+    - probability_of_backtest_overfitting
+    - maximum_drawdown
+    - expected_shortfall_95
+    - turnover
+    - average_transaction_cost
+    - liquidity_capacity_ratio
+    - winner_concentration_hhi
+    - maximum_single_name_weight
+    - paired_observation_count
+    - positive_return_count
+    - negative_return_count
+
+active_evidence_floors:
+  minimum_paired_net_alpha_lcb: 0.0
+  minimum_absolute_profit_factor: 1.0
+  minimum_relative_profit_factor: 1.0
+  minimum_robust_profit_factor: 1.0
+  minimum_deflated_sharpe_ratio: 0.80
+  maximum_probability_of_backtest_overfitting: 0.50
+  maximum_drawdown: 0.30
+  minimum_expected_shortfall_95: -0.10
+  maximum_turnover: 2.0
+  maximum_average_transaction_cost: 0.01
+  minimum_liquidity_capacity_ratio: 1.00
+  maximum_winner_concentration_hhi: 0.25
+  maximum_single_name_weight: 0.20
+  minimum_paired_observations: 30
+  minimum_positive_return_observations: 10
+  minimum_negative_return_observations: 5
+
+state_transition_policy:
+  maximum_one_tier_per_decision: true
+  require_immediate_predecessor: true
+  require_new_input_panel: true
+  minimum_new_paired_observations_per_horizon_for_advancement: 1
+  minimum_active_pilot_dwell_days: 63
+  minimum_active_scaled_dwell_days: 126
+  reset_to_pilot_on_code_or_candidate_change: true
+
+capital_tiers:
+  rollback:
+    active_cap: 0.00
+  benchmark_production:
+    active_cap: 0.00
+  active_pilot:
+    active_cap: 0.20
+  active_scaled:
+    active_cap: 0.60
+  active_full:
+    active_cap: 1.00

@@ -68,10 +68,13 @@ def main() -> int:
         models = {row.get("model_name") for row in summary_rows}
         production_model = str(cfg_get(config, f"{CONFIG_KEY}.production_model_name", "stage8_promoted_production_v1"))
         challenger_model = str(cfg_get(config, f"{CONFIG_KEY}.stage7_challenger_model_name", "stage7_challenger_v1"))
+        rollback_model = str(cfg_get(config, f"{CONFIG_KEY}.rollback_shadow_model_name", ""))
         if production_model not in models:
             errors.append(f"Production model missing from backtest summary: {production_model}")
         if challenger_model not in models:
             errors.append(f"Stage 7 challenger missing from backtest summary: {challenger_model}")
+        if rollback_model and rollback_model not in models:
+            errors.append(f"Rollback shadow missing from backtest summary: {rollback_model}")
         for field in ("annualized_return", "max_drawdown", "avg_turnover", "avg_excess_return_vs_qqq", "avg_excess_return_vs_equal_weight"):
             if field not in summary_rows[0]:
                 errors.append(f"Backtest summary missing field: {field}")

@@ -15,14 +15,18 @@ from factor_validation import sha256_file
 from .config import ConfigBundle, cfg_get
 from .db import utc_now
 from .market_data import SELECTION_PURPOSE, write_csv, write_json
-from .specialized_metrics import bootstrap_stage6b, stage6b_policy_sha256
+from .specialized_metrics import (
+    _run_observations,
+    bootstrap_stage6b,
+    stage6b_policy_sha256,
+)
 from .stage6c_schema import STAGE6C_MIGRATION_SHA256, ensure_stage6c_schema
 from .stage3_runtime import DEFAULT_TERMINAL_POLICY
 from .terminal_events import load_terminal_event_policy, terminal_horizon_value
 
 
 MODEL_FAMILY = 'consumer_defensive'
-PANEL_VERSION = 'consumer_defensive_stage6c_specialized_pit_panel_v1'
+PANEL_VERSION = 'consumer_defensive_stage6c_specialized_pit_panel_v3'
 DEFAULT_FRESHNESS_DAYS = 550
 DEFAULT_ENTRY_LAG = 1
 MINIMUM_EVALUATION_DATES = 12
@@ -41,6 +45,12 @@ _HASH_COLUMNS = (
     'forward_spy_beta_residual_return_63d',
     'forward_spy_beta_residual_return_126d',
 )
+_MANIFEST_HASH_COLUMNS = (
+    'factor_id', 'source_availability_class', 'cohorts_json',
+    'applicability_subtypes_json', 'unit_family', 'direction_hint',
+    'factor_direction', 'production_status', 'definition_versions_json',
+    'factor_validation_eligible', 'exclusion_reason',
+)
 
 
 def _canonical_json(value: Any) -> str:
@@ -57,6 +67,31 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode('utf-8')).hexdigest()
 
 
+def stage6c_config_payload(bundle: ConfigBundle) -> dict[str, Any]:
+    return {
+        'schema_version': 'consumer_defensive_stage6c_config_v1',
+        'requested_history_start': str(cfg_get(
+            bundle.payload,
+            'historical_contract.requested_snapshot_start',
+        )),
+        'horizons': sorted(int(value) for value in cfg_get(
+            bundle.payload, 'factor_validation.horizons'
+        )),
+        'strict_oos_start_date': str(cfg_get(
+            bundle.payload, 'oos_provenance.strict_oos_start_date', ''
+        ) or ''),
+        'evaluation_frequency': 'monthly',
+        'entry_lag_trading_days': DEFAULT_ENTRY_LAG,
+        'terminal_event_policy_sha256': sha256_file(
+            DEFAULT_TERMINAL_POLICY
+        ),
+    }
+
+
+def stage6c_config_sha256(bundle: ConfigBundle) -> str:
+    return _sha256(stage6c_config_payload(bundle))
+
+
 def _finite(value: Any) -> float | None:
     if value is None:
         return None
@@ -66,6 +101,12 @@ def _finite(value: Any) -> float | None:
 
 def _row_hash(row: dict[str, Any]) -> str:
     return _sha256({column: row.get(column) for column in _HASH_COLUMNS})
+
+
+def _manifest_hash(row: dict[str, Any]) -> str:
+    return _sha256({
+        column: row.get(column) for column in _MANIFEST_HASH_COLUMNS
+    })
 
 
 def _metric_applicable(metric: dict[str, Any], *, cohort: str, subtype: str) -> bool:
@@ -98,16 +139,21 @@ def _latest_stage6b_run(conn: sqlite3.Connection, *, as_of: str) -> sqlite3.Row:
     return row
 
 
-def _metrics(conn: sqlite3.Connection, *, as_of: str) -> dict[str, dict[str, Any]]:
+def _metrics(
+    conn: sqlite3.Connection,
+    *,
+    observations: Iterable[sqlite3.Row],
+) -> dict[str, dict[str, Any]]:
     definitions: dict[str, set[str]] = defaultdict(set)
-    for row in conn.execute(
-        '''SELECT metric_id,definition_version
-           FROM fact_specialized_metric_observation
-           WHERE accepted_at<=? AND production_status='measurement_only'
-           GROUP BY metric_id,definition_version''',
-        (as_of + 'T23:59:59Z',),
-    ):
-        definitions[str(row[0])].add(str(row[1]))
+    for row in observations:
+        if (
+            str(row['production_status']) == 'measurement_only'
+            and str(row['evidence_status']) == 'accepted_measurement_only'
+            and row['numeric_value'] is not None
+        ):
+            definitions[str(row['metric_id'])].add(
+                str(row['definition_version'])
+            )
     output: dict[str, dict[str, Any]] = {}
     for row in conn.execute('SELECT * FROM dim_specialized_metric ORDER BY metric_id'):
         metric_id = str(row['metric_id'])
@@ -380,19 +426,24 @@ def _market_regime(
 
 
 def _observation_rows(
-    conn: sqlite3.Connection, *, as_of: str
+    conn: sqlite3.Connection,
+    *,
+    as_of: str,
+    run: sqlite3.Row,
 ) -> list[sqlite3.Row]:
-    return list(conn.execute(
-        '''SELECT observation_id,ticker,metric_id,period_end,accepted_at,
-                  numeric_value,unit,definition_version,confidence,scope,
-                  observation_sha256
-           FROM fact_specialized_metric_observation
-           WHERE accepted_at<=? AND numeric_value IS NOT NULL
-             AND evidence_status='accepted_measurement_only'
-             AND production_status='measurement_only'
-           ORDER BY accepted_at,observation_id''',
-        (as_of + 'T23:59:59Z',),
-    ))
+    return sorted(
+        (
+            row for row in _run_observations(
+                conn, as_of=as_of, run=run
+            )
+            if row['numeric_value'] is not None
+            and str(row['evidence_status']) == 'accepted_measurement_only'
+            and str(row['production_status']) == 'measurement_only'
+        ),
+        key=lambda row: (
+            str(row['accepted_at']), int(row['observation_id'])
+        ),
+    )
 
 
 def _scope_priority(scope: str) -> int:
@@ -406,16 +457,22 @@ def _scope_priority(scope: str) -> int:
     return 2
 
 
-def _best_observation(rows: Iterable[sqlite3.Row]) -> sqlite3.Row | None:
-    values = list(rows)
+def _best_observation(
+    rows: Iterable[sqlite3.Row], *, as_of: str
+) -> sqlite3.Row | None:
+    values = [
+        row for row in rows
+        if str(row['period_end']) <= as_of
+        and str(row['accepted_at'])[:10] <= as_of
+    ]
     if not values:
         return None
     return max(
         values,
         key=lambda row: (
-            _scope_priority(str(row['scope'] or '')),
-            str(row['accepted_at']),
             str(row['period_end']),
+            str(row['accepted_at']),
+            _scope_priority(str(row['scope'] or '')),
             float(row['confidence'] or 0.0),
             int(row['observation_id']),
         ),
@@ -461,7 +518,7 @@ def _manifest_row(metric: dict[str, Any], *, created_at: str) -> dict[str, Any]:
         'factor_validation_eligible': int(eligible),
         'exclusion_reason': reason,
     }
-    payload['manifest_row_sha256'] = _sha256(payload)
+    payload['manifest_row_sha256'] = _manifest_hash(payload)
     payload['created_at'] = created_at
     return payload
 
@@ -506,8 +563,12 @@ def build_stage6c_panel(
     policy_sha = stage6b_policy_sha256()
     if str(stage6b_run['policy_sha256']) != policy_sha:
         raise RuntimeError('Stage 6B policy drifted before Stage 6C panel construction.')
-    config_sha = sha256_file(bundle.path)
-    metrics = _metrics(conn, as_of=as_of)
+    config_contract = stage6c_config_payload(bundle)
+    config_sha = _sha256(config_contract)
+    observations = _observation_rows(
+        conn, as_of=as_of, run=stage6b_run
+    )
+    metrics = _metrics(conn, observations=observations)
     taxonomy = _taxonomy(conn)
     memberships = _memberships(conn)
     selected_sources = _selected_sources(conn, as_of=as_of)
@@ -530,7 +591,6 @@ def build_stage6c_panel(
         maximum_horizon=max(horizons),
     )
     terminal_policy = load_terminal_event_policy(DEFAULT_TERMINAL_POLICY)
-    observations = _observation_rows(conn, as_of=as_of)
     observations_by_key: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
     pointer = 0
     now = utc_now()
@@ -540,14 +600,13 @@ def build_stage6c_panel(
         cutoff = evaluation_date + 'T23:59:59Z'
         while pointer < len(observations) and str(observations[pointer]['accepted_at']) <= cutoff:
             observed = observations[pointer]
-            if str(observed['period_end']) <= evaluation_date:
-                observations_by_key[
-                    (str(observed['ticker']), str(observed['metric_id']))
-                ].append(observed)
+            observations_by_key[
+                (str(observed['ticker']), str(observed['metric_id']))
+            ].append(observed)
             pointer += 1
         regime = _market_regime(prices['XLP'], as_of=evaluation_date)
         for ticker, member in sorted(taxonomy.items()):
-            membership_eligible, live = _membership_on(
+            membership_eligible, _live = _membership_on(
                 memberships.get(ticker, ()),
                 as_of=evaluation_date,
             )
@@ -574,7 +633,8 @@ def build_stage6c_panel(
                 ):
                     continue
                 observation = _best_observation(
-                    observations_by_key.get((ticker, metric_id), ())
+                    observations_by_key.get((ticker, metric_id), ()),
+                    as_of=evaluation_date,
                 )
                 factor_value: float | None = None
                 unit: str | None = None
@@ -625,10 +685,8 @@ def build_stage6c_panel(
                     'source_definition_version': definition_version,
                     'membership_eligible_flag': 1,
                     'investable_flag': int(entry_available),
-                    'sample_role': (
-                        'current_live'
-                        if live and evaluation_date == as_of
-                        else _sample_role(bundle, as_of=evaluation_date)
+                    'sample_role': _sample_role(
+                        bundle, as_of=evaluation_date
                     ),
                     'market_regime': regime,
                     'input_cost_regime': 'not_available',
@@ -680,6 +738,7 @@ def build_stage6c_panel(
         'horizons_trading_days': list(horizons),
         'freshness_days': freshness_days,
         'config_sha256': config_sha,
+        'stage6c_config_contract': config_contract,
         'metric_policy_sha256': policy_sha,
         'source_stage6b_run_id': int(stage6b_run['stage6b_run_id']),
         'factor_count': len(manifest_rows),
@@ -738,7 +797,37 @@ def build_stage6c_panel(
 def validate_stage6c_panel(
     conn: sqlite3.Connection, *, stage6c_run_id: int
 ) -> dict[str, Any]:
-    ensure_stage6c_schema(conn)
+    query_only = int(conn.execute('PRAGMA query_only').fetchone()[0]) == 1
+    if query_only:
+        expected_tables = {
+            'stage6c_schema_migrations', 'stage6c_panel_run',
+            'stage6c_feature_manifest', 'stage6c_specialized_factor_panel',
+        }
+        present_tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if missing := expected_tables - present_tables:
+            raise RuntimeError(
+                'Read-only Stage 6C validation requires the existing schema; '
+                f'missing={sorted(missing)}'
+            )
+        migration = conn.execute(
+            '''SELECT migration_sha256 FROM stage6c_schema_migrations
+               ORDER BY migration_version DESC LIMIT 1'''
+        ).fetchone()
+        if migration is None or str(migration[0]) != STAGE6C_MIGRATION_SHA256:
+            raise RuntimeError(
+                'Read-only Stage 6C validation found a migration checksum mismatch.'
+            )
+        if conn.execute('PRAGMA foreign_key_check').fetchone() is not None:
+            raise RuntimeError(
+                'Read-only Stage 6C validation found a foreign-key violation.'
+            )
+    else:
+        ensure_stage6c_schema(conn)
     run = conn.execute(
         'SELECT * FROM stage6c_panel_run WHERE stage6c_run_id=?',
         (stage6c_run_id,),
@@ -782,6 +871,36 @@ def validate_stage6c_panel(
              AND substr(source_accepted_at,1,10)>asof_date''',
         (stage6c_run_id,),
     ).fetchone()[0])
+    period_age_errors = int(conn.execute(
+        '''SELECT COUNT(*) FROM stage6c_specialized_factor_panel
+           WHERE stage6c_run_id=? AND source_period_end IS NOT NULL
+             AND (
+                 source_period_end>asof_date
+                 OR source_age_days IS NULL
+                 OR source_age_days<0
+                 OR source_age_days<>
+                    CAST(julianday(asof_date)-julianday(source_period_end)
+                         AS INTEGER)
+             )''',
+        (stage6c_run_id,),
+    ).fetchone()[0])
+    availability_errors = int(conn.execute(
+        '''SELECT COUNT(*) FROM stage6c_specialized_factor_panel
+           WHERE stage6c_run_id=? AND (
+               (availability_status='available' AND (
+                   factor_value IS NULL OR source_accepted_at IS NULL
+                   OR source_period_end IS NULL
+                   OR source_observation_sha256 IS NULL
+                   OR source_definition_version IS NULL
+               ))
+               OR (availability_status<>'available' AND factor_value IS NOT NULL)
+               OR (availability_status='structurally_excluded_non_sec' AND (
+                   source_accepted_at IS NOT NULL OR source_period_end IS NOT NULL
+                   OR source_observation_sha256 IS NOT NULL
+               ))
+           )''',
+        (stage6c_run_id,),
+    ).fetchone()[0])
     weighted = int(conn.execute(
         '''SELECT COUNT(*) FROM dim_specialized_metric WHERE production_weight<>0'''
     ).fetchone()[0])
@@ -792,13 +911,138 @@ def validate_stage6c_panel(
     registry_count = int(conn.execute(
         'SELECT COUNT(*) FROM dim_specialized_metric'
     ).fetchone()[0])
+    manifest_rows = [
+        dict(row) for row in conn.execute(
+            '''SELECT * FROM stage6c_feature_manifest
+               WHERE stage6c_run_id=? ORDER BY factor_id''',
+            (stage6c_run_id,),
+        )
+    ]
+    manifest_hash_mismatches = sum(
+        _manifest_hash(row) != str(row['manifest_row_sha256'])
+        for row in manifest_rows
+    )
+    source_run = conn.execute(
+        '''SELECT * FROM stage6b_specialized_run
+           WHERE stage6b_run_id=? AND asof_date=?
+             AND status='measurement_only_complete' ''',
+        (int(run['source_stage6b_run_id']), str(run['asof_date'])),
+    ).fetchone()
+    source_run_valid = (
+        source_run is not None
+        and str(source_run['policy_sha256']) == stage6b_policy_sha256()
+    )
+    source_observations = (
+        _observation_rows(
+            conn, as_of=str(run['asof_date']), run=source_run
+        )
+        if source_run_valid and source_run is not None
+        else []
+    )
+    expected_metrics = _metrics(
+        conn, observations=source_observations
+    )
+    expected_manifest = {
+        factor_id: _manifest_row(metric, created_at='')
+        for factor_id, metric in expected_metrics.items()
+    }
+    manifest_semantic_mismatches = 0
+    for row in manifest_rows:
+        expected = expected_manifest.get(str(row['factor_id']))
+        if expected is None or any(
+            row.get(column) != expected.get(column)
+            for column in _MANIFEST_HASH_COLUMNS
+        ):
+            manifest_semantic_mismatches += 1
+    manifest_semantic_mismatches += len(
+        set(expected_manifest) - {
+            str(row['factor_id']) for row in manifest_rows
+        }
+    )
+    try:
+        run_manifest = json.loads(str(run['manifest_json']))
+    except (TypeError, json.JSONDecodeError):
+        run_manifest = None
+    manifest_contract = (
+        run_manifest.get('stage6c_config_contract')
+        if isinstance(run_manifest, dict) else None
+    )
+    run_manifest_valid = bool(
+        isinstance(run_manifest, dict)
+        and isinstance(manifest_contract, dict)
+        and _sha256(manifest_contract) == str(run['config_sha256'])
+        and run_manifest.get('schema_version') == PANEL_VERSION
+        and run_manifest.get('panel_sha256') == str(run['panel_sha256'])
+        and run_manifest.get('row_count') == int(run['panel_row_count'])
+        and run_manifest.get('numeric_row_count')
+        == int(run['numeric_row_count'])
+        and run_manifest.get('source_stage6b_run_id')
+        == int(run['source_stage6b_run_id'])
+    )
+
+    observations_by_key: dict[
+        tuple[str, str], list[sqlite3.Row]
+    ] = defaultdict(list)
+    for observed in source_observations:
+        observations_by_key[
+            (str(observed['ticker']), str(observed['metric_id']))
+        ].append(observed)
+    non_sec = {
+        factor_id for factor_id, metric in expected_metrics.items()
+        if metric['source_availability_class'] == 'non_sec'
+    }
+    selection_mismatches = 0
+    lineage_mismatches = 0
+    observations_by_sha = {
+        str(observed['observation_sha256']): observed
+        for values in observations_by_key.values()
+        for observed in values
+    }
+    for row in rows:
+        source_sha = row['source_observation_sha256']
+        expected = None
+        if str(row['factor_id']) not in non_sec:
+            expected = _best_observation(
+                observations_by_key.get(
+                    (str(row['ticker']), str(row['factor_id'])), ()
+                ),
+                as_of=str(row['asof_date']),
+            )
+        expected_sha = (
+            None if expected is None
+            else str(expected['observation_sha256'])
+        )
+        if source_sha != expected_sha:
+            selection_mismatches += 1
+        if source_sha is not None:
+            source = observations_by_sha.get(str(source_sha))
+            if source is None or any((
+                str(source['ticker']) != str(row['ticker']),
+                str(source['metric_id']) != str(row['factor_id']),
+                str(source['accepted_at']) != str(row['source_accepted_at']),
+                str(source['period_end']) != str(row['source_period_end']),
+                str(source['unit'] or '') != str(row['unit'] or ''),
+                str(source['definition_version'])
+                    != str(row['source_definition_version']),
+                _finite(source['numeric_value']) != _finite(row['factor_value'])
+                    and str(row['availability_status']) == 'available',
+            )):
+                lineage_mismatches += 1
     check('run_complete', str(run['status']) == 'complete', str(run['status']))
+    check('source_stage6b_run_exact', source_run_valid, f'run_id={run["source_stage6b_run_id"]}')
     check('row_count_exact', len(rows) == int(run['panel_row_count']), f'observed={len(rows)} expected={run["panel_row_count"]}')
     check('row_hashes_exact', mismatches == 0, f'mismatches={mismatches}')
     check('panel_hash_exact', panel_sha == str(run['panel_sha256']), f'observed={panel_sha} expected={run["panel_sha256"]}')
     check('panel_primary_keys_unique', duplicate_count == 0, f'duplicates={duplicate_count}')
     check('accepted_at_point_in_time', future_count == 0, f'future_rows={future_count}')
+    check('period_end_and_source_age_point_in_time', period_age_errors == 0, f'errors={period_age_errors}')
+    check('availability_and_source_fields_coherent', availability_errors == 0, f'errors={availability_errors}')
+    check('run_manifest_and_config_contract_exact', run_manifest_valid, f'config_sha256={run["config_sha256"]}')
     check('feature_manifest_complete', manifest_count == registry_count, f'manifest={manifest_count} registry={registry_count}')
+    check('feature_manifest_hashes_exact', manifest_hash_mismatches == 0, f'mismatches={manifest_hash_mismatches}')
+    check('feature_manifest_registry_bound', manifest_semantic_mismatches == 0, f'mismatches={manifest_semantic_mismatches}')
+    check('source_observation_selection_exact', selection_mismatches == 0, f'mismatches={selection_mismatches}')
+    check('source_observation_lineage_exact', lineage_mismatches == 0, f'mismatches={lineage_mismatches}')
     check('minimum_evaluation_dates', int(run['evaluation_date_count']) >= MINIMUM_EVALUATION_DATES, f'dates={run["evaluation_date_count"]}')
     check('production_weights_zero', weighted == 0, f'nonzero={weighted}')
     check('foreign_keys_valid', conn.execute('PRAGMA foreign_key_check').fetchone() is None, 'bounded_first_violation_check')
@@ -824,6 +1068,14 @@ def write_stage6c_reports(
     output_dir: Path,
 ) -> dict[str, Any]:
     validation = validate_stage6c_panel(conn, stage6c_run_id=stage6c_run_id)
+    if validation['status'] != 'PASS':
+        failed = [
+            row['check'] for row in validation['checks']
+            if row['status'] == 'FAIL'
+        ]
+        raise RuntimeError(
+            f'Refusing to export invalid Stage 6C panel: {failed}'
+        )
     run = conn.execute(
         'SELECT * FROM stage6c_panel_run WHERE stage6c_run_id=?',
         (stage6c_run_id,),

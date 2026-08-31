@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -24,7 +25,21 @@ from industrials.transportation.scripts._shared import (  # noqa: E402
 )
 
 
-ORCHESTRATOR_VERSION = "transportation_current_refresh_v1"
+ORCHESTRATOR_VERSION = "transportation_current_refresh_v3"
+
+# Validation steps are read-only. When their deterministic input is stale, a
+# retry must rewind to the nearest local producer instead of either repeating
+# network synchronization or rerunning the same validator against unchanged
+# rows.
+RESUME_REWIND_BY_FAILED_STEP = {
+    "06_validate_market": "19_build_exact_pit",
+    "08_validate_financial": "19_build_exact_pit",
+    "08a_validate_metrics": "19_build_exact_pit",
+    "14_validate_positioning": "09_import_positioning",
+    "06a_validate_scoring": "06a_build_scoring",
+    "18_validate_shadow": "17_publish_shadow",
+    "21a_audit_monitor": "21b_export_monitor_source",
+}
 DEFAULT_OUTPUT_ROOT = (
     PROJECT_ROOT
     / "output"
@@ -68,6 +83,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an immediately preceding compatible failed run at its failed step.",
+    )
     parser.add_argument("--list-steps", action="store_true")
     parser.add_argument("--from-step", default="")
     parser.add_argument("--to-step", default="")
@@ -78,6 +98,15 @@ def parse_args() -> argparse.Namespace:
             "Skip only the upstream network refresh when its raw data was "
             "already refreshed for this date; local positioning import and "
             "validation still run."
+        ),
+    )
+    parser.add_argument(
+        "--force-publish",
+        action="store_true",
+        help=(
+            "Allow the exact-date dashboard publisher to replace artifacts "
+            "during an explicit failed-run resume. Normal first attempts "
+            "remain immutable."
         ),
     )
     return parser.parse_args()
@@ -94,6 +123,7 @@ def build_steps(
     asof: str,
     *,
     skip_positioning_upstream: bool = False,
+    force_publish: bool = False,
 ) -> list[Step]:
     snapshot_complete = (
         "output/industrials/transportation/current_panels/"
@@ -181,6 +211,7 @@ def build_steps(
                 asof,
                 "--max-dates",
                 "1",
+                "--rebuild-existing",
                 "--output-csv",
                 f"{current_pit_root}/transportation_current_pit_build.csv",
                 "--output-json",
@@ -277,7 +308,7 @@ def build_steps(
                 "stage_10",
                 "publish exact-date shadow rank table",
                 "industrials/transportation/scripts/17_publish_transportation_shadow_rank_table.py",
-                ["--asof", asof],
+                ["--asof", asof, *(["--force"] if force_publish else [])],
             ),
             Step(
                 "18_validate_shadow",
@@ -381,18 +412,76 @@ def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def resume_step_from_manifest(
+    manifest_path: Path,
+    *,
+    asof: str,
+    valid_step_ids: list[str],
+    config_sha256: str,
+    orchestrator_source_sha256: str,
+) -> str:
+    if not manifest_path.is_file():
+        raise ValueError(f"No failed Transportation manifest to resume: {manifest_path}")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        payload.get("acceptance") != "FAIL"
+        or payload.get("asof_date") != asof
+        or payload.get("orchestrator_version") != ORCHESTRATOR_VERSION
+        or payload.get("config_sha256") != config_sha256
+        or payload.get("orchestrator_source_sha256")
+        != orchestrator_source_sha256
+    ):
+        raise ValueError(
+            "Transportation resume manifest is stale or incompatible"
+        )
+    failed = payload.get("failed_step_ids")
+    if not isinstance(failed, list) or len(failed) != 1:
+        raise ValueError("Transportation resume requires exactly one failed step")
+    failed_step = str(failed[0])
+    if failed_step not in valid_step_ids:
+        raise ValueError(
+            f"Transportation resume failed step is unknown: {failed_step}"
+        )
+    resume_step = RESUME_REWIND_BY_FAILED_STEP.get(failed_step, failed_step)
+    if resume_step not in valid_step_ids:
+        raise ValueError(
+            "Transportation resume producer step is unknown: "
+            f"failed={failed_step} resume={resume_step}"
+        )
+    return resume_step
+
+
 def main() -> int:
     args = parse_args()
     asof = datetime.strptime(args.asof[:10], "%Y-%m-%d").date().isoformat()
     config_path = args.config.expanduser().resolve()
     output_root = args.output_root.expanduser().resolve()
+    manifest_path, steps_path, logs_dir = _manifest_paths(output_root, asof)
+    config_sha256 = _file_sha256(config_path)
+    orchestrator_source_sha256 = _file_sha256(Path(__file__).resolve())
     all_steps = build_steps(
         asof,
         skip_positioning_upstream=args.skip_positioning_upstream,
+        force_publish=args.force_publish,
     )
+    if args.resume and (args.from_step.strip() or args.to_step.strip()):
+        raise ValueError("--resume cannot be combined with --from-step/--to-step")
+    from_step = args.from_step.strip()
+    if args.resume:
+        from_step = resume_step_from_manifest(
+            manifest_path,
+            asof=asof,
+            valid_step_ids=[step.step_id for step in all_steps],
+            config_sha256=config_sha256,
+            orchestrator_source_sha256=orchestrator_source_sha256,
+        )
     selected = select_steps(
         all_steps,
-        from_step=args.from_step.strip(),
+        from_step=from_step,
         to_step=args.to_step.strip(),
     )
     if args.list_steps:
@@ -402,7 +491,6 @@ def main() -> int:
                 f"network={int(step.network)}\t{step.label}"
             )
         return 0
-    manifest_path, steps_path, logs_dir = _manifest_paths(output_root, asof)
     commands = [
         {
             "step_id": step.step_id,
@@ -419,6 +507,8 @@ def main() -> int:
             "orchestrator_version": ORCHESTRATOR_VERSION,
             "model_family": MODEL_FAMILY,
             "asof_date": asof,
+            "config_sha256": config_sha256,
+            "orchestrator_source_sha256": orchestrator_source_sha256,
             "selected_step_count": len(selected),
             "steps": commands,
             "frozen_historical_panel_modified": False,
@@ -490,6 +580,8 @@ def main() -> int:
         "orchestrator_version": ORCHESTRATOR_VERSION,
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
+        "config_sha256": config_sha256,
+        "orchestrator_source_sha256": orchestrator_source_sha256,
         "started_at_utc": started_at.isoformat(),
         "finished_at_utc": finished_at.isoformat(),
         "selected_step_ids": [step.step_id for step in selected],

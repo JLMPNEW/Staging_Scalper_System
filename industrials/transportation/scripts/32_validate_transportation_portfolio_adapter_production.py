@@ -14,6 +14,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from industrials.core.config import load_yaml, resolve_path  # noqa: E402
 from industrials.transportation.contracts import write_manifest  # noqa: E402
+from industrials.transportation.legacy_production_routes import (  # noqa: E402
+    route_diagnostic,
+)
 from industrials.transportation.scripts._shared import MODEL_FAMILY  # noqa: E402
 from portfolio_layer.scores.adapters import run_adapter  # noqa: E402
 
@@ -25,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Validate an activated transportation production rank through "
-            "the shared portfolio-layer industrial-family adapter."
+            "the dedicated portfolio-layer Transportation subgroup adapter."
         )
     )
     parser.add_argument(
@@ -39,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def _legacy_active_validation_never_called() -> int:
     args = parse_args()
     asof = datetime.strptime(args.asof[:10], "%Y-%m-%d").date().isoformat()
     config_path = args.portfolio_config.expanduser().resolve()
@@ -58,9 +61,9 @@ def main() -> int:
         )
     else:
         source = sources[0]
-        if source.get("adapter") != "industrial_family":
+        if source.get("adapter") != "transportation_subgroup":
             errors.append(
-                "transportation portfolio source must use industrial_family"
+                "transportation portfolio source must use transportation_subgroup"
             )
         if not bool(source.get("required")):
             errors.append(
@@ -89,7 +92,7 @@ def main() -> int:
     if result is not None:
         if result.source_pipeline != MODEL_FAMILY:
             errors.append(f"source_pipeline={result.source_pipeline!r}")
-        if result.adapter != "industrial_family":
+        if result.adapter != "transportation_subgroup":
             errors.append(f"adapter={result.adapter!r}")
         if result.source_asof_date != asof:
             errors.append(
@@ -146,6 +149,76 @@ def main() -> int:
         "oos_score_valid_rows": len(oos_valid),
         "errors": errors,
     }
+    write_manifest(output_path, summary)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if not errors else 1
+
+
+def main() -> int:
+    """Audit that the superseded production adapter route remains inactive."""
+    args = parse_args()
+    asof = datetime.strptime(args.asof[:10], "%Y-%m-%d").date().isoformat()
+    config_path = args.portfolio_config.expanduser().resolve()
+    config = load_yaml(config_path)
+    sources = [
+        item
+        for item in config.get("score_contract", {}).get("sectors", [])
+        if str(item.get("model_family") or "") == MODEL_FAMILY
+    ]
+    errors: list[str] = []
+    source: dict[str, object] = {}
+    if len(sources) != 1:
+        errors.append(
+            "expected exactly one portfolio transportation source, "
+            f"found {len(sources)}"
+        )
+    else:
+        source = dict(sources[0])
+        if source.get("adapter") != "transportation_subgroup":
+            errors.append("reserved Transportation adapter mapping changed")
+        if source.get("enabled") is not False:
+            errors.append("legacy Transportation source must remain disabled")
+        if source.get("required") is not False:
+            errors.append("legacy Transportation source must remain optional")
+        if source.get("require_oos_score_valid") is not True:
+            errors.append("OOS validity must remain mandatory")
+        calibration = source.get("calibration") or {}
+        if not isinstance(calibration, dict) or abs(
+            float(calibration.get("expected_alpha_at_full") or 0.0)
+        ) > 1e-12:
+            errors.append("legacy Transportation expected alpha must be zero")
+    cap = float(
+        ((config.get("optimizer") or {}).get("sector_weight_caps") or {}).get(
+            MODEL_FAMILY, 0.0
+        )
+    )
+    if abs(cap) > 1e-12:
+        errors.append("legacy Transportation optimizer cap must be zero")
+    diagnostic = route_diagnostic(
+        "32_validate_transportation_portfolio_adapter_production"
+    )
+    summary = {
+        "acceptance": "PASS" if not errors else "FAIL",
+        "acceptance_scope": "INACTIVE_ROUTE_SAFETY_ONLY",
+        "model_family": MODEL_FAMILY,
+        "asof_date": asof,
+        "source": source,
+        "sector_weight_cap": cap,
+        "production_promotion_eligible": False,
+        "production_activation_authorized": False,
+        "portfolio_allocation_authorized": False,
+        "legacy_route": diagnostic,
+        "errors": errors,
+    }
+    output_path = (
+        args.output_json.expanduser().resolve()
+        if args.output_json
+        else PROJECT_ROOT
+        / "output"
+        / "industrials"
+        / "transportation"
+        / "portfolio_adapter_production_validation.json"
+    )
     write_manifest(output_path, summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if not errors else 1

@@ -3137,27 +3137,62 @@ def apply_stage6b_measurement_overlays(
             'asof_date': as_of,
             'updated_component_count': 0,
         }
-    cutoff = as_of + 'T23:59:59Z'
+    stage6b_run = conn.execute(
+        '''SELECT * FROM stage6b_specialized_run
+           WHERE asof_date=? AND status='measurement_only_complete'
+           ORDER BY stage6b_run_id DESC LIMIT 1''',
+        (as_of,),
+    ).fetchone()
+    if stage6b_run is None:
+        raise RuntimeError(
+            f'Stage 6B overlay requires a completed sealed run for {as_of}.'
+        )
+    stage6b_run_id = int(stage6b_run['stage6b_run_id'])
+    run_observations = _run_observations(
+        conn,
+        as_of=as_of,
+        run=stage6b_run,
+    )
+    observation_by_key: dict[tuple[str, str], sqlite3.Row] = {}
+    for observation in run_observations:
+        period_end = str(observation['period_end'] or '')
+        if (
+            not period_end
+            or period_end > as_of
+            or str(observation['evidence_status'])
+            != 'accepted_measurement_only'
+            or observation['numeric_value'] is None
+        ):
+            continue
+        key = (str(observation['ticker']), str(observation['metric_id']))
+        incumbent = observation_by_key.get(key)
+        rank = (
+            period_end,
+            str(observation['accepted_at']),
+            float(observation['confidence']),
+            str(observation['observation_sha256']),
+        )
+        if incumbent is None or rank > (
+            str(incumbent['period_end']),
+            str(incumbent['accepted_at']),
+            float(incumbent['confidence']),
+            str(incumbent['observation_sha256']),
+        ):
+            observation_by_key[key] = observation
     updated = 0
     now = utc_now()
     with conn:
         for component in components:
             metric_id = str(component['source_field'])
-            observation = conn.execute(
-                '''SELECT * FROM fact_specialized_metric_observation
-                   WHERE ticker=? AND metric_id=? AND accepted_at<=?
-                     AND production_status='measurement_only'
-                     AND evidence_status='accepted_measurement_only'
-                     AND numeric_value IS NOT NULL
-                   ORDER BY period_end DESC,accepted_at DESC,confidence DESC,
-                            observation_sha256 DESC LIMIT 1''',
-                (str(component['ticker']), metric_id, cutoff),
-            ).fetchone()
+            observation = observation_by_key.get(
+                (str(component['ticker']), metric_id)
+            )
             if observation is None:
                 continue
             row = dict(component)
             lineage = json.loads(str(row['lineage_json'] or '{}'))
             lineage['stage6b_overlay'] = {
+                'stage6b_run_id': stage6b_run_id,
                 'observation_sha256': str(observation['observation_sha256']),
                 'evidence_key': str(observation['evidence_key'] or ''),
                 'accepted_at': str(observation['accepted_at']),
@@ -3215,7 +3250,7 @@ def apply_stage6b_measurement_overlays(
                    ORDER BY component_name''',
                 (str(row['ticker']), as_of),
             ).fetchall()
-            component_ids = [str(value[0]) for value in ticker_components]
+            component_ids = sorted(str(value[0]) for value in ticker_components)
             applicable_specialized = sum(
                 str(value['component_group']) == 'specialized'
                 and str(value['availability_status']) != 'not_applicable'
@@ -3245,6 +3280,7 @@ def apply_stage6b_measurement_overlays(
             lineage = json.loads(str(row['lineage_json'] or '{}'))
             lineage['component_observation_ids'] = component_ids
             lineage['stage6b_measurement_overlay'] = True
+            lineage['stage6b_run_id'] = stage6b_run_id
             lineage['specialized_applicable_count'] = applicable_specialized
             lineage['specialized_available_count'] = available_specialized
             lineage['specialized_missing_count'] = (
@@ -3275,6 +3311,7 @@ def apply_stage6b_measurement_overlays(
     return {
         'status': 'PASS',
         'asof_date': as_of,
+        'stage6b_run_id': stage6b_run_id,
         'updated_component_count': updated,
     }
 

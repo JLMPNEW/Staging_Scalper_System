@@ -26,6 +26,7 @@ from industrials.machinery.stage12_contract_upgrade import (
     FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES,
     _assert_rank_projection_unchanged,
     _changed_source_keys,
+    _validate_optimizer_seal_migration,
     validate_active_portfolio_contract,
 )
 from industrials.machinery.stage12_activation_transaction import (
@@ -104,6 +105,58 @@ def test_lineage_contract_source_allowlist_is_narrow() -> None:
     assert changed - FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES == {
         "stage9_backtest.py"
     }
+
+
+def test_optimizer_seal_migration_requires_reviewed_hash_and_unchanged_runner(
+    tmp_path: Path,
+) -> None:
+    optimizer = tmp_path / "optimizer_core.py"
+    runner = tmp_path / "09_run_portfolio_optimizer.py"
+    optimizer.write_text("new optimizer\n", encoding="utf-8")
+    runner.write_text("sealed runner\n", encoding="utf-8")
+    lock = {
+        "portfolio_optimizer_sha256": "0" * 64,
+        "portfolio_optimizer_runner_sha256": file_sha256(runner),
+    }
+
+    previous, current, previous_runner, current_runner = (
+        _validate_optimizer_seal_migration(
+            lock,
+            optimizer_path=optimizer,
+            runner_path=runner,
+            expected_optimizer_sha256=file_sha256(optimizer),
+            expected_runner_sha256=file_sha256(runner),
+        )
+    )
+
+    assert previous == "0" * 64
+    assert current == file_sha256(optimizer)
+    assert previous_runner == file_sha256(runner)
+    assert current_runner == file_sha256(runner)
+    with pytest.raises(ValueError, match="optimizer"):
+        _validate_optimizer_seal_migration(
+            lock,
+            optimizer_path=optimizer,
+            runner_path=runner,
+            expected_optimizer_sha256="1" * 64,
+            expected_runner_sha256=file_sha256(runner),
+        )
+    with pytest.raises(ValueError, match="runner"):
+        _validate_optimizer_seal_migration(
+            lock,
+            optimizer_path=optimizer,
+            runner_path=runner,
+            expected_optimizer_sha256=file_sha256(optimizer),
+            expected_runner_sha256="1" * 64,
+        )
+    lock["portfolio_optimizer_runner_sha256"] = "2" * 64
+    _validate_optimizer_seal_migration(
+        lock,
+        optimizer_path=optimizer,
+        runner_path=runner,
+        expected_optimizer_sha256=file_sha256(optimizer),
+        expected_runner_sha256=file_sha256(runner),
+    )
 
 
 def test_contract_upgrade_allows_unrelated_sleeve_changes() -> None:

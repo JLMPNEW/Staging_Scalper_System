@@ -17,6 +17,9 @@ from industrials.transportation.release_contract import (  # noqa: E402
     git_source_state,
     required_release_source_paths,
 )
+from industrials.transportation.legacy_production_routes import (  # noqa: E402
+    route_diagnostic,
+)
 from industrials.transportation.selected_feature_history import (  # noqa: E402
     read_json,
     sha256,
@@ -74,6 +77,12 @@ def main() -> int:
     )
     manifest_path = release_dir / "transportation_release_manifest.json"
     errors: list[str] = []
+    diagnostic = route_diagnostic(
+        "34_audit_transportation_production_release_integrity"
+    )
+    errors.append(
+        "legacy generic-OOS release is superseded and cannot authorize capital"
+    )
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = read_json(manifest_path)
@@ -163,15 +172,18 @@ def main() -> int:
 
     result = {
         "acceptance": "PASS" if not errors else "FAIL",
-        "gate": "TRANSPORTATION_PRODUCTION_RELEASE_INTEGRITY",
+        "acceptance_scope": "LEGACY_ARTIFACT_DIAGNOSTIC_ONLY",
+        "gate": "TRANSPORTATION_LEGACY_RELEASE_INTEGRITY",
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
         "release_name": release_name,
         "release_dir": str(release_dir),
         "git_commit_sha": source_state.get("git_commit_sha", ""),
         "artifact_count": len(artifacts),
-        "production_model_promoted": True,
-        "production_allocation_authorized": True,
+        "production_model_promoted": False,
+        "production_activation_authorized": False,
+        "production_allocation_authorized": False,
+        "legacy_route": diagnostic,
         "errors": errors,
     }
     output_path = (

@@ -1238,6 +1238,8 @@ def run_semiconductor_walk_forward_calibration() -> None:
                 "refit_wins": win,
                 **{f"refit_mean_ic_{h}": candidate_metrics.get(f"mean_ic_{h}") for h in horizons},
                 **{f"stage7_mean_ic_{h}": stage7_metrics.get(f"mean_ic_{h}") for h in horizons},
+                **{f"refit_hit_rate_{h}": candidate_metrics.get(f"hit_rate_{h}") for h in horizons},
+                **{f"refit_mean_spread_net_{h}": candidate_metrics.get(f"mean_spread_net_{h}") for h in horizons},
                 "refit_avg_top_turnover": candidate_metrics.get("avg_top_turnover"),
                 "refit_avg_top_cohort_share": candidate_metrics.get("avg_top_cohort_share"),
                 "component_weights_json": json.dumps(candidate.component_weights, sort_keys=True),
@@ -1368,12 +1370,22 @@ def validate_semiconductor_optuna_calibration() -> int:
 
 
 if __name__ == "__main__":
+    from technology.core.optuna_artifact_governance import (
+        run_stage8_with_governance,
+        run_walk_forward_with_governance,
+        validate_stage8_from_argv,
+        validate_walk_forward_from_argv,
+    )
+
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "validate":
         sys.argv.pop(1)
-        raise SystemExit(validate_semiconductor_optuna_calibration())
+        raise SystemExit(max(validate_semiconductor_optuna_calibration(), validate_stage8_from_argv("semiconductors")))
     if command == "walk-forward":
         sys.argv.pop(1)
-        run_semiconductor_walk_forward_calibration()
+        run_walk_forward_with_governance(run_semiconductor_walk_forward_calibration, "semiconductors")
         raise SystemExit(0)
-    run_semiconductor_optuna_calibration()
+    if command == "validate-walk-forward":
+        sys.argv.pop(1)
+        raise SystemExit(validate_walk_forward_from_argv("semiconductors"))
+    run_stage8_with_governance(run_semiconductor_optuna_calibration, "semiconductors")

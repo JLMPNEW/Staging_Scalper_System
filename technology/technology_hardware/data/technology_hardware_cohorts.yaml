@@ -32,6 +32,7 @@ cohorts:
     cohort_name: Components, Sensors & Distribution
     calibration_use: core
     tickers:
+      - AEVA
       - ALNT
       - APH
       - ARW

@@ -7,7 +7,7 @@ import math
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -21,6 +21,9 @@ from industrials.transportation.financial_contract import (  # noqa: E402
     MetricDefinition,
     load_metric_registry,
     registry_summary,
+)
+from industrials.transportation.metric_applicability import (  # noqa: E402
+    explicit_zero_debt_interest_na,
 )
 from industrials.transportation.disclosure_candidates import (  # noqa: E402
     EXTRACTION_METHOD,
@@ -108,12 +111,6 @@ def number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
-
-
-def explicit_zero_debt_interest_na(financial: Mapping[str, object]) -> bool:
-    debt = number(financial.get("total_debt_usd"))
-    interest = number(financial.get("interest_expense_ttm_usd"))
-    return debt == 0.0 and interest in {None, 0.0}
 
 
 def latest_asof(conn: Any) -> str:

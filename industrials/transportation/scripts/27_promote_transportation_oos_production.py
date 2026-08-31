@@ -26,6 +26,9 @@ from industrials.transportation.scoring import (  # noqa: E402
     finalize_rank_rows,
     publish_dashboard,
 )
+from industrials.transportation.legacy_production_routes import (  # noqa: E402
+    block_legacy_route,
+)
 from industrials.transportation.scripts._shared import (  # noqa: E402
     DEFAULT_CONFIG,
 )
@@ -50,6 +53,7 @@ def main() -> int:
     args = parse_args()
     research = date.fromisoformat(args.research_asof[:10])
     effective = date.fromisoformat(args.effective_date[:10])
+    block_legacy_route("27_promote_transportation_oos_production")
     if effective <= research:
         raise ValueError("--effective-date must follow --research-asof")
     config_path = args.config.expanduser().resolve()

@@ -1276,7 +1276,7 @@ def aggregate_13f_ownership_for_tickers(
                COALESCE(shares, 0.0) AS shares,
                COALESCE(market_value, 0.0) AS market_value
         FROM institutional_13f_holdings
-        WHERE UPPER(ticker) IN ({qmarks})
+        WHERE ticker IN ({qmarks})
           AND UPPER(COALESCE(share_type, '')) IN ('', 'SH')
           AND COALESCE(put_call, '') = ''
           AND COALESCE(period_of_report, '') <> ''
@@ -1356,7 +1356,7 @@ def aggregate_13f_ownership_for_tickers(
     with conn:
         # Replace any legacy filing-day-slice snapshots wholesale for these tickers.
         conn.execute(
-            f"DELETE FROM institutional_13f_ownership_snapshots WHERE source = ? AND UPPER(ticker) IN ({qmarks})",
+            f"DELETE FROM institutional_13f_ownership_snapshots WHERE source = ? AND ticker IN ({qmarks})",
             (source, *ticker_scope),
         )
         conn.executemany(

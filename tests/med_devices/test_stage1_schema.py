@@ -798,7 +798,7 @@ def test_august_data_fix_closures_preserve_pit_history_and_re_gate_as_watchlist(
 
     cohorts = {
         "ADPT": "diagnostics_clinical_tests",
-        "MDAI": "capital_equipment_procedure_platforms",
+        "MDAI": "emerging_single_product_medtech_platforms",
         "BDSX": "diagnostics_clinical_tests",
         "CSTL": "diagnostics_clinical_tests",
         "NEO": "diagnostics_clinical_tests",
@@ -1432,15 +1432,16 @@ def test_med_device_universe_loader_keeps_otc_issuer_active_but_non_investable(
 
 
 @pytest.mark.parametrize(
-    ("ticker", "expected_before", "expected_after"),
+    ("ticker", "cohort", "expected_before", "expected_after"),
     [
-        ("TMDX", "reject", "approve"),
-        ("PRCT", "reject", "watchlist"),
-        ("OWLT", "watchlist", "reject"),
+        ("TMDX", "capital_equipment_procedure_platforms", "reject", "approve"),
+        ("PRCT", "capital_equipment_procedure_platforms", "reject", "watchlist"),
+        ("OWLT", "home_chronic_care_devices_dme_drug_delivery", "watchlist", "reject"),
     ],
 )
 def test_august_15_capital_platform_governance_decisions_preserve_pit_history(
     ticker: str,
+    cohort: str,
     expected_before: str,
     expected_after: str,
 ) -> None:
@@ -1452,13 +1453,13 @@ def test_august_15_capital_platform_governance_decisions_preserve_pit_history(
     before = effective_decision(
         decisions,
         ticker=ticker,
-        cohort="capital_equipment_procedure_platforms",
+        cohort=cohort,
         asof=date(2026, 8, 14),
     )
     after = effective_decision(
         decisions,
         ticker=ticker,
-        cohort="capital_equipment_procedure_platforms",
+        cohort=cohort,
         asof=date(2026, 8, 17),
     )
 
@@ -3819,7 +3820,9 @@ def test_cohort_neutral_backtest_prefers_saved_point_in_time_cohort() -> None:
         "med_device_cohort_neutral_pit_cohort_test",
     )
     rows = [{"asof_date": "2024-01-02", "ticker": "AAA"}]
-    taxonomy = {"AAA": {"calibration_cohort": "current_cohort"}}
+    taxonomy = {
+        ("2024-01-02", "AAA"): {"calibration_cohort": "historical_cohort"}
+    }
     scores = {
         ("2024-01-02", "AAA"): {
             "calibration_cohort": "historical_cohort",

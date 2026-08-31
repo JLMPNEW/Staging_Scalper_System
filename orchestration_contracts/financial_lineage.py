@@ -366,6 +366,7 @@ def evaluate_financial_lineage_rows(
     expected_asof_field: str = "",
     min_core_metric_count: int = DEFAULT_MIN_CORE_METRIC_COUNT,
     candidate_fields: Sequence[str] = (
+        "portfolio_candidate_gate_before_lineage",
         "portfolio_candidate_gate",
         "investable_eligible",
     ),
@@ -380,6 +381,30 @@ def evaluate_financial_lineage_rows(
     unresolved_count = 0
     for row_number, row in enumerate(materialized, start=2):
         ticker = str(row.get("ticker") or f"row_{row_number}").strip()
+        is_candidate = _candidate(row, candidate_fields)
+        if mode == POLICY_CANDIDATE_ONLY and not is_candidate:
+            row_expected_asof = (
+                str(row.get(expected_asof_field) or "").strip()
+                if expected_asof_field
+                else str(expected_asof or "").strip()
+            )
+            if lineage_row_is_safe(
+                row,
+                expected_asof=row_expected_asof,
+                min_core_metric_count=min_core_metric_count,
+            ):
+                incorporated_count += 1
+            else:
+                unresolved_count += 1
+                issues.append(
+                    LineageIssue(
+                        ticker,
+                        "noncandidate_financial_lineage_unresolved",
+                        str(row.get("financial_lineage_status") or "missing_status"),
+                        False,
+                    )
+                )
+            continue
         missing = [field for field in LINEAGE_FIELDS if field not in row]
         if missing:
             unresolved_count += 1
@@ -431,7 +456,6 @@ def evaluate_financial_lineage_rows(
             incorporated_count += 1
 
         if gate == "0":
-            is_candidate = _candidate(row, candidate_fields)
             if is_candidate:
                 issues.append(
                     LineageIssue(

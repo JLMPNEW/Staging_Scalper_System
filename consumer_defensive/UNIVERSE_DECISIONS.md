@@ -13,13 +13,15 @@ Status: adopted for Stage 2 implementation
 7. Current-universe replay is not survivorship-correct. Historical calibration uses exact membership intervals, delisted securities, and verified terminal events. Unresolved terminal outcomes remain visible in audit coverage but are not calibration-eligible.
 8. `CCE` is a historical ticker in the continuous `CCEP` security lineage, and `DPS` is a historical ticker in the continuous `KDP` lineage. Neither is loaded as a separate delisted calibration security. Both are ticker aliases/security events.
 9. `CENTA`, not `CENT`, is retained. The verified 63-session median dollar volume was approximately $10.8 million for CENTA versus $3.2 million for CENT, and Central designed the non-voting class to enhance liquidity.
-10. Fresh Del Monte Produce (CIK `1047340`) uses its reviewed NYSE ticker `FDP`. `DMC` is not an alias for Fresh Del Monte; `DMC`/DMC Global (`BOOM`, CIK `34067`) are out of scope.
-11. `country` in the existing live CSV is listing country. It must not be silently treated as issuer domicile; issuer domicile requires issuer-level evidence.
-12. Security types normalize to `Common Stock`, `Ordinary Shares`, or `ADR/ADS`. Duplicate tickers, duplicate provider assets, overlapping alias intervals, cross-cohort assignments, and multiple live primary listings fail closed.
+10. Del Monte Corporation (CIK `1047340`) uses its NYSE ticker `DMC` from 2026-06-29. Historical ticker `FDP` remains a predecessor alias through 2026-06-26 on continuous Norgate asset `132283`. Unrelated DMC Global remains ticker `BOOM`, CIK `34067`, and is out of scope.
+11. `VLGEA` is the verified Nasdaq Class A ticker for Village Super Market; `VLGA` is not a valid listed ticker.
+12. `LMNR` remains outside the investable universe while its reviewed 63-session median dollar volume is below the configured support floor. `YSWY` remains outside the calibration universe until it has enough point-in-time history for the frozen 126-day momentum and 252-day risk features.
+13. `country` in the existing live CSV is listing country. It must not be silently treated as issuer domicile; issuer domicile requires issuer-level evidence.
+14. Security types normalize to `Common Stock`, `Ordinary Shares`, or `ADR/ADS`. Duplicate tickers, duplicate provider assets, overlapping alias intervals, cross-cohort assignments, and multiple live primary listings fail closed.
 
 ## Stage 2 acceptance
 
-- Load and validate the 108-row live security master and taxonomy.
+- Load and validate the 110-row live security master and taxonomy.
 - Load ticker aliases and security events without creating duplicate securities.
 - Resolve Norgate asset IDs and persist approved-index point-in-time membership.
 - Require the loaded current and historical candidate sets to match their reviewed inputs and terminal-event scope exactly.

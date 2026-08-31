@@ -6,7 +6,7 @@ import csv
 import logging
 import sys
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -72,11 +72,25 @@ class UniverseCompany:
     data_quality_status: str
 
 
+@dataclass(frozen=True)
+class UniverseAction:
+    ticker: str
+    action: str
+    valid_from: date
+    valid_to: date | None
+    reviewed_at: date
+    reason: str
+    destination_pipeline: str
+    source_reference: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Load the med-devices ticker universe into the independent DB.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--universe-csv", type=Path, default=None)
+    parser.add_argument("--universe-actions-csv", type=Path, default=None)
+    parser.add_argument("--asof", type=str, default="")
     return parser.parse_args()
 
 
@@ -140,6 +154,105 @@ def normalize_iso_date(raw: object, *, field_name: str) -> str:
     except ValueError as exc:
         raise ValueError(f"Invalid {field_name}: {raw!r}; expected YYYY-MM-DD") from exc
     return parsed.isoformat()
+
+
+SUPPORTED_UNIVERSE_ACTIONS = {"exclude_all_history"}
+
+
+def action_date(raw: object, *, field_name: str, required: bool = True) -> date | None:
+    value = normalize_iso_date(raw, field_name=field_name)
+    if not value:
+        if required:
+            raise ValueError(f"Missing required {field_name}")
+        return None
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def load_universe_actions(path: Path | None) -> dict[str, UniverseAction]:
+    if path is None:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"Configured med-device universe action CSV does not exist: {path}")
+    actions: dict[str, UniverseAction] = {}
+    for row_number, row in enumerate(read_csv_flexible(path), start=2):
+        ticker = normalize_ticker(row_get(row, "ticker"))
+        if not ticker:
+            raise ValueError(f"{path}:{row_number}: ticker is required")
+        if ticker in actions:
+            raise ValueError(f"{path}:{row_number}: duplicate universe action ticker {ticker}")
+        action = row_get(row, "action").lower()
+        if action not in SUPPORTED_UNIVERSE_ACTIONS:
+            raise ValueError(
+                f"{path}:{row_number}: unsupported action {action!r}; "
+                f"expected one of {sorted(SUPPORTED_UNIVERSE_ACTIONS)}"
+            )
+        valid_from = action_date(row_get(row, "valid_from"), field_name=f"{ticker} valid_from")
+        valid_to = action_date(
+            row_get(row, "valid_to"),
+            field_name=f"{ticker} valid_to",
+            required=False,
+        )
+        reviewed_at = action_date(row_get(row, "reviewed_at"), field_name=f"{ticker} reviewed_at")
+        if valid_from is None or reviewed_at is None:
+            raise AssertionError("Required action dates unexpectedly parsed as None")
+        if valid_to is not None and valid_to < valid_from:
+            raise ValueError(f"{path}:{row_number}: valid_to precedes valid_from for {ticker}")
+        reason = row_get(row, "reason")
+        source_reference = row_get(row, "source_reference")
+        if not reason or not source_reference:
+            raise ValueError(f"{path}:{row_number}: reason and source_reference are required for {ticker}")
+        actions[ticker] = UniverseAction(
+            ticker=ticker,
+            action=action,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            reviewed_at=reviewed_at,
+            reason=reason,
+            destination_pipeline=row_get(row, "destination_pipeline"),
+            source_reference=source_reference,
+        )
+    return actions
+
+
+def universe_action_is_effective(action: UniverseAction, *, asof: date) -> bool:
+    if asof < action.valid_from:
+        return False
+    return action.valid_to is None or asof <= action.valid_to
+
+
+def apply_universe_actions(
+    companies: list[UniverseCompany],
+    actions: dict[str, UniverseAction],
+    *,
+    asof: date,
+) -> tuple[list[UniverseCompany], list[str]]:
+    company_tickers = {company.ticker for company in companies}
+    unmatched = sorted(set(actions) - company_tickers)
+    if unmatched:
+        raise ValueError(
+            "Universe action ledger contains ticker(s) missing from the med-device seed: "
+            + ",".join(unmatched)
+        )
+    applied: list[str] = []
+    out: list[UniverseCompany] = []
+    for company in companies:
+        action = actions.get(company.ticker)
+        if action is None or not universe_action_is_effective(action, asof=asof):
+            out.append(company)
+            continue
+        if action.action == "exclude_all_history":
+            out.append(
+                replace(
+                    company,
+                    investability_status="sector_scope_excluded",
+                    universe_status="remove",
+                    is_active=0,
+                )
+            )
+            applied.append(company.ticker)
+            continue
+        raise AssertionError(f"Unhandled universe action: {action.action}")
+    return out, sorted(applied)
 
 
 def validate_security_identity(
@@ -542,11 +655,23 @@ def main() -> None:
         if args.universe_csv
         else resolve_path(cfg_get(config, "med_devices_universe.seed_csv"), base_dir=base_dir)
     )
+    action_raw = str(cfg_get(config, "med_devices_universe.universe_actions_csv", "") or "").strip()
+    universe_actions_csv = (
+        args.universe_actions_csv.expanduser().resolve()
+        if args.universe_actions_csv
+        else (resolve_path(action_raw, base_dir=base_dir) if action_raw else None)
+    )
+    asof_text = args.asof.strip() or datetime.now(timezone.utc).date().isoformat()
+    action_asof = action_date(asof_text, field_name="universe action asof")
+    if action_asof is None:
+        raise AssertionError("Universe action as-of unexpectedly parsed as None")
     timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
     if not universe_csv.exists():
         raise FileNotFoundError(f"Med-devices universe CSV not found: {universe_csv}")
 
     companies = parse_universe_rows(universe_csv, config=config)
+    universe_actions = load_universe_actions(universe_actions_csv)
+    companies, applied_actions = apply_universe_actions(companies, universe_actions, asof=action_asof)
     with connect(db_path, timeout_sec=timeout_sec) as conn:
         init_db(conn)
         run_id = start_run(conn, run_type="load_med_device_universe", input_path=universe_csv)
@@ -558,9 +683,18 @@ def main() -> None:
                 run_id=run_id,
                 status="success",
                 row_count=row_count,
-                message=f"active={active_count} source={universe_csv}",
+                message=(
+                    f"active={active_count} source={universe_csv} action_asof={action_asof.isoformat()} "
+                    f"applied_universe_actions={len(applied_actions)}"
+                ),
             )
-            LOGGER.info("Loaded med-devices universe: rows=%d active=%d db=%s", row_count, active_count, db_path)
+            LOGGER.info(
+                "Loaded med-devices universe: rows=%d active=%d actions=%d db=%s",
+                row_count,
+                active_count,
+                len(applied_actions),
+                db_path,
+            )
         except BaseException as exc:
             finish_run(conn, run_id=run_id, status="failed", row_count=0, message=f"{type(exc).__name__}: {exc}")
             raise

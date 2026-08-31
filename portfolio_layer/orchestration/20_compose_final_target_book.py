@@ -37,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.artifacts import mark_final_report_stale  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     fail_if_exists,
     manifest_acceptance_value,
@@ -253,11 +254,7 @@ def main() -> int:  # noqa: C901
     )
     weights_path = out_dir / weights_name
     manifest_path = out_dir / manifest_name
-    enriched_path = out_dir / "final_target_book.csv"
-    enriched_manifest_path = out_dir / "final_manifest.json"
     guarded_outputs = [weights_path, manifest_path]
-    if not args.monitor_bootstrap:
-        guarded_outputs.extend([enriched_path, enriched_manifest_path])
     try:
         fail_if_exists(guarded_outputs, force=args.force)
     except FileExistsError as exc:
@@ -567,12 +564,11 @@ def main() -> int:  # noqa: C901
     gross_after = sum(float(r["weight"]) for r in rows)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    if args.force and not args.monitor_bootstrap:
-        # Recomputed target weights invalidate the downstream human/reporting view. Deleted only
-        # now, after composition succeeded, so a failed forced rerun cannot destroy a still-
-        # consistent enriched view.
-        enriched_path.unlink(missing_ok=True)
-        enriched_manifest_path.unlink(missing_ok=True)
+    if not args.monitor_bootstrap:
+        # Preserve the last accepted Streamlit/report pair while making its
+        # staleness explicit to the orchestration resume gate. Stage 12b swaps
+        # in a passing replacement only after its full validation completes.
+        mark_final_report_stale(run_dir, "final")
     write_csv(weights_path, WEIGHT_FIELDS, rows)
     # Re-validate the WRITTEN artifact end-to-end (long-only, finite, unique tickers, exactly one
     # CASH row, conservation after rounding) so the acceptance reflects what consumers will read.

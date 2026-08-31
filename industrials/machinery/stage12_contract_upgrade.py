@@ -76,6 +76,65 @@ def _require_hash(path: Path, expected: object, *, label: str) -> None:
         raise ValueError(f"{label} hash mismatch: expected={expected!r} actual={actual}")
 
 
+def _validate_optimizer_seal_migration(
+    lock: Mapping[str, Any],
+    *,
+    optimizer_path: Path,
+    runner_path: Path,
+    expected_optimizer_sha256: str,
+    expected_runner_sha256: str,
+) -> tuple[str, str, str, str]:
+    """Validate the reviewed optimizer dependency migration before any writes."""
+
+    def reviewed_sha256(value: str, *, label: str) -> str:
+        digest = value.strip().lower()
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError(
+                f"Expected {label} SHA-256 must be 64 lowercase hexadecimal characters"
+            )
+        return digest
+
+    reviewed_optimizer = reviewed_sha256(
+        expected_optimizer_sha256, label="optimizer"
+    )
+    reviewed_runner = reviewed_sha256(expected_runner_sha256, label="runner")
+    previous_optimizer = str(
+        lock.get("portfolio_optimizer_sha256") or ""
+    ).strip().lower()
+    previous_runner = str(
+        lock.get("portfolio_optimizer_runner_sha256") or ""
+    ).strip().lower()
+    if len(previous_optimizer) != 64:
+        raise ValueError("Governance lock has no valid portfolio optimizer SHA-256")
+    if len(previous_runner) != 64:
+        raise ValueError("Governance lock has no valid optimizer runner SHA-256")
+    current_optimizer = file_sha256(optimizer_path)
+    current_runner = file_sha256(runner_path)
+    if current_optimizer != reviewed_optimizer:
+        raise ValueError(
+            "Reviewed optimizer SHA-256 does not match the current source: "
+            f"reviewed={reviewed_optimizer} current={current_optimizer}"
+        )
+    if current_runner != reviewed_runner:
+        raise ValueError(
+            "Reviewed runner SHA-256 does not match the current source: "
+            f"reviewed={reviewed_runner} current={current_runner}"
+        )
+    if (
+        current_optimizer == previous_optimizer
+        and current_runner == previous_runner
+    ):
+        raise ValueError("Portfolio optimizer dependency seal is already current")
+    return (
+        previous_optimizer,
+        current_optimizer,
+        previous_runner,
+        current_runner,
+    )
+
+
 def _changed_source_keys(
     previous: Mapping[str, str],
     current: Mapping[str, str],
@@ -1336,6 +1395,311 @@ def migrate_active_adapter_semantic_seal(
     }
     write_json_atomic(
         backup_root / "machinery_adapter_semantic_seal_migration.json",
+        report,
+    )
+    return report
+
+
+def migrate_active_optimizer_seal(
+    config: dict[str, Any],
+    *,
+    config_path: Path,
+    governance_root: Path,
+    asof: str,
+    expected_optimizer_sha256: str,
+    expected_runner_sha256: str,
+    expected_adapter_semantic_sha256: str,
+) -> dict[str, Any]:
+    """Atomically reseal reviewed portfolio dependencies without changing the model."""
+    from industrials.machinery.stage12_governance import validate_stage12_lock
+    from portfolio_layer.scores.adapter_semantics import (
+        industrial_adapter_semantic_sha256,
+    )
+
+    asof = parse_asof(asof)
+    state_path = Stage12Paths(governance_root).activation_state_json
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if (
+        state.get("acceptance") != "PASS"
+        or state.get("production_policy_status") != PRODUCTION_POLICY_STATUS_ACTIVE
+        or state.get("activation_asof") != asof
+    ):
+        raise ValueError("Machinery activation state is not active for this date")
+    previous_source_hashes = state.get("production_source_sha256")
+    if not isinstance(previous_source_hashes, dict):
+        raise ValueError("Machinery activation state has no source seal")
+    changed_sources = changed_production_policy_sources(previous_source_hashes)
+    if changed_sources:
+        raise ValueError(
+            "Machinery production sources changed; optimizer migration refused: "
+            + ",".join(changed_sources)
+        )
+
+    active_root = _active_cycle_root(state, default_root=governance_root)
+    stage12_paths = Stage12Paths(active_root)
+    activation_paths = ActivationPaths(active_root, asof)
+    result_path = activation_paths.activation_json
+    candidate_path = activation_paths.rank_csv
+    _require_hash(
+        stage12_paths.lock_json,
+        state.get("governance_lock_sha256"),
+        label="governance lock",
+    )
+    _require_hash(
+        candidate_path,
+        state.get("candidate_rank_sha256"),
+        label="activation candidate",
+    )
+    _require_hash(
+        result_path,
+        state.get("activation_result_sha256"),
+        label="activation result",
+    )
+    stage12_validation = validate_stage12_lock(output_root=active_root)
+    if stage12_validation.get("acceptance") != "PASS":
+        raise ValueError(
+            "Existing Stage 12 lock is invalid: "
+            + ";".join(stage12_validation.get("issues", []))
+        )
+
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    if (
+        result.get("acceptance") != "PASS"
+        or result.get("activation_status") != ACTIVATION_STATUS_FULLY_VALIDATED
+        or result.get("asof_date") != asof
+        or result.get("full_portfolio_smoke_required") is not False
+    ):
+        raise ValueError("Machinery activation result is not fully validated")
+
+    portfolio_config_path = resolve_path(
+        cfg_get(config, "machinery_stage12.portfolio_config_path"),
+        base_dir=config_path.parent,
+    )
+    portfolio_config = load_yaml(portfolio_config_path)
+    lock = json.loads(stage12_paths.lock_json.read_text(encoding="utf-8"))
+    validate_active_portfolio_contract(
+        portfolio_config,
+        expected_cap=float(lock["proposed_portfolio_cap"]),
+        expected_policy_sha256=str(lock["machinery_portfolio_policy_sha256"]),
+    )
+    optimizer_path = (
+        config_path.parents[2] / "portfolio_layer" / "optimizer" / "optimizer_core.py"
+    )
+    runner_path = (
+        config_path.parents[2]
+        / "portfolio_layer"
+        / "optimizer"
+        / "09_run_portfolio_optimizer.py"
+    )
+    (
+        previous_optimizer_sha256,
+        current_optimizer_sha256,
+        previous_runner_sha256,
+        current_runner_sha256,
+    ) = _validate_optimizer_seal_migration(
+        lock,
+        optimizer_path=optimizer_path,
+        runner_path=runner_path,
+        expected_optimizer_sha256=expected_optimizer_sha256,
+        expected_runner_sha256=expected_runner_sha256,
+    )
+    reviewed_adapter_semantic_sha256 = (
+        expected_adapter_semantic_sha256.strip().lower()
+    )
+    if len(reviewed_adapter_semantic_sha256) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in reviewed_adapter_semantic_sha256
+    ):
+        raise ValueError(
+            "Expected adapter semantic SHA-256 must be 64 lowercase hexadecimal characters"
+        )
+    current_adapter_semantic_sha256 = industrial_adapter_semantic_sha256()
+    if current_adapter_semantic_sha256 != reviewed_adapter_semantic_sha256:
+        raise ValueError(
+            "Reviewed adapter semantic SHA-256 does not match current semantics: "
+            f"reviewed={reviewed_adapter_semantic_sha256} "
+            f"current={current_adapter_semantic_sha256}"
+        )
+    previous_adapter_semantic_sha256 = str(
+        lock.get("portfolio_adapter_semantic_sha256") or ""
+    ).strip().lower()
+    if len(previous_adapter_semantic_sha256) != 64:
+        raise ValueError("Governance lock has no valid adapter semantic SHA-256")
+    adapter_path = (
+        config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
+    )
+
+    live_rank = Path(str(result.get("rank_table") or ""))
+    live_manifest = Path(str(result.get("rank_manifest") or ""))
+    _require_hash(live_rank, result.get("rank_table_sha256"), label="live rank table")
+    if file_sha256(live_rank) != file_sha256(candidate_path):
+        raise ValueError("Live machinery rank table differs from sealed candidate")
+    _require_hash(
+        live_manifest,
+        result.get("rank_manifest_sha256"),
+        label="live rank manifest",
+    )
+    rank_manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
+    sidecar_path = live_manifest.with_name(
+        "machinery_stage11_survivorship_calibration_panel.csv"
+    )
+    _require_hash(
+        sidecar_path,
+        rank_manifest.get("sidecar_sha256"),
+        label="shadow calibration sidecar",
+    )
+    candidate_rows = read_rows(candidate_path)
+    sidecar_rows = read_rows(sidecar_path)
+
+    backup_root = (
+        governance_root
+        / "activation_contract_upgrades"
+        / asof
+        / "portfolio_optimizer_seal"
+    )
+    backup_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = stage12_paths.manifest_json
+    originals = {
+        stage12_paths.lock_json: stage12_paths.lock_json.read_bytes(),
+        manifest_path: manifest_path.read_bytes(),
+        state_path: state_path.read_bytes(),
+        result_path: result_path.read_bytes(),
+    }
+    backup_names = {
+        stage12_paths.lock_json: "governance_lock_before_migration.json",
+        manifest_path: "stage12_manifest_before_migration.json",
+        state_path: "activation_state_before_migration.json",
+        result_path: "activation_result_before_migration.json",
+    }
+    for source, payload in originals.items():
+        backup = backup_root / backup_names[source]
+        if not backup.exists():
+            _write_bytes_atomic(backup, payload)
+
+    migrated_at = utc_now()
+    previous_lock_sha256 = file_sha256(stage12_paths.lock_json)
+    try:
+        lock["portfolio_optimizer_sha256"] = current_optimizer_sha256
+        lock["portfolio_optimizer_runner_sha256"] = current_runner_sha256
+        lock["portfolio_adapter_semantic_sha256"] = (
+            current_adapter_semantic_sha256
+        )
+        lock["portfolio_adapter_sha256"] = file_sha256(adapter_path)
+        lock["optimizer_seal_migration"] = {
+            "version": "overlapping_group_caps_v1",
+            "migrated_at_utc": migrated_at,
+            "previous_optimizer_sha256": previous_optimizer_sha256,
+            "reviewed_optimizer_sha256": current_optimizer_sha256,
+            "previous_runner_sha256": previous_runner_sha256,
+            "reviewed_runner_sha256": current_runner_sha256,
+            "previous_adapter_semantic_sha256": (
+                previous_adapter_semantic_sha256
+            ),
+            "reviewed_adapter_semantic_sha256": (
+                current_adapter_semantic_sha256
+            ),
+            "previous_governance_lock_sha256": previous_lock_sha256,
+            "candidate_reproduction_required": True,
+            "portfolio_rerun_required": True,
+        }
+        write_json_atomic(stage12_paths.lock_json, lock)
+
+        stage12_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        lock_metadata = stage12_manifest.get("files", {}).get(
+            stage12_paths.lock_json.name
+        )
+        if not isinstance(lock_metadata, dict):
+            raise ValueError("Stage 12 manifest does not seal the governance lock")
+        lock_metadata["path"] = str(stage12_paths.lock_json)
+        lock_metadata["sha256"] = file_sha256(stage12_paths.lock_json)
+        write_json_atomic(manifest_path, stage12_manifest)
+
+        result["optimizer_seal_migration"] = {
+            "migrated_at_utc": migrated_at,
+            "previous_optimizer_sha256": previous_optimizer_sha256,
+            "reviewed_optimizer_sha256": current_optimizer_sha256,
+            "previous_runner_sha256": previous_runner_sha256,
+            "reviewed_runner_sha256": current_runner_sha256,
+            "previous_adapter_semantic_sha256": (
+                previous_adapter_semantic_sha256
+            ),
+            "reviewed_adapter_semantic_sha256": (
+                current_adapter_semantic_sha256
+            ),
+            "candidate_reproduced_exactly": True,
+        }
+        write_json_atomic(result_path, result)
+
+        history = list(state.get("source_upgrade_history") or [])
+        history.append(
+            {
+                "upgraded_at_utc": migrated_at,
+                "reason": "portfolio_optimizer_overlapping_group_caps_v1",
+                "previous_governance_lock_sha256": previous_lock_sha256,
+                "previous_optimizer_sha256": previous_optimizer_sha256,
+                "reviewed_optimizer_sha256": current_optimizer_sha256,
+                "previous_runner_sha256": previous_runner_sha256,
+                "reviewed_runner_sha256": current_runner_sha256,
+                "previous_adapter_semantic_sha256": (
+                    previous_adapter_semantic_sha256
+                ),
+                "reviewed_adapter_semantic_sha256": (
+                    current_adapter_semantic_sha256
+                ),
+                "candidate_reproduced_exactly": True,
+            }
+        )
+        state.update(
+            {
+                "activation_result_sha256": file_sha256(result_path),
+                "governance_lock_sha256": file_sha256(stage12_paths.lock_json),
+                "optimizer_seal_migrated_at_utc": migrated_at,
+                "source_upgrade_history": history,
+            }
+        )
+        write_json_atomic(state_path, state)
+
+        regenerated_rows, policy_metadata = apply_active_production_policy(
+            config,
+            config_path=config_path,
+            governance_root=governance_root,
+            asof=asof,
+            shadow_rows=sidecar_rows,
+        )
+        if regenerated_rows != candidate_rows:
+            raise ValueError(
+                "Reviewed optimizer seal does not reproduce the activated candidate"
+            )
+        validations = _validate_live_outputs(config_path=config_path, asof=asof)
+    except BaseException:
+        for path, payload in originals.items():
+            _write_bytes_atomic(path, payload)
+        raise
+
+    report = {
+        "acceptance": "PASS",
+        "asof_date": asof,
+        "migrated_at_utc": migrated_at,
+        "operation": "PORTFOLIO_OPTIMIZER_SEAL_MIGRATION",
+        "candidate_reproduced_exactly": True,
+        "historical_rebuild_performed": False,
+        "portfolio_rerun_performed": False,
+        "portfolio_rerun_required": True,
+        "row_count": len(candidate_rows),
+        "previous_optimizer_sha256": previous_optimizer_sha256,
+        "reviewed_optimizer_sha256": current_optimizer_sha256,
+        "previous_runner_sha256": previous_runner_sha256,
+        "reviewed_runner_sha256": current_runner_sha256,
+        "previous_adapter_semantic_sha256": previous_adapter_semantic_sha256,
+        "reviewed_adapter_semantic_sha256": current_adapter_semantic_sha256,
+        "previous_governance_lock_sha256": previous_lock_sha256,
+        "governance_lock_sha256": file_sha256(stage12_paths.lock_json),
+        "production_policy_status": policy_metadata["production_policy_status"],
+        "validations": validations,
+        "backup_root": str(backup_root),
+    }
+    write_json_atomic(
+        backup_root / "machinery_optimizer_seal_migration.json",
         report,
     )
     return report

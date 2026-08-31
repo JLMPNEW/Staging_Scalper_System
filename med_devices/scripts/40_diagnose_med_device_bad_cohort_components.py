@@ -25,7 +25,7 @@ DEFAULT_COHORTS = (
     "capital_equipment_procedure_platforms",
     "diagnostics_clinical_tests",
     "elective_vision_dental_aesthetic_devices",
-    "emerging_single_product_therapeutic_platforms",
+    "emerging_single_product_medtech_platforms",
     "healthcare_services_cro_lab_services",
     "home_chronic_care_devices_dme_drug_delivery",
     "hospital_supplies_surgical_consumables_oem",

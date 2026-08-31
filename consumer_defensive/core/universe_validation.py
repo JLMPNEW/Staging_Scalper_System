@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +74,9 @@ def validate_stage2(
     *,
     current_csv: Path | None = None,
     require_pit_membership: bool = True,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
+    as_of_date = date.fromisoformat(str(as_of)).isoformat() if as_of is not None else None
     path = current_csv.expanduser().resolve() if current_csv else policy.resolve("authoritative_current_csv")
     csv_rows = read_csv(path)
     validate_current_rows(csv_rows, policy)
@@ -203,6 +206,57 @@ def validate_stage2(
         """,
         (*params, MODEL_FAMILY, PIT_SOURCE_ID),
     )
+    as_of_membership_count = 0
+    as_of_listing_count = 0
+    as_of_complete_vehicle_count = 0
+    if as_of_date is not None:
+        as_of_membership_count = _scalar(
+            conn,
+            f"""
+            SELECT COUNT(DISTINCT ticker) FROM dim_universe_membership
+            WHERE ticker IN ({placeholders}) AND model_family=? AND membership_source_id=?
+              AND membership_basis='recognized_index_union' AND point_in_time_flag=1
+              AND is_current_member=1 AND live_investable_flag=1
+              AND start_date<=? AND COALESCE(end_date, '9999-12-31')>=?
+            """,
+            (*params, MODEL_FAMILY, PIT_SOURCE_ID, as_of_date, as_of_date),
+        )
+        as_of_listing_count = _scalar(
+            conn,
+            f"""
+            SELECT COUNT(DISTINCT s.ticker)
+            FROM dim_security s
+            JOIN fact_major_exchange_listing_daily x ON x.security_id=s.security_id
+            WHERE s.ticker IN ({placeholders}) AND s.listing_status='active'
+              AND x.source_id=? AND x.listing_date=?
+              AND x.major_exchange_listed_flag=1
+            """,
+            (*params, PIT_SOURCE_ID, as_of_date),
+        )
+        vehicle_placeholders = ",".join("?" for _ in expected_vehicle_ids)
+        as_of_complete_vehicle_count = _scalar(
+            conn,
+            f"""
+            SELECT COUNT(*) FROM (
+                SELECT s.ticker
+                FROM dim_security s
+                JOIN fact_recognized_vehicle_membership_daily m
+                  ON m.security_id=s.security_id
+                WHERE s.ticker IN ({placeholders}) AND s.listing_status='active'
+                  AND m.source_id=? AND m.membership_date=?
+                  AND m.vehicle_id IN ({vehicle_placeholders})
+                GROUP BY s.ticker
+                HAVING COUNT(DISTINCT m.vehicle_id)=?
+            )
+            """,
+            (
+                *params,
+                PIT_SOURCE_ID,
+                as_of_date,
+                *sorted(expected_vehicle_ids),
+                len(expected_vehicle_ids),
+            ),
+        )
     current_asset_count = _scalar(
         conn,
         f"""
@@ -292,6 +346,21 @@ def validate_stage2(
             errors.append(f"Norgate asset identities: expected={expected} actual={current_asset_count}")
         if daily_series_count != expected:
             errors.append(f"four-index daily series: expected={expected} actual={daily_series_count}")
+        if as_of_date is not None and as_of_membership_count != expected:
+            errors.append(
+                f"recognized membership covering {as_of_date}: "
+                f"expected={expected} actual={as_of_membership_count}"
+            )
+        if as_of_date is not None and as_of_listing_count != expected:
+            errors.append(
+                f"major-exchange listing rows on {as_of_date}: "
+                f"expected={expected} actual={as_of_listing_count}"
+            )
+        if as_of_date is not None and as_of_complete_vehicle_count != expected:
+            errors.append(
+                f"four-index membership rows on {as_of_date}: expected={expected} "
+                f"actual={as_of_complete_vehicle_count}"
+            )
         if historical_missing or historical_extra:
             errors.append(
                 "historical candidate taxonomy scope mismatch: "
@@ -405,6 +474,10 @@ def validate_stage2(
         "active_security_rows": security_count,
         "taxonomy_rows": taxonomy_count,
         "recognized_current_members": current_membership_count,
+        "membership_as_of": as_of_date,
+        "recognized_members_as_of": as_of_membership_count,
+        "major_exchange_listings_as_of": as_of_listing_count,
+        "complete_four_index_rows_as_of": as_of_complete_vehicle_count,
         "norgate_asset_identities": current_asset_count,
         "complete_four_index_daily_series": daily_series_count,
         "historical_candidates_expected": len(expected_historical_tickers),

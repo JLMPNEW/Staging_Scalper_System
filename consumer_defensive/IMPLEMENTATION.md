@@ -5,6 +5,17 @@ Package: `consumer_defensive`
 Canonical Portfolio Layer sector: `Consumer Staples`  
 Internal universe sector label: `Consumer Defensive`
 
+Audit correction (`2026-08-25`): Stage 8's 24/24 and Stage 9's 31/31 results
+validate internal artifact reconstruction only. They are not strict-OOS or
+promotion passes. The holdout was exposed to 318 unauthorized candidates,
+candidate samples and targets differed, and freshness/survivorship/source
+invariants remain false. Canonical corrected evidence is under
+`output/consumer_defensive/validation_v4/2026-08-25/v6`.
+The capital verdict and only admissible future protocol are controlled by
+[PRODUCTION_PROMOTION_AUDIT_2026-08-25.md](../PRODUCTION_PROMOTION_AUDIT_2026-08-25.md).
+The canonical trust registry is unconfigured and the evidence clock has not started.
+
+
 ## 1. Objective
 
 Build a fully independent Consumer Defensive scoring pipeline that:
@@ -799,9 +810,21 @@ It publishes the historical research panel, daily and cohort breadth, feature co
 
 Signal diagnostics and `factor_validation` read this frozen panel; they may not independently reconstruct a different feature universe. The panel includes XLP-relative and trailing-beta SPY-relative 21/63/126-session forward targets, next-session entry lag, PIT membership, terminal total-return handling, regimes, and immutable row/manifest hashes. Selective market-share disclosures remain measurable but are excluded from validation pending a coverage-bias contract.
 
-The measured `2026-08-14` panel is Stage 6C run 1: 81,221 immutable rows, 30,309 numeric rows, 86 monthly evaluation dates, all 38 metrics, and panel SHA-256 `1c83868c680e5cb9e5a5533760c25a03df3824dfdc22abd2eb946c188dc5e479`. All ten construction/validation checks pass. The Stage 6B handoff accepts only the canonical `measurement_only_complete` run status; a focused regression prevents the earlier fixture-only `complete` status from masking the production contract.
+The corrected `2026-08-14` panel is Stage 6C run 3: 81,221 immutable
+rows, 28,487 valid numeric rows, 86 monthly evaluation dates, all 38 metrics,
+and panel SHA-256
+`d2c7155be91cf21c2826e911e083e662bf203119ee087baf12f754ac2d2adcf0`.
+All 18 construction/validation checks pass. The Stage 6B handoff is bound to
+the exact observation-hash manifest of run 37, and selection enforces both
+accepted-at and period-end point-in-time constraints.
 
-Shared factor-validation campaign `cdfv_20260814_1c83868c680e_0b1ba11163e0` contains 276 sector/cohort/scope/horizon cells. Seventy-seven cells meet the kernel evidence floor, but none survives the sealed 5% family FDR gate; the lowest raw p-value is `0.155087`. The campaign and ledger validate cleanly, so this is retained as negative evidence rather than weakened thresholds. All specialized production weights remain zero.
+Corrected factor-validation campaign
+`cdfv_20260814_d2c7155be91c_2498172c7161_a6495192b5` contains 174 routed
+sector/cohort/subtype/target/horizon cells. Ninety cells meet the evidence floor
+across eight metrics. One alcohol-depletion cell survives 5% family FDR with
+`p=q=0.0117267`, but its negative IC conflicts with the pre-registered
+`higher_is_better` direction. The campaign and ledger validate cleanly, zero
+cells pass every acceptance gate, and all specialized weights remain zero.
 
 Scoring-feature definition v2 freezes the hierarchical contract. Common factors can be normalized within cohort with the existing guarded universe fallback. Specialized overlays are registered separately for each reviewed cohort/subtype and may receive independent cohort weights only after shared factor-validation acceptance. A nonapplicable metric is excluded from the ticker's completeness denominator. A missing applicable metric remains null, contributes zero, and does not redistribute its weight to available metrics. Accepted measurement-only evidence increases the ticker's full-data confidence but cannot create a score or weight by itself.
 
@@ -831,9 +854,67 @@ Exit gate:
 - shadow status forces all portfolio gates off without neutralizing the research scores; and
 - Stage 7 does not overwrite Stage 6 feature rows.
 
+The corrected implementation is complete through isolated acceptance at
+`2026-08-14`. `core/stage7_schema.py` owns the additive v1 migration, v2 model/weight
+contracts and immutable snapshot tables. `core/stage7_scoring.py` consumes the
+exact Stage 6A input/component identities, requires the exact completed Stage
+6B overlay run ID, rejects future component dates or nonzero specialized weights,
+and publishes deterministic sector and cohort ranks. Missing core inputs receive
+the configured neutral component score only for their frozen weight; weights are
+never redistributed. Scripts `16` and `16a` build and independently validate the
+snapshot with no network dependency.
+
+The full-stack rehearsal was created from the retained Stage 6B database by a
+transaction-consistent backup, then enriched from production through read-only
+copies of the four Stage 5 fact tables. Production was not changed. Its backup
+SHA-256 is
+`05148773b3f6e91ebf28008c65fb02426a8415fc308272572173804656b9304e`,
+with SQLite quick-check `ok` and zero foreign-key violations. The rebuilt Stage
+6A/6B handoff passes its complete gate with 96/108 rank-ready inputs and 505
+exact-run specialized component overlays. The audit found canonical component
+ordering, unsealed-observation, and future-period selection defects; the code
+now enforces the exact Stage 6B run manifest and point-in-time period eligibility,
+with regressions protecting each invariant.
+
+Stage 7 itself passes 15/15 checks with 108 outputs, 94 rank-ready rows and 14
+explicit review rows. The four cohort readiness fractions all exceed the frozen
+85% sector floor. Every specialized weight remains zero, every output is
+`shadow_monitor`, and both investability gates remain zero. Contract, input and
+output SHA-256 values are respectively
+`d5184d007b89f3be62c61277cd4ddcb864f15ff0ccd09d9234de31922cf909c8`,
+`ad90697b81c020c3666d47b04aa2ece231a2d8b7793dc00d23e27dd907f2500a`,
+and `abcca120e948d45a440b5f421809f3fb98b656484a4439d8b493e8a852fe93e8`.
+The validator independently reconciles weighted arithmetic, score order,
+ticker tie-breaks, percentiles, and manifests. The legacy Stage 8 artifact
+replay is complete, but its promotion evidence is retrospective; production
+migration remains blocked.
+
 ### Stage 8 - Constrained Calibration Research
 
 Following Technology Stage 8, run report-only constrained calibration, embargoed holdout testing, shared factor-validation acceptance, cohort-concentration checks, and walk-forward refits. Stage 8 cannot modify Stage 7 weights automatically.
+
+Implemented by `core/stage8_calibration.py`, scripts `17` and `17a`, and the
+`stage8_calibration` fail-closed configuration contract. The runner reconstructs
+historical common features from acceptance-dated raw facts and frozen whole-
+ticker prices through a read-only rehearsal database connection. It does not
+reuse the current canonical financial snapshot for past dates. It preregisters
+the candidate census before reading labels, retains excluded dates in the audit
+panel, neutralizes missing components without weight redistribution, and opens
+the final holdout only after both static validation and walk-forward gates pass.
+
+Measured run `cds8_2a94264294f4b58b1444fb2d` passes all 24 internal
+artifact-integrity checks. That does not establish independent predictive or
+strict-OOS validity. The full panel has 9,036 rows, 116 tickers and 86 dates,
+including partial date `2026-02-11`. All 320 candidates touched holdout data;
+318 were unauthorized, accounting for 5,088 unauthorized period rows.
+Candidate-dependent eligibility also compared candidates and baseline on
+different samples. Stale 13F data, incomplete source sealing, current/final
+rather than PIT sector taxonomy, and the partial month leave freshness,
+survivorship, cadence, source-identity, holdout, and strict-OOS gates false.
+The corrected independent baseline estimates are positive but underpowered:
+21d IC `0.197942` at n=3, 63d IC `0.197055` at n=2, and 126d IC `0.176805`
+at n=1. Stage 7 weights remain shadow-only, specialized weights remain zero,
+and production/OOS/Portfolio Layer flags remain false.
 
 Exit gate:
 
@@ -856,6 +937,24 @@ Exit gate:
 - PIT membership and reconciled terminal returns are enforced; and
 - Stage 9 writes reports only and never promotes weights.
 
+Implementation: `core/stage9_backtest.py` owns deterministic scheduling,
+candidate scoring, holdings, transaction/borrow costs, capacity, risk and
+source tieout. Policy is isolated in
+`data/consumer_defensive_stage9_backtest.yaml`, so adding Stage 9 does not
+invalidate the frozen Stage 8 configuration lockbox. Script `18` runs against a
+strict SQLite `mode=ro` connection and script `18a` independently reconstructs
+the evidence package.
+
+The legacy isolated run is `cds9_63065740a60179d1a1abc968`, contract
+`63065740a60179d1a1abc96806f5e82198efa9221161aa32f640b34b4e11ce1f`,
+and manifest
+`03346ffceb33b9f1c7b974229cad4ec1f5638945422d476f8cbe8aca3b1df183`.
+All 31 internal artifact-integrity checks pass across 2,560 summary, 46,280
+period and 377,106 holding rows. Stage 9 opened the burned holdout for all 320
+candidates, discarded 16 of 56 schedule slots, and evaluates a fixed 21-session
+target that does not match Stage 8's weighted 21/63/126-session objective. The
+decision is retrospective report-only and retains the Stage 7 core baseline.
+
 ### Stage 10 - Dashboard And Static Reports
 
 Publish the final rank table, company scorecards, cohort summary, risk flags, review queue, specialized-overlay coverage, and Stage 9 summary from the current Stage 7 scoring layer.
@@ -868,9 +967,28 @@ Exit gate:
 - latest and dated snapshot paths are both published; and
 - dashboard publishing does not change model scores or source data.
 
+Measured isolated acceptance at `2026-08-14`: run
+`cds10_729cbfd933b3c0ddc912b999` publishes 108 deterministic final-rank rows,
+5,940 company scorecard rows, five sector/cohort summaries, 190 specialized
+coverage rows, 14 review rows, 43 risk rows, 40 frozen Stage 9 baseline views,
+and seven source-ledger rows. Specialized measurement coverage is 543/971
+applicable ticker-metric pairs (55.92%) overall, but zero of 38 specialized
+metrics are model-weight qualified and all specialized weights remain zero.
+All 17 Stage 10 publishing checks pass after a fresh 31/31 Stage 9
+artifact-integrity validation. Desktop and responsive render QA pass, and an
+exact replay leaves all 28 dated/latest artifact hashes unchanged. Publishing
+integrity does not repair the inherited evidence defects; the accepted v3
+package remains shadow-only, non-OOS and non-investable.
+
 ### Stage 10B - Governance Lockbox And Signal Registry
 
-Publish the signal registry, evidence ledger, model lockbox, artifact hashes, promotion state, qualification gaps, and governance manifest without changing source data, scores, or weights.
+Legacy Stage 10B shadow governance is implemented and records the signal
+registry, evidence ledger, lockbox, artifact hashes, promotion state, and
+qualification gaps without changing data, scores, or weights. Its `4/4 PASS`
+certifies artifact/governance and fail-closed controls only, not predictive
+efficacy. It sets `promotion_eligible` false and portfolio cap zero and is
+superseded for promotion use by the corrected V6 audit and canonical
+three-authority future protocol.
 
 Exit gate:
 
@@ -880,6 +998,9 @@ Exit gate:
 - shadow, promoted, and deferred states cannot be confused.
 
 ### Stage 11 - Portfolio Layer Adapter And End-To-End Tests
+
+Status: adapter implemented and fail-closed; capital activation remains blocked.
+
 
 Implement the Portfolio Layer adapter and all config changes in a disabled test fixture first. Run Stage 1 collection, cross-sector score calibration, score-contract validation, risk-panel construction, and optimizer smoke tests against fixture outputs.
 
@@ -1168,11 +1289,24 @@ The second slice is Technology Stage 3: load the complete market/corporate-actio
 
 ### Current ordered checkpoint
 
-Stages 0-5 and terminal-event reconciliation are implemented in production. Stage 6A is implemented and passes its isolated production-copy rehearsal; production was not mutated by that rehearsal. The FDP-corrected chronological replay, transactionally consistent two-database backup, production-copy rehearsal, and approved Stage 5 deployment are complete. Production Stage 4 passes 40/40 at `2026-08-14` with 119/119 reporting profiles covered, zero stale lifecycle outputs, zero required FX gaps, zero lineage mismatches, and clean foreign keys. Production Stage 5 passes 18/18 at `2026-08-11` with current 13F, short-interest, and numeric positioning coverage all 108/108; Section 16 coverage is 95/95 applicable issuers. The remaining work must proceed in this order:
+Stages 0-5 and terminal-event reconciliation are implemented in production.
+Stages 6A-7 pass isolated construction gates. Legacy Stages 8-10 pass internal
+artifact-reconstruction checks only; their burned holdout and remaining PIT,
+freshness, source, cadence, target, and sample-size defects make them ineligible
+for promotion. Stage 10B shadow governance and a disabled-by-default Stage 11
+adapter are implemented. The remaining work must proceed in this order:
 
-1. complete Stage 6B reviewed recall/conflict adjudication, expand the golden corpus, and approve only viable specialized overlays from the already complete historical shadow inventory;
-2. re-run the unchanged Stage 6A contract validator after any Stage 6B overlay;
-3. build and validate the definitive Stage 6C PIT historical feature panel from `2019-01-02`, then run signal diagnostics and the dedicated `factor_validation` adapter before Stage 7 calibration; and
-4. continue through Stages 7-12 only in the documented dependency order.
+1. configure and independently approve the fixed three-authority trust registry;
+2. externally timestamp the exact frozen plan before any new target access;
+3. operate target-blind capture and maturity-aware evaluation on the official
+   XNYS schedule;
+4. accumulate the required independent 21/63/126-session observations;
+5. obtain a separate independent review that binds a passing evaluation hash
+   into a new promotion candidate; and
+6. complete clean-room acceptance, backup-copy migration rehearsal, rollback
+   verification and explicit governance approval before capital activation.
 
-Therefore, parser validation has priority over the definitive historical-readiness audit, and that audit has priority over signal diagnostics and factor validation. The earlier Stage 5 checkpoint is foundation coverage only.
+Historical replay and the legacy Stage 10B package cannot shorten this order.
+
+The earlier Stage 5 checkpoint remains foundation coverage only; the accepted
+Stage 6C panel is the definitive historical research input.

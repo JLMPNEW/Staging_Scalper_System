@@ -356,8 +356,11 @@ def load_rows(
                    m.end_date AS terminal_date
             FROM dim_company c
             JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id AND t.model_family = ?
-            LEFT JOIN dim_universe_membership m
-              ON m.company_id = c.company_id AND m.model_family = t.model_family AND m.is_current_member = 1
+            JOIN dim_universe_membership m
+              ON m.company_id = c.company_id
+             AND m.model_family = t.model_family
+             AND m.membership_basis = 'current_source_of_truth'
+             AND m.is_current_member = 1
             WHERE c.is_active = 1
             ORDER BY c.ticker
             """,

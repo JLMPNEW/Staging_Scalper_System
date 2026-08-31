@@ -14,7 +14,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.config import active_score_sectors, cfg_get, load_yaml  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import check_stage1_readiness, latest_run_with, readiness_passed  # noqa: E402
@@ -60,9 +60,12 @@ def main() -> int:
     expected = []
     per_pipeline_tolerance = {}
     optional_pipelines: set[str] = set()
-    for sector in cfg_get(config, "score_contract.sectors", []):
-        if not bool(sector.get("enabled", True)):
-            continue
+    try:
+        active_sectors = active_score_sectors(config, run_as_of)
+    except ValueError as exc:
+        LOGGER.error("Invalid score-sector activation contract: %s", exc)
+        return 1
+    for sector in active_sectors:
         pipe = str(sector["model_family"])
         per_pipeline_tolerance[pipe] = int(sector.get("staleness_tolerance_days", tolerance))
         if bool(sector.get("required", True)):

@@ -1,0 +1,26 @@
+schema_version: consumer_defensive_stage10_publishing_policy_v2
+stage10_publishing:
+  mode: research_only_static_publish
+  output_version: v4
+  readiness_label: Research-only shadow dashboard — not investable
+  permitted_use: research_reporting_only
+  production_promotion_enabled: false
+  portfolio_write_enabled: false
+  portfolio_candidate_gate: 0
+  oos_score_valid_flag: 0
+  require_stage9_validation_pass: true
+  require_stage9_permitted_use: stage10_reporting_input
+  minimum_ticker_count: 79
+  minimum_rank_ready_fraction: 0.85
+  expected_core_component_count: 17
+  expected_specialized_component_count: 38
+  top_rank_rows_html: 25
+  maximum_review_rows_html: 100
+  canonical_sector: Consumer Staples
+  internal_sector: Consumer Defensive
+  portfolio_adapter: consumer_defensive
+  stage11_calibration_panel_source: stage6c_specialized_factor_panel_run_3
+  survivorship_corrected_panel_flag: 0
+  citation_policy: strict
+  latest_snapshot_enabled: true
+  dated_snapshot_required: true

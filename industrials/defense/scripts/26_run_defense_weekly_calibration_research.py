@@ -417,6 +417,11 @@ def complete_feature_dates(
                 JOIN dim_industrials_taxonomy t
                   ON t.company_id = c.company_id
                  AND t.model_family = 'defense'
+                JOIN dim_universe_membership m
+                  ON m.company_id = c.company_id
+                 AND m.model_family = t.model_family
+                 AND m.membership_basis = 'current_source_of_truth'
+                 AND m.is_current_member = 1
                 WHERE c.is_active = 1
                 """
             ).fetchone()["n"]
@@ -456,6 +461,11 @@ def complete_feature_dates(
                 JOIN dim_industrials_taxonomy t
                   ON t.company_id = c.company_id
                  AND t.model_family = f.model_family
+                JOIN dim_universe_membership m
+                  ON m.company_id = c.company_id
+                 AND m.model_family = t.model_family
+                 AND m.membership_basis = 'current_source_of_truth'
+                 AND m.is_current_member = 1
                 WHERE f.model_family = 'defense'
                   AND f.source_id IN ({placeholders(source_ids)})
                   AND f.asof_date = ?

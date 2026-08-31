@@ -59,6 +59,7 @@ def main() -> int:
                 policy,
                 current_csv=args.universe_csv,
                 require_pit_membership=not args.identity_only,
+                as_of=args.as_of,
             )
             finish_run(
                 conn,

@@ -80,6 +80,25 @@ def test_candidate_only_retains_unresolved_noncandidate_as_nonblocking_evidence(
     assert evaluation.issue_counts == {"noncandidate_financial_lineage_unresolved": 1}
 
 
+def test_candidate_only_allows_calibration_row_without_production_lineage() -> None:
+    evaluation = evaluate_financial_lineage_rows(
+        [
+            {
+                "ticker": "RESEARCH",
+                "portfolio_candidate_gate": "0",
+                "investable_eligible": "0",
+            }
+        ],
+        policy_mode=POLICY_CANDIDATE_ONLY,
+        expected_asof=ASOF,
+    )
+
+    assert evaluation.acceptance == "PASS"
+    assert evaluation.unresolved_count == 1
+    assert evaluation.errors == []
+    assert evaluation.issue_counts == {"noncandidate_financial_lineage_unresolved": 1}
+
+
 def test_incorporated_row_passes_both_policies() -> None:
     row = _row(gate="1", candidate="1")
 

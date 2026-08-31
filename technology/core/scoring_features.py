@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import logging
 import math
@@ -443,6 +444,190 @@ def latest_row(
     ).fetchone()
 
 
+def latest_rows_by_ticker(
+    conn: Any,
+    table: str,
+    tickers: list[str],
+    source_id: str,
+    model_family: str,
+    asof: date,
+    order_cols: str,
+) -> dict[str, Any]:
+    """Load the same PIT rows as ``latest_row`` in one query per table."""
+    normalized = sorted({normalize_ticker(ticker) for ticker in tickers if normalize_ticker(ticker)})
+    if not normalized:
+        return {}
+    placeholders = ",".join("?" for _ in normalized)
+    rows = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                source_rows.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ticker
+                    ORDER BY {order_cols}
+                ) AS _pit_row_number
+            FROM {table} AS source_rows
+            WHERE ticker IN ({placeholders})
+              AND source_id = ?
+              AND model_family = ?
+              AND asof_date <= ?
+        )
+        SELECT *
+        FROM ranked
+        WHERE _pit_row_number = 1
+        """,
+        (*normalized, source_id, model_family, asof.isoformat()),
+    ).fetchall()
+    return {normalize_ticker(row["ticker"]): row for row in rows}
+
+
+@dataclass(frozen=True)
+class PitRowTimeline:
+    dates: list[str]
+    rows: list[Any]
+
+    def at_or_before(self, asof: date) -> Any | None:
+        index = bisect.bisect_right(self.dates, asof.isoformat()) - 1
+        return self.rows[index] if index >= 0 else None
+
+
+@dataclass(frozen=True)
+class PitFeatureCache:
+    market: dict[str, PitRowTimeline]
+    financial: dict[str, PitRowTimeline]
+    positioning: dict[str, PitRowTimeline]
+    profiles: dict[str, dict[str, Any]]
+
+    def rows_at(
+        self,
+        asof: date,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
+        return (
+            {ticker: row for ticker, timeline in self.market.items() if (row := timeline.at_or_before(asof)) is not None},
+            {
+                ticker: row
+                for ticker, timeline in self.financial.items()
+                if (row := timeline.at_or_before(asof)) is not None
+            },
+            {
+                ticker: row
+                for ticker, timeline in self.positioning.items()
+                if (row := timeline.at_or_before(asof)) is not None
+            },
+            self.profiles,
+        )
+
+
+def financial_latest_key(row: Any) -> tuple[str, int, int, str]:
+    quality_rank = {"complete": 2, "review": 1}.get(str(row["data_quality_status"] or ""), 0)
+    completeness = sum(
+        row[field] is not None
+        for field in (
+            "revenue",
+            "gross_profit",
+            "operating_income",
+            "net_income",
+            "assets",
+            "equity",
+            "cash_and_equivalents",
+            "operating_cash_flow",
+            "free_cash_flow",
+            "diluted_shares",
+        )
+    )
+    return (
+        str(row["fiscal_period_end"] or ""),
+        quality_rank,
+        completeness,
+        str(row["asof_date"] or ""),
+    )
+
+
+def load_pit_row_timelines(
+    conn: Any,
+    *,
+    table: str,
+    tickers: list[str],
+    source_id: str,
+    model_family: str,
+    max_asof: date,
+    prefix_best_financial: bool = False,
+) -> dict[str, PitRowTimeline]:
+    normalized = sorted({normalize_ticker(ticker) for ticker in tickers if normalize_ticker(ticker)})
+    if not normalized:
+        return {}
+    placeholders = ",".join("?" for _ in normalized)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {table}
+        WHERE ticker IN ({placeholders})
+          AND source_id = ?
+          AND model_family = ?
+          AND asof_date <= ?
+        ORDER BY ticker, asof_date, rowid
+        """,
+        (*normalized, source_id, model_family, max_asof.isoformat()),
+    ).fetchall()
+    grouped: dict[str, list[Any]] = {}
+    for row in rows:
+        grouped.setdefault(normalize_ticker(row["ticker"]), []).append(row)
+
+    timelines: dict[str, PitRowTimeline] = {}
+    for ticker, ticker_rows in grouped.items():
+        dates: list[str] = []
+        selected_rows: list[Any] = []
+        best: Any | None = None
+        for row in ticker_rows:
+            if prefix_best_financial and (best is None or financial_latest_key(row) > financial_latest_key(best)):
+                best = row
+            dates.append(str(row["asof_date"]))
+            selected_rows.append(best if prefix_best_financial else row)
+        timelines[ticker] = PitRowTimeline(dates=dates, rows=selected_rows)
+    return timelines
+
+
+def load_pit_feature_cache(
+    conn: Any,
+    *,
+    tickers: list[str],
+    market_source: str,
+    financial_source: str,
+    positioning_source: str,
+    model_family: str,
+    max_asof: date,
+) -> PitFeatureCache:
+    return PitFeatureCache(
+        market=load_pit_row_timelines(
+            conn,
+            table="feature_market_technical",
+            tickers=tickers,
+            source_id=market_source,
+            model_family=model_family,
+            max_asof=max_asof,
+        ),
+        financial=load_pit_row_timelines(
+            conn,
+            table="feature_financial_statement",
+            tickers=tickers,
+            source_id=financial_source,
+            model_family=model_family,
+            max_asof=max_asof,
+            prefix_best_financial=True,
+        ),
+        positioning=load_pit_row_timelines(
+            conn,
+            table="feature_positioning",
+            tickers=tickers,
+            source_id=positioning_source,
+            model_family=model_family,
+            max_asof=max_asof,
+        ),
+        profiles=load_profiles_by_ticker(conn, tickers),
+    )
+
+
 def load_universe(conn: Any, model_family: str, ticker_filter: set[str]) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -501,9 +686,87 @@ def latest_share_growth(conn: Any, ticker: str, source_id: str, model_family: st
     return None
 
 
+def latest_share_growth_by_ticker(
+    conn: Any,
+    tickers: list[str],
+    source_id: str,
+    model_family: str,
+    asof: date,
+) -> dict[str, float | None]:
+    """Batch the 12-row diluted-share lookback used by ``latest_share_growth``."""
+    normalized = sorted({normalize_ticker(ticker) for ticker in tickers if normalize_ticker(ticker)})
+    if not normalized:
+        return {}
+    placeholders = ",".join("?" for _ in normalized)
+    rows = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                ticker,
+                fiscal_period_end,
+                diluted_shares,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ticker
+                    ORDER BY fiscal_period_end DESC, asof_date DESC
+                ) AS _pit_row_number
+            FROM feature_financial_statement
+            WHERE ticker IN ({placeholders})
+              AND source_id = ?
+              AND model_family = ?
+              AND asof_date <= ?
+              AND diluted_shares IS NOT NULL
+        )
+        SELECT ticker, fiscal_period_end, diluted_shares
+        FROM ranked
+        WHERE _pit_row_number <= 12
+        ORDER BY ticker, _pit_row_number
+        """,
+        (*normalized, source_id, model_family, asof.isoformat()),
+    ).fetchall()
+    by_ticker: dict[str, list[Any]] = {}
+    for row in rows:
+        by_ticker.setdefault(normalize_ticker(row["ticker"]), []).append(row)
+
+    out: dict[str, float | None] = {}
+    for ticker in normalized:
+        ticker_rows = by_ticker.get(ticker, [])
+        if len(ticker_rows) < 2:
+            out[ticker] = None
+            continue
+        latest = safe_float(ticker_rows[0]["diluted_shares"])
+        latest_end = parse_date(ticker_rows[0]["fiscal_period_end"])
+        if latest is None or latest_end is None:
+            out[ticker] = None
+            continue
+        growth: float | None = None
+        for row in ticker_rows[1:]:
+            prior = safe_float(row["diluted_shares"])
+            prior_end = parse_date(row["fiscal_period_end"])
+            if prior is None or prior_end is None:
+                continue
+            day_gap = (latest_end - prior_end).days
+            if 300 <= day_gap <= 460:
+                growth = pct_change(latest, prior)
+                break
+        out[ticker] = growth
+    return out
+
+
 def load_profile(conn: Any, ticker: str) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM dim_issuer_reporting_profile WHERE ticker = ?", (ticker,)).fetchone()
     return dict(row) if row is not None else {}
+
+
+def load_profiles_by_ticker(conn: Any, tickers: list[str]) -> dict[str, dict[str, Any]]:
+    normalized = sorted({normalize_ticker(ticker) for ticker in tickers if normalize_ticker(ticker)})
+    if not normalized:
+        return {}
+    placeholders = ",".join("?" for _ in normalized)
+    rows = conn.execute(
+        f"SELECT * FROM dim_issuer_reporting_profile WHERE ticker IN ({placeholders})",
+        normalized,
+    ).fetchall()
+    return {normalize_ticker(row["ticker"]): dict(row) for row in rows}
 
 
 def adj_close_at(conn: Any, ticker: str, price_source: str, date_iso: str) -> float | None:
@@ -560,40 +823,49 @@ def build_raw_rows(
     financial_source: str,
     positioning_source: str,
     relative_strength_market_field: str = "rel_strength_soxx_3m",
+    pit_feature_cache: PitFeatureCache | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for item in universe:
-        ticker = str(item["ticker"])
-        market = latest_row(
+    tickers = [normalize_ticker(str(item["ticker"])) for item in universe]
+    if pit_feature_cache is not None:
+        markets, financials, positionings, profiles = pit_feature_cache.rows_at(asof)
+    else:
+        markets = latest_rows_by_ticker(
             conn,
             "feature_market_technical",
-            ticker,
+            tickers,
             market_source,
             model_family,
             asof,
             "asof_date DESC",
         )
-        financial = latest_row(
+        financials = latest_rows_by_ticker(
             conn,
             "feature_financial_statement",
-            ticker,
+            tickers,
             financial_source,
             model_family,
             asof,
-            # The newest period wins. For the same period, retain the richer
-            # statement instead of letting a sparse 6-K earnings release displace it.
             FINANCIAL_LATEST_ORDER,
         )
-        positioning = latest_row(
+        positionings = latest_rows_by_ticker(
             conn,
             "feature_positioning",
-            ticker,
+            tickers,
             positioning_source,
             model_family,
             asof,
             "asof_date DESC",
         )
-        profile = load_profile(conn, ticker)
+        profiles = load_profiles_by_ticker(conn, tickers)
+    share_growth = latest_share_growth_by_ticker(conn, tickers, financial_source, model_family, asof)
+
+    for item in universe:
+        ticker = normalize_ticker(str(item["ticker"]))
+        market = markets.get(ticker)
+        financial = financials.get(ticker)
+        positioning = positionings.get(ticker)
+        profile = profiles.get(ticker, {})
         row: dict[str, Any] = {
             "ticker": ticker,
             "company_id": item.get("company_id"),
@@ -655,7 +927,7 @@ def build_raw_rows(
                 row[key] = financial[key]
             net_income_ttm = safe_float(financial["net_income_ttm"])
             row["fcf_to_net_income"] = safe_div(safe_float(financial["free_cash_flow_ttm"]), net_income_ttm if net_income_ttm and net_income_ttm > 0 else None)
-            row["share_count_yoy_growth"] = latest_share_growth(conn, ticker, financial_source, model_family, asof)
+            row["share_count_yoy_growth"] = share_growth.get(ticker)
             filing_adj = adj_close_at(conn, ticker, market_source, str(financial["asof_date"]))
             asof_adj = adj_close_at(conn, ticker, market_source, asof.isoformat())
             price_ratio = asof_adj / filing_adj if filing_adj and asof_adj and filing_adj > 0 else None

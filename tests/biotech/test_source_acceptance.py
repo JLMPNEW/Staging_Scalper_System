@@ -247,6 +247,41 @@ def test_form4_freshness_accepts_latest_market_snapshot_for_weekend_report(tmp_p
     assert result.evidence["expected_snapshot_date"] == "2026-08-21"
 
 
+def test_form4_freshness_accepts_snapshot_newer_than_price_floor(tmp_path: Path) -> None:
+    module = load_script_module(
+        "33_validate_biotech_source_acceptance.py",
+        "biotech_source_acceptance_form4_newer_than_market_test",
+    )
+    db_path = tmp_path / "sec_insider.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE stock_signal_snapshot_tier1(as_of_date TEXT);
+            CREATE TABLE sec_ownership_submission(filing_date TEXT);
+            INSERT INTO stock_signal_snapshot_tier1 VALUES ('2026-08-28');
+            INSERT INTO sec_ownership_submission VALUES ('2026-08-28');
+            """
+        )
+    checks: list[Any] = []
+    config = {
+        "governance_events": {"form4_db_path": str(db_path)},
+        "biotech_refresh": {"form4_preflight": {"max_raw_filing_lag_days": 5}},
+    }
+
+    module.validate_form4_source(
+        config,
+        base_dir=tmp_path,
+        checks=checks,
+        asof=date(2026, 8, 28),
+        expected_snapshot_date=date(2026, 8, 27),
+    )
+
+    result = next(check for check in checks if check.name == "form4_source_freshness")
+    assert result.status == "PASS"
+    assert result.evidence["expected_snapshot_date"] == "2026-08-27"
+    assert result.evidence["snapshot_date"] == "2026-08-28"
+
+
 def test_trial_snapshot_lookup_is_bounded_by_requested_asof() -> None:
     module = load_script_module(
         "33_validate_biotech_source_acceptance.py",

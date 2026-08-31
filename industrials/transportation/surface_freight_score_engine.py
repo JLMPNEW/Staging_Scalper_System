@@ -53,7 +53,7 @@ def percentile_scores(
     winsor_lower: float = 0.05,
     winsor_upper: float = 0.95,
 ) -> dict[str, float]:
-    """Exact copy of the legacy percentile math, kept dependency-free."""
+    """Winsorized average-rank percentiles with deterministic ties."""
     finite = {
         str(key): float(value)
         for key, value in values.items()
@@ -68,12 +68,24 @@ def percentile_scores(
         key: min(high, max(low, value))
         for key, value in finite.items()
     }
-    unique = sorted(set(clipped.values()))
-    if len(unique) == 1:
+    if len(clipped) == 1:
         return {key: 50.0 for key in clipped}
-    positions = {value: index for index, value in enumerate(unique)}
-    scale = 100.0 / (len(unique) - 1)
-    return {key: positions[value] * scale for key, value in clipped.items()}
+    ordered_items = sorted(clipped.items(), key=lambda item: (item[1], item[0]))
+    ranks: dict[str, float] = {}
+    cursor = 0
+    while cursor < len(ordered_items):
+        end = cursor + 1
+        while (
+            end < len(ordered_items)
+            and ordered_items[end][1] == ordered_items[cursor][1]
+        ):
+            end += 1
+        average_rank = (cursor + end - 1) / 2.0
+        for key, _value in ordered_items[cursor:end]:
+            ranks[key] = average_rank
+        cursor = end
+    scale = 100.0 / (len(ordered_items) - 1)
+    return {key: ranks[key] * scale for key in clipped}
 
 
 def metric_score_field(metric_id: str) -> str:

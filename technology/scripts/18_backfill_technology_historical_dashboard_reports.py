@@ -64,6 +64,7 @@ class FamilySpec:
     rank_filename: str
     manifest_filename: str
     stage11_prefix: str
+    pre_steps: tuple[StepSpec, ...]
     steps: tuple[StepSpec, ...]
     restore_steps: tuple[StepSpec, ...]
 
@@ -78,6 +79,22 @@ FAMILIES: dict[str, FamilySpec] = {}
 def register(spec: FamilySpec) -> None:
     for alias in (spec.family, *spec.aliases):
         FAMILIES[alias.lower()] = spec
+
+
+def financial_feature_pre_step(model_family: str) -> StepSpec:
+    return StepSpec(
+        "08_rebuild_financial_features",
+        script("technology/scripts/08_build_technology_financial_features_batched.py"),
+        (
+            "--model-family",
+            model_family,
+            "--batch-size",
+            "8",
+            "--batch-timeout-sec",
+            "900",
+        ),
+        pass_asof=False,
+    )
 
 
 SEMICONDUCTOR_STEPS = (
@@ -99,6 +116,18 @@ SEMICONDUCTOR_STEPS = (
         "10b_publish_dashboard",
         script("technology/semiconductors/scripts/10b_publish_semiconductor_dashboard_reports.py"),
         historical_mode=True,
+    ),
+    StepSpec(
+        "10c_financial_lineage_shadow",
+        script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"),
+        (
+            "--family",
+            "semiconductors",
+            "--policy-context",
+            "production",
+            "--retrospective-source-discovery-max-days",
+            "7",
+        ),
     ),
     StepSpec(
         "10b_validate_dashboard_snapshot",
@@ -130,6 +159,18 @@ HARDWARE_STEPS = (
         historical_mode=True,
     ),
     StepSpec(
+        "10c_financial_lineage_shadow",
+        script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"),
+        (
+            "--family",
+            "technology_hardware",
+            "--policy-context",
+            "production",
+            "--retrospective-source-discovery-max-days",
+            "7",
+        ),
+    ),
+    StepSpec(
         "10b_validate_dashboard_snapshot",
         script("technology/technology_hardware/scripts/10b_validate_technology_hardware_dashboard_reports.py"),
         historical_mode=True,
@@ -159,6 +200,18 @@ SOFTWARE_STEPS = (
         historical_mode=True,
     ),
     StepSpec(
+        "10c_financial_lineage_shadow",
+        script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"),
+        (
+            "--family",
+            "software_infrastructure",
+            "--policy-context",
+            "production",
+            "--retrospective-source-discovery-max-days",
+            "7",
+        ),
+    ),
+    StepSpec(
         "10b_validate_dashboard_snapshot",
         script("technology/software_infrastructure/scripts/10b_validate_software_infrastructure_dashboard_reports.py"),
         historical_mode=True,
@@ -182,6 +235,7 @@ register(
         rank_filename="semiconductor_final_rank_table.csv",
         manifest_filename="semiconductor_dashboard_manifest.json",
         stage11_prefix="semiconductor",
+        pre_steps=(financial_feature_pre_step("semiconductors"),),
         steps=SEMICONDUCTOR_STEPS,
         restore_steps=SEMICONDUCTOR_RESTORE_STEPS,
     )
@@ -195,6 +249,7 @@ register(
         rank_filename="technology_hardware_final_rank_table.csv",
         manifest_filename="technology_hardware_dashboard_manifest.json",
         stage11_prefix="technology_hardware",
+        pre_steps=(financial_feature_pre_step("technology_hardware"),),
         steps=HARDWARE_STEPS,
         restore_steps=HARDWARE_RESTORE_STEPS,
     )
@@ -208,6 +263,7 @@ register(
         rank_filename="software_infrastructure_final_rank_table.csv",
         manifest_filename="software_infrastructure_dashboard_manifest.json",
         stage11_prefix="software_infrastructure",
+        pre_steps=(financial_feature_pre_step("software_infrastructure"),),
         steps=SOFTWARE_STEPS,
         restore_steps=SOFTWARE_RESTORE_STEPS,
     )
@@ -589,6 +645,46 @@ def run_with_args(args: argparse.Namespace) -> int:
         f"frequency={args.frequency} families={','.join(spec.family for spec in families)}"
     )
     try:
+        date_range_label = f"{dates[0]}..{dates[-1]}"
+        for spec in families:
+            for step in spec.pre_steps:
+                cmd = command_for_step(
+                    python_exe=sys.executable,
+                    step=step,
+                    config_path=config_path,
+                    db_path=command_db_path,
+                    asof=dates[-1],
+                    snapshot_dir=None,
+                )
+                print(f"[{date_range_label}][{spec.family}][{step.step_id}]")
+                try:
+                    code, stdout, stderr = run_command(
+                        cmd,
+                        timeout_sec=args.step_timeout_sec,
+                        dry_run=bool(args.dry_run),
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    code = 124
+                    stdout = str(exc.stdout or "")
+                    stderr = str(
+                        exc.stderr or f"Timed out after {args.step_timeout_sec}s"
+                    )
+                rows.append(
+                    {
+                        "asof_date": date_range_label,
+                        "family": spec.family,
+                        "step_id": step.step_id,
+                        "returncode": code,
+                        "command": " ".join(cmd),
+                        "stdout_tail": tail(stdout),
+                        "stderr_tail": tail(stderr),
+                    }
+                )
+                if code != 0:
+                    failures += 1
+                    print(tail(stderr) or tail(stdout))
+                    if not args.continue_on_error:
+                        raise _BackfillAbort
         for asof in dates:
             for spec in families:
                 root_dir = dashboard_dir(config, base_dir, spec)

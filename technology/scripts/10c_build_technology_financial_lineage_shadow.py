@@ -53,11 +53,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rank-table", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--retrospective-source-discovery-max-days",
+        type=int,
+        default=0,
+        help=(
+            "Historical-repair only: permit the earliest sealed live SEC submissions "
+            "capture up to this many days after --asof. Filings, facts, and score "
+            "inputs remain filtered to --asof. Daily production must leave this at 0."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.retrospective_source_discovery_max_days < 0:
+        raise ValueError("--retrospective-source-discovery-max-days must be non-negative")
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
@@ -94,6 +106,9 @@ def main() -> int:
         model_family=args.family,
         expected_asof=str(args.asof or ""),
         policy_context=str(args.policy_context),
+        retrospective_source_discovery_max_days=(
+            args.retrospective_source_discovery_max_days
+        ),
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0 if manifest["acceptance"] == "PASS" else 1

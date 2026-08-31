@@ -43,7 +43,9 @@ from technology.core.scoring_features import (  # noqa: E402
     build_raw_rows,
     cfg_ticker_set,
     finalize_rows,
+    load_pit_feature_cache,
     OVERLAY_SCORE_FIELDS,
+    PitFeatureCache,
     safe_float,
 )
 from technology.core.text_norm import normalize_ticker  # noqa: E402
@@ -949,6 +951,69 @@ def apply_market_price_override(
     )
 
 
+@dataclass(frozen=True)
+class PitOverlayTimeline:
+    dates: list[str]
+    rows: list[dict[str, Any]]
+
+    def at_or_before(self, asof: str) -> dict[str, Any] | None:
+        index = bisect.bisect_right(self.dates, asof) - 1
+        return self.rows[index] if index >= 0 else None
+
+
+@dataclass(frozen=True)
+class PitOverlayCache:
+    timelines: dict[str, PitOverlayTimeline]
+
+    def rows_at(self, asof: str) -> dict[str, dict[str, Any]]:
+        return {
+            ticker: row
+            for ticker, timeline in self.timelines.items()
+            if (row := timeline.at_or_before(asof)) is not None
+        }
+
+
+def load_pit_overlay_cache(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    model_family: str,
+    max_asof: str,
+) -> PitOverlayCache:
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT ticker, asof_date, {", ".join(OVERLAY_SCORE_FIELDS)}
+            FROM feature_scoring_input
+            WHERE source_id = ?
+              AND model_family = ?
+              AND asof_date <= ?
+              AND sector_overlay_status <> 'not_loaded'
+            ORDER BY ticker, asof_date, rowid
+            """,
+            (source_id, model_family, max_asof),
+        ).fetchall()
+    except sqlite3.Error:
+        return PitOverlayCache(timelines={})
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        ticker = normalize_ticker(row["ticker"])
+        if ticker:
+            grouped.setdefault(ticker, []).append(row)
+    timelines: dict[str, PitOverlayTimeline] = {}
+    for ticker, ticker_rows in grouped.items():
+        cached_rows: list[dict[str, Any]] = []
+        for row in ticker_rows:
+            item = dict(row)
+            item["sector_overlay_feature_asof_date"] = row["asof_date"]
+            cached_rows.append(item)
+        timelines[ticker] = PitOverlayTimeline(
+            dates=[str(row["asof_date"]) for row in ticker_rows],
+            rows=cached_rows,
+        )
+    return PitOverlayCache(timelines=timelines)
+
+
 def load_pit_preserved_overlays(
     conn: sqlite3.Connection,
     *,
@@ -991,6 +1056,8 @@ def build_pit_scores(
     benchmark_series: dict[str, PriceSeries],
     max_price_staleness_days: int,
     max_overlay_staleness_days: int,
+    pit_feature_cache: PitFeatureCache | None = None,
+    pit_overlay_cache: PitOverlayCache | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     scoring_source, model_source, model_version, contract_version = source_ids_for_family(config, spec)
     input_sources = cfg_get(config, f"{spec.scoring_config_key}.input_sources", {}) or {}
@@ -1002,11 +1069,15 @@ def build_pit_scores(
     overlay_default_quality = float(cfg_get(config, f"{spec.scoring_config_key}.sector_overlay_default_quality", 0.0))
     min_trading_days = int(cfg_get(config, "market_data_policy.min_trading_days_for_full_features", 252))
     liquidity_threshold = float(cfg_get(config, "market_data_policy.min_avg_dollar_volume_60d_for_full_features", 5000000.0))
-    preserved_overlays = load_pit_preserved_overlays(
-        conn,
-        source_id=scoring_source,
-        model_family=spec.model_family,
-        asof=asof,
+    preserved_overlays = (
+        pit_overlay_cache.rows_at(asof)
+        if pit_overlay_cache is not None
+        else load_pit_preserved_overlays(
+            conn,
+            source_id=scoring_source,
+            model_family=spec.model_family,
+            asof=asof,
+        )
     )
     # Cap preserved-overlay staleness: overlays older than the cap fall back to the
     # neutral/not_loaded path in finalize_rows, while the stale asof date is still
@@ -1030,6 +1101,7 @@ def build_pit_scores(
         financial_source=financial_source,
         positioning_source=positioning_source,
         relative_strength_market_field=relative_strength_market_field,
+        pit_feature_cache=pit_feature_cache,
     )
     for row in raw_rows:
         apply_market_price_override(
@@ -1391,6 +1463,26 @@ def export_family(
     benchmark_tickers.add(relative_strength_benchmark(config, spec))
     tickers.update(benchmark_tickers)
     source_ids = price_source_ids(config, spec)
+    input_sources = cfg_get(config, f"{spec.scoring_config_key}.input_sources", {}) or {}
+    market_source = str(input_sources.get("market") or MARKET_SOURCE_ID)
+    financial_source = str(input_sources.get("financial") or "sec_companyfacts")
+    positioning_source = str(input_sources.get("positioning") or "technology_positioning_composite")
+    pit_feature_cache = load_pit_feature_cache(
+        conn,
+        tickers=sorted(tickers),
+        market_source=market_source,
+        financial_source=financial_source,
+        positioning_source=positioning_source,
+        model_family=spec.model_family,
+        max_asof=parse_iso_date(max(dates)),
+    )
+    scoring_source, _, _, _ = source_ids_for_family(config, spec)
+    pit_overlay_cache = load_pit_overlay_cache(
+        conn,
+        source_id=scoring_source,
+        model_family=spec.model_family,
+        max_asof=max(dates),
+    )
     price_start = (parse_iso_date(min(dates)) - timedelta(days=550)).isoformat()
     price_series = load_price_series(conn, tickers=tickers, source_ids=source_ids, start_date=price_start)
     benchmark_series = {ticker: price_series[ticker] for ticker in benchmark_tickers if ticker in price_series}
@@ -1417,6 +1509,8 @@ def export_family(
             benchmark_series,
             max_price_staleness_days,
             max_overlay_staleness_days,
+            pit_feature_cache=pit_feature_cache,
+            pit_overlay_cache=pit_overlay_cache,
         )
         rows = merge_member_score_rows(
             config=config,

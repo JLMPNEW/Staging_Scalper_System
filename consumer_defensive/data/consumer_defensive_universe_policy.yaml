@@ -3,7 +3,7 @@ model_family: consumer_defensive
 internal_sector: Consumer Defensive
 portfolio_sector: Consumer Staples
 authoritative_current_csv: ../../ticker_mapping/consumer_defensive.csv
-expected_current_rows: 108
+expected_current_rows: 110
 history_start: "2017-11-28"
 requested_snapshot_start: "2019-01-02"
 
@@ -58,11 +58,11 @@ cohorts:
   Discount Stores:
     cohort_id: consumer_staples_distribution_retail
     display_name: Consumer Staples Distribution & Retail
-    expected_current_rows: 22
+    expected_current_rows: 23
   Household & Personal Products:
     cohort_id: household_personal_tobacco
     display_name: Household Personal & Tobacco
-    expected_current_rows: 25
+    expected_current_rows: 26
   Packaged Foods:
     cohort_id: packaged_foods_agricultural_products
     display_name: Packaged Foods & Agricultural Products

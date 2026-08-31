@@ -98,3 +98,26 @@ def test_connection_fallback_replays_only_bounded_prior_partition(
             tickers=["AAA"],
             max_partition_age_days=1,
         )
+
+
+def test_bounded_reuse_requires_current_universe_coverage() -> None:
+    collector = _load_collector()
+    acceptable = [
+        {"ticker": "AAA", "spread_status": "ok"},
+        {"ticker": "BBB", "spread_status": "fallback"},
+    ]
+    assert (
+        collector._bounded_reuse_rejection_reason(
+            acceptable,
+            max_fallback_fraction=0.50,
+        )
+        == ""
+    )
+    assert "fallback_fraction" in collector._bounded_reuse_rejection_reason(
+        acceptable,
+        max_fallback_fraction=0.10,
+    )
+    assert collector._bounded_reuse_rejection_reason(
+        [{"ticker": "AAA", "spread_status": "failed"}],
+        max_fallback_fraction=1.0,
+    ) == "failed_tickers=1"

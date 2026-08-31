@@ -1,0 +1,137 @@
+schema_version: consumer_defensive_promotion_framework_v3
+model_family: consumer_defensive
+framework_version: consumer_defensive_four_layer_standard_allocation_v3
+status: implemented_standard_allocation_requires_pinned_registry
+
+ownership:
+  sector_owner: consumer_defensive
+  cross_sector_code_imports_allowed: false
+  shared_service_contract_path: consumer_defensive/data/consumer_defensive_shared_service_contract_v1.yaml
+  shared_service_contract_sha256: 5037eee0aae23bb280b9a833ffa1d889b356d10e82145adb1e615263b3923839
+
+cohorts:
+  beverages:
+    calibrated_independently: true
+  consumer_staples_distribution_retail:
+    calibrated_independently: true
+  household_personal_tobacco:
+    calibrated_independently: true
+  packaged_foods_agricultural_products:
+    calibrated_independently: true
+
+layer_1_data_and_safety:
+  required_attestations:
+    - independent_validation_passed
+    - source_hashes_verified
+    - outer_oos_only
+    - no_lookahead
+    - chronology_complete
+    - returns_net_of_costs
+    - matched_daily_benchmark
+    - corporate_actions_reconciled
+    - terminal_events_reconciled
+    - production_model_contract_bound
+  hard_limits:
+    require_all_horizons: true
+    minimum_daily_path_observations: 60
+    minimum_paired_observations: 30
+    maximum_drawdown: 0.45
+    minimum_expected_shortfall_95: -0.20
+    maximum_turnover: 3.00
+    maximum_average_transaction_cost: 0.02
+    minimum_liquidity_capacity_ratio: 1.00
+    maximum_winner_concentration_hhi: 0.35
+    maximum_single_name_weight: 0.25
+
+layer_2_economic_performance:
+  periods_per_year: 252
+  horizon_weights:
+    "21": 0.25
+    "63": 0.50
+    "126": 0.25
+  positive_correlation_penalty: 1.00
+  neutral_score: 50.0
+  blocks:
+    benchmark_relative_return:
+      weight: 0.35
+      metrics:
+        excess_cagr: 0.40
+        relative_wealth: 0.25
+        robust_profit_factor: 0.20
+        paired_net_alpha_lcb: 0.15
+    absolute_profitability:
+      weight: 0.25
+      metrics:
+        cagr: 0.60
+        absolute_profit_factor: 0.40
+    risk_efficiency:
+      weight: 0.20
+      metrics:
+        calmar_ratio: 0.50
+        maximum_drawdown: 0.30
+        expected_shortfall_95: 0.20
+    deployability:
+      weight: 0.20
+      metrics:
+        average_transaction_cost: 0.20
+        turnover: 0.20
+        liquidity_capacity_ratio: 0.20
+        winner_concentration_hhi: 0.20
+        maximum_single_name_weight: 0.20
+  metric_anchors:
+    excess_cagr: {direction: higher, bad: -0.10, neutral: 0.00, good: 0.15}
+    relative_wealth: {direction: higher, bad: 0.85, neutral: 1.00, good: 1.25}
+    robust_profit_factor: {direction: higher, bad: 0.75, neutral: 1.00, good: 2.00}
+    paired_net_alpha_lcb: {direction: higher, bad: -0.05, neutral: 0.00, good: 0.05}
+    cagr: {direction: higher, bad: -0.10, neutral: 0.00, good: 0.20}
+    absolute_profit_factor: {direction: higher, bad: 0.75, neutral: 1.00, good: 2.00}
+    calmar_ratio: {direction: higher, bad: 0.00, neutral: 1.00, good: 3.00}
+    maximum_drawdown: {direction: lower, bad: 0.45, neutral: 0.25, good: 0.10}
+    expected_shortfall_95: {direction: higher, bad: -0.15, neutral: -0.07, good: -0.02}
+    average_transaction_cost: {direction: lower, bad: 0.010, neutral: 0.003, good: 0.000}
+    turnover: {direction: lower, bad: 2.00, neutral: 1.00, good: 0.25}
+    liquidity_capacity_ratio: {direction: higher, bad: 1.00, neutral: 2.00, good: 5.00}
+    winner_concentration_hhi: {direction: lower, bad: 0.35, neutral: 0.25, good: 0.10}
+    maximum_single_name_weight: {direction: lower, bad: 0.25, neutral: 0.20, good: 0.10}
+
+layer_3_confidence_adjustment:
+  floor: 0.50
+  deflated_sharpe_weight: 0.25
+  inverse_pbo_weight: 0.25
+  score_shrinkage_target: 50.0
+  do_not_reapply_to_cap: true
+
+layer_4_controlled_deployment:
+  tier_order:
+    - benchmark_production
+    - active_full
+  tiers:
+    rollback: {minimum_score: 0.0, deployment_fraction: 0.00, deployable: false}
+    benchmark_production: {minimum_score: 0.0, deployment_fraction: 0.00, deployable: false}
+    active_full: {minimum_score: 60.0, deployment_fraction: 1.00, deployable: true}
+  modifiers:
+    capacity_full_credit_ratio: 1.00
+    apply_cohort_level_diversification_haircut: false
+  standard_allocation_policy:
+    allocation_source: portfolio_owned_consumer_defensive_sector_budget
+    allocation_method: equal_configured_cohort_slots
+    failed_or_ineligible_slot: cash
+    minimum_confidence_adjusted_score: 60.0
+  transition_policy:
+    maximum_one_upward_tier_per_decision: true
+    design_evidence_maximum_state: active_full
+    fresh_chronological_evidence_required_for_advancement: true
+    require_new_input_panel: true
+    minimum_new_paired_observations_per_horizon: 1
+    minimum_dwell_days:
+      active_full: 63
+    maximum_activation_age_days: 63
+    material_model_change_resets_to: benchmark_production
+    hard_failure_state: rollback
+
+production_model_contract:
+  champion_horizon_sessions: 63
+  selection_rule: latest_admissible_outer_fold_winner
+  require_exact_candidate_definition: true
+  calibration_remains_report_only: true
+  activation_requires_pinned_registry: true

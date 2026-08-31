@@ -587,7 +587,7 @@ def test_shadow_publish_is_deterministic_and_portfolio_adapter_fails_closed(
     )
     result = run_adapter(source, tmp_path / "one", ASOF)
     assert result.source_pipeline == "transportation"
-    assert result.adapter == "industrial_family"
+    assert result.adapter == "transportation_subgroup"
     assert result.source_asof_date == ASOF
     assert len(result.rows) == 24
     assert not any(row.investable_eligible for row in result.rows)

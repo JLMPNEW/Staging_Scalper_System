@@ -827,6 +827,9 @@ def test_historical_reuse_requires_current_build_signature(
     config = load_yaml(PROJECT_ROOT / "industrials" / "machinery" / "config.yaml")
     metadata = historical_build_metadata(
         config,
+        config_path=(
+            PROJECT_ROOT / "industrials" / "machinery" / "config.yaml"
+        ),
         policy_lock_date="2026-07-09",
         required_metrics=required_metric_names(),
     )
@@ -839,6 +842,10 @@ def test_historical_reuse_requires_current_build_signature(
     assert metadata['semantic_source_sha256'][
         '08_build_industrials_financial_features.py'
     ] == hashlib.sha256(builder_path.read_bytes()).hexdigest()
+    assert metadata["historical_build_contract_version"] == "machinery_history_v4"
+    assert metadata["production_policy_context"][
+        "portfolio_adapter_semantic_sha256"
+    ]
     output_dir = tmp_path / "2026-07-21"
     output_dir.mkdir()
 
@@ -868,6 +875,123 @@ def test_historical_reuse_requires_current_build_signature(
         output_dir=output_dir,
         asof="2026-07-21",
         expected_build_signature=metadata["historical_build_signature"],
+    )
+
+
+def test_historical_portfolio_handoff_accepts_active_production_rows(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18_backfill_machinery_historical_dashboard_reports.py"
+        )
+    )
+    adapter_row = SimpleNamespace(
+        ticker="CAT",
+        investable_eligible=1,
+        oos_score_valid_flag=1,
+        calibration_research_eligible=1,
+    )
+    namespace["validate_portfolio_handoff"].__globals__["run_adapter"] = (
+        lambda *_args, **_kwargs: SimpleNamespace(
+            rows=[adapter_row], source_asof_date="2026-08-24"
+        )
+    )
+    count = namespace["validate_portfolio_handoff"](
+        sector_output_root=tmp_path,
+        asof="2026-08-24",
+        rank_rows=[
+            {
+                "ticker": "CAT",
+                "portfolio_sleeve_selected_flag": "1",
+                "portfolio_sleeve_target_weight": "1.0",
+                "stage11_calibration_input_eligible_flag": "1",
+            }
+        ],
+        production_policy_active=True,
+    )
+    assert count == 1
+
+
+def test_historical_portfolio_handoff_rejects_active_membership_drift(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18_backfill_machinery_historical_dashboard_reports.py"
+        )
+    )
+    namespace["validate_portfolio_handoff"].__globals__["run_adapter"] = (
+        lambda *_args, **_kwargs: SimpleNamespace(
+            rows=[
+                SimpleNamespace(
+                    ticker="DE",
+                    investable_eligible=1,
+                    oos_score_valid_flag=1,
+                    calibration_research_eligible=1,
+                )
+            ],
+            source_asof_date="2026-08-24",
+        )
+    )
+    with pytest.raises(ValueError, match="membership does not match"):
+        namespace["validate_portfolio_handoff"](
+            sector_output_root=tmp_path,
+            asof="2026-08-24",
+            rank_rows=[
+                {
+                    "ticker": "CAT",
+                    "portfolio_sleeve_selected_flag": "1",
+                    "portfolio_sleeve_target_weight": "1.0",
+                    "stage11_calibration_input_eligible_flag": "1",
+                }
+            ],
+            production_policy_active=True,
+        )
+
+
+def test_historical_promotion_reuse_requires_current_build_signature(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "machinery"
+            / "scripts"
+            / "18b_materialize_machinery_historical_promotions.py"
+        )
+    )
+    output_dir = tmp_path / "2026-07-21"
+    output_dir.mkdir()
+    metadata_path = output_dir / HISTORICAL_BUILD_METADATA_FILENAME
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "acceptance": "PASS",
+                "promotion_preflight_fingerprint": "preflight",
+                "historical_build_signature": "current",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert namespace["_metadata_matches"](
+        output_dir,
+        fingerprint="preflight",
+        build_signature="current",
+    )
+    assert not namespace["_metadata_matches"](
+        output_dir,
+        fingerprint="preflight",
+        build_signature="stale",
     )
 
 

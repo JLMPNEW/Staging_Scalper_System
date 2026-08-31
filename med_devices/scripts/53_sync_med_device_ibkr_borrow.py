@@ -7,7 +7,6 @@ import json
 import logging
 import math
 import sys
-import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +37,8 @@ SOURCE_FIELDS = [
 ]
 REQUIRED_IBKR_BORROW_GENERIC_TICKS = ("236", "499")
 SUPPORTED_IBKR_BORROW_GENERIC_TICKS = frozenset(REQUIRED_IBKR_BORROW_GENERIC_TICKS)
+DEFAULT_IBKR_MARKET_DATA_BATCH_SIZE = 75
+MAX_IBKR_MARKET_DATA_BATCH_SIZE = 90
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,6 +86,24 @@ def borrow_generic_tick_list(config: dict[str, Any]) -> str:
         )
         ticks.extend(missing)
     return ",".join(ticks)
+
+
+def ibkr_market_data_batch_size(config: dict[str, Any]) -> int:
+    raw = cfg_get(
+        config,
+        "ibkr_borrow_ingestion.batch_size",
+        DEFAULT_IBKR_MARKET_DATA_BATCH_SIZE,
+    )
+    try:
+        batch_size = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"ibkr_borrow_ingestion.batch_size must be an integer, got {raw!r}") from exc
+    if not 1 <= batch_size <= MAX_IBKR_MARKET_DATA_BATCH_SIZE:
+        raise ValueError(
+            "ibkr_borrow_ingestion.batch_size must be between 1 and "
+            f"{MAX_IBKR_MARKET_DATA_BATCH_SIZE}, got {batch_size}"
+        )
+    return batch_size
 
 
 def ensure_source(conn: Any, source_id: str) -> None:
@@ -150,7 +169,35 @@ def load_csv_rows(path: Path, *, asof: str, source_id: str, company_by_ticker: d
     return rows
 
 
-def fetch_ib_rows(companies: list[dict[str, Any]], *, asof: str, source_id: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+def _ib_row(
+    company: dict[str, Any],
+    *,
+    asof: str,
+    source_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    fee_rate = to_float(payload.get("feeRate"))
+    rebate_rate = to_float(payload.get("rebateRate"))
+    return {
+        "ticker": normalize_ticker(company["ticker"]),
+        "asof_date": asof,
+        "source_id": source_id,
+        "company_id": int(company["company_id"]),
+        "shortable_status": to_float(payload.get("shortable")),
+        "shortable_shares": to_float(payload.get("shortableShares")),
+        "borrow_fee_rate": fee_rate if fee_rate is not None else rebate_rate,
+        "source_timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "payload_json": json.dumps(payload, sort_keys=True, ensure_ascii=True),
+    }
+
+
+def fetch_ib_rows(
+    companies: list[dict[str, Any]],
+    *,
+    asof: str,
+    source_id: str,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
     try:
         from ib_insync import IB, Stock  # type: ignore
     except ImportError as exc:
@@ -162,6 +209,7 @@ def fetch_ib_rows(companies: list[dict[str, Any]], *, asof: str, source_id: str,
     client_id = int(cfg_get(config, "ibkr_borrow_ingestion.client_id", 7741))
     timeout_sec = float(cfg_get(config, "ibkr_borrow_ingestion.snapshot_timeout_sec", 8.0))
     sleep_sec = float(cfg_get(config, "ibkr_borrow_ingestion.sleep_sec", 0.25))
+    batch_size = ibkr_market_data_batch_size(config)
     generic_ticks = borrow_generic_tick_list(config)
     exchange = str(cfg_get(config, "ibkr_borrow_ingestion.default_exchange", "SMART"))
     currency = str(cfg_get(config, "ibkr_borrow_ingestion.default_currency", "USD"))
@@ -174,41 +222,95 @@ def fetch_ib_rows(companies: list[dict[str, Any]], *, asof: str, source_id: str,
     )
     rows: list[dict[str, Any]] = []
     try:
-        for company in companies:
-            ticker = normalize_ticker(company["ticker"])
-            contract = Stock(ticker, exchange, currency)
-            ib.qualifyContracts(contract)
-            snapshot = ib.reqMktData(contract, genericTickList=generic_ticks, snapshot=False, regulatorySnapshot=False)
-            ib.sleep(timeout_sec)
-            payload = {
-                "ticker": ticker,
-                "shortable": getattr(snapshot, "shortable", None),
-                "shortableShares": getattr(snapshot, "shortableShares", None),
-                "feeRate": getattr(snapshot, "feeRate", None),
-                "rebateRate": getattr(snapshot, "rebateRate", None),
-                "ticks": [str(tick) for tick in getattr(snapshot, "ticks", [])],
-                "genericTickList": generic_ticks,
+        for start in range(0, len(companies), batch_size):
+            batch = companies[start : start + batch_size]
+            requested_contracts = [
+                Stock(normalize_ticker(company["ticker"]), exchange, currency)
+                for company in batch
+            ]
+            qualified = list(ib.qualifyContracts(*requested_contracts) or [])
+            qualified_by_ticker = {
+                normalize_ticker(getattr(contract, "symbol", "")): contract
+                for contract in qualified
+                if normalize_ticker(getattr(contract, "symbol", ""))
             }
-            fee_rate = to_float(payload["feeRate"])
-            rebate_rate = to_float(payload["rebateRate"])
-            rows.append(
-                {
-                    "ticker": ticker,
-                    "asof_date": asof,
-                    "source_id": source_id,
-                    "company_id": int(company["company_id"]),
-                    "shortable_status": to_float(payload["shortable"]),
-                    "shortable_shares": to_float(payload["shortableShares"]),
-                    "borrow_fee_rate": fee_rate if fee_rate is not None else rebate_rate,
-                    "source_timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-                    "payload_json": json.dumps(payload, sort_keys=True, ensure_ascii=True),
-                }
-            )
-            ib.cancelMktData(contract)
-            time.sleep(sleep_sec)
+            active: list[tuple[dict[str, Any], Any, Any]] = []
+            try:
+                for company in batch:
+                    ticker = normalize_ticker(company["ticker"])
+                    contract = qualified_by_ticker.get(ticker)
+                    if contract is None:
+                        rows.append(
+                            _ib_row(
+                                company,
+                                asof=asof,
+                                source_id=source_id,
+                                payload={
+                                    "ticker": ticker,
+                                    "genericTickList": generic_ticks,
+                                    "request_error": "contract_not_qualified",
+                                },
+                            )
+                        )
+                        continue
+                    try:
+                        snapshot = ib.reqMktData(
+                            contract,
+                            genericTickList=generic_ticks,
+                            snapshot=False,
+                            regulatorySnapshot=False,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - preserve per-name coverage
+                        rows.append(
+                            _ib_row(
+                                company,
+                                asof=asof,
+                                source_id=source_id,
+                                payload={
+                                    "ticker": ticker,
+                                    "genericTickList": generic_ticks,
+                                    "request_error": f"{type(exc).__name__}: {exc}",
+                                },
+                            )
+                        )
+                        try:
+                            ib.cancelMktData(contract)
+                        except Exception:  # noqa: BLE001 - disconnect remains final cleanup
+                            pass
+                        continue
+                    active.append((company, contract, snapshot))
+
+                if active:
+                    ib.sleep(timeout_sec)
+                for company, _contract, snapshot in active:
+                    ticker = normalize_ticker(company["ticker"])
+                    rows.append(
+                        _ib_row(
+                            company,
+                            asof=asof,
+                            source_id=source_id,
+                            payload={
+                                "ticker": ticker,
+                                "shortable": getattr(snapshot, "shortable", None),
+                                "shortableShares": getattr(snapshot, "shortableShares", None),
+                                "feeRate": getattr(snapshot, "feeRate", None),
+                                "rebateRate": getattr(snapshot, "rebateRate", None),
+                                "ticks": [str(tick) for tick in getattr(snapshot, "ticks", [])],
+                                "genericTickList": generic_ticks,
+                            },
+                        )
+                    )
+            finally:
+                for _company, contract, _snapshot in active:
+                    try:
+                        ib.cancelMktData(contract)
+                    except Exception as exc:  # noqa: BLE001 - disconnect closes residual subscriptions
+                        LOGGER.warning("Unable to cancel IBKR borrow subscription: %s", exc)
+            if start + batch_size < len(companies) and sleep_sec > 0:
+                ib.sleep(sleep_sec)
     finally:
         ib.disconnect()
-    return rows
+    return sorted(rows, key=lambda row: str(row["ticker"]))
 
 
 def upsert_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
@@ -268,6 +370,10 @@ def main() -> None:
     base_dir = config_path.parent
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     asof = args.asof.strip() or date.today().isoformat()
+    try:
+        date.fromisoformat(asof)
+    except ValueError as exc:
+        raise ValueError(f"--asof must be YYYY-MM-DD, got {asof!r}") from exc
     source_id = str(cfg_get(config, "ibkr_borrow_ingestion.source_id", "ibkr_borrow"))
     output_csv = (
         args.output_csv.expanduser().resolve()

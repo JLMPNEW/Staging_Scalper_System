@@ -25,7 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path
-from biotech_index.core.db import connect, finish_run, init_db, start_run, utc_now
+from biotech_index.core.db import connect, finish_run, init_db, refresh_sec_latest_documents, start_run, utc_now
 from biotech_index.core.http_cache import CachedHttpClient, HostThrottle
 from biotech_index.core.logging_utils import configure_utc_logging
 from biotech_index.core.pipeline_guards import (
@@ -1025,6 +1025,27 @@ def load_filing_metadata_bulk(
     if forms:
         form_clause = f"AND f.form IN ({','.join('?' for _ in forms)})"
         params.extend(sorted(forms))
+    missing_latest_rows = conn.execute(
+        f"""
+        SELECT f.accession_nodash
+        FROM sec_filings f
+        LEFT JOIN sec_filing_latest_document l ON l.accession_nodash = f.accession_nodash
+        WHERE f.company_id IN ({company_placeholders})
+          AND f.filing_date >= ?
+          AND f.filing_date <= ?
+          {form_clause}
+          AND l.accession_nodash IS NULL
+        ORDER BY f.accession_nodash
+        """,
+        tuple(params),
+    ).fetchall()
+    missing_latest = [
+        str(row["accession_nodash"] or "")
+        for row in missing_latest_rows
+        if str(row["accession_nodash"] or "")
+    ]
+    if missing_latest:
+        refresh_sec_latest_documents(conn, missing_latest)
     params.append(max(1, max_filings_per_company))
     rows = conn.execute(
         f"""
@@ -1042,28 +1063,6 @@ def load_filing_metadata_bulk(
             SELECT f.accession_nodash, l.document_type, l.text_hash
             FROM target_filings f
             JOIN sec_filing_latest_document l ON l.accession_nodash = f.accession_nodash
-            UNION ALL
-            SELECT accession_nodash, document_type, text_hash
-            FROM (
-                SELECT d.accession_nodash, d.document_type, d.text_hash,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY d.accession_nodash
-                           ORDER BY
-                               CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
-                               d.fetched_at DESC,
-                               d.document_url DESC
-                       ) AS doc_rank
-                FROM sec_filing_documents d
-                JOIN target_filings f ON f.accession_nodash = d.accession_nodash
-                LEFT JOIN sec_filing_latest_document l ON l.accession_nodash = d.accession_nodash
-                WHERE l.accession_nodash IS NULL
-                  AND (
-                    COALESCE(d.text_length, 0) > 0
-                    OR d.text_hash IS NOT NULL
-                    OR d.text_content IS NOT NULL
-                  )
-            )
-            WHERE doc_rank = 1
         ),
         ranked_filings AS (
             SELECT f.*, d.document_type,
@@ -1112,22 +1111,10 @@ def load_filing_text_content_bulk(conn: sqlite3.Connection, filings: list[Filing
         placeholders = ",".join("?" for _ in chunk)
         rows = conn.execute(
             f"""
-            SELECT accession_nodash, document_type, text_content, text_hash
-            FROM (
-                SELECT d.accession_nodash, d.document_type, d.text_content, d.text_hash,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY d.accession_nodash
-                           ORDER BY
-                               CASE WHEN d.document_type = 'complete_submission_text' THEN 0 ELSE 1 END,
-                               d.fetched_at DESC,
-                               d.document_url DESC
-                       ) AS doc_rank
-                FROM sec_filing_documents d
-                WHERE d.accession_nodash IN ({placeholders})
-                  AND d.text_content IS NOT NULL
-                  AND LENGTH(d.text_content) > 0
-            )
-            WHERE doc_rank = 1
+            SELECT l.accession_nodash, l.document_type, d.text_content, l.text_hash
+            FROM sec_filing_latest_document l
+            JOIN sec_filing_documents d ON d.document_id = l.document_id
+            WHERE l.accession_nodash IN ({placeholders})
             """,
             tuple(chunk),
         ).fetchall()

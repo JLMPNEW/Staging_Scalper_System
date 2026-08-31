@@ -1,9 +1,11 @@
-"""Shared schema and helpers for the earnings-date calendar feed.
+"""Shared schema and helpers for the point-in-time earnings-date calendar.
 
-The feed is advisory data only: nothing downstream consumes it yet, so it never calls
-`invalidate_dependents`. Every sync run appends to a persistent history CSV so scheduled
-dates that move are tracked point-in-time (the store accrues from the day it turns on).
+The calendar is not an allocation signal, but it is a required input to the expectations
+monitor, levels engine, and enriched final report. Every sync appends to persistent
+history so date changes are tracked from the first observation without backdating later
+provider knowledge into an earlier portfolio run.
 """
+
 from __future__ import annotations
 
 import re
@@ -23,23 +25,23 @@ from portfolio_layer.core.contracts import (
 
 # One row per Stage 1 contract ticker, keyed to the sealed run it was joined against.
 EARNINGS_CALENDAR_FIELDS = [
-    "run_as_of_date",            # sealed Stage 1 run this row is keyed to
-    "fetched_at_utc",            # provider fetch timestamp (PIT stamp)
-    "ticker",                    # Stage 1 contract ticker
-    "query_symbol",              # provider symbol actually matched/queried
-    "investable_eligible",       # 0/1 carried from stocks_scores
+    "run_as_of_date",  # sealed Stage 1 run this row is keyed to
+    "fetched_at_utc",  # provider fetch timestamp (PIT stamp)
+    "ticker",  # Stage 1 contract ticker
+    "query_symbol",  # provider symbol actually matched/queried
+    "investable_eligible",  # 0/1 carried from stocks_scores
     "source_pipeline",
     "sector",
-    "next_earnings_date",        # YYYY-MM-DD; empty when no reliable date found
-    "days_until",                # calendar days from fetch date; empty when unknown
-    "fiscal_date_ending",        # Alpha Vantage bulk fiscalDateEnding when available
-    "av_eps_estimate",           # Alpha Vantage bulk EPS estimate when available
-    "source",                    # alpha_vantage_bulk | yahoo_finance | gemini_search_grounded | none
-    "confidence",                # gemini-reported confidence (high|medium|low) when applicable
-    "source_urls",               # gemini grounding URLs, " | " joined
+    "next_earnings_date",  # YYYY-MM-DD; empty when no reliable date found
+    "days_until",  # calendar days from fetch date; empty when unknown
+    "fiscal_date_ending",  # Alpha Vantage bulk fiscalDateEnding when available
+    "av_eps_estimate",  # Alpha Vantage bulk EPS estimate when available
+    "source",  # alpha_vantage_bulk | yahoo_finance | gemini_search_grounded | none
+    "confidence",  # gemini-reported confidence (high|medium|low) when applicable
+    "source_urls",  # gemini grounding URLs, " | " joined
     "prior_next_earnings_date",  # latest earlier history snapshot's date for this ticker
-    "date_changed_flag",         # 0/1 next date differs from the prior snapshot
-    "error_detail",              # per-provider error trail when no date found
+    "date_changed_flag",  # 0/1 next date differs from the prior snapshot
+    "error_detail",  # per-provider error trail when no date found
 ]
 
 ALLOWED_SOURCES = (
@@ -172,6 +174,80 @@ def latest_prior_dates(history_rows: list[dict[str, str]]) -> dict[str, str]:
         if current is None or fetched > current[0]:
             best[ticker] = (fetched, next_date)
     return {ticker: stamp[1] for ticker, stamp in best.items()}
+
+
+def pipeline_coverage_summary(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return deterministic earnings-date coverage by Stage 1 source pipeline."""
+    grouped: dict[str, dict[str, int]] = {}
+    for row in rows:
+        pipeline = str(row.get("source_pipeline", "")).strip()
+        counts = grouped.setdefault(
+            pipeline,
+            {
+                "universe_count": 0,
+                "investable_count": 0,
+                "investable_with_date": 0,
+            },
+        )
+        counts["universe_count"] += 1
+        if str(row.get("investable_eligible", "")).strip() != "1":
+            continue
+        counts["investable_count"] += 1
+        if str(row.get("next_earnings_date", "")).strip():
+            counts["investable_with_date"] += 1
+
+    summary: list[dict[str, Any]] = []
+    for pipeline, counts in sorted(grouped.items()):
+        investable = counts["investable_count"]
+        dated = counts["investable_with_date"]
+        summary.append(
+            {
+                "source_pipeline": pipeline,
+                **counts,
+                "investable_coverage_fraction": (round(dated / investable, 6) if investable else 0.0),
+            }
+        )
+    return summary
+
+
+def assess_pipeline_coverage(
+    rows: list[dict[str, Any]],
+    *,
+    minimum_investable_count: int,
+    minimum_coverage_fraction: float,
+    provider_network_calls_allowed: bool,
+) -> dict[str, Any]:
+    """Classify per-pipeline coverage without treating PIT deferral as live success."""
+    if minimum_investable_count < 1:
+        raise ValueError("minimum_investable_count must be >= 1")
+    if not 0.0 <= minimum_coverage_fraction <= 1.0:
+        raise ValueError("minimum_coverage_fraction must be in [0, 1]")
+
+    summary = pipeline_coverage_summary(rows)
+    eligible = [item for item in summary if int(item["investable_count"]) >= minimum_investable_count]
+    zero_coverage = [str(item["source_pipeline"]) for item in eligible if int(item["investable_with_date"]) == 0]
+    below_floor = [
+        str(item["source_pipeline"])
+        for item in eligible
+        if int(item["investable_with_date"]) > 0
+        and float(item["investable_coverage_fraction"]) < minimum_coverage_fraction
+    ]
+    deferred = bool(zero_coverage) and not provider_network_calls_allowed
+    if zero_coverage and provider_network_calls_allowed:
+        status = "FAIL"
+    elif zero_coverage or below_floor:
+        status = "WARN"
+    else:
+        status = "PASS"
+    return {
+        "status": status,
+        "deferred": deferred,
+        "zero_coverage_pipelines": zero_coverage,
+        "below_floor_pipelines": below_floor,
+        "pipeline_coverage": summary,
+    }
 
 
 def append_history(path: Path, existing: list[dict[str, str]], new_rows: list[dict[str, Any]]) -> int:

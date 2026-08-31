@@ -37,8 +37,10 @@ def test_stage0_config_contract_and_history_dates() -> None:
     assert cfg_get(config, "historical_contract.trading_calendar_ticker") == "SPY"
     assert cfg_get(config, "historical_contract.sector_benchmark_ticker") == "XLP"
     assert cfg_get(config, "oos_provenance.deep_replay_oos_score_valid_flag") == 0
-    assert cfg_get(config, "portfolio_layer.enabled") is False
-    assert cfg_get(config, "portfolio_layer.sector_weight_cap") == 0.0
+    assert cfg_get(config, "portfolio_layer.enabled") is True
+    assert cfg_get(config, "portfolio_layer.required") is True
+    assert cfg_get(config, "portfolio_layer.sector_weight_cap") == 0.125
+    assert cfg_get(config, "portfolio_layer.promotion_state") == "active"
 
 
 def test_config_rejects_unknown_root_and_cross_sector_identity() -> None:

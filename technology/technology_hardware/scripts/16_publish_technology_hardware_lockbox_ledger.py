@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from technology.core.calibrated_scoring import component_weight_specs, subfeature_weight_specs  # noqa: E402
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
+from technology.core.promotion_governance import resolve_production_binding  # noqa: E402
 from technology.core.scoring_features import SUBFEATURE_SPECS  # noqa: E402
 from technology.technology_hardware.calibrated_scoring import SETTINGS  # noqa: E402
 from technology.technology_hardware.optuna_calibration import write_csv  # noqa: E402
@@ -448,6 +449,8 @@ def main() -> int:
         artifact_row("component_ic", "diagnostics", diagnostics_dir / "component_ic.csv"),
         artifact_row("signal_birthdates", "diagnostics", diagnostics_dir / "signal_birthdates.csv"),
         artifact_row("stage8_best_weights", "research_calibration", optuna_dir / "stage8_best_weights.json"),
+        artifact_row("stage8_run_manifest", "research_calibration", optuna_dir / "stage8_run_manifest.json", required=False),
+        artifact_row("walk_forward_run_manifest", "research_calibration", optuna_dir / "walk_forward" / "walk_forward_run_manifest.json", required=False),
         artifact_row("stage8_best_summary", "research_calibration", optuna_dir / "stage8_best_summary.csv"),
         artifact_row("stage8_candidate_current_scores", "research_calibration", optuna_dir / "stage8_candidate_current_scores.csv"),
         artifact_row("walk_forward_summary", "research_calibration", optuna_dir / "walk_forward" / "walk_forward_summary.json"),
@@ -459,8 +462,14 @@ def main() -> int:
         artifact_row("signal_registry_report", "governance", signal_registry_csv),
     ]
 
-    latest_stage8_promotion_candidate = int(stage8_weights.get("promotion_candidate") or 0)
+    latest_stage8_promotion_candidate = int(walk_forward_summary.get("final_promotion_eligible") or 0)
     latest_stage8_status = "promotable_pending_manual_review" if latest_stage8_promotion_candidate else "report_only_not_promoted"
+    production_binding = resolve_production_binding(
+        config,
+        config_path=config_path,
+        family="technology_hardware",
+        governance_config_key="technology_hardware_governance_reports",
+    )
     production_status = str(cfg_get(config, f"{CONFIG_KEY}.production_model_status", "stage7_active"))
     stage8_status = str(cfg_get(config, f"{CONFIG_KEY}.stage8_candidate_status", "report_only_not_promoted"))
     manual_promotion_approved = int(bool(cfg_get(config, f"{CONFIG_KEY}.manual_promotion_approved", False)))
@@ -473,6 +482,11 @@ def main() -> int:
         "config_sha256": sha256_file(config_path),
         "registry_sha256": sha256_file(registry_path),
         "model_family": model_family,
+        "production_binding_valid": int(production_binding.valid),
+        "production_binding_status": production_binding.status,
+        "production_binding_reasons": list(production_binding.reasons),
+        "active_promotion_receipt_path": production_binding.receipt_path,
+        "active_promotion_receipt_sha256": production_binding.receipt_sha256,
         "production_source_id": production_source_id,
         "production_model_status": production_status,
         "production_model_name": production_model_name,
@@ -566,6 +580,9 @@ def main() -> int:
         "generated_at_utc": generated_at,
         "snapshot_id": lockbox["snapshot_id"],
         "database_path": str(db_path),
+        "production_binding_valid": int(production_binding.valid),
+        "production_binding_status": production_binding.status,
+        "production_binding_reasons": list(production_binding.reasons),
         "production_model_status": lockbox["production_model_status"],
         "production_model_name": lockbox["production_model_name"],
         "stage8_candidate_status": lockbox["stage8_candidate_status"],
@@ -594,7 +611,7 @@ def main() -> int:
         output_dir,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True, default=str))
-    return 1 if lockbox["missing_required_artifacts"] else 0
+    return 1 if lockbox["missing_required_artifacts"] or not production_binding.valid else 0
 
 
 if __name__ == "__main__":

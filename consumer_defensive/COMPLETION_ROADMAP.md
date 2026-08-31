@@ -2,6 +2,12 @@
 
 ## Purpose And Authority
 
+> **V2 authority update (2026-08-26):** The legacy future-evidence and Stage 12
+> routes described below are retired and archived. The authoritative calibration
+> and promotion sequence is now `CONSUMER_DEFENSIVE_V2_IMPLEMENTATION_PATH.md`.
+> Historical sections remain here only to preserve the implementation record and
+> cannot authorize calibration, promotion, orchestration, or portfolio activation.
+
 This document is the authoritative remaining-work sequence for completing the
 Consumer Defensive implementation. It consolidates the stage order in
 `README.md`, `STAGE_GATES.md`, and `IMPLEMENTATION.md` into one execution path.
@@ -14,21 +20,36 @@ The implementation is Consumer Defensive-specific. It may reuse shared kernels
 such as `dedicated_parser` and `factor_validation`, but it must not import or run
 Technology sector scripts as its implementation path.
 
+## 2026-08-25 Validation Correction
+
+The corrected V6 audit supersedes earlier Stage 8/9 promotion language below.
+The reported 24/24 and 31/31 results are internal artifact-integrity checks,
+not independent predictive-validation or strict-OOS passes. The authoritative
+corrected evidence is `output/consumer_defensive/validation_v4/2026-08-25/v6`;
+capital promotion remains fail-closed. The cross-sector capital verdict and
+admissible three-authority future protocol are recorded in
+[PRODUCTION_PROMOTION_AUDIT_2026-08-25.md](../PRODUCTION_PROMOTION_AUDIT_2026-08-25.md).
+The old Stage 10B package remains a shadow record and is superseded for any
+promotion decision.
+
 ## Current Accepted State
 
 | Workstream | Status | Accepted evidence |
 | --- | --- | --- |
 | Stages 0-5 | Complete | Production foundation, market, financial, disclosure and positioning gates are implemented. |
-| Stage 6A | Implemented | Scoring-feature definition v2 is frozen. A full-stack rehearsal remains required before Stage 7. |
+| Stage 6A | Complete through isolated acceptance | The full-stack `2026-08-14` rebuild passes 20/20 checks with 96/108 rank-ready inputs. |
 | Stage 6B v3.18 | Complete | 14,673 filings and 23,078 documents processed with zero failed work items; validation 10/10 PASS. |
 | Stage 6B coverage | Accepted | 542/1,079 all-taxonomy pairs; 541/1,022 SEC-addressable pairs; 504/916 current-live SEC-addressable pairs. |
 | Residual PDF recovery | Deferred | At most four SEC-addressable pairs remain recoverable; OCR would remain review-required and is not a material next lever. |
-| Stage 6C | Complete | 81,221 PIT rows, 30,309 numeric rows, 86 monthly dates, 38 metrics; validation 10/10 PASS. |
-| Shared factor validation | Complete, negative result | 276 hypotheses tested; none passed the sealed 5% BH-FDR gate. Specialized scoring weights remain zero. |
-| Stage 7 | Not implemented | Immediate next stage. |
-| Stages 8-12 | Not implemented | Must follow the dependency order below. |
-| Historical dated-output backfill | Not implemented | Begins only after Stage 12 is stable. |
-| Final deployment acceptance | Not started | Requires all prior gates and a production-backup migration rehearsal. |
+| Stage 6C | Corrected; isolated PASS | Run 3 has 81,221 PIT rows, 28,487 valid numeric rows, 86 monthly dates, and 38 metrics; validation 18/18 PASS. |
+| Shared factor validation | Corrected, zero accepted | 174 cells were registered; 90 were testable across eight metrics. One inverse-direction cell passed FDR, so zero cells passed every acceptance gate and specialized weights remain zero. |
+| Stage 7 | Corrected v3; isolated PASS | The shadow baseline produces 108/108 deterministic outputs, 94 rank-ready, with all 15 checks passing and all portfolio/OOS gates off. |
+| Stage 8 | Legacy replay integrity complete; promotion evidence invalid | The run passes 24/24 internal artifact checks, but 320 candidates touched holdout data, including 318 unauthorized candidates and 5,088 unauthorized period rows. |
+| Stage 9 | Legacy replay integrity complete; retrospective only | The run passes 31/31 internal artifact checks, but uses the burned holdout and a fixed 21-session target that does not match Stage 8's 21/63/126-session objective. |
+| Stage 10 | Publishing integrity complete; shadow only | The package publishes and replays deterministically, but inherits non-OOS Stage 8/9 evidence and remains non-investable. |
+| Stages 10B-12 | Code complete and fail-closed; evidence pending | The operational publisher, cohort-scoped signed-lock bridge, Portfolio adapter, per-cohort calibration/caps, local refresh runner and master non-blocking shadow registration are implemented. All checked-in cohort alpha/caps remain zero. |
+| Historical dated-output backfill | Engine implemented; execution pending | The restartable PIT-census sidecar/backfill refuses incomplete historical membership censuses and never labels reconstructed rows strict OOS. |
+| Final deployment acceptance | Rehearsal tooling implemented; execution pending | The backup-copy migration rehearsal is fail-closed on a signed activation registry and proves the production database remains byte-unchanged. |
 
 ## Non-Negotiable Modeling Contracts
 
@@ -54,7 +75,8 @@ Technology sector scripts as its implementation path.
 
 ### 1. Preserve The Accepted Stage 6 Evidence
 
-Status: complete; retain as an immutable baseline.
+Status: complete. Retain the legacy evidence immutably and use the corrected
+run 3/v3 campaign as the current research baseline.
 
 Required retained evidence:
 
@@ -72,7 +94,7 @@ gap justifies it.
 
 ### 2. Create The Full-Stack Stage 7 Rehearsal Database
 
-Status: next prerequisite.
+Status: complete in the isolated `2026-08-14` rehearsal; production unchanged.
 
 The retained Stage 6B extraction database is not suitable because it has no
 Stage 5 `feature_positioning` rows. Create a disposable, transaction-consistent
@@ -91,7 +113,8 @@ Acceptance checks:
 
 ### 3. Rebuild Stage 6A v2 In The Full Stack
 
-Status: pending the full-stack clone.
+Status: complete; 108 inputs and 5,940 components pass all 20 checks, with
+96/108 (`88.89%`) rank-ready against the frozen `85%` floor.
 
 Actions:
 
@@ -107,7 +130,9 @@ readiness gate.
 
 ### 4. Reapply And Validate The Stage 6B Overlay
 
-Status: pending Stage 6A full-stack success.
+Status: complete; 505 exact-run specialized component measurements were
+reapplied at zero weight in the corrected rehearsal. The canonical-lineage,
+sealed-run, and future-period defects are fixed and covered by regression tests.
 
 Actions:
 
@@ -124,7 +149,8 @@ future-data violation blocks Stage 7.
 
 ### 5. Implement Stage 7 Baseline Scoring
 
-Status: immediate implementation stage after the full-stack readiness steps.
+Status: complete through isolated acceptance; production migration remains
+deferred to final deployment acceptance.
 
 Scope:
 
@@ -159,9 +185,32 @@ Stage 7 completion artifact: a frozen, reviewed core baseline suitable for
 comparison in Stage 8. It is not a claim that specialized metrics have predictive
 value.
 
+Measured acceptance at `2026-08-14`:
+
+- 108/108 current tickers have deterministic shadow outputs;
+- 94 are rank-ready and 14 have explicit review reasons (`87.04%`, above the
+  frozen `85%` floor);
+- cohort readiness is beverages 19/22, distribution/retail 19/22,
+  household/personal/tobacco 22/25, and packaged foods/agriculture 34/39;
+- all 38 specialized components remain zero-weight under corrected campaign
+  `cdfv_20260814_d2c7155be91c_2498172c7161_a6495192b5`; eight metrics were
+  testable, and the only FDR-significant cell failed its pre-registered
+  direction gate;
+- `promotion_state=shadow_monitor`, `portfolio_candidate_gate=0`, and
+  `oos_score_valid_flag=0` for every row;
+- contract SHA-256 is
+  `d5184d007b89f3be62c61277cd4ddcb864f15ff0ccd09d9234de31922cf909c8`;
+- baseline-input manifest SHA-256 is
+  `ad90697b81c020c3666d47b04aa2ece231a2d8b7793dc00d23e27dd907f2500a`;
+- output manifest SHA-256 is
+  `abcca120e948d45a440b5f421809f3fb98b656484a4439d8b493e8a852fe93e8`,
+  reproduced exactly by the same-date replay; and
+- the full Consumer Defensive test suite passes 391 tests with five
+  platform-specific skips, and Ruff passes every modified file.
+
 ### 6. Implement Stage 8 Constrained Calibration Research
 
-Status: blocked by Stage 7 completion.
+Status: legacy artifact-integrity replay complete; promotion evidence is retrospective and invalid.
 
 Actions:
 
@@ -175,13 +224,42 @@ Actions:
 7. Compare core-only and core-plus-specialized candidates.
 8. Publish accepted, rejected and inconclusive results with immutable evidence.
 
-Because the current specialized campaign is negative, the expected initial
-Stage 8 outcome is retention of the Stage 7 core baseline. A nonzero specialized
-candidate requires new accepted evidence; coverage by itself is insufficient.
+Measured acceptance at `2026-08-14`:
+
+- immutable run `cds8_2a94264294f4b58b1444fb2d` passes 24/24 internal
+  artifact-integrity checks, not statistical-independence or OOS checks;
+- the evidence panel retains 9,036 rows, 116 tickers and 86 monthly dates;
+- `2026-02-11` is a partial/immature panel date and cannot represent a true
+  completed month-end observation;
+- a label-blind frozen-baseline census admits 56 dates beginning `2021-07-30`
+  and explicitly excludes 30 earlier non-rank-ready dates;
+- the chronology is 30 training dates, seven embargo dates, six validation
+  dates, seven embargo dates and six final-holdout dates;
+- all 320 candidates were exposed to the holdout; only two were authorized,
+  leaving 318 unauthorized candidates and 5,088 unauthorized period rows;
+- candidate-dependent eligibility compared candidates and baseline on different
+  samples;
+- stale 13F observations, incomplete source identity, and current/final rather
+  than point-in-time sector taxonomy leave freshness and survivorship gates
+  false;
+- beverages reached the final holdout but improved the weighted IC objective by
+  only `0.00005848`, below the registered `0.002` minimum;
+- the sector and household/personal/tobacco candidates failed walk-forward
+  repeatability, while distribution/retail and packaged foods/agriculture
+  failed validation;
+- zero candidates and zero specialized overlays were accepted, so the Stage 7
+  core baseline is retained; and
+- production promotion, Portfolio Layer writes, Stage 7 mutation and OOS claims
+  remain disabled.
+- an exact same-directory replay reproduced every immutable artifact
+  byte-for-byte.
+
+The complete failure history and hashes are recorded in
+`STAGE8_CALIBRATION_AUDIT_2026-08-24.md`.
 
 ### 7. Implement Stage 9 Report-Only Portfolio Backtests
 
-Status: blocked by Stages 7 and 8.
+Status: legacy artifact-integrity replay complete; production remains fail-closed.
 
 Test the Stage 7 baseline and every registered Stage 8 candidate using the same
 PIT panel. Produce long-only, long-short, equal-weight, score-weighted and
@@ -189,9 +267,31 @@ XLP-relative variants. Include turnover, costs, available borrow costs,
 drawdown, volatility, capacity, cohort concentration and delisted terminal
 returns. Stage 9 cannot change production weights.
 
+Measured acceptance at `2026-08-14`:
+
+- all 320 Stage 8 candidates were evaluated, confirming retrospective holdout
+  exposure rather than an unopened OOS test;
+- 56 calendar slots produced 40 greedily selected 21-session windows; the
+  remaining 16 schedule slots were discarded, not evaluated as cash;
+- the package contains 2,560 summary rows, 46,280 period rows and 377,106
+  holding rows, including four selected terminal-return panel rows;
+- transaction costs, observed and missing-borrow stress, drawdown, volatility,
+  capacity, liquidation time, cohort concentration and name concentration are
+  reconciled from holdings through summaries;
+- run `cds9_63065740a60179d1a1abc968` and manifest
+  `03346ffceb33b9f1c7b974229cad4ec1f5638945422d476f8cbe8aca3b1df183`
+  pass all 31 internal artifact-integrity checks; and
+- Stage 9's fixed 21-session return target does not match Stage 8's weighted
+  21/63/126-session selection objective;
+- the decision remains report-only: Stage 7 is retained, OOS validity and
+  portfolio gates remain off, and database writes are zero.
+
+The complete contract, caveats and failure history are recorded in
+`STAGE9_PORTFOLIO_BACKTEST_AUDIT_2026-08-25.md`.
+
 ### 8. Implement Stage 10 Publishing
 
-Status: blocked by Stage 9.
+Status: publishing integrity complete; inherited promotion evidence remains invalid.
 
 Publish deterministic current and dated:
 
@@ -206,19 +306,45 @@ Publish deterministic current and dated:
 Every current security must have a score or explicit review status. Historical
 rows remain non-investable unless strict contemporaneous OOS capture is proven.
 
+Measured acceptance at `2026-08-14`:
+
+- 108/108 securities publish a deterministic score or explicit review status;
+- 94 are rank-ready and 14 remain in the review queue;
+- 543/971 applicable specialized ticker-metric pairs are measurement qualified
+  (55.92%), while zero of 38 specialized metrics are model-weight qualified;
+- the package contains 5,940 company scorecard rows, 190 metric coverage rows,
+  43 risk flags, 40 frozen Stage 9 baseline views, and seven source-ledger rows;
+- run `cds10_729cbfd933b3c0ddc912b999`, contract
+  `729cbfd933b3c0ddc912b999bd9e5b210e0ec545685e7bb4f970c0cfa764d8cb`
+  and manifest
+  `1ef5e07f8f33b775574c2a356cddd907dbecae6ebd10c5edc8572d026abc709d`
+  pass all 17 publishing checks after a fresh 31/31 artifact-integrity validation;
+- desktop and responsive render QA pass; and
+- an exact replay leaves all 14 dated and 14 latest file hashes unchanged.
+
+The accepted package remains research-only, shadow-monitor, non-OOS and
+non-investable. Details are in `STAGE10_PUBLISHING_AUDIT_2026-08-25.md`.
+
 ### 9. Implement Stage 10B Governance
 
-Status: blocked by Stage 10.
+Status: legacy v1 is implemented as shadow governance; it is not a promotion
+authority and is superseded for that purpose by the corrected V6 evidence.
 
-Create the signal registry and governance lockbox. Record definitions, weights,
-evidence hashes, factor verdicts, walk-forward results, backtest references,
-promotion state, rollback version, reviewer and timestamps. Keep `promoted`,
-`shadow_monitor` and `deferred` distinct. No statistical process can promote
+The signal registry and governance lockbox record definitions, weights,
+evidence hashes, factor verdicts, backtest references, promotion state,
+rollback version, reviewer and timestamps. The accepted package is explicitly
+`shadow_monitor`, zero-cap, and non-OOS; no statistical process can promote
 itself.
+
+Any future promotion candidate must bind the exact passing evaluation hash from
+the canonical three-authority protocol and a separate independent-review
+receipt. It must not reuse the legacy Stage 10B decision or change production
+configuration automatically.
 
 ### 10. Implement Stage 11 Portfolio Layer Integration
 
-Status: blocked by Stage 10B approval.
+Status: cohort-aware adapter and optimizer contracts implemented and disabled;
+activation remains blocked by promotion evidence and signed change control.
 
 Actions:
 
@@ -236,17 +362,29 @@ database.
 
 ### 11. Implement Stage 12 Refresh Orchestration
 
-Status: blocked by Stage 11.
+Status: implemented. Script `28_run_consumer_defensive_stage12_pipeline.py`
+performs local feature/score validation, deterministic Stage 10 publishing and
+independent validation, then publishes a separate Stage 12 operational file.
+The master registry runs it as a non-blocking shadow lane. Capital activation
+remains independently blocked without an effective signed cohort lock.
 
-Create one independent runner with an explicit step table, `--asof`,
-`--dry-run`, `--skip-network`, bounded step selection, restart/resume,
-fail-fast behavior, per-step logs, final validation and a health manifest.
-Support promoted and shadow-monitor profiles. Routine refreshes must exclude
-Stage 8 searches, Stage 9 backtests and one-time history imports.
+The implemented runner has an explicit local-only step table, `--asof`,
+`--dry-run`, `--skip-local-score-build`, fail-fast subprocess receipts, final
+validation and a Stage 12 health manifest. Network work is excluded by
+construction. A failed refresh is rerun atomically through the master
+orchestrator instead of resuming inside a partially published Stage 12 run.
+Dry-run may display clearly marked unresolved Stage 8/9 placeholders, while a
+real run fails closed unless accepted roots exist. It supports promoted and
+shadow-monitor profiles. Routine refreshes exclude Stage 8 searches, Stage 9
+backtests and one-time history imports.
+Promotion-facing capture/evaluation additionally requires the fixed canonical
+trust registry, independent evidence sealing, external append-only timestamping,
+independent market-data export attestation, and exact official XNYS chronology.
 
 ### 12. Run The Historical Dated-Output Backfill
 
-Status: blocked by stable Stage 12 orchestration.
+Status: restartable engine implemented; historical execution and census
+exceptions remain pending.
 
 Generate restartable daily outputs from `2019-01-02` using only information
 available at each as-of date. Validate output/manifest dates and preserve
@@ -255,7 +393,8 @@ restartability by date and chunk, then restore the current latest dashboard.
 
 ### 13. Run Final Acceptance And Deployment
 
-Status: final gate.
+Status: final external/evidence gate; backup rehearsal code is implemented but
+cannot pass until a signed activation registry exists.
 
 Actions:
 
@@ -280,46 +419,42 @@ Accepted Stages 0-6C
   -> Stage 8 report-only calibration
   -> Stage 9 report-only portfolio backtest
   -> Stage 10 publishing
-  -> Stage 10B governance decision
+  -> legacy Stage 10B zero-cap shadow record
   -> Stage 11 Portfolio Layer file adapter
-  -> Stage 12 refresh orchestration
+  -> Stage 12 fail-closed shadow refresh
   -> historical dated-output backfill
+  -> canonical three-authority prospective registration and capture
+  -> matured future-only evaluation
+  -> independent promotion review and new lock
   -> final clean-room acceptance
   -> production migration
 ```
 
 Skipping a dependency invalidates every downstream acceptance claim.
 
-## Usage-Constrained Work Tranche
+## Prior Usage-Constrained Work Tranche
 
-At the time this roadmap was requested, the Codex UI showed 11% remaining for
-GPT-5.6 Sol at extra-high reasoning, with a requested reserve of 5%. This leaves
-a nominal six-percentage-point margin. OpenAI's official model documentation
-confirms the model and `xhigh` reasoning mode, but does not define a deterministic
-conversion from the Codex UI percentage to files, tool calls, tests or elapsed
-work. The reserve therefore cannot be guaranteed programmatically.
-
-The safe tranche within that margin is:
-
-1. complete and validate this authoritative roadmap;
-2. freeze the Stage 7 implementation and acceptance contract in this document;
-3. perform only a read-only inventory of candidate full-stack rehearsal inputs;
-4. record the exact Stage 7 prerequisite and stop condition; and
-5. stop before editing Stage 7 schema, scoring code or migrations.
-
-Do not begin the Stage 7 engine under this usage constraint. A partial schema or
-half-tested scoring path would be worse than a clean documented boundary. Start
-Stage 7 in the next sufficiently funded task and implement it through its full
-test and acceptance boundary.
+The earlier 11%-to-5% usage tranche documented the safe stopping boundary before
+Stage 7. The user subsequently issued an explicit implementation instruction,
+and Stage 7 was completed through its isolated acceptance boundary. Usage
+percentages remain UI estimates and are not treated as implementation gates.
 
 ## Immediate Next Task
 
 The next implementation task should be narrowly stated as:
 
-> Create and validate the full-stack isolated Stage 7 rehearsal database,
-> rebuild Stage 6A v2, reapply the accepted Stage 6B overlay, and stop unless all
-> Stage 6 readiness gates pass. If they pass, implement the complete versioned
-> Stage 7 baseline scoring layer with specialized weights frozen at zero.
+> Configure and independently approve the three canonical trust authorities,
+> then externally timestamp the exact frozen future-only monthly evidence
+> contract before any target access. Run target-blind contemporaneous capture on
+> each eligible true month end, evaluate outcomes only after maturity, preserve
+> the 12/6/4 independent-observation floors, and keep every capital path fail
+> closed until an independent review binds a passing evaluation into a new lock.
 
-This keeps the path coherent and prevents Stage 8 calibration, Stage 9
-backtesting or Portfolio Layer work from starting before the baseline exists.
+The code path through cohort-scoped Portfolio calibration, caps, Stage 12
+publishing, historical sidecars, master shadow orchestration, and backup-copy
+rehearsal is implemented. Canonical authority configuration, prospective
+registration, fresh OOS observations, independent promotion review, a signed
+activation registry, and execution of the backup-copy rehearsal remain
+outstanding. A historical replay cannot shorten this sequence. The decision on
+which elements of the Biotech target framework to adapt is recorded in
+`BIOTECH_FRAMEWORK_ADAPTATION_DECISION.md`.

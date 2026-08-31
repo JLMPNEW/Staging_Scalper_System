@@ -87,7 +87,10 @@ def build_financial_lineage_shadow(
     model_family: str = "semiconductors",
     expected_asof: str = "",
     policy_context: str = "research",
+    retrospective_source_discovery_max_days: int = 0,
 ) -> dict[str, Any]:
+    if retrospective_source_discovery_max_days < 0:
+        raise ValueError("retrospective_source_discovery_max_days must be non-negative")
     rank_rows = read_rank_rows(rank_table_path, model_family=model_family)
     row_dates = {str(row.get("asof_date") or "").strip() for row in rank_rows}
     if len(row_dates) != 1:
@@ -104,6 +107,9 @@ def build_financial_lineage_shadow(
             model_family=model_family,
             asof=asof,
             tickers=tickers,
+            retrospective_source_discovery_max_days=(
+                retrospective_source_discovery_max_days
+            ),
         )
 
     shadow_rows: list[dict[str, str]] = []
@@ -152,6 +158,14 @@ def build_financial_lineage_shadow(
         "candidate_count": len(candidate_rows),
         "candidate_incorporated_count": sum(
             str(row.get("financial_lineage_gate") or "") == "1" for row in candidate_rows
+        ),
+        "retrospective_source_discovery_max_days": (
+            retrospective_source_discovery_max_days
+        ),
+        "retrospective_source_discovery_count": sum(
+            "retrospective_sec_submissions_discovery_confirmed"
+            in str(row.get("financial_lineage_reason") or "")
+            for row in shadow_rows
         ),
         **evaluation_manifest(evaluation, policy=policy, context=policy_context),
     }

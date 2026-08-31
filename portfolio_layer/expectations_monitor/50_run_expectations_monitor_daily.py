@@ -91,6 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--late-holding-supplement", action="store_true")
+    parser.add_argument("--historical-catchup", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     return parser.parse_args()
 
@@ -1233,6 +1234,8 @@ def main() -> int:
             state_command.append("--force")
         if args.late_holding_supplement:
             state_command.append("--late-holding-supplement")
+        if args.historical_catchup:
+            state_command.append("--historical-catchup")
         if args.dry_run:
             state_command.append("--dry-run")
         state_rc, state_detail = _run(state_command, dry_run=False)
@@ -1348,6 +1351,7 @@ def main() -> int:
             "state_publication_authorized": state_publication_authorized,
             "broker_execution_prohibited": True,
             "late_holding_supplement": bool(args.late_holding_supplement),
+            "historical_catchup": bool(args.historical_catchup),
             "provider_request_fields": ["endpoint", "ticker", "authentication"],
             "implementation_or_policy_data_sent": False,
             "capture_cycle_count": len(cycles),

@@ -8,7 +8,7 @@ own: callers supply raw/canonical rows and persist returned decisions.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 import hashlib
 import json
@@ -25,7 +25,7 @@ from consumer_defensive.core.financial_semantics import (
 )
 
 
-FEATURE_DEFINITION_VERSION = "consumer_defensive_financial_features_v2_average_balance"
+FEATURE_DEFINITION_VERSION = "consumer_defensive_financial_features_v3_structured_normalization"
 FLOW_METRIC_NAMES = {
     "revenue": "revenue",
     "cost_of_revenue": "cost_of_revenue",
@@ -38,6 +38,9 @@ FLOW_METRIC_NAMES = {
     "depreciation_amortization": "depreciation_and_amortization",
 }
 INSTANT_METRICS = ("cash", "inventory", "equity", "debt_current", "debt_noncurrent")
+ADDITIVE_FLOW_METRICS = frozenset({"cost_of_revenue"})
+MINIMUM_ADDITIVE_COMPONENTS = 2
+ADDITIVE_RECONCILIATION_RELATIVE_TOLERANCE = 0.005
 FEATURE_COLUMNS = (
     "revenue_ttm_usd",
     "gross_margin",
@@ -117,6 +120,16 @@ def select_canonical_financial_facts(
     equal-priority conflicting values are rejected rather than row-id selected.
     """
 
+    additive_components: dict[str, tuple[str, ...]] = {}
+    for metric in ADDITIVE_FLOW_METRICS:
+        components = tuple(sorted({
+            str(mapping[2])
+            for mapping in concept_index.values()
+            if str(mapping[0]) == metric and str(mapping[2]) != "total"
+        }))
+        if components:
+            additive_components[metric] = components
+
     rows: list[dict[str, Any]] = []
     audit: Counter[str] = Counter()
     for raw in raw_rows:
@@ -149,6 +162,7 @@ def select_canonical_financial_facts(
                 "currency": currency,
                 "numeric_value": value,
                 'source_observation_id': _stable_observation_identity(row),
+                "dimensions_key": _normalized_dimensions_key(row.get("dimensions_json")),
             }
         )
         rows.append(row)
@@ -200,20 +214,116 @@ def select_canonical_financial_facts(
 
         chosen: dict[tuple[str, str], tuple[dict[str, Any], tuple[str, ...], str]] = {}
         for metric_component, candidates in by_metric.items():
+            metric, _component = metric_component
+            if metric in ADDITIVE_FLOW_METRICS:
+                consolidated = [
+                    row for row in candidates if row.get("dimensions_key") == "[]"
+                ]
+                audit["dimensioned_additive_fact_rejected"] += (
+                    len(candidates) - len(consolidated)
+                )
+                candidates = consolidated
+                if not candidates:
+                    continue
             picked, flags = _priority_candidate(candidates)
             if picked is None:
                 audit["ambiguous_equal_priority_value"] += 1
                 continue
             chosen[metric_component] = (picked, flags, "reviewed_concept_priority")
 
+        composed_rows: dict[str, dict[str, Any]] = {}
+        for metric, required_components in additive_components.items():
+            if len(required_components) < MINIMUM_ADDITIVE_COMPONENTS:
+                audit["unsafe_additive_component_definition"] += 1
+                continue
+            available = {
+                component: chosen[(metric, component)]
+                for component in required_components
+                if (metric, component) in chosen
+            }
+            if not available:
+                continue
+            if len(available) != len(required_components):
+                audit["incomplete_additive_component_set"] += 1
+                for component in available:
+                    row, flags, method = chosen[(metric, component)]
+                    chosen[(metric, component)] = (
+                        row,
+                        tuple(sorted(set(flags + (
+                            "incomplete_additive_component_set",
+                        )))),
+                        method,
+                    )
+                continue
+
+            component_rows = [
+                available[component][0] for component in required_components
+            ]
+            composed = dict(component_rows[0])
+            composed["numeric_value"] = sum(
+                abs(float(row["numeric_value"])) for row in component_rows
+            )
+            composed["concept"] = "+".join(
+                str(row.get("concept") or "") for row in component_rows
+            )
+            composed_rows[metric] = composed
+            direct = chosen.get((metric, "total"))
+            if direct is None:
+                audit["complete_additive_component_set"] += 1
+                for component in required_components:
+                    row, flags, method = chosen[(metric, component)]
+                    chosen[(metric, component)] = (
+                        row,
+                        tuple(sorted(set(flags + (
+                            "additive_component_source",
+                            "exact_context_component_set_complete",
+                        )))),
+                        method,
+                    )
+                continue
+
+            direct_value = abs(float(direct[0]["numeric_value"]))
+            composed_value = float(composed["numeric_value"])
+            scale = max(direct_value, composed_value, 1.0)
+            reconciles = (
+                abs(direct_value - composed_value) / scale
+                <= ADDITIVE_RECONCILIATION_RELATIVE_TOLERANCE
+            )
+            reconciliation_flag = (
+                "direct_total_reconciles_additive_components"
+                if reconciles
+                else "direct_total_conflicts_with_additive_components"
+            )
+            audit[reconciliation_flag] += 1
+            direct_row, direct_flags, direct_method = direct
+            chosen[(metric, "total")] = (
+                direct_row,
+                tuple(sorted(set(direct_flags + (
+                    reconciliation_flag,
+                    "direct_total_preferred_over_additive_components",
+                )))),
+                direct_method,
+            )
+            for component in required_components:
+                row, flags, method = chosen[(metric, component)]
+                chosen[(metric, component)] = (
+                    row,
+                    tuple(sorted(set(flags + (
+                        "additive_component_source",
+                        "direct_total_available_component_not_summed",
+                    )))),
+                    method,
+                )
+
         revenue_candidates = by_metric.get(("revenue", "total"), [])
         cogs = chosen.get(("cost_of_revenue", "total"))
         gross = chosen.get(("gross_profit", "total"))
-        if revenue_candidates and cogs and gross:
+        identity_cogs_row = cogs[0] if cogs else composed_rows.get("cost_of_revenue")
+        if revenue_candidates and identity_cogs_row and gross:
             facts = [_financial_fact(row, "revenue") for row in revenue_candidates]
             identity = select_revenue_candidate(
                 facts,
-                cost_of_revenue=_financial_fact(cogs[0], "cost_of_revenue"),
+                cost_of_revenue=_financial_fact(identity_cogs_row, "cost_of_revenue"),
                 gross_profit=_financial_fact(gross[0], "gross_profit"),
                 reporting_currency=str(group[0]["currency"]),
             )
@@ -288,6 +398,9 @@ def select_canonical_financial_facts(
             )
             audit["selected"] += 1
 
+    decisions = _certify_additive_component_sets(
+        decisions, additive_components, audit
+    )
     decisions.sort(
         key=lambda row: (
             row.ticker,
@@ -326,6 +439,13 @@ def build_financial_feature_bundle(
     flow_audit: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for canonical_metric, feature_metric in FLOW_METRIC_NAMES.items():
         metric_rows = [row for row in rows if str(row.get("canonical_metric")) == canonical_metric]
+        if canonical_metric in ADDITIVE_FLOW_METRICS:
+            selected_values, audit_rows = _select_additive_flow_values(
+                metric_rows, feature_metric, as_of=as_of[:10] + "T23:59:59Z"
+            )
+            flow_candidates[feature_metric].extend(selected_values)
+            flow_audit[feature_metric].extend(audit_rows)
+            continue
         grouped: dict[tuple[str, str], list[FinancialFact]] = defaultdict(list)
         for row in metric_rows:
             grouped[(str(row.get("taxonomy") or ""), str(row.get("reported_currency") or ""))].append(
@@ -478,6 +598,11 @@ def build_financial_feature_bundle(
             for metric, value in selected_values.items()
             if metric in FLOW_METRIC_NAMES.values()
         },
+        "selected_flow_basis": {
+            metric: value.basis
+            for metric, value in selected_values.items()
+            if metric in FLOW_METRIC_NAMES.values()
+        },
         "rejected_flow_lineage": dict(sorted(rejected_flow_lineage.items())),
         "instant_lineage": instant_lineage,
         "ratio_quality_flags": {
@@ -528,6 +653,381 @@ def legacy_feature_values(rows: Sequence[Sequence[Any]]) -> dict[str, float | No
         maximum_period_age_days=100_000,
     )
     return dict(bundle.values)
+
+
+def _certify_additive_component_sets(
+    decisions: Sequence[CanonicalDecision],
+    requirements: Mapping[str, tuple[str, ...]],
+    audit: Counter[str],
+) -> list[CanonicalDecision]:
+    """Bind completeness flags to the declared component definition."""
+
+    grouped_components: dict[tuple[str, ...], set[str]] = defaultdict(set)
+    for decision in decisions:
+        required = requirements.get(decision.metric, ())
+        if (
+            len(required) < MINIMUM_ADDITIVE_COMPONENTS
+            or decision.component not in required
+        ):
+            continue
+        grouped_components[_canonical_component_context(decision)].add(
+            decision.component
+        )
+
+    certified_contexts = {
+        context
+        for context, present in grouped_components.items()
+        if present == set(requirements.get(context[1], ()))
+    }
+    audit["certified_additive_component_context"] += len(certified_contexts)
+    output: list[CanonicalDecision] = []
+    for decision in decisions:
+        required = requirements.get(decision.metric, ())
+        if (
+            len(required) < MINIMUM_ADDITIVE_COMPONENTS
+            or decision.component not in required
+        ):
+            output.append(decision)
+            continue
+        flags = set(decision.quality_flags)
+        context = _canonical_component_context(decision)
+        if context in certified_contexts:
+            flags.discard("incomplete_additive_component_set")
+            flags.update({
+                "additive_component_source",
+                "exact_context_component_set_complete",
+            })
+        else:
+            flags.discard("exact_context_component_set_complete")
+            flags.add("incomplete_additive_component_set")
+        output.append(replace(decision, quality_flags=tuple(sorted(flags))))
+    return output
+
+
+def _canonical_component_context(decision: CanonicalDecision) -> tuple[str, ...]:
+    return (
+        decision.ticker,
+        decision.metric,
+        decision.accession_number,
+        decision.taxonomy,
+        decision.reported_currency,
+        str(decision.period_start or ""),
+        decision.period_end,
+    )
+
+
+def _select_additive_flow_values(
+    rows: Sequence[Mapping[str, Any]],
+    metric: str,
+    *,
+    as_of: str,
+) -> tuple[list[FinancialValue], list[dict[str, Any]]]:
+    """Select direct totals or complete, exact-context additive components."""
+
+    normalized_rows = [dict(row) for row in rows]
+    audit_rows: list[dict[str, Any]] = []
+    direct_values: list[FinancialValue] = []
+    direct_groups: dict[tuple[str, str], list[FinancialFact]] = defaultdict(list)
+    for row in normalized_rows:
+        if str(row.get("canonical_component") or "total") != "total":
+            continue
+        context = (
+            str(row.get("taxonomy") or ""),
+            str(row.get("reported_currency") or ""),
+        )
+        direct_groups[context].append(_canonical_financial_fact(row, metric))
+    for context, facts in sorted(direct_groups.items()):
+        selection = select_safe_flow_value(facts, as_of=as_of)
+        audit_rows.append({
+            "source_kind": "direct_total",
+            "taxonomy": context[0],
+            "currency": context[1],
+            "status": selection.status,
+            "quality_flags": list(selection.quality_flags),
+        })
+        if selection.selected is not None:
+            direct_values.append(selection.selected)
+
+    component_rows: list[dict[str, Any]] = []
+    rejected_components: list[str] = []
+    for row in normalized_rows:
+        component = str(row.get("canonical_component") or "total")
+        if component == "total":
+            continue
+        flags = _canonical_quality_flag_set(row)
+        if (
+            "exact_context_component_set_complete" in flags
+            and "incomplete_additive_component_set" not in flags
+        ):
+            component_rows.append(row)
+        else:
+            rejected_components.append(_canonical_row_lineage_id(row))
+    if rejected_components:
+        audit_rows.append({
+            "source_kind": "additive_components",
+            "status": "rejected_uncertified_component_rows",
+            "component_lineage": sorted(rejected_components),
+            "quality_flags": ["declared_component_set_not_certified_complete"],
+        })
+
+    required_components = tuple(sorted({
+        str(row.get("canonical_component") or "total")
+        for row in component_rows
+        if str(row.get("canonical_component") or "total") != "total"
+    }))
+    if len(required_components) < MINIMUM_ADDITIVE_COMPONENTS:
+        if required_components:
+            audit_rows.append({
+                "source_kind": "additive_components",
+                "status": "incomplete_component_definition",
+                "required_components": list(required_components),
+                "quality_flags": ["minimum_two_additive_components_required"],
+            })
+        return direct_values, audit_rows
+
+    composed_facts, composed_lineage, composition_audit = (
+        _compose_exact_period_component_facts(
+            component_rows, metric, required_components=required_components
+        )
+    )
+    audit_rows.extend(composition_audit)
+    composed_values: list[FinancialValue] = []
+    composed_groups: dict[tuple[str, str], list[FinancialFact]] = defaultdict(list)
+    for fact in composed_facts:
+        composed_groups[(fact.taxonomy, fact.currency)].append(fact)
+    for context, facts in sorted(composed_groups.items()):
+        selection = select_safe_flow_value(facts, as_of=as_of)
+        audit_rows.append({
+            "source_kind": "additive_components",
+            "taxonomy": context[0],
+            "currency": context[1],
+            "status": selection.status,
+            "required_components": list(required_components),
+            "quality_flags": list(selection.quality_flags),
+        })
+        if selection.selected is not None:
+            composed_values.append(
+                _expand_composed_flow_lineage(selection.selected, composed_lineage)
+            )
+
+    selected_values = list(direct_values)
+    for composed in composed_values:
+        context = _flow_value_context(composed)
+        direct_index = next((
+            index
+            for index, direct in enumerate(selected_values)
+            if _flow_value_context(direct) == context
+        ), None)
+        if direct_index is None:
+            selected_values.append(composed)
+            continue
+        direct = selected_values[direct_index]
+        scale = max(abs(direct.value), abs(composed.value), 1.0)
+        relative_difference = abs(direct.value - composed.value) / scale
+        reconciles = (
+            relative_difference <= ADDITIVE_RECONCILIATION_RELATIVE_TOLERANCE
+        )
+        composed_is_newer = str(composed.accepted_at or "") > str(
+            direct.accepted_at or ""
+        )
+        if composed_is_newer:
+            selected_values[direct_index] = composed
+        audit_rows.append({
+            "source_kind": "direct_component_reconciliation",
+            "taxonomy": context[2],
+            "currency": context[3],
+            "period_start": context[0],
+            "period_end": context[1],
+            "status": "reconciled" if reconciles else "conflict",
+            "selected_source_kind": (
+                "additive_components" if composed_is_newer else "direct_total"
+            ),
+            "relative_difference": relative_difference,
+            "direct_lineage": list(direct.lineage),
+            "component_lineage": list(composed.lineage),
+            "quality_flags": ([] if reconciles else [
+                "direct_total_conflicts_with_additive_components"
+            ]),
+        })
+
+    selected_values.sort(key=lambda value: (
+        str(value.period_end),
+        str(value.period_start or ""),
+        value.taxonomy,
+        value.currency,
+        value.basis,
+        value.lineage,
+    ))
+    return selected_values, audit_rows
+
+
+def _compose_exact_period_component_facts(
+    rows: Sequence[Mapping[str, Any]],
+    metric: str,
+    *,
+    required_components: tuple[str, ...],
+) -> tuple[list[FinancialFact], dict[str, tuple[str, ...]], list[dict[str, Any]]]:
+    exact_groups: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = (
+        defaultdict(list)
+    )
+    audit_rows: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        component = str(row.get("canonical_component") or "total")
+        if component not in required_components:
+            continue
+        accession = str(row.get("accession_number") or "").strip()
+        start = str(row.get("period_start") or "").strip()
+        end = str(row.get("period_end") or "").strip()
+        accepted = str(row.get("accepted_at") or "").strip()
+        taxonomy = str(row.get("taxonomy") or "").strip()
+        currency = str(row.get("reported_currency") or "").strip()
+        if not all((accession, start, end, accepted, taxonomy, currency)):
+            audit_rows.append({
+                "source_kind": "additive_components",
+                "status": "rejected_incomplete_context",
+                "component": component,
+                "quality_flags": ["exact_component_context_required"],
+            })
+            continue
+        exact_groups[(
+            accession, start, end, taxonomy, currency
+        )].append(row)
+
+    facts: list[FinancialFact] = []
+    lineage_by_token: dict[str, tuple[str, ...]] = {}
+    for context, candidates in sorted(exact_groups.items()):
+        by_component: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in candidates:
+            by_component[str(row.get("canonical_component"))].append(row)
+        missing = [
+            component for component in required_components if component not in by_component
+        ]
+        if missing:
+            audit_rows.append({
+                "source_kind": "additive_components",
+                "status": "rejected_incomplete_component_set",
+                "accession_number": context[0],
+                "period_start": context[1],
+                "period_end": context[2],
+                "taxonomy": context[3],
+                "currency": context[4],
+                "missing_components": missing,
+                "quality_flags": ["exact_context_component_set_incomplete"],
+            })
+            continue
+
+        selected_rows: list[dict[str, Any]] = []
+        conflict = False
+        component_lineage: list[str] = []
+        for component in required_components:
+            component_rows = by_component[component]
+            distinct_values = {float(row["value_usd"]) for row in component_rows}
+            if len(distinct_values) != 1:
+                conflict = True
+                audit_rows.append({
+                    "source_kind": "additive_components",
+                    "status": "rejected_conflicting_component_values",
+                    "accession_number": context[0],
+                    "period_start": context[1],
+                    "period_end": context[2],
+                    "component": component,
+                    "quality_flags": ["conflicting_exact_context_component_values"],
+                })
+                break
+            component_rows.sort(key=_canonical_row_lineage_id)
+            selected_rows.append(component_rows[0])
+            component_lineage.extend(
+                _canonical_row_lineage_id(row) for row in component_rows
+            )
+        if conflict:
+            continue
+
+        lineage = tuple(sorted(set(component_lineage)))
+        token_payload = [metric, *context, list(required_components), list(lineage)]
+        token = "additive:" + hashlib.sha256(json.dumps(
+            token_payload, ensure_ascii=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        lineage_by_token[token] = lineage
+        total = sum(abs(float(row["value_usd"])) for row in selected_rows)
+        facts.append(FinancialFact(
+            metric=metric,
+            value=total,
+            period_start=context[1],
+            period_end=context[2],
+            accepted_at=max(str(row.get("accepted_at") or "") for row in selected_rows),
+            accession_number=context[0],
+            taxonomy=context[3],
+            currency=context[4],
+            concept="+".join(
+                str(row.get("source_concept") or "") for row in selected_rows
+            ),
+            raw_fact_id=token,
+        ))
+        audit_rows.append({
+            "source_kind": "additive_components",
+            "status": "composed_exact_context",
+            "accession_number": context[0],
+            "period_start": context[1],
+            "period_end": context[2],
+            "taxonomy": context[3],
+            "currency": context[4],
+            "required_components": list(required_components),
+            "component_lineage": list(lineage),
+            "quality_flags": ["cost_of_revenue_composed_from_exact_components"],
+        })
+    return facts, lineage_by_token, audit_rows
+
+
+def _expand_composed_flow_lineage(
+    value: FinancialValue,
+    lineage_by_token: Mapping[str, tuple[str, ...]],
+) -> FinancialValue:
+    expanded: list[str] = []
+    for item in value.lineage:
+        expanded.extend(lineage_by_token.get(item, (item,)))
+    return FinancialValue(
+        metric=value.metric,
+        value=value.value,
+        period_start=value.period_start,
+        period_end=value.period_end,
+        taxonomy=value.taxonomy,
+        currency=value.currency,
+        accepted_at=value.accepted_at,
+        basis=f"composed_additive_components:{value.basis}",
+        lineage=tuple(expanded),
+    )
+
+
+def _flow_value_context(value: FinancialValue) -> tuple[str, str, str, str]:
+    return (
+        str(value.period_start or ""),
+        str(value.period_end),
+        value.taxonomy,
+        value.currency,
+    )
+
+
+def _canonical_row_lineage_id(row: Mapping[str, Any]) -> str:
+    return str(
+        row.get("source_observation_id")
+        or row.get("source_raw_fact_id")
+        or ""
+    )
+
+
+def _canonical_quality_flag_set(row: Mapping[str, Any]) -> set[str]:
+    """Return persisted canonical flags; malformed lineage fails uncertified."""
+
+    raw = row.get("quality_flags_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return set()
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    return {str(flag) for flag in raw if str(flag)}
 
 
 def _priority_candidate(
@@ -664,6 +1164,18 @@ def _distinct_context(row: Mapping[str, Any]) -> tuple[str, str, str, str]:
         str(row.get("period_end") or ""),
         str(row.get("component") or ""),
     )
+
+def _normalized_dimensions_key(raw: Any) -> str | None:
+    if raw is None or str(raw).strip() == "":
+        return "[]"
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if parsed in ({}, []):
+        return "[]"
+    return json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+
 
 
 def _unique_plurality(groups: Mapping[str, set[Any]]) -> str | None:

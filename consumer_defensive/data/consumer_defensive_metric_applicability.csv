@@ -43,6 +43,7 @@ SFM,consumer_staples_distribution_retail,retail,reviewed,grocery retail
 UNFI,consumer_staples_distribution_retail,food_distribution,reviewed,food distribution
 USFD,consumer_staples_distribution_retail,food_distribution,reviewed,foodservice distribution
 WMK,consumer_staples_distribution_retail,retail,reviewed,grocery retail
+VLGEA,consumer_staples_distribution_retail,retail,reviewed,grocery retail
 PG,household_personal_tobacco,household_personal,reviewed,household and personal care
 CL,household_personal_tobacco,household_personal,reviewed,household and personal care
 KVUE,household_personal_tobacco,household_personal,reviewed,consumer health and personal care
@@ -68,6 +69,7 @@ TPB,household_personal_tobacco,tobacco,reviewed,tobacco
 UL,household_personal_tobacco,household_personal,reviewed,household and personal care
 UVV,household_personal_tobacco,tobacco,reviewed,tobacco leaf
 WDFC,household_personal_tobacco,household_personal,reviewed,household products
+NWL,household_personal_tobacco,household_personal,reviewed,household consumer products
 JBS,packaged_foods_agricultural_products,protein_dairy,reviewed,protein
 KHC,packaged_foods_agricultural_products,branded_food,reviewed,branded packaged food
 GIS,packaged_foods_agricultural_products,branded_food,reviewed,branded packaged food
@@ -102,7 +104,7 @@ AVO,packaged_foods_agricultural_products,agricultural_processor,reviewed,fresh p
 BG,packaged_foods_agricultural_products,agricultural_processor,reviewed,agricultural processing
 CALM,packaged_foods_agricultural_products,protein_dairy,reviewed,eggs
 CENTA,packaged_foods_agricultural_products,branded_food,reviewed,pet consumables and garden products
-FDP,packaged_foods_agricultural_products,branded_food,reviewed,branded food
+DMC,packaged_foods_agricultural_products,branded_food,reviewed,branded food and agricultural products
 DOLE,packaged_foods_agricultural_products,agricultural_processor,reviewed,fresh produce
 HSY,packaged_foods_agricultural_products,branded_food,reviewed,branded confectionery
 SFD,packaged_foods_agricultural_products,protein_dairy,reviewed,protein

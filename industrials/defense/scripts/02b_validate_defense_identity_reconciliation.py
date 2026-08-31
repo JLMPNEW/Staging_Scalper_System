@@ -307,14 +307,22 @@ def validate_delisted_rows(
     warnings: list[WarningRecord] = []
     tickers = sorted(delisted_rows)
     ph = placeholders(tickers)
-    seed_count = scalar(conn, f"SELECT COUNT(*) FROM dim_delisted_calibration_seed WHERE ticker IN ({ph})", tuple(tickers))
+    seed_count = scalar(
+        conn,
+        (
+            "SELECT COUNT(*) FROM dim_delisted_calibration_seed "
+            f"WHERE model_family = 'defense' AND ticker IN ({ph})"
+        ),
+        tuple(tickers),
+    )
     if seed_count != len(tickers):
         errors.append(f"dim_delisted_calibration_seed count mismatch: db={seed_count} csv={len(tickers)}")
     db_rows = conn.execute(
         f"""
         SELECT ticker, company_name, calibration_cohort_id, cik, exit_year
         FROM dim_delisted_calibration_seed
-        WHERE ticker IN ({ph})
+        WHERE model_family = 'defense'
+          AND ticker IN ({ph})
         """,
         tuple(tickers),
     ).fetchall()

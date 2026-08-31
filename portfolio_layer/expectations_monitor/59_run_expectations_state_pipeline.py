@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market-data-dir", type=Path)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--late-holding-supplement", action="store_true")
+    parser.add_argument("--historical-catchup", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     return parser.parse_args()
@@ -151,6 +152,8 @@ def main() -> int:
                 command.append("--force")
             if args.late_holding_supplement and step == "levels":
                 command.append("--late-holding-supplement")
+            if args.historical_catchup and step == "levels":
+                command.append("--historical-catchup")
             print(
                 f"{step}: {subprocess.list2cmdline(command)}; "
                 f"manifest={expected_manifest.resolve()}"
@@ -166,6 +169,8 @@ def main() -> int:
             command.append("--force")
         if args.late_holding_supplement and step == "levels":
             command.append("--late-holding-supplement")
+        if args.historical_catchup and step == "levels":
+            command.append("--historical-catchup")
         return_code, detail = _run(command)
         valid = False
         child_hash = ""
@@ -221,6 +226,7 @@ def main() -> int:
             "shadow_only": True,
             "broker_execution_prohibited": True,
             "late_holding_supplement": bool(args.late_holding_supplement),
+            "historical_catchup": bool(args.historical_catchup),
             "child_manifests": children,
             "inputs_sha256": {str(path): sha256_file(path) for path in source_paths},
             "outputs_sha256": {steps_path.name: sha256_file(steps_path)},

@@ -10,6 +10,7 @@ from consumer_defensive.core.db import connect, init_db
 from consumer_defensive.core.norgate_membership import Candidate, load_candidates, load_current_provider_symbols, load_historical_ciks, load_norgate_membership, resolve_candidate
 from consumer_defensive.core.source_registry import load_source_registry, upsert_source_registry
 from consumer_defensive.core.universe import (
+    PIT_SOURCE_ID,
     load_current_universe,
     load_policy,
     upsert_stage2_sources,
@@ -66,15 +67,15 @@ def test_current_provider_symbol_override_is_reviewed_and_asset_bound(
     tmp_path: Path,
 ) -> None:
     policy = load_policy(POLICY_PATH)
-    assert load_current_provider_symbols(policy) == {"FDP": ("DMC", "132283")}
+    assert load_current_provider_symbols(policy) == {"DMC": ("DMC", "132283")}
 
     with connect(tmp_path / "provider_override.sqlite") as conn:
         initialize_stage2(conn)
         load_current_universe(conn, policy)
         candidates, _ = load_candidates(conn, policy)
-        fdp = next(candidate for candidate in candidates if candidate.ticker == "FDP")
-        assert fdp.explicit_price_symbol == "DMC"
-        assert fdp.explicit_provider_asset_id == "132283"
+        dmc = next(candidate for candidate in candidates if candidate.ticker == "DMC")
+        assert dmc.explicit_price_symbol == "DMC"
+        assert dmc.explicit_provider_asset_id == "132283"
 
 
 def test_delisted_candidates_are_exact_terminal_scope_and_use_terminal_eligibility(tmp_path: Path) -> None:
@@ -131,21 +132,21 @@ def test_reviewed_provider_asset_rebinds_from_superseded_identity(
         _, policy = initialize_stage2(conn)
         load_current_universe(conn, policy)
         conn.execute(
-            "UPDATE dim_company SET primary_ticker='DMC' WHERE primary_ticker='FDP'"
+            "UPDATE dim_company SET primary_ticker='FDP' WHERE primary_ticker='DMC'"
         )
         conn.execute(
             """UPDATE dim_security
-               SET ticker='DMC', provider_price_symbol='DMC'
-               WHERE ticker='FDP' AND listing_status='active'"""
+               SET ticker='FDP', provider_price_symbol='DMC'
+               WHERE ticker='DMC' AND listing_status='active'"""
         )
         conn.execute(
             """UPDATE dim_consumer_defensive_taxonomy
-               SET ticker='DMC' WHERE ticker='FDP' AND model_family='consumer_defensive'"""
+               SET ticker='FDP' WHERE ticker='DMC' AND model_family='consumer_defensive'"""
         )
         legacy = conn.execute(
             """SELECT c.company_id, s.security_id
                FROM dim_company c JOIN dim_security s ON s.company_id=c.company_id
-               WHERE c.primary_ticker='DMC' AND s.ticker='DMC'"""
+               WHERE c.primary_ticker='FDP' AND s.ticker='FDP'"""
         ).fetchone()
         assert legacy is not None
         conn.execute(
@@ -185,21 +186,98 @@ def test_reviewed_provider_asset_rebinds_from_superseded_identity(
                JOIN dim_security s ON s.security_id=i.security_id
                WHERE i.identifier_type='norgate_assetid' AND i.identifier_value='132283'"""
         ).fetchone()
-        assert tuple(owner) == ("FDP", "FDP")
+        assert tuple(owner) == ("DMC", "DMC")
         assert conn.execute(
-            "SELECT listing_status FROM dim_security WHERE ticker='DMC'"
+            "SELECT listing_status FROM dim_security WHERE ticker='FDP'"
         ).fetchone()[0] == "superseded"
         assert conn.execute(
-            "SELECT is_active FROM dim_company WHERE primary_ticker='DMC'"
+            "SELECT is_active FROM dim_company WHERE primary_ticker='FDP'"
         ).fetchone()[0] == 0
         assert conn.execute(
             """SELECT COUNT(*) FROM dim_universe_membership
-               WHERE ticker='DMC' AND membership_source_id='norgate_us_equities_pit_membership'"""
+               WHERE ticker='FDP' AND membership_source_id='norgate_us_equities_pit_membership'"""
         ).fetchone()[0] == 0
         assert conn.execute(
             """SELECT COUNT(*) FROM dim_universe_membership
                WHERE membership_source_id='norgate_us_equities_pit_membership'"""
-        ).fetchone()[0] == 119
+        ).fetchone()[0] == 121
+
+
+def test_current_load_reactivates_same_issuer_dormant_security_row(
+    tmp_path: Path,
+) -> None:
+    with connect(tmp_path / "dormant_current_identity.sqlite") as conn:
+        _, policy = initialize_stage2(conn)
+        load_current_universe(conn, policy)
+        original = conn.execute(
+            """SELECT s.security_id, s.company_id
+               FROM dim_security s
+               WHERE s.ticker='DMC' AND s.listing_status='active'"""
+        ).fetchone()
+        assert original is not None
+        original_security_id, company_id = map(int, original)
+        conn.execute(
+            """UPDATE dim_security
+               SET listing_status='superseded', is_primary_listing=0,
+                   listing_start_date='1997-10-24'
+               WHERE security_id=?""",
+            (original_security_id,),
+        )
+        conn.execute(
+            "DELETE FROM dim_consumer_defensive_taxonomy WHERE ticker='DMC'"
+        )
+        conn.execute(
+            """INSERT INTO dim_company(
+                   primary_ticker, cik, company_name, reporting_currency,
+                   universe_status, is_active, data_quality_status,
+                   first_seen_at, updated_at
+               ) VALUES ('FDP', '1047340', 'Fresh Del Monte Produce Inc.', 'USD',
+                   'keep', 1, 'complete', ?, ?)""",
+            ("2026-08-27T00:00:00Z", "2026-08-27T00:00:00Z"),
+        )
+        legacy_company_id = int(
+            conn.execute(
+                "SELECT company_id FROM dim_company WHERE primary_ticker='FDP'"
+            ).fetchone()[0]
+        )
+        conn.execute(
+            """INSERT INTO dim_security(
+                   company_id, ticker, provider_price_symbol, exchange,
+                   listing_country, security_type, listing_status,
+                   is_primary_listing, currency, listing_start_date,
+                   created_at, updated_at
+               ) VALUES (?, 'FDP', 'DMC', 'NYSE', 'United States',
+                   'Ordinary Shares', 'active', 1, 'USD', '1997-10-24', ?, ?)""",
+            (legacy_company_id, "2026-08-27T00:00:00Z", "2026-08-27T00:00:00Z"),
+        )
+        conn.execute(
+            """INSERT INTO dim_consumer_defensive_taxonomy(
+                   company_id, security_id, ticker, model_family, sector,
+                   portfolio_sector, calibration_cohort_id, calibration_cohort,
+                   taxonomy_confidence, taxonomy_source,
+                   business_cohort_override_flag, analyst_reviewed, updated_at
+               ) SELECT ?, security_id, 'FDP', 'consumer_defensive',
+                   'Consumer Defensive', 'Consumer Staples',
+                   'packaged_foods_agricultural_products',
+                   'Packaged Foods & Agricultural Products', 1.0,
+                   'consumer_defensive_current_universe', 0, 1, ?
+                 FROM dim_security WHERE ticker='FDP' AND listing_status='active'""",
+            (legacy_company_id, "2026-08-27T00:00:00Z"),
+        )
+
+        result = load_current_universe(conn, policy)
+
+        assert result["stale_taxonomy_rows_removed"] == 1
+        restored = conn.execute(
+            """SELECT security_id, company_id, listing_status, listing_start_date
+               FROM dim_security WHERE ticker='DMC'"""
+        ).fetchall()
+        assert [tuple(row) for row in restored] == [
+            (original_security_id, company_id, "active", "1997-10-24")
+        ]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM dim_security WHERE ticker='FDP' AND listing_status='active'"
+        ).fetchone()[0] == 0
 
 
 def test_stage2_current_load_is_exact_and_aliases_do_not_create_securities(tmp_path: Path) -> None:
@@ -209,30 +287,30 @@ def test_stage2_current_load_is_exact_and_aliases_do_not_create_securities(tmp_p
         stats = load_current_universe(conn, policy)
         result = validate_stage2(conn, policy, require_pit_membership=False)
         assert stats == {
-            "current_rows": 108,
+            "current_rows": 110,
             "vehicles": 4,
-            "aliases": 2,
-            "events": 2,
+            "aliases": 3,
+            "events": 3,
             "stale_taxonomy_rows_removed": 0,
         }
         assert result["status"] == "PASS", result
         assert result["cohort_counts"] == {
             "beverages": 22,
-            "consumer_staples_distribution_retail": 22,
-            "household_personal_tobacco": 25,
+            "consumer_staples_distribution_retail": 23,
+            "household_personal_tobacco": 26,
             "packaged_foods_agricultural_products": 39,
         }
         assert conn.execute(
             "SELECT COUNT(*) FROM dim_security WHERE listing_status='active'"
-        ).fetchone()[0] == 108
+        ).fetchone()[0] == 110
         assert conn.execute(
-            "SELECT COUNT(*) FROM dim_security WHERE ticker IN ('CCE','DPS')"
+            "SELECT COUNT(*) FROM dim_security WHERE ticker IN ('CCE','DPS','FDP')"
         ).fetchone()[0] == 0
         assert dict(
             conn.execute(
                 "SELECT alias_ticker, canonical_ticker FROM dim_security_alias ORDER BY alias_ticker"
             ).fetchall()
-        ) == {"CCE": "CCEP", "DPS": "KDP"}
+        ) == {"CCE": "CCEP", "DPS": "KDP", "FDP": "DMC"}
         assert conn.execute(
             "SELECT COUNT(*) FROM dim_security WHERE ticker='CENTA'"
         ).fetchone()[0] == 1
@@ -426,17 +504,21 @@ def test_stage2_norgate_contract_persists_four_series_and_union_membership(tmp_p
             as_of="2026-08-10",
             output_dir=output_dir,
         )
-        result = validate_stage2(conn, policy, require_pit_membership=True)
-        assert summary["current_loaded"] == 108
-        assert summary["current_latest_eligible"] == 108
+        result = validate_stage2(conn, policy, require_pit_membership=True, as_of="2026-08-07")
+        assert summary["current_loaded"] == 110
+        assert summary["current_latest_eligible"] == 110
         assert summary["historical_expected"] == len(historical_candidates)
         assert summary["historical_required_in_window"] == len(historical_candidates)
         assert summary["historical_loaded"] == len(historical_candidates)
         assert summary["historical_recognized_members"] == len(historical_candidates)
         assert result["status"] == "PASS", result
-        assert result["norgate_asset_identities"] == 108
-        assert result["complete_four_index_daily_series"] == 108
-        assert result["recognized_current_members"] == 108
+        assert result["norgate_asset_identities"] == 110
+        assert result["complete_four_index_daily_series"] == 110
+        assert result["recognized_current_members"] == 110
+        assert result["membership_as_of"] == "2026-08-07"
+        assert result["recognized_members_as_of"] == 110
+        assert result["major_exchange_listings_as_of"] == 110
+        assert result["complete_four_index_rows_as_of"] == 110
         assert result["historical_candidates_expected"] == len(historical_candidates)
         assert result["historical_taxonomy_rows"] == len(historical_candidates)
         assert result["historical_norgate_asset_identities"] == len(historical_candidates)
@@ -446,12 +528,60 @@ def test_stage2_norgate_contract_persists_four_series_and_union_membership(tmp_p
         assert result["historical_recognized_members"] == len(historical_candidates)
         assert conn.execute(
             "SELECT COUNT(*) FROM fact_recognized_vehicle_membership_daily"
-        ).fetchone()[0] == (108 + len(historical_candidates)) * 4 * 3
+        ).fetchone()[0] == (110 + len(historical_candidates)) * 4 * 3
         assert conn.execute(
             "SELECT COUNT(*) FROM fact_major_exchange_listing_daily"
-        ).fetchone()[0] == (108 + len(historical_candidates)) * 3
+        ).fetchone()[0] == (110 + len(historical_candidates)) * 3
         assert (output_dir / "norgate_membership_resolution.csv").exists()
         assert (output_dir / "daily_cohort_breadth.csv").exists()
+
+        stale_ticker = str(
+            conn.execute(
+                """SELECT ticker FROM dim_universe_membership
+                   WHERE membership_source_id=?
+                   ORDER BY ticker LIMIT 1""",
+                (PIT_SOURCE_ID,),
+            ).fetchone()[0]
+        )
+        with conn:
+            conn.execute(
+                """UPDATE dim_universe_membership SET end_date='2026-08-06'
+                   WHERE ticker=? AND membership_source_id=?""",
+                (stale_ticker, PIT_SOURCE_ID),
+            )
+        stale = validate_stage2(
+            conn,
+            policy,
+            require_pit_membership=True,
+            as_of="2026-08-07",
+        )
+        assert stale["status"] == "FAIL"
+        assert any("recognized membership covering 2026-08-07" in error for error in stale["errors"])
+
+        with conn:
+            conn.execute(
+                """UPDATE dim_universe_membership SET end_date='2026-08-10'
+                   WHERE ticker=? AND membership_source_id=?""",
+                (stale_ticker, PIT_SOURCE_ID),
+            )
+            conn.execute(
+                """DELETE FROM fact_recognized_vehicle_membership_daily
+                   WHERE security_id=(
+                       SELECT security_id FROM dim_security WHERE ticker=?
+                   ) AND membership_date='2026-08-07'
+                     AND vehicle_id=(
+                       SELECT vehicle_id FROM dim_recognized_vehicle ORDER BY vehicle_id LIMIT 1
+                   )""",
+                (stale_ticker,),
+            )
+        incomplete = validate_stage2(
+            conn,
+            policy,
+            require_pit_membership=True,
+            as_of="2026-08-07",
+        )
+        assert incomplete["status"] == "FAIL"
+        assert any("four-index membership rows on 2026-08-07" in error for error in incomplete["errors"])
 
 
 def test_stage2_norgate_contract_rejects_one_missing_historical_candidate(

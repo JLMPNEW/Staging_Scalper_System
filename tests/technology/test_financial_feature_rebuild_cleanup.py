@@ -46,3 +46,45 @@ def test_ticker_rebuild_cleanup_is_scoped_to_family_and_source() -> None:
         ("OTHER", "semiconductors"),
         ("POET", "technology_hardware"),
     ]
+
+
+def test_filing_acceptance_map_preserves_first_public_timestamp() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE fact_sec_filing(
+            ticker TEXT, source_id TEXT, accession_number TEXT,
+            filing_date TEXT, accepted_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO fact_sec_filing VALUES (?,?,?,?,?)",
+        (
+            "CRM",
+            "sec_submissions",
+            "0001108524-26-000190",
+            "2026-08-27",
+            "2026-08-26T22:54:46.000Z",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO fact_sec_filing VALUES (?,?,?,?,?)",
+        (
+            "CRM",
+            "sec_companyfacts",
+            "0001108524-26-000190",
+            "2026-08-27",
+            "",
+        ),
+    )
+
+    acceptance = MODULE.load_filing_acceptance_by_accession(
+        conn,
+        ticker="CRM",
+    )
+
+    assert acceptance == {
+        "0001108524-26-000190": "2026-08-26T22:54:46.000Z"
+    }

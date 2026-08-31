@@ -427,23 +427,75 @@ def max_drawdown(returns: Sequence[float]) -> float | None:
     return worst
 
 
+def _mean(values: Sequence[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _hit_rate(values: Sequence[float]) -> float | None:
+    return (
+        sum(value > 0 for value in values) / len(values)
+        if values
+        else None
+    )
+
+
+def _one_way_turnover(
+    current: set[str],
+    previous: set[str] | None,
+) -> float:
+    if previous is None:
+        return 1.0
+    return 1.0 - len(previous & current) / max(len(previous), len(current))
+
+
+def _non_overlapping_period_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    selected: list[Mapping[str, object]] = []
+    last_exit: date | None = None
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("entry_date") or item.get("asof_date") or ""),
+            str(item.get("asof_date") or ""),
+        ),
+    ):
+        entry = parse_date(
+            row.get("entry_date") or row.get("asof_date"),
+            field="independent entry_date",
+        )
+        exit_date = parse_date(row.get("exit_date"), field="independent exit_date")
+        if last_exit is not None and entry <= last_exit:
+            continue
+        selected.append(row)
+        last_exit = exit_date
+    return selected
+
+
 def summarize_candidate_period_rows(
     period_rows: Sequence[Mapping[str, object]],
     *,
     eligible_row_count: int,
     available_outcome_row_count: int,
+    independent_schedule_rows: Sequence[Mapping[str, object]] | None = None,
+    independent_eligible_row_count: int | None = None,
+    independent_available_outcome_row_count: int | None = None,
+    invalid_execution_interval_cross_sections: Sequence[
+        Mapping[str, object]
+    ] = (),
+    early_terminal_observation_count: int = 0,
+    late_security_entry_observation_count: int = 0,
 ) -> dict[str, object]:
-    """Summarize already-ranked periods without resetting portfolio state."""
+    """Summarize overlapping diagnostics and a separately costed schedule."""
     ordered = sorted(period_rows, key=lambda row: str(row.get("asof_date") or ""))
-    non_overlapping_rows: list[Mapping[str, object]] = []
-    last_exit: date | None = None
-    for item in ordered:
-        asof_date = parse_date(item["asof_date"])
-        exit_date = parse_date(item["exit_date"])
-        if last_exit is not None and asof_date <= last_exit:
-            continue
-        non_overlapping_rows.append(item)
-        last_exit = exit_date
+    if independent_schedule_rows is None:
+        independent_rows = _non_overlapping_period_rows(ordered)
+    else:
+        independent_rows = [
+            row
+            for row in independent_schedule_rows
+            if int(float(str(row.get("evaluation_available_flag") or 0))) == 1
+        ]
 
     def values(field: str, source: Sequence[Mapping[str, object]]) -> list[float]:
         return [
@@ -456,22 +508,27 @@ def summarize_candidate_period_rows(
     rank_vs_cohort = values("top_minus_cohort_net", ordered)
     rank_top_bottom = values("top_minus_bottom_gross", ordered)
     cohort_returns = values("cohort_excess", ordered)
-    non_overlapping_returns = values("net_excess", non_overlapping_rows)
+    non_overlapping_returns = values("net_excess", independent_rows)
     non_overlapping_rank_vs_cohort = values(
-        "top_minus_cohort_net", non_overlapping_rows
+        "top_minus_cohort_net", independent_rows
     )
+    non_overlapping_top_bottom = values(
+        "top_minus_bottom_gross", independent_rows
+    )
+    non_overlapping_ics = values("ic", independent_rows)
     ics = values("ic", ordered)
     turnovers = values("turnover", ordered)
-
-    def mean(items: Sequence[float]) -> float | None:
-        return sum(items) / len(items) if items else None
-
-    def hit_rate(items: Sequence[float]) -> float | None:
-        return (
-            sum(value > 0 for value in items) / len(items)
-            if items
-            else None
-        )
+    independent_turnovers = values("turnover", independent_rows)
+    independent_eligible = (
+        eligible_row_count
+        if independent_eligible_row_count is None
+        else independent_eligible_row_count
+    )
+    independent_available = (
+        available_outcome_row_count
+        if independent_available_outcome_row_count is None
+        else independent_available_outcome_row_count
+    )
 
     return {
         "eligible_row_count": eligible_row_count,
@@ -482,28 +539,201 @@ def summarize_candidate_period_rows(
             else 0.0
         ),
         "snapshot_count": len(ordered),
-        "mean_ic": mean(ics),
-        "mean_top_excess_net": mean(net_returns),
-        "top_excess_hit_rate": hit_rate(net_returns),
-        "mean_cohort_excess": mean(cohort_returns),
-        "mean_top_minus_cohort_net": mean(rank_vs_cohort),
-        "top_minus_cohort_hit_rate": hit_rate(rank_vs_cohort),
-        "mean_top_minus_bottom_gross": mean(rank_top_bottom),
-        "top_minus_bottom_hit_rate": hit_rate(rank_top_bottom),
-        "non_overlapping_snapshot_count": len(non_overlapping_rows),
-        "mean_non_overlapping_top_excess_net": mean(non_overlapping_returns),
-        "non_overlapping_top_excess_hit_rate": hit_rate(
+        "mean_ic": _mean(ics),
+        "mean_top_excess_net": _mean(net_returns),
+        "top_excess_hit_rate": _hit_rate(net_returns),
+        "mean_cohort_excess": _mean(cohort_returns),
+        "mean_top_minus_cohort_net": _mean(rank_vs_cohort),
+        "top_minus_cohort_hit_rate": _hit_rate(rank_vs_cohort),
+        "mean_top_minus_bottom_gross": _mean(rank_top_bottom),
+        "top_minus_bottom_hit_rate": _hit_rate(rank_top_bottom),
+        "non_overlapping_snapshot_count": len(independent_rows),
+        "independent_snapshot_count": len(independent_rows),
+        "independent_eligible_row_count": independent_eligible,
+        "independent_available_outcome_row_count": independent_available,
+        "independent_outcome_coverage": (
+            independent_available / independent_eligible
+            if independent_eligible
+            else 0.0
+        ),
+        "mean_non_overlapping_ic": _mean(non_overlapping_ics),
+        "mean_independent_ic": _mean(non_overlapping_ics),
+        "mean_non_overlapping_top_excess_net": _mean(non_overlapping_returns),
+        "mean_independent_top_excess_net": _mean(non_overlapping_returns),
+        "non_overlapping_top_excess_hit_rate": _hit_rate(
             non_overlapping_returns
         ),
-        "mean_non_overlapping_top_minus_cohort_net": mean(
+        "independent_top_excess_hit_rate": _hit_rate(non_overlapping_returns),
+        "mean_non_overlapping_top_minus_cohort_net": _mean(
             non_overlapping_rank_vs_cohort
         ),
-        "non_overlapping_top_minus_cohort_hit_rate": hit_rate(
+        "mean_independent_top_minus_cohort_net": _mean(
             non_overlapping_rank_vs_cohort
+        ),
+        "non_overlapping_top_minus_cohort_hit_rate": _hit_rate(
+            non_overlapping_rank_vs_cohort
+        ),
+        "independent_top_minus_cohort_hit_rate": _hit_rate(
+            non_overlapping_rank_vs_cohort
+        ),
+        "mean_non_overlapping_top_minus_bottom_gross": _mean(
+            non_overlapping_top_bottom
+        ),
+        "mean_independent_top_minus_bottom_gross": _mean(
+            non_overlapping_top_bottom
+        ),
+        "independent_top_minus_bottom_hit_rate": _hit_rate(
+            non_overlapping_top_bottom
         ),
         "max_drawdown": max_drawdown(non_overlapping_returns),
-        "average_turnover": mean(turnovers),
+        "average_turnover": _mean(turnovers),
+        "average_independent_turnover": _mean(independent_turnovers),
+        "invalid_execution_interval_cross_section_count": len(
+            invalid_execution_interval_cross_sections
+        ),
+        "invalid_execution_interval_cross_sections": [
+            dict(row) for row in invalid_execution_interval_cross_sections
+        ],
+        "early_terminal_observation_count": early_terminal_observation_count,
+        "late_security_entry_observation_count": (
+            late_security_entry_observation_count
+        ),
+        "terminal_proceeds_policy": (
+            "terminal_proceeds_cash_carry_to_benchmark_exit_zero_return"
+        ),
+        "late_security_entry_policy": (
+            "cash_carry_from_benchmark_entry_to_security_entry_zero_return"
+        ),
+        "independent_intervals": [
+            {
+                "asof_date": str(row.get("asof_date") or ""),
+                "entry_date": str(row.get("entry_date") or ""),
+                "exit_date": str(row.get("exit_date") or ""),
+                "evaluation_available_flag": int(
+                    float(str(row.get("evaluation_available_flag") or 0))
+                ),
+            }
+            for row in (
+                independent_schedule_rows
+                if independent_schedule_rows is not None
+                else independent_rows
+            )
+        ],
     }
+
+
+def _benchmark_interval_contract(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    asof: str,
+    strict: bool,
+) -> tuple[str, str, int, int, list[str]]:
+    entries = {
+        str(
+            row.get("benchmark_entry_date")
+            or ("" if strict else row.get("entry_date") or asof)
+        ).strip()[:10]
+        for row in rows
+    }
+    exits = {
+        str(
+            row.get("benchmark_exit_date")
+            or ("" if strict else row.get("exit_date"))
+        ).strip()[:10]
+        for row in rows
+    }
+    errors: list[str] = []
+    if "" in entries or len(entries) != 1:
+        errors.append("benchmark_entry_date_missing_or_nonunique")
+    if "" in exits or len(exits) != 1:
+        errors.append("benchmark_exit_date_missing_or_nonunique")
+    if errors:
+        return "", "", 0, 0, errors
+    entry = next(iter(entries))
+    exit_date = next(iter(exits))
+    try:
+        parsed_asof = parse_date(asof, field="asof_date")
+        parsed_entry = parse_date(entry, field="benchmark_entry_date")
+        parsed_exit = parse_date(exit_date, field="benchmark_exit_date")
+    except ValueError:
+        return "", "", 0, 0, ["benchmark_interval_invalid_date"]
+    if not (parsed_asof < parsed_entry <= parsed_exit):
+        errors.append("benchmark_interval_order_invalid")
+    if not strict:
+        return entry, exit_date, 0, 0, errors
+
+    early_terminal_count = 0
+    late_security_entry_count = 0
+    benchmark_returns: list[float] = []
+    allowed_terminal_types = {
+        "acquisition",
+        "distressed_nonzero",
+        "wipeout",
+    }
+    for row in rows:
+        forward = finite_float(row.get("forward_excess_return"))
+        available_flag = str(row.get("outcome_available_flag") or "")
+        if available_flag == "1" and forward is None:
+            errors.append("available_outcome_missing_forward_excess_return")
+            continue
+        if forward is None:
+            continue
+        if available_flag and available_flag != "1":
+            errors.append("forward_return_present_but_outcome_not_available")
+        security_return = finite_float(row.get("security_forward_return"))
+        benchmark_return = finite_float(row.get("benchmark_forward_return"))
+        if security_return is None or benchmark_return is None:
+            errors.append("forward_return_components_missing")
+            continue
+        if not math.isclose(
+            security_return - benchmark_return,
+            forward,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            errors.append("forward_excess_return_arithmetic_mismatch")
+        benchmark_returns.append(benchmark_return)
+        security_entry_raw = str(row.get("entry_date") or "").strip()[:10]
+        security_exit_raw = str(row.get("exit_date") or "").strip()[:10]
+        try:
+            security_entry = parse_date(
+                security_entry_raw,
+                field="security entry_date",
+            )
+            security_exit = parse_date(
+                security_exit_raw,
+                field="security exit_date",
+            )
+        except ValueError:
+            errors.append("security_execution_interval_missing_or_invalid")
+            continue
+        if security_entry < parsed_entry:
+            errors.append("security_entry_before_benchmark_entry")
+        elif security_entry > parsed_entry:
+            late_security_entry_count += 1
+        if security_entry > security_exit:
+            errors.append("security_entry_after_security_exit")
+        if security_exit > parsed_exit:
+            errors.append("security_exit_after_benchmark_horizon")
+        if security_exit < parsed_exit:
+            if (
+                str(row.get("outcome_method") or "")
+                != "terminal_membership_exit"
+                or str(row.get("terminal_type") or "")
+                not in allowed_terminal_types
+            ):
+                errors.append("early_security_exit_without_terminal_contract")
+            else:
+                early_terminal_count += 1
+    if benchmark_returns and max(benchmark_returns) - min(benchmark_returns) > 1e-9:
+        errors.append("benchmark_return_nonunique_within_cross_section")
+    return (
+        entry,
+        exit_date,
+        early_terminal_count,
+        late_security_entry_count,
+        sorted(set(errors)),
+    )
 
 
 def evaluate_candidate(
@@ -516,98 +746,239 @@ def evaluate_candidate(
     minimum_cross_section: int = 5,
     transaction_cost_bps: float = 20.0,
     require_complete_components: bool = False,
+    require_unique_benchmark_interval: bool = False,
 ) -> dict[str, object]:
-    by_date: dict[str, list[tuple[str, float, float, str]]] = defaultdict(list)
+    by_date: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     eligible_rows = 0
     available_rows = 0
     for row in rows:
         if str(row.get("split") or "") != split:
             continue
-        if (
-            int(float(str(row.get("horizon_sessions") or 0)))
-            != horizon_sessions
-        ):
+        if int(float(str(row.get("horizon_sessions") or 0))) != horizon_sessions:
             continue
         if str(row.get("calibration_eligible_flag") or "") != "1":
             continue
         eligible_rows += 1
-        outcome = finite_float(row.get("forward_excess_return"))
         score = weighted_score(
             row,
             weights,
             require_complete=require_complete_components,
         )
-        if outcome is None or score is None:
-            continue
-        available_rows += 1
-        by_date[str(row.get("asof_date") or "")].append(
-            (
-                str(row.get("ticker") or ""),
-                score,
-                outcome,
-                str(row.get("benchmark_exit_date") or ""),
-            )
-        )
-    period_rows: list[dict[str, object]] = []
-    previous: set[str] = set()
+        outcome = finite_float(row.get("forward_excess_return"))
+        if score is not None and outcome is not None:
+            available_rows += 1
+        by_date[str(row.get("asof_date") or "")].append(row)
+
+    interval_failures: list[dict[str, object]] = []
+    ranked_records: list[dict[str, object]] = []
+    total_early_terminal = 0
+    total_late_security_entry = 0
     for asof in sorted(by_date):
-        values = by_date[asof]
-        if len(values) < minimum_cross_section:
+        date_rows = by_date[asof]
+        (
+            entry,
+            exit_date,
+            terminal_count,
+            late_entry_count,
+            errors,
+        ) = _benchmark_interval_contract(
+            date_rows,
+            asof=asof,
+            strict=require_unique_benchmark_interval,
+        )
+        tickers = [str(row.get("ticker") or "") for row in date_rows]
+        if not tickers or len(tickers) != len(set(tickers)):
+            errors.append("ticker_identity_missing_or_duplicated")
+        if errors:
+            interval_failures.append(
+                {
+                    "asof_date": asof,
+                    "horizon_sessions": horizon_sessions,
+                    "eligible_row_count": len(date_rows),
+                    "reasons": sorted(set(errors)),
+                    "tickers": sorted(
+                        str(row.get("ticker") or "") for row in date_rows
+                    ),
+                    "outcome_unavailable_reasons": sorted(
+                        {
+                            str(
+                                row.get("outcome_unavailable_reason") or ""
+                            )
+                            for row in date_rows
+                            if str(
+                                row.get("outcome_unavailable_reason") or ""
+                            )
+                        }
+                    ),
+                    "right_censored_at_panel_end_flag": int(
+                        bool(date_rows)
+                        and all(
+                            str(
+                                row.get("outcome_unavailable_reason") or ""
+                            )
+                            in {
+                                "execution_window_crosses_data_end",
+                                "missing_d1_open_execution_price",
+                            }
+                            for row in date_rows
+                        )
+                    ),
+                }
+            )
             continue
-        count = max(1, math.ceil(len(values) * top_fraction))
-        ranked = sorted(
-            values,
-            key=lambda item: (-item[1], item[0]),
-        )
-        selected = ranked[:count]
-        bottom = ranked[-count:]
-        selected_tickers = {item[0] for item in selected}
-        turnover = (
-            0.0
-            if not previous
-            else 1.0
-            - len(previous & selected_tickers)
-            / max(len(previous), len(selected_tickers))
-        )
-        gross = sum(item[2] for item in selected) / len(selected)
-        cohort_excess = sum(item[2] for item in values) / len(values)
-        bottom_excess = sum(item[2] for item in bottom) / len(bottom)
-        net = gross - turnover * transaction_cost_bps / 10000.0
-        top_minus_cohort_net = (
-            gross - cohort_excess - turnover * transaction_cost_bps / 10000.0
-        )
-        ic = spearman(
-            [item[1] for item in values],
-            [item[2] for item in values],
-        )
+        total_early_terminal += terminal_count
+        total_late_security_entry += late_entry_count
+        scored: list[tuple[Mapping[str, object], str, float]] = []
+        for row in date_rows:
+            score = weighted_score(
+                row,
+                weights,
+                require_complete=require_complete_components,
+            )
+            if score is not None:
+                scored.append((row, str(row.get("ticker") or ""), score))
+        if len(scored) < minimum_cross_section:
+            continue
+        ranked = sorted(scored, key=lambda item: (-item[2], item[1]))
+        sleeve_count = max(1, math.ceil(len(ranked) * top_fraction))
+        selected = ranked[:sleeve_count]
+        bottom = ranked[-sleeve_count:]
+        selected_tickers = {item[1] for item in selected}
+        bottom_tickers = {item[1] for item in bottom}
+        outcomes = {
+            item[1]: finite_float(item[0].get("forward_excess_return"))
+            for item in ranked
+        }
+        complete_outcomes = all(value is not None for value in outcomes.values())
+        record: dict[str, object] = {
+            "asof_date": asof,
+            "entry_date": entry,
+            "exit_date": exit_date,
+            "eligible_row_count": len(date_rows),
+            "available_outcome_row_count": sum(
+                value is not None for value in outcomes.values()
+            ),
+            "cross_section": len(ranked),
+            "selected": len(selected),
+            "selected_tickers": selected_tickers,
+            "bottom_tickers": bottom_tickers,
+            "early_terminal_observation_count": terminal_count,
+            "late_security_entry_observation_count": late_entry_count,
+            "evaluation_available_flag": int(complete_outcomes),
+        }
+        if complete_outcomes:
+            numeric = {
+                ticker: float(value)
+                for ticker, value in outcomes.items()
+                if value is not None
+            }
+            gross = _mean([numeric[item[1]] for item in selected])
+            cohort_excess = _mean(list(numeric.values()))
+            bottom_excess = _mean([numeric[item[1]] for item in bottom])
+            assert gross is not None
+            assert cohort_excess is not None
+            assert bottom_excess is not None
+            record.update(
+                ic=spearman(
+                    [item[2] for item in ranked],
+                    [numeric[item[1]] for item in ranked],
+                ),
+                gross_excess=gross,
+                cohort_excess=cohort_excess,
+                bottom_excess=bottom_excess,
+                top_minus_cohort_gross=gross - cohort_excess,
+                top_minus_bottom_gross=gross - bottom_excess,
+            )
+        ranked_records.append(record)
+
+    period_rows: list[dict[str, object]] = []
+    previous: set[str] | None = None
+    cost_rate = transaction_cost_bps / 10000.0
+    for record in sorted(ranked_records, key=lambda item: str(item["asof_date"])):
+        selected_tickers = set(record["selected_tickers"])
+        turnover = _one_way_turnover(selected_tickers, previous)
+        previous = selected_tickers
+        if int(record["evaluation_available_flag"]) != 1:
+            continue
+        gross = float(record["gross_excess"])
+        cohort_excess = float(record["cohort_excess"])
         period_rows.append(
             {
-                "asof_date": asof,
-                "exit_date": selected[0][3],
-                "cross_section": len(values),
-                "selected": len(selected),
-                "ic": ic,
+                **record,
+                "selected_tickers": sorted(selected_tickers),
+                "bottom_tickers": sorted(set(record["bottom_tickers"])),
                 "turnover": turnover,
-                "gross_excess": gross,
-                "net_excess": net,
-                "cohort_excess": cohort_excess,
-                "bottom_excess": bottom_excess,
-                "top_minus_cohort_gross": gross - cohort_excess,
-                "top_minus_cohort_net": top_minus_cohort_net,
-                "top_minus_bottom_gross": gross - bottom_excess,
+                "net_excess": gross - turnover * cost_rate,
+                "top_minus_cohort_net": (
+                    gross - cohort_excess - turnover * cost_rate
+                ),
             }
         )
-        previous = selected_tickers
+
+    independent_records: list[dict[str, object]] = []
+    last_exit: date | None = None
+    for record in sorted(
+        ranked_records,
+        key=lambda item: (
+            str(item["entry_date"]),
+            str(item["asof_date"]),
+        ),
+    ):
+        entry = parse_date(record["entry_date"], field="benchmark_entry_date")
+        exit_date = parse_date(record["exit_date"], field="benchmark_exit_date")
+        if last_exit is not None and entry <= last_exit:
+            continue
+        independent_records.append(record)
+        last_exit = exit_date
+
+    independent_schedule: list[dict[str, object]] = []
+    independent_previous: set[str] | None = None
+    for sequence, record in enumerate(independent_records, start=1):
+        selected_tickers = set(record["selected_tickers"])
+        turnover = _one_way_turnover(selected_tickers, independent_previous)
+        independent_previous = selected_tickers
+        schedule_row = {
+            **record,
+            "independent_sequence": sequence,
+            "selected_tickers": sorted(selected_tickers),
+            "bottom_tickers": sorted(set(record["bottom_tickers"])),
+            "turnover": turnover,
+        }
+        if int(record["evaluation_available_flag"]) == 1:
+            gross = float(record["gross_excess"])
+            cohort_excess = float(record["cohort_excess"])
+            schedule_row.update(
+                net_excess=gross - turnover * cost_rate,
+                top_minus_cohort_net=(
+                    gross - cohort_excess - turnover * cost_rate
+                ),
+            )
+        independent_schedule.append(schedule_row)
+
+    independent_eligible = sum(
+        int(record["eligible_row_count"]) for record in independent_records
+    )
+    independent_available = sum(
+        int(record["available_outcome_row_count"])
+        for record in independent_records
+    )
     summary = summarize_candidate_period_rows(
         period_rows,
         eligible_row_count=eligible_rows,
         available_outcome_row_count=available_rows,
+        independent_schedule_rows=independent_schedule,
+        independent_eligible_row_count=independent_eligible,
+        independent_available_outcome_row_count=independent_available,
+        invalid_execution_interval_cross_sections=interval_failures,
+        early_terminal_observation_count=total_early_terminal,
+        late_security_entry_observation_count=total_late_security_entry,
     )
     return {
         "split": split,
         "horizon_sessions": horizon_sessions,
         **summary,
         "period_rows": period_rows,
+        "independent_schedule_rows": independent_schedule,
     }
 
 

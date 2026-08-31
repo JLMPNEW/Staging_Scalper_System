@@ -91,6 +91,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--python-executable", type=str, default=sys.executable)
     p.add_argument("--refresh-industry-stock-foreign", action="store_true",
                    help="Also rebuild MacroLayer industry, stock overlay, portfolio inputs, stock sleeves, and foreign budget.")
+    p.add_argument(
+        "--historical-catchup",
+        action="store_true",
+        help=(
+            "Build production V1 serving state for a historical recovery date without repeatedly "
+            "retraining shadow probability candidates. The current target-date run remains "
+            "responsible for updating every shadow candidate across the accumulated gap."
+        ),
+    )
     p.add_argument("--rebuild-policies", action="store_true")
     return p.parse_args()
 
@@ -135,6 +144,43 @@ def common_serving_watermark(
         OVERLAY_WATERMARK_TABLES if include_overlays else ()
     )
     return _table_watermark(serving_db, tables)
+
+
+def exact_date_tables_complete(
+    serving_db: Path,
+    tables: tuple[str, ...],
+    *,
+    as_of: str,
+) -> bool:
+    """Return True only when every required table contains the requested date."""
+    if not serving_db.exists() or not tables:
+        return False
+    try:
+        date.fromisoformat(as_of)
+        with sqlite3.connect(serving_db) as conn:
+            existing = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            for table in tables:
+                if table not in existing:
+                    return False
+                present = conn.execute(
+                    f'SELECT 1 FROM "{table}" WHERE as_of_date = ? LIMIT 1',
+                    (as_of,),
+                ).fetchone()
+                if present is None:
+                    return False
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        LOGGER.warning(
+            "Could not verify exact-date MacroLayer completeness for %s: %s",
+            as_of,
+            exc,
+        )
+        return False
+    return True
 
 
 def latest_cadence_date(*, as_of: date, cadence: str) -> date:
@@ -244,6 +290,26 @@ def main() -> int:
         LOGGER.error("%s", exc)
         return 2
 
+    reuse_historical_core = (
+        args.historical_catchup
+        and args.start_date is None
+        and not args.full_history
+        and not args.rebuild_policies
+        and overlay_end_date is None
+        and exact_date_tables_complete(
+            serving_db,
+            CORE_WATERMARK_TABLES,
+            as_of=args.as_of,
+        )
+    )
+    if reuse_historical_core:
+        LOGGER.info(
+            "MacroLayer exact-date serving state is complete for historical catch-up %s; "
+            "reusing sealed DB rows because no overlay refresh is due.",
+            args.as_of,
+        )
+        return 0
+
     cmd = [
         str(args.python_executable),
         str(script),
@@ -267,6 +333,20 @@ def main() -> int:
         LOGGER.info("MacroLayer full-history serving requested or required")
     if args.rebuild_policies:
         cmd.append("--rebuild-policies")
+    if args.historical_catchup:
+        cmd.extend(
+            [
+                "--skip-probabilities-v2",
+                "--skip-probabilities-v2-1",
+                "--skip-probabilities-v2-2",
+                "--skip-probabilities-v2-3",
+                "--skip-probabilities-h1",
+            ]
+        )
+        LOGGER.info(
+            "Historical catch-up: production V1 macro serving remains active; "
+            "shadow V2/V2.1/V2.2/V2.3/H1 candidates defer to the current-date run."
+        )
     if overlay_end_date is not None:
         if overlay_start_date is not None:
             cmd.extend(["--overlay-start-date", overlay_start_date])

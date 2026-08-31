@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -92,3 +94,46 @@ def resolve_path(raw: Any, *, base_dir: Path) -> Path:
         raise ValueError("Path config value is empty")
     path = Path(expand_env_vars(raw)).expanduser()
     return path if path.is_absolute() else (base_dir / path).resolve()
+
+
+def _iso_config_date(raw: object, *, label: str) -> date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be YYYY-MM-DD, got {text!r}") from exc
+
+
+def score_sector_is_active(sector: Mapping[str, Any], as_of: str | None) -> bool:
+    """Return whether a score-sector contract is active for an allocation date."""
+    if not bool(sector.get("enabled", True)):
+        return False
+    start = _iso_config_date(sector.get("enabled_from"), label="score sector enabled_from")
+    end = _iso_config_date(sector.get("enabled_until"), label="score sector enabled_until")
+    if start is not None and end is not None and start > end:
+        raise ValueError("score sector enabled_from must not exceed enabled_until")
+    if as_of is None:
+        return True
+    allocation_date = _iso_config_date(as_of, label="score sector as-of")
+    assert allocation_date is not None
+    return not ((start is not None and allocation_date < start) or (end is not None and allocation_date > end))
+
+
+def active_score_sectors(config: Mapping[str, Any], as_of: str | None) -> list[dict[str, Any]]:
+    """Return active score-sector configs after validating the config surface."""
+    score_contract = config.get("score_contract")
+    if not isinstance(score_contract, Mapping):
+        raise ValueError("score_contract must be a mapping")
+    sectors = score_contract.get("sectors")
+    if not isinstance(sectors, list):
+        raise ValueError("score_contract.sectors must be a list")
+    active: list[dict[str, Any]] = []
+    for index, sector in enumerate(sectors):
+        if not isinstance(sector, Mapping):
+            raise ValueError(f"score_contract.sectors[{index}] must be a mapping")
+        normalized = dict(sector)
+        if score_sector_is_active(normalized, as_of):
+            active.append(normalized)
+    return active

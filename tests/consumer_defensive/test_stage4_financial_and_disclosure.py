@@ -42,14 +42,14 @@ def _prepared_db(tmp_path: Path):
 
 def test_applicability_is_complete_unique_and_matches_current_universe(tmp_path: Path) -> None:
     mapping = load_applicability(APPLICABILITY)
-    assert len(mapping) == 119
+    assert len(mapping) == 121
     bundle, conn = _prepared_db(tmp_path)
     try:
         rows = conn.execute(
             "SELECT ticker, calibration_cohort_id, applicability_subtype "
             "FROM dim_consumer_defensive_taxonomy"
         ).fetchall()
-        assert len(rows) == 108
+        assert len(rows) == 110
         assert all(mapping[str(row[0])] == (str(row[1]), str(row[2])) for row in rows)
         assert mapping["KO"][1] == "non_alcohol"
         assert mapping["SYY"][1] == "food_distribution"
@@ -357,7 +357,7 @@ def test_financial_features_preserve_duration_sum_debt_components_and_use_true_i
                 (concept, str(value), value, "USD", start, end, accepted),
             )
         result = build_financial_features(conn, bundle, as_of="2025-03-01")
-        assert result["definition_version"] == "consumer_defensive_financial_v3"
+        assert result["definition_version"] == "consumer_defensive_financial_v4"
         conn.execute(
             """INSERT INTO fact_financial_statement_canonical(
                    ticker,canonical_metric,canonical_component,statement_type,period_start,period_end,
@@ -366,7 +366,7 @@ def test_financial_features_preserve_duration_sum_debt_components_and_use_true_i
                ) VALUES(
                    'KO','future_guard','total','income','2025-01-01','2025-12-31',
                    '2026-02-20T16:30:00Z','annual',1,'USD',1,1,NULL,
-                   'sec_companyfacts','consumer_defensive_financial_v3','complete','2026-02-20T16:30:00Z'
+                   'sec_companyfacts','consumer_defensive_financial_v4','complete','2026-02-20T16:30:00Z'
                )"""
         )
         build_financial_features(conn, bundle, as_of="2025-03-01")
@@ -423,7 +423,7 @@ def test_missing_acceptance_is_not_loaded_and_fx_failure_is_a_stage4_gate(tmp_pa
         assert result["raw_facts"] == 0
         conn.execute(
             """INSERT INTO fact_financial_statement_canonical(ticker,canonical_metric,canonical_component,statement_type,period_start,period_end,accepted_at,frequency,value,reported_currency,value_usd,fx_rate,source_raw_fact_id,source_id,definition_version,quality_status,created_at)
-               VALUES('KO','revenue','total','income','2023-01-01','2023-12-31','2024-02-20T00:00:00Z','annual',10,'EUR',NULL,NULL,NULL,'sec_companyfacts','consumer_defensive_financial_v3','fx_missing','2024-02-20T00:00:00Z')"""
+               VALUES('KO','revenue','total','income','2023-01-01','2023-12-31','2024-02-20T00:00:00Z','annual',10,'EUR',NULL,NULL,NULL,'sec_companyfacts','consumer_defensive_financial_v4','fx_missing','2024-02-20T00:00:00Z')"""
         )
         validation = validate_stage4(conn, bundle, as_of="2024-12-31")
         assert validation["checks"]["canonical_fx_conversion_complete"] is False

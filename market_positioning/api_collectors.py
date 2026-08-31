@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -909,22 +909,37 @@ def sync_sec_13f_data_sets(
     max_archives: int = 0,
     force_reprocess_archives: bool = False,
     cache_only: bool = False,
+    archive_paths: Sequence[Path] | None = None,
 ) -> SyncResult:
     name_map = load_universe_name_map(tickers_csv)
     cusip_map = load_cusip_ticker_map(cusip_ticker_map_csv)
     if not name_map and not cusip_map:
         raise RuntimeError("SEC 13F sync requires ticker/company-name or ticker/CUSIP mapping")
-    if cache_only:
-        archives: list[str | Path] = sorted(cache_dir.glob("*_form13f.zip"))
+    archives: list[str | Path] = []
+    if archive_paths is not None:
+        if not cache_only:
+            raise ValueError("archive_paths is supported only with cache_only=True")
+        resolved_archives = sorted({Path(path).expanduser().resolve() for path in archive_paths})
+        missing_archives = [path for path in resolved_archives if not path.is_file()]
+        if missing_archives:
+            raise FileNotFoundError(
+                "Explicit SEC 13F cache archives are missing: "
+                + ", ".join(str(path) for path in missing_archives[:10])
+            )
+        archives.extend(resolved_archives)
+    elif cache_only:
+        archives.extend(sorted(cache_dir.glob("*_form13f.zip")))
         if not archives:
             raise RuntimeError(f"No cached SEC 13F archives found under {cache_dir}")
     else:
-        archives = discover_sec_13f_archives(
-            index_url=index_url,
-            start_year=history_start_date.year,
-            end_year=end_date.year,
-            user_agent=user_agent,
-            timeout_sec=timeout_sec,
+        archives.extend(
+            discover_sec_13f_archives(
+                index_url=index_url,
+                start_year=history_start_date.year,
+                end_year=end_date.year,
+                user_agent=user_agent,
+                timeout_sec=timeout_sec,
+            )
         )
     if max_archives and max_archives > 0:
         archives = archives[:max_archives]
@@ -1139,16 +1154,33 @@ def prune_backdated_ibkr_shortable_rows(conn: sqlite3.Connection) -> int:
     return max(0, int(result.rowcount))
 
 
-def latest_ibkr_fee_asof(conn: sqlite3.Connection, ticker: str) -> date | None:
+def ibkr_fee_history_bounds(
+    conn: sqlite3.Connection,
+    ticker: str,
+) -> tuple[date | None, date | None]:
     row = conn.execute(
         """
-        SELECT MAX(asof_date) AS max_asof
+        SELECT MIN(asof_date) AS min_asof, MAX(asof_date) AS max_asof
         FROM ibkr_borrow_fee_rate_daily
         WHERE ticker = ? AND source = 'interactive_brokers'
         """,
         (ticker,),
     ).fetchone()
-    return parse_date(row["max_asof"] if row else None)
+    return (
+        parse_date(row["min_asof"] if row else None),
+        parse_date(row["max_asof"] if row else None),
+    )
+
+
+def ibkr_fee_history_left_edge_missing(
+    earliest_fee: date | None,
+    history_start_date: date,
+    *,
+    tolerance_days: int = 14,
+) -> bool:
+    if tolerance_days < 0:
+        raise ValueError("tolerance_days must be non-negative")
+    return earliest_fee is None or earliest_fee > history_start_date + timedelta(days=tolerance_days)
 
 
 def upsert_ibkr_fee_rows(conn: sqlite3.Connection, rows: list[tuple[Any, ...]]) -> None:
@@ -1234,6 +1266,7 @@ def _sync_ibkr_borrow_availability(
     fee_rate_unit: str = "decimal",
     fee_rate_initial_duration: str = "7 Y",
     fee_rate_incremental_duration: str = "45 D",
+    backfill_fee_history_left_edge: bool = True,
     snapshot_wait_sec: float = 4.0,
     shortable_snapshot: bool = True,
     shortable_coverage_warn_min: float = 50.0,
@@ -1285,6 +1318,7 @@ def _sync_ibkr_borrow_availability(
     shortable_rows_written = 0
     failed_tickers: list[str] = []
     skipped_fee_history = 0
+    left_edge_fee_backfills = 0
     try:
         ib.connect(host, int(port), clientId=int(client_id), readonly=True, timeout=30)
         ib.reqMarketDataType(int(market_data_type))
@@ -1304,12 +1338,21 @@ def _sync_ibkr_borrow_availability(
                     failed_tickers.append(ticker)
                     continue
                 contract = contracts[0]
-                latest_fee = latest_ibkr_fee_asof(conn, ticker)
-                if latest_fee is not None and latest_fee >= effective_end_date:
+                earliest_fee, latest_fee = ibkr_fee_history_bounds(conn, ticker)
+                left_edge_missing = bool(
+                    backfill_fee_history_left_edge
+                    and ibkr_fee_history_left_edge_missing(
+                        earliest_fee,
+                        history_start_date,
+                    )
+                )
+                if latest_fee is not None and latest_fee >= effective_end_date and not left_edge_missing:
                     skipped_fee_history += 1
                     qualified[ticker] = contract
                     continue
-                duration = fee_rate_initial_duration if latest_fee is None else fee_rate_incremental_duration
+                if left_edge_missing:
+                    left_edge_fee_backfills += 1
+                duration = fee_rate_initial_duration if latest_fee is None or left_edge_missing else fee_rate_incremental_duration
                 bars = ib.reqHistoricalData(
                     contract,
                     endDateTime=f"{effective_end_date.strftime('%Y%m%d')} 23:59:59",
@@ -1346,7 +1389,7 @@ def _sync_ibkr_borrow_availability(
                 )
                 upsert_ibkr_fee_rows(conn, records)
                 fee_rows_written += len(records)
-                if records or latest_fee is not None:
+                if records or (latest_fee is not None and not left_edge_missing):
                     qualified[ticker] = contract
                 else:
                     failed_tickers.append(ticker)
@@ -1437,7 +1480,8 @@ def _sync_ibkr_borrow_availability(
         f"requested_end_date={end_date.isoformat()} "
         f"effective_end_date={effective_end_date.isoformat()} "
         f"qualified={qualified_count} fee_rows_new_or_refreshed={fee_rows_written} "
-        f"fee_history_skipped_current={skipped_fee_history} shortable_rows_new_or_refreshed={shortable_rows_written} "
+        f"fee_history_skipped_current={skipped_fee_history} left_edge_fee_backfills={left_edge_fee_backfills} "
+        f"shortable_rows_new_or_refreshed={shortable_rows_written} "
         f"shortable_coverage_pct={shortable_coverage_pct:.1f} "
         f"shortable_snapshot={bool(shortable_snapshot)} failed_tickers={len(set(failed_tickers))} "
         f"ended_memberships_skipped={len(ended_before_asof)} "
@@ -1474,6 +1518,7 @@ def sync_ibkr_borrow_availability(
     fee_rate_unit: str = "decimal",
     fee_rate_initial_duration: str = "7 Y",
     fee_rate_incremental_duration: str = "45 D",
+    backfill_fee_history_left_edge: bool = True,
     snapshot_wait_sec: float = 4.0,
     shortable_snapshot: bool = True,
     shortable_coverage_warn_min: float = 50.0,
@@ -1482,7 +1527,12 @@ def sync_ibkr_borrow_availability(
     max_tickers: int = 0,
     market_data_lock_timeout_sec: float = DEFAULT_IBKR_LOCK_TIMEOUT_SEC,
 ) -> SyncResult:
-    """Serialize shared IB access and keep streaming requests below account capacity."""
+    """Serialize shared IB access and keep streaming requests below account capacity.
+
+    ``backfill_fee_history_left_edge`` is reserved for explicit history builds.
+    Daily callers must disable it so an unavailable pre-listing or old IB history
+    edge cannot turn every incremental refresh into another seven-year request.
+    """
     with IBKRMarketDataLock(timeout_sec=market_data_lock_timeout_sec):
         return _sync_ibkr_borrow_availability(
             conn,
@@ -1496,6 +1546,7 @@ def sync_ibkr_borrow_availability(
             fee_rate_unit=fee_rate_unit,
             fee_rate_initial_duration=fee_rate_initial_duration,
             fee_rate_incremental_duration=fee_rate_incremental_duration,
+            backfill_fee_history_left_edge=backfill_fee_history_left_edge,
             snapshot_wait_sec=snapshot_wait_sec,
             shortable_snapshot=shortable_snapshot,
             shortable_coverage_warn_min=shortable_coverage_warn_min,

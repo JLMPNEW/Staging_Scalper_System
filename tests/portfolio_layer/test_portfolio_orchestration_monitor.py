@@ -7,6 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from portfolio_layer.core.artifacts import (
+    final_report_is_stale,
+    invalidate_dependents,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -162,6 +167,143 @@ def test_monitor_stable_manifest_verifies_parent_outputs_and_children(
     ).startswith("STALE_PARENT_CHILD:")
 
 
+def test_manifest_resume_rejects_changed_direct_input(tmp_path: Path) -> None:
+    orchestrator = _load_orchestrator()
+    run_dir = tmp_path / "2026-07-31"
+    input_path = tmp_path / "scores.csv"
+    manifest = run_dir / "expectations_monitor" / "monitor_universe_manifest.json"
+    input_path.write_text("ticker\nAAA\n", encoding="utf-8")
+    orchestrator.write_manifest(
+        manifest,
+        {
+            "acceptance": "PASS",
+            "run_as_of": run_dir.name,
+            "inputs_sha256": {
+                str(input_path.resolve()): orchestrator.sha256_file(input_path)
+            },
+        },
+    )
+
+    assert (
+        orchestrator.manifest_acceptance(
+            run_dir,
+            "expectations_monitor/monitor_universe_manifest.json",
+        )
+        == "PASS"
+    )
+    input_path.write_text("ticker\nBBB\n", encoding="utf-8")
+    assert orchestrator.manifest_acceptance(
+        run_dir,
+        "expectations_monitor/monitor_universe_manifest.json",
+    ).startswith("STALE_INPUT:")
+
+
+def test_manifest_resume_does_not_treat_semantic_digest_labels_as_paths(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    run_dir = tmp_path / "2026-07-31"
+    manifest = run_dir / "governor" / "governor_manifest.json"
+    orchestrator.write_manifest(
+        manifest,
+        {
+            "acceptance": "PASS",
+            "run_as_of": run_dir.name,
+            "inputs_sha256": {
+                "book": "a" * 64,
+                "macro_serving.sqlite:content": "b" * 64,
+            },
+        },
+    )
+
+    assert (
+        orchestrator.manifest_acceptance(
+            run_dir,
+            "governor/governor_manifest.json",
+        )
+        == "PASS"
+    )
+
+
+def test_manifest_resume_rejects_changed_structured_provenance_input(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    run_dir = tmp_path / "2026-07-31"
+    config_path = tmp_path / "config.yaml"
+    manifest = run_dir / "manifest.json"
+    config_path.write_text("version: 1\n", encoding="utf-8")
+    orchestrator.write_manifest(
+        manifest,
+        {
+            "acceptance": "PASS",
+            "run_as_of": run_dir.name,
+            "provenance": {
+                "config_yaml": {
+                    "path": str(config_path.resolve()),
+                    "sha256": orchestrator.sha256_file(config_path),
+                }
+            },
+        },
+    )
+
+    assert orchestrator.manifest_acceptance(run_dir, "manifest.json") == "PASS"
+    config_path.write_text("version: 2\n", encoding="utf-8")
+    assert orchestrator.manifest_acceptance(
+        run_dir,
+        "manifest.json",
+    ) == "PROVENANCE_STALE_INPUT:config_yaml"
+
+
+def test_monitor_stable_manifest_rejects_changed_parent_input(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    run_dir = tmp_path / "2026-07-31"
+    stable = run_dir / "expectations_monitor" / "daily_monitor_manifest.json"
+    session = tmp_path / "session"
+    input_path = tmp_path / "monitor_universe.csv"
+    output = session / "daily_monitor_steps.csv"
+    parent = session / "daily_monitor_manifest.json"
+    input_path.write_text("ticker\nAAA\n", encoding="utf-8")
+    output.parent.mkdir(parents=True)
+    output.write_text("status\nPASS\n", encoding="utf-8")
+    orchestrator.write_manifest(
+        parent,
+        {
+            "acceptance": "PASS",
+            "as_of_date": run_dir.name,
+            "inputs_sha256": {
+                str(input_path.resolve()): orchestrator.sha256_file(input_path)
+            },
+            "outputs_sha256": {output.name: orchestrator.sha256_file(output)},
+            "child_manifests": [],
+        },
+    )
+    orchestrator.write_manifest(
+        stable,
+        {
+            "acceptance": "PASS",
+            "run_as_of": run_dir.name,
+            "parent_manifest_path": str(parent.resolve()),
+            "parent_manifest_sha256": orchestrator.sha256_file(parent),
+        },
+    )
+
+    assert (
+        orchestrator.manifest_acceptance(
+            run_dir,
+            "expectations_monitor/daily_monitor_manifest.json",
+        )
+        == "PASS"
+    )
+    input_path.write_text("ticker\nBBB\n", encoding="utf-8")
+    assert orchestrator.manifest_acceptance(
+        run_dir,
+        "expectations_monitor/daily_monitor_manifest.json",
+    ).startswith("PARENT_STALE_INPUT:")
+
+
 def test_monitor_filter_is_mandatory_second_pass() -> None:
     orchestrator = _load_orchestrator()
     for cadence in ("tactical", "strategic"):
@@ -222,6 +364,64 @@ def test_monitor_filter_is_mandatory_second_pass() -> None:
     assert bootstrap_group[0][2] == "final/bootstrap_final_weights_manifest.json"
 
 
+def test_orchestration_retry_archives_exact_prior_manifest_bytes(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    path = tmp_path / "2026-08-28" / "orchestration_meta.json"
+    orchestrator.write_manifest(
+        path,
+        {"acceptance": "FAIL", "run_as_of": "2026-08-28", "error": "first"},
+    )
+    prior = path.read_bytes()
+
+    first_archive = orchestrator.archive_existing_orchestration_meta(path)
+    repeated_archive = orchestrator.archive_existing_orchestration_meta(path)
+
+    assert first_archive is not None
+    assert repeated_archive == first_archive
+    assert first_archive.read_bytes() == prior
+
+    orchestrator.write_manifest(
+        path,
+        {"acceptance": "PASS", "run_as_of": "2026-08-28"},
+    )
+    second_archive = orchestrator.archive_existing_orchestration_meta(path)
+
+    assert second_archive is not None
+    assert second_archive != first_archive
+    assert len(list((path.parent / "orchestration_history").glob("*.json"))) == 2
+
+
+def test_dependency_invalidation_preserves_last_accepted_report_and_forces_refresh(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    run_dir = tmp_path / "2026-08-21"
+    final_dir = run_dir / "final"
+    final_dir.mkdir(parents=True)
+    report = final_dir / "final_target_book.csv"
+    manifest = final_dir / "final_manifest.json"
+    weights = final_dir / "final_target_weights.csv"
+    report.write_text("ticker,weight\nAAA,1\n", encoding="utf-8")
+    weights.write_text("ticker,weight\nAAA,1\n", encoding="utf-8")
+    orchestrator.write_manifest(
+        manifest,
+        {"acceptance": "PASS", "run_as_of": run_dir.name},
+    )
+
+    invalidate_dependents(run_dir, "scores")
+
+    assert report.is_file()
+    assert manifest.is_file()
+    assert not weights.exists()
+    assert final_report_is_stale(run_dir)
+    assert (
+        orchestrator.manifest_acceptance(run_dir, "final/final_manifest.json")
+        == "STALE_DEPENDENCY"
+    )
+
+
 def test_monitor_filter_partial_recovery_is_intrinsically_rebuilt(
     tmp_path: Path,
 ) -> None:
@@ -253,12 +453,83 @@ def test_historical_catchup_suppresses_current_provider_event_cycle() -> None:
         args,
         "50_run_expectations_monitor_daily.py",
         group="monitor",
-    ) == ["--skip-event-cycle"]
+    ) == ["--skip-event-cycle", "--historical-catchup"]
     assert orchestrator.script_args(
         args,
         "37_sync_earnings_dates.py",
         group="earnings",
     ) == ["--historical-catchup"]
+    assert orchestrator.script_args(
+        args,
+        "05c_collect_ib_historical_spread_samples.py",
+        group="risk",
+    ) == ["--prefer-bounded-db-samples"]
+    assert orchestrator.script_args(
+        args,
+        "20_run_macro_serving.py",
+        group="macro",
+    ) == ["--refresh-industry-stock-foreign", "--historical-catchup"]
+
+
+def test_risk_data_retry_prefers_validated_bounded_liquidity_samples() -> None:
+    orchestrator = _load_orchestrator()
+    args = SimpleNamespace(
+        force=True,
+        reuse_risk_price_data=True,
+        historical_catchup=False,
+    )
+    assert orchestrator.script_args(
+        args,
+        "05c_collect_ib_historical_spread_samples.py",
+        group="risk",
+    ) == ["--force", "--prefer-bounded-db-samples"]
+
+
+def test_existing_failed_group_gate_uses_preemptive_recovery_force(
+    tmp_path: Path,
+) -> None:
+    orchestrator = _load_orchestrator()
+    run_dir = tmp_path / "2026-08-21"
+    gate = run_dir / "expectations_monitor" / "daily_monitor_manifest.json"
+    orchestrator.write_manifest(
+        gate,
+        {"acceptance": "FAIL", "run_as_of": run_dir.name},
+    )
+    pass_steps = orchestrator.build_step_plan(
+        ["monitor"],
+        {
+            "monitor": [
+                (
+                    "expectations_monitor",
+                    "50_run_expectations_monitor_daily.py",
+                    "expectations_monitor/daily_monitor_manifest.json",
+                )
+            ]
+        },
+    )[0]
+
+    assert orchestrator.group_recovery_force_required(
+        run_dir,
+        pass_steps,
+        operator_force=False,
+    )
+    assert not orchestrator.group_recovery_force_required(
+        run_dir,
+        pass_steps,
+        operator_force=True,
+    )
+    flags = orchestrator.script_args(
+        SimpleNamespace(
+            force=False,
+            reuse_risk_price_data=False,
+            historical_catchup=True,
+            late_holding_supplement=False,
+        ),
+        "50_run_expectations_monitor_daily.py",
+        group="monitor",
+        self_force=True,
+    )
+    assert flags == ["--force", "--skip-event-cycle", "--historical-catchup"]
 
 
 def test_liquidity_attempt_precedes_authoritative_risk_gates() -> None:

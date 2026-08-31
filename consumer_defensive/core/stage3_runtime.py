@@ -62,7 +62,12 @@ def bootstrap_stage3(conn: sqlite3.Connection, bundle: ConfigBundle) -> None:
     ensure_terminal_event_schema(conn)
 
 
-def assert_stage2_ready(conn: sqlite3.Connection, bundle: ConfigBundle) -> dict[str, Any]:
+def assert_stage2_ready(
+    conn: sqlite3.Connection,
+    bundle: ConfigBundle,
+    *,
+    as_of: str | None = None,
+) -> dict[str, Any]:
     universe_policy = load_policy(
         resolve_path(
             cfg_get(bundle.payload, "universe.policy_path"),
@@ -73,6 +78,7 @@ def assert_stage2_ready(conn: sqlite3.Connection, bundle: ConfigBundle) -> dict[
         conn,
         universe_policy,
         require_pit_membership=True,
+        as_of=as_of,
     )
     expected = int(cfg_get(bundle.payload, "universe.expected_current_rows"))
     active = len(active_universe_tickers(conn))
@@ -123,6 +129,12 @@ def assert_stage2_ready(conn: sqlite3.Connection, bundle: ConfigBundle) -> dict[
         "pit_membership_rows": pit_rows,
         "provider_price_symbols_missing": unresolved_symbols,
         "recognized_current_members": int(validation["recognized_current_members"]),
+        "membership_as_of": validation["membership_as_of"],
+        "recognized_members_as_of": int(validation["recognized_members_as_of"]),
+        "major_exchange_listings_as_of": int(
+            validation["major_exchange_listings_as_of"]
+        ),
+        "complete_four_index_rows_as_of": int(validation["complete_four_index_rows_as_of"]),
         "norgate_asset_identities": int(validation["norgate_asset_identities"]),
         "complete_four_index_daily_series": int(
             validation["complete_four_index_daily_series"]

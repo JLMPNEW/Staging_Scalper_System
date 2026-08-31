@@ -152,8 +152,14 @@ def _active_events(rows: list[dict[str, Any]], *, as_of: str) -> list[dict[str, 
         if row["decay_mode"] == "until_replaced":
             key = (str(row["ticker"]), _replacement_family(row))
             prior = latest_until_replaced.get(key)
-            if prior is None or (str(row["event_date"]), str(row["event_id"])) > (
-                str(prior["event_date"]), str(prior["event_id"])
+            if prior is None or (
+                str(row["event_date"]),
+                str(row["detected_at_utc"]),
+                str(row["event_id"]),
+            ) > (
+                str(prior["event_date"]),
+                str(prior["detected_at_utc"]),
+                str(prior["event_id"]),
             ):
                 latest_until_replaced[key] = row
             continue

@@ -423,7 +423,7 @@ score_contract:
   contract_version: "stocks_scores_v1"
   sector_output_root: "../output"        # repo-level output/ tree (relative to this config)
   staleness_tolerance_days: 10
-  min_successful_sectors: 7              # all seven enabled production sectors must publish usable rows
+  min_successful_sectors: 8              # all eight enabled production sectors must publish usable rows
   # Operational continuity for governed model transitions. Stage 1 may carry the latest prior
   # OOS-valid dated artifact only within that sector's staleness tolerance. Research replay and
   # direct adapters retain exact-date semantics.
@@ -489,6 +489,7 @@ score_contract:
       industry_aggregate: "Pharmaceuticals, Biotechnology & Life Sciences"
       file_mode: dated
       file_path: "biotech_index_reports/{yyyymmdd}/biotech_daily_scores.csv"
+      benchmark_residual_ticker: "XBI"
       zero_score_is_missing: true
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.20}
@@ -534,10 +535,12 @@ score_contract:
       file_path: "industrials/machinery/dashboard/{yyyy-mm-dd}/machinery_final_rank_table.csv"
       require_oos_score_valid: true
       calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
-    # Transportation remains outside portfolio_layer until its implementation,
-    # calibration, and production activation are complete and separately approved.
+    # Transportation artifact/execution checks are shadow-ready; predictive
+    # acceptance is FAIL. It remains outside allocation until the canonical
+    # three-authority future-only protocol passes and an independent promotion
+    # review separately authorizes activation.
     - model_family: transportation
-      adapter: industrial_family
+      adapter: transportation_subgroup
       # The global orchestrator continues the independent shadow evidence lane,
       # but Stage 1 must not collect or freshness-gate this family until its
       # separately governed production activation is approved.
@@ -550,7 +553,48 @@ score_contract:
       file_mode: dated
       file_path: "industrials/transportation/dashboard/{yyyy-mm-dd}/transportation_final_rank_table.csv"
       require_oos_score_valid: true
-      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.15}
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.00}
+    # Consumer Defensive participates through four independently calibrated
+    # cohorts under one hash-pinned standard-allocation registry. The adapter
+    # fails closed on stale/missing registry authority or config drift.
+    - model_family: consumer_defensive
+      adapter: consumer_defensive
+      enabled: true
+      enabled_from: "2026-08-28"  # first allocation date authorized by the pinned v3 registry
+      required: true
+      staleness_tolerance_days: 3
+      sector: "Consumer Staples"
+      industry: "Consumer Defensive"
+      industry_aggregate: "Consumer Staples"
+      file_mode: dated
+      file_path: "consumer_defensive/dashboard/{yyyy-mm-dd}/consumer_defensive_final_rank_table.csv"
+      require_oos_score_valid: true
+      calibration: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.00}
+      # Each cohort earns alpha independently. These maps, the sector cap, and
+      # the registry path/SHA must be updated atomically from one sealed registry.
+      calibration_by_scope:
+        beverages: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.002775685508133919}
+        consumer_staples_distribution_retail: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.030029042651632126}
+        household_personal_tobacco: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.06172254768156904}
+        packaged_foods_agricultural_products: {neutral: "median", scale: 50.0, expected_alpha_at_full: 0.10806271277233473}
+      optimizer_cap_by_scope:
+        beverages: 0.03125
+        consumer_staples_distribution_retail: 0.03125
+        household_personal_tobacco: 0.03125
+        packaged_foods_agricultural_products: 0.03125
+      # Must equal the independently enforced optimizer sector cap. This is
+      # the sum of all four equal registry allocation slots,
+      # including any non-promoted slot that remains cash.
+      optimizer_sector_cap: 0.125
+      production_activation_registry_file_path: "consumer_defensive/framework_v3/production/2026-08-28/475fe462877c7522/consumer_defensive_activation_registry_v3.json"
+      production_activation_registry_sha256: "1722d00239df6625045197f3e95752fa6911f0d80910c3cd40ecabf07073e0e1"
+      # Independent Portfolio boundary: the adjacent score manifest must bind
+      # the rank CSV to this reviewed pre-normalization exclusion scope, and
+      # the same-date terminal PASS must seal those exact rank/manifest bytes.
+      production_score_manifest_filename: "consumer_defensive_production_score_manifest_v3.json"
+      production_calibration_scope_sha256: "b9993085e910504b386484f3642db7c11e4ccc0ad82f170da19ab06981c03c68"
+      production_terminal_manifest_file_path: "consumer_defensive/orchestration/{yyyy-mm-dd}/consumer_defensive_production_refresh_manifest_v3.json"
+      production_change_control_public_key_path: ""
 
 # Stage 2 - live/current-book cross-sector risk panel (self-sourced, NOT survivorship history).
 risk_panel:
@@ -625,6 +669,7 @@ risk_panel:
     defense: XAR
     machinery: XLI
     transportation: IYT
+    consumer_defensive: XLP
   fetch:
     chart_url_templates:
       - "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -698,7 +743,12 @@ optimizer:
   covariance_source: "stage2"            # inject Stage 2 risk/covariance.csv; never rebuild from prices
   use_confidence_adjusted_mu: true        # mu_used = final_score * score_confidence (both annualized)
   risk_aversion: 5.0                       # gamma in maximize mu'w - 0.5*gamma*w'Sigma*w
-  gross_exposure: 1.0                      # fully invested, long-only
+  gross_exposure: 1.0                      # requested NAV budget; Stage 4 closes any residual to CASH
+  # Preserve every hard per-name/sector/scope cap when an unavailable fail-closed
+  # sector leaves insufficient capacity. Stage 3 invests the independently
+  # verified maximum and seals the shortfall as constraint cash; it never loosens
+  # caps or redistributes above them merely to force full investment.
+  allow_constraint_cash: true
   max_weight_per_name: 0.05               # per-name cap
   min_weight_to_hold: 0.0005              # drop dust weights below this then renormalize
   solver: "ECOS"                           # fallback order: ECOS -> OSQP -> SCS
@@ -706,22 +756,31 @@ optimizer:
   sector_weight_caps:                      # source_pipeline -> max share of gross in the LIVE Stage 3 book.
     # Defense is a newly promoted sleeve: hold it to a 5% shadow-to-live pilot (matches its BL strategic
     # weight) instead of distorting its alpha anchor. Set 0.0 to exclude it from sizing entirely.
-    # Research/shadow books (walk-forward arms, BL, sleeve diagnostics) are intentionally UNCAPPED —
+    # Research/shadow books (walk-forward arms, BL, sleeve diagnostics) are intentionally UNCAPPED â€”
     # a larger live budget is earned through Stage 7/BL fusion + Stage 11 calibration evidence.
     defense: 0.05
     machinery: 0.05
     transportation: 0.00
+    consumer_defensive: 0.125
     # deployable-book concentration/cash/liquidity policy 2026-07-20: cap the tech sleeves so the LIVE
     # book cannot over-concentrate in Information Technology (consumed ONLY by optimizer 09/10).
     software_infrastructure: 0.25
     semiconductors: 0.15
     technology_hardware: 0.12
+  # Independently promoted Consumer Defensive cohorts are additionally bounded
+  # here. A sector cap cannot substitute for these per-cohort evidence limits.
+  scope_weight_caps:
+    consumer_defensive:
+      beverages: 0.03125
+      consumer_staples_distribution_retail: 0.03125
+      household_personal_tobacco: 0.03125
+      packaged_foods_agricultural_products: 0.03125
   # Preserve the sector model's validated within-sleeve construction while
   # allowing the cross-sector optimizer to choose the sleeve's total budget.
   # Machinery's validated production sleeve retains equal weights inside its
   # optimizer-selected budget, capped at 5% of gross above.
   fixed_equal_weight_sleeves: [machinery]
-  # deployable-book concentration/cash/liquidity policy 2026-07-20: pre-solve liquidity floor — names
+  # deployable-book concentration/cash/liquidity policy 2026-07-20: pre-solve liquidity floor â€” names
   # whose run-dir risk/spread_snapshot.csv median_half_spread_bps exceeds this are excluded from sizing
   # (fail-open: a missing snapshot or missing/blank row never excludes). Optimizer 09 only.
   max_half_spread_bps: 50
@@ -737,7 +796,7 @@ optimizer:
 
 # Stage 4 - transaction-cost & turnover overlay (flat per-order commission, AUM-aware). Stage 3 unchanged.
 transaction_costs:
-  aum_usd: 300000                          # REQUIRED (CLI --aum overrides); flat commission is AUM-dependent
+  aum_usd: 500000                          # REQUIRED (CLI --aum overrides); flat commission is AUM-dependent
   # deployable-book concentration/cash/liquidity policy 2026-07-20: hold a fixed CASH buffer in the
   # deployable book. Stage 4 (14_apply_no_trade_bands) scales the asset block by (1 - fraction) and
   # routes the freed weight to CASH so assets+cash still close to gross=1.0. Optimizer gross stays 1.0.
@@ -796,7 +855,7 @@ rotation:
 
 # Stage 6 - macro regime / macro-fit contract (SHADOW-ONLY).
 # MacroLayer remains a vendored independent engine under portfolio_layer/MacroLayer. Stage 6 adapts its
-# serving DB into portfolio-native artifacts keyed to the five source_pipeline sleeves. It never overwrites
+# serving DB into portfolio-native artifacts keyed to every active source_pipeline sleeve. It never overwrites
 # Stage 1 stocks_scores.csv or Stage 3/4/5 live-book artifacts; Stage 7 consumes the sealed macro contract.
 macro:
   enabled_in_production: false
@@ -851,6 +910,10 @@ macro:
       macro_sector_fallback: "Industrials"
       industries: ["Transportation", "Road & Rail", "Air Freight & Logistics", "Passenger Airlines", "Trucking", "Marine Transportation"]
       industry_aggregates: ["Transportation"]
+    consumer_defensive:
+      macro_sector_fallback: "Consumer Defensive"
+      industries: ["Beverages", "Consumer Staples Distribution & Retail", "Food Products", "Household Products", "Personal Care Products", "Tobacco"]
+      industry_aggregates: ["Consumer Staples"]
 
 # Stage 7 - Black-Litterman fusion (SHADOW-ONLY adapter over the vendored optimizer).
 # Units = annualized (option B): only Stage 1 final_score becomes an expected-return view; rating/state/
@@ -884,14 +947,17 @@ black_litterman_fusion:
   strategic_sector_weights:                 # neutral sleeve policy before bounded macro/rotation tilts
     # Machinery is capped in the live optimizer but has no uncalibrated BL
     # strategic prior. A positive prior requires separate BL calibration.
-    biotech: 0.285
-    med_devices: 0.095
-    semiconductors: 0.2375
-    software_infrastructure: 0.19
-    technology_hardware: 0.1425
-    defense: 0.05
+    # Consumer Defensive receives its 12.5% strategic allocation; the prior
+    # positive weights are proportionally rescaled to preserve a 100% baseline.
+    biotech: 0.249375
+    med_devices: 0.083125
+    semiconductors: 0.2078125
+    software_infrastructure: 0.16625
+    technology_hardware: 0.1246875
+    defense: 0.04375
     machinery: 0.00
     transportation: 0.00
+    consumer_defensive: 0.125
   benchmark_within_sector_source: "equal"   # equal | stage3_weights; ticker-level BL prior inside each sleeve
   macro_sector_shift_mode: "relative_with_floor"
   macro_sector_max_shift: 0.10              # absolute safety cap on |shift| before projection
@@ -901,7 +967,7 @@ black_litterman_fusion:
   macro_sector_cap_band: 0.03               # tier1 sector exposure band around macro-shifted benchmark weights
   regime_to_gross_scalar:                   # macro regime -> gross-exposure multiplier
     # The live regime vocabulary (V1 decision layer and all v2-family/H1 candidates) is the
-    # four-quadrant set below — each entry EXPLICIT per H1_CANDIDATE_SPEC.md downstream
+    # four-quadrant set below â€” each entry EXPLICIT per H1_CANDIDATE_SPEC.md downstream
     # preconditions (H1 surfaces HEATING_UP/EXPANSION_DISINFLATION far more often than V1 did).
     EXPANSION_DISINFLATION: 1.00            # goldilocks quadrant: full gross (mirrors legacy EXPANSION)
     HEATING_UP: 1.00                        # validated-supportive regime (research/71-72); full gross
@@ -932,6 +998,7 @@ sleeves:
     defense: "XAR"
     machinery: "XLI"
     transportation: "IYT"
+    consumer_defensive: "XLP"
   factor_risk_caps:
     min_idiosyncratic_share: 0.50            # >= this share of book variance must be idiosyncratic
     max_market_share: 0.25                   # market-beta risk share cap
@@ -1003,10 +1070,10 @@ exit_engine:
   enabled_in_production: false
   phase: "phase1_actual_equity_holdings"
   # scope, signal source, and target-gap source are FIXED behaviors of exits/33 (ledger actual
-  # holdings; latest sealed scores <= ledger as-of; Stage 8 sleeve proposal, diagnostic only) —
+  # holdings; latest sealed scores <= ledger as-of; Stage 8 sleeve proposal, diagnostic only) â€”
   # documented here as comments, not knobs, so nobody edits a value that nothing reads.
   max_signal_lag_days: 10
-  # Stage 9 Phase 2 (exits/36): price-stop PROBE thresholds — diagnostic flags only, exits stay
+  # Stage 9 Phase 2 (exits/36): price-stop PROBE thresholds â€” diagnostic flags only, exits stay
   # score-driven until Stage 11 evidence says otherwise
   price_stop_probe:
     loss_vs_cost_pct: 0.25                  # flag if mark <= (1 - this) * FIFO average cost
@@ -1038,7 +1105,7 @@ exit_engine:
 #   - dev_window_start may move EARLIER freely as older sector history is generated (expanding dev
 #     data backward never contaminates the sealed window).
 #   - dev_window_end / sealed_start move ONLY via a dated append-only entry in the protocol's
-#     Amendment Log (e.g., declaring a new lockbox cycle after an Open Event) — never edited ad hoc.
+#     Amendment Log (e.g., declaring a new lockbox cycle after an Open Event) â€” never edited ad hoc.
 #   - lockbox_opened flips true only when an Open Event entry exists in the Amendment Log.
 stage11_lockbox:
   protocol_doc: "docs/LOCKBOX_PROTOCOL.md"
@@ -1069,6 +1136,8 @@ earnings_dates:
     request_pause_sec: 6.5                # ~9 requests/minute stays under free-tier RPM
   validation:
     min_coverage_fraction_investable: 0.60  # WARN below this; reports >90d out are often unpublished
+    minimum_pipeline_investable_count: 3    # ignore immaterial one-off pipelines for the zero-coverage hard gate
+    min_coverage_fraction_by_pipeline: 0.60 # WARN below; zero coverage on a live refresh is a hard FAIL
     max_days_until: 400
 
 # Stage 11 - PIT snapshot store (research/65). Immutable append-only archive of sealed Stage 1 runs.
@@ -1125,7 +1194,7 @@ calibration_panel:
 
 # Stage 11 - first-pass empirical alpha calibration (research/68). RESEARCH ONLY: approved slopes
 # feed Stage 1 / Stage 7 only after Stage 11 OOS validation (69/16) passes. Approval is deliberately
-# conservative — overlapping forward windows are not independent evidence, so short test spans
+# conservative â€” overlapping forward windows are not independent evidence, so short test spans
 # reject with insufficient_independent_windows by design.
 alpha_calibration:
   dir: "alpha_calibration"                 # under paths.output_dir; one subdir per panel build
@@ -1142,7 +1211,7 @@ alpha_calibration:
 # purged of every date whose forward-label window can overlap a test date's window (Lopez de Prado
 # purged K-fold); validation verdicts require genuinely independent out-of-fold evidence.
 # Stage 11 - calibration feedback gate (research/70). INERT until cells are BOTH 68-approved and
-# 69-oos-validated; then emits proposed expected_alpha_at_full updates for HUMAN review — it never
+# 69-oos-validated; then emits proposed expected_alpha_at_full updates for HUMAN review â€” it never
 # edits this file. Production promotion additionally requires backtest/16 evidence + protocol note.
 calibration_feedback:
   dir: "calibration_feedback"

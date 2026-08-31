@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -48,8 +48,14 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         choices=["catch-up", "daily"],
         default="catch-up",
-        help="Master mode: catch-up (default; current-target-first with best-effort "
-        "backfill) or daily (current session only, no gap scanning).",
+        help="Master mode: catch-up (default; bounded best-effort historical gaps "
+        "first, authoritative current target last) or daily (current session only, "
+        "no gap scanning).",
+    )
+    parser.add_argument(
+        "--catch-up-from",
+        default="",
+        help="Operator override passed to run_all --catch-up-from (YYYY-MM-DD).",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--selftest", action="store_true")
@@ -57,30 +63,49 @@ def parse_args() -> argparse.Namespace:
 
 
 def _is_first_trading_session_of_week(iso_date: str) -> bool:
-    target = run_all_mod._to_date(iso_date)
-    week = target.isocalendar()[:2]
-    cursor = target - timedelta(days=1)
-    while cursor.isocalendar()[:2] == week:
-        if run_all_mod.is_trading_day(cursor):
-            return False
-        cursor -= timedelta(days=1)
-    return True
+    return run_all_mod.is_first_trading_session_of_week(iso_date)
 
 
-def master_command(mode: str, as_of: str, dry_run: bool, *, cadence: str = "daily") -> list[str]:
-    """The run_all invocation for this nightly. catch-up is CURRENT-TARGET-FIRST in
-    run_all (an unbuildable historical date can no longer wedge the current book);
-    daily is the plain single-session lane."""
+def master_command(
+    mode: str,
+    as_of: str,
+    dry_run: bool,
+    *,
+    cadence: str = "daily",
+    catch_up_from: str = "",
+) -> list[str]:
+    """Build the run_all invocation for this nightly.
+
+    Catch-up runs bounded historical gaps first and the authoritative current
+    target last. Historical failures remain visible but cannot wedge the current
+    book; daily is the plain single-session lane.
+    """
     command = [sys.executable, str(MASTER_RUNNER)]
     if mode == "catch-up":
         command.append("--catch-up")
     if as_of:
         command.extend(["--as-of", as_of])
+    if catch_up_from:
+        if mode != "catch-up":
+            raise ValueError("catch_up_from requires catch-up mode")
+        command.extend(["--catch-up-from", catch_up_from])
     if cadence == "weekly":
         command.extend(["--cadence", "weekly"])
     if dry_run:
         command.append("--dry-run")
     return command
+
+
+def provider_validation_command(config: Path) -> list[str]:
+    """Use the bounded nightly check; accepted captures already verify full history."""
+    return [
+        sys.executable,
+        str(PROVIDER_VALIDATOR),
+        "--config",
+        str(config),
+        "--verification-mode",
+        "head",
+    ]
 
 
 def reconcile_abandoned_nightly_runs(root: Path = NIGHTLY_ROOT) -> list[Path]:
@@ -160,6 +185,57 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _active_orchestrator(path: Path = run_all_mod.ORCH_LOCK_PATH) -> dict[str, Any] | None:
+    """Return verified ownership details when another master still owns the lock.
+
+    A scheduled nightly may overlap an operator-started recovery even though Task
+    Scheduler's ``IgnoreNew`` policy prevents two task-owned instances.  Treat that
+    overlap as an explicit deferred success, not a failed production run.  A dead
+    holder is deliberately *not* deferred here; run_all's serialized stale-lock
+    recovery remains authoritative for that case.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        age_sec = max(0.0, datetime.now(timezone.utc).timestamp() - path.stat().st_mtime)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # An existing but transiently unreadable lock is not safe to race.
+        return {"path": str(path), "holder_pid": None, "live_children": [], "state": "unreadable"}
+
+    fields: dict[str, str] = {}
+    for token in raw.replace("\n", " ").split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+            fields[key.strip()] = value.strip()
+    try:
+        holder_pid = int(fields.get("pid", ""))
+    except ValueError:
+        holder_pid = None
+    children: list[int] = []
+    for item in fields.get("children", "").split(","):
+        try:
+            child = int(item.strip())
+        except ValueError:
+            continue
+        if child > 0:
+            children.append(child)
+    live_children = [pid for pid in children if run_all_mod._pid_alive(pid) is True]
+    holder_alive = run_all_mod._holder_alive(holder_pid, fields.get("started_utc", ""))
+    if holder_alive is False and not live_children:
+        return None
+    if holder_alive is None and not live_children and age_sec > run_all_mod.DEFAULT_LOCK_STALE_SEC:
+        return None
+    return {
+        "path": str(path),
+        "holder_pid": holder_pid,
+        "holder_alive": holder_alive,
+        "live_children": live_children,
+        "age_sec": round(age_sec, 3),
+        "state": "active" if holder_alive is True or live_children else "indeterminate_fresh",
+    }
+
+
 def _master_manifests() -> set[Path]:
     if not RUNS_ROOT.is_dir():
         return set()
@@ -202,6 +278,12 @@ def _selftest() -> int:
     assert _is_first_trading_session_of_week("2026-08-17")
     assert not _is_first_trading_session_of_week("2026-08-18")
     assert _is_first_trading_session_of_week("2026-09-08")  # Labor Day Monday
+    cmd_bounded = master_command(
+        "catch-up", "2026-08-28", True, catch_up_from="2026-08-24"
+    )
+    assert "--catch-up-from" in cmd_bounded and "2026-08-24" in cmd_bounded
+    provider_cmd = provider_validation_command(DEFAULT_CONFIG)
+    assert provider_cmd[-2:] == ["--verification-mode", "head"]
     checks += 1
 
     # abandoned-nightly reconciliation: dead pid -> ABORTED; live/unknown pid kept
@@ -237,6 +319,23 @@ def _selftest() -> int:
     assert _load_json(sealed_dir / "nightly_manifest.json")["acceptance"] == "PASS"
     checks += 1
 
+    # A live operator-owned master defers a scheduled launch without producing a
+    # false FAIL_MASTER. Dead locks remain available to run_all's recovery path.
+    active_lock = root / "active_master.lock"
+    active_lock.write_text(
+        f"pid={os.getpid()} started_utc={datetime.now(timezone.utc).isoformat(timespec='seconds')}\nchildren=\n",
+        encoding="utf-8",
+    )
+    active = _active_orchestrator(active_lock)
+    assert active is not None and active["holder_pid"] == os.getpid() and active["state"] == "active"
+    dead_lock = root / "dead_master.lock"
+    dead_lock.write_text(
+        "pid=2000000000 started_utc=2020-01-01T00:00:00+00:00\nchildren=\n",
+        encoding="utf-8",
+    )
+    assert _active_orchestrator(dead_lock) is None
+    checks += 1
+
     # nightly acceptance resolution: reconciliation failure is loud but never blocks
     assert _resolve_acceptance(reconciliation_failed=False, passed=True) == "PASS"
     assert _resolve_acceptance(reconciliation_failed=False, passed=False) == "FAIL_MASTER"
@@ -255,6 +354,49 @@ def _resolve_acceptance(*, reconciliation_failed: bool, passed: bool) -> str:
     if reconciliation_failed:
         return "FAIL_LATE_STATEMENT_RECONCILIATION"
     return "PASS" if passed else "FAIL_MASTER"
+
+
+def _run_reconciliation_pass(
+    *,
+    phase: str,
+    config: Path,
+    target: str,
+    run_dir: Path,
+    log: TextIO,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Run one sealed late-statement pass and return its normalized result.
+
+    The pre-master pass updates books that already existed when the schedule
+    started. The post-master pass is equally important: it attaches statements
+    that were already on disk to books created by this same catch-up run.
+    """
+    reconciliation_manifest = run_dir / f"late_statement_{phase}_manifest.json"
+    command = [
+        sys.executable,
+        str(LATE_STATEMENT_RECONCILER),
+        "--config",
+        str(config),
+        "--manifest",
+        str(reconciliation_manifest),
+        "--target",
+        target,
+    ]
+    if dry_run:
+        command.append("--dry-run")
+    rc = _run_logged(command, log)
+    payload = _load_json(reconciliation_manifest)
+    acceptance = str(payload.get("acceptance", ""))
+    accepted = rc == 0 and acceptance in {"PASS", "PASS_DRY_RUN"}
+    return {
+        "phase": phase,
+        "rc": rc,
+        "manifest": str(reconciliation_manifest),
+        "acceptance": acceptance,
+        "accepted": accepted,
+        "candidate_dates": list(payload.get("candidate_dates") or []),
+        "no_existing_book": list(payload.get("no_existing_book") or []),
+    }
 
 
 def main() -> int:
@@ -283,6 +425,15 @@ def main() -> int:
         if not run_all_mod.is_trading_day(run_all_mod._to_date(requested_as_of)):
             raise SystemExit(f"--as-of {requested_as_of} is not a trading session (weekend/holiday/closure)")
     effective_as_of = run_all_mod.resolve_target_date(requested_as_of)
+    catch_up_from = ""
+    if args.catch_up_from:
+        if args.mode != "catch-up":
+            raise SystemExit("--catch-up-from requires --mode catch-up")
+        catch_up_from = run_all_mod.parse_iso(args.catch_up_from)
+        if catch_up_from > effective_as_of:
+            raise SystemExit(
+                f"--catch-up-from ({catch_up_from}) must not be after target ({effective_as_of})"
+            )
     cadence = "weekly" if _is_first_trading_session_of_week(effective_as_of) else "daily"
 
     for reconciled in reconcile_abandoned_nightly_runs():
@@ -295,7 +446,7 @@ def main() -> int:
     log_path = run_dir / "nightly.log"
     manifest_path = run_dir / "nightly_manifest.json"
     manifest: dict[str, Any] = {
-        "schema_version": "nightly_orchestration_manifest_v3",
+        "schema_version": "nightly_orchestration_manifest_v6",
         "acceptance": "RUNNING",
         "started_at_utc": started.isoformat(timespec="seconds"),
         "nightly_pid": os.getpid(),
@@ -303,11 +454,15 @@ def main() -> int:
         "effective_as_of": effective_as_of,
         "cadence": cadence,
         "mode": args.mode,
+        "catch_up_from": catch_up_from,
         "dry_run": bool(args.dry_run),
         "provider_validation_rc": None,
+        "provider_validation_mode": "head",
         "late_statement_reconciliation_rc": None,
         "late_statement_reconciliation_manifest": "",
         "late_statement_reconciliation_acceptance": "",
+        "late_statement_pre": {},
+        "late_statement_post": {},
         "master_rc": None,
         "master_manifest": "",
         "master_acceptance": "",
@@ -315,15 +470,35 @@ def main() -> int:
     }
     _atomic_json(manifest_path, manifest)
 
+    busy = _active_orchestrator()
+    if busy is not None:
+        deferred_message = (
+            "nightly deferred: an active orchestration master already owns the global lock "
+            f"(pid={busy.get('holder_pid')}, children={busy.get('live_children')})"
+        )
+        with log_path.open("w", encoding="utf-8", newline="\n") as log:
+            log.write(deferred_message + "\n")
+            log.flush()
+            os.fsync(log.fileno())
+        manifest.update(
+            {
+                "acceptance": "DEFERRED_BUSY",
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "deferred_reason": "verified active orchestration master owns the global lock",
+                "busy_orchestrator": busy,
+            }
+        )
+        _atomic_json(manifest_path, manifest)
+        print(deferred_message, flush=True)
+        print(f"nightly_manifest: {manifest_path}", flush=True)
+        return 0
+
     before = _master_manifests()
     with log_path.open("w", encoding="utf-8", newline="") as log:
         if args.dry_run:
             provider_rc = 0
         else:
-            provider_rc = _run_logged(
-                [sys.executable, str(PROVIDER_VALIDATOR), "--config", str(config)],
-                log,
-            )
+            provider_rc = _run_logged(provider_validation_command(config), log)
         manifest["provider_validation_rc"] = provider_rc
         _atomic_json(manifest_path, manifest)
         if provider_rc != 0:
@@ -332,32 +507,17 @@ def main() -> int:
             _atomic_json(manifest_path, manifest)
             return 1
 
-        reconciliation_manifest_path = run_dir / "late_statement_reconciliation_manifest.json"
-        reconciliation_command = [
-            sys.executable,
-            str(LATE_STATEMENT_RECONCILER),
-            "--config",
-            str(config),
-            "--manifest",
-            str(reconciliation_manifest_path),
-        ]
-        reconciliation_command.extend(["--target", effective_as_of])
-        if args.dry_run:
-            reconciliation_command.append("--dry-run")
-        reconciliation_rc = _run_logged(reconciliation_command, log)
-        reconciliation_payload = _load_json(reconciliation_manifest_path)
-        reconciliation_acceptance = str(reconciliation_payload.get("acceptance", ""))
-        manifest.update(
-            {
-                "late_statement_reconciliation_rc": reconciliation_rc,
-                "late_statement_reconciliation_manifest": str(reconciliation_manifest_path),
-                "late_statement_reconciliation_acceptance": reconciliation_acceptance,
-            }
+        pre_reconciliation = _run_reconciliation_pass(
+            phase="pre_master",
+            config=config,
+            target=effective_as_of,
+            run_dir=run_dir,
+            log=log,
+            dry_run=bool(args.dry_run),
         )
+        manifest["late_statement_pre"] = pre_reconciliation
         _atomic_json(manifest_path, manifest)
-        accepted_reconciliation = reconciliation_acceptance in {"PASS", "PASS_DRY_RUN"}
-        reconciliation_failed = reconciliation_rc != 0 or not accepted_reconciliation
-        if reconciliation_failed:
+        if not pre_reconciliation["accepted"]:
             # POLICY (2026-08-07): a broken/unparsable HISTORICAL statement must not
             # block current production. The failure stays a failing nightly verdict
             # (FAIL_LATE_STATEMENT_RECONCILIATION below) so it cannot be overlooked,
@@ -374,9 +534,43 @@ def main() -> int:
             )
 
         master_rc = _run_logged(
-            master_command(args.mode, effective_as_of, args.dry_run, cadence=cadence),
+            master_command(
+                args.mode,
+                effective_as_of,
+                args.dry_run,
+                cadence=cadence,
+                catch_up_from=catch_up_from,
+            ),
             log,
         )
+
+        post_reconciliation = _run_reconciliation_pass(
+            phase="post_master",
+            config=config,
+            target=effective_as_of,
+            run_dir=run_dir,
+            log=log,
+            dry_run=bool(args.dry_run),
+        )
+        reconciliation_failed = not (
+            pre_reconciliation["accepted"] and post_reconciliation["accepted"]
+        )
+        # Retain the original aggregate fields for operators and older readers,
+        # while the v4 manifest exposes both passes explicitly.
+        manifest.update(
+            {
+                "late_statement_pre": pre_reconciliation,
+                "late_statement_post": post_reconciliation,
+                "late_statement_reconciliation_rc": (
+                    0 if not reconciliation_failed else max(pre_reconciliation["rc"], post_reconciliation["rc"], 1)
+                ),
+                "late_statement_reconciliation_manifest": post_reconciliation["manifest"],
+                "late_statement_reconciliation_acceptance": (
+                    post_reconciliation["acceptance"] if not reconciliation_failed else "FAIL"
+                ),
+            }
+        )
+        _atomic_json(manifest_path, manifest)
 
     master_path, master_payload = _new_master_manifest(before)
     master_acceptance = str((master_payload or {}).get("acceptance", ""))

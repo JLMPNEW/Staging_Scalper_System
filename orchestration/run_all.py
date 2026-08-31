@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Master cross-sector orchestrator for the scalper staging system.
 
-Runs the seven sector refreshes (biotech, med_devices, semiconductors,
-software_infrastructure, technology_hardware, defense, machinery) and the
-Tier-1 portfolio layer from a single command, reading orchestration/registry.yaml
+Runs every sector registered in orchestration/registry.yaml (currently eight required
+production sectors plus one optional sector) and the Tier-1 portfolio layer from a
+single command, reading the registry
 for every sector's exact CLI, publish glob, health manifest, and backfill/repair
 entry points.
 
@@ -37,12 +37,13 @@ never a value derived from published artifacts.
 Modes: daily (default) | catch-up | backfill | repair | health-check.
 Validate with --selftest (no subprocess) and --dry-run (prints the command matrix).
 
-Catch-up policy (2026-08-07 redesign)
--------------------------------------
+Catch-up policy (2026-08-29 correction)
+-----------------------------------------
 An unavailable HISTORICAL date must never prevent producing the CURRENT
 portfolio. Catch-up therefore:
-  * runs the CURRENT target date FIRST for every sector; older missing dates
-    are backfilled afterwards, newest-first, best-effort;
+  * backfills older missing dates FIRST, oldest-first and best-effort, then
+    rebuilds/verifies the CURRENT target last. Stateful sector pipelines cannot
+    reliably publish an older partition after their root state has advanced;
   * accepts the sector on the current date alone: failed backfill dates are
     recorded per-date in the manifest (status PASS_WITH_BACKFILL_GAPS) and
     never fail the master; only a current-date failure fails the sector;
@@ -100,6 +101,7 @@ from zoneinfo import ZoneInfo
 
 try:
     import yaml
+    from yaml.nodes import MappingNode, Node, SequenceNode
 except ImportError as exc:  # pragma: no cover - yaml is a hard dependency here
     raise SystemExit("PyYAML is required: pip install pyyaml") from exc
 
@@ -157,6 +159,7 @@ class BackfillSpec:
     script: str
     args_template: list[str]
     per_date: bool
+    covers_target: bool = False
     note: str = ""
 
 
@@ -221,8 +224,17 @@ class Sector:
     #   publish_epoch: earliest ISO date the publish_glob convention is valid for;
     #     dates before it are exempt from missing-detection (a repointed glob must
     #     not retroactively manufacture missing history).
+    #   native_backfill_min_dates: optional minimum gap size that must use the
+    #     sector's PIT-native backfill driver. This is 1 for pipelines whose live
+    #     provider watermarks cannot be replayed safely for historical sessions.
     backfill_window_days: int | None
+    native_backfill_min_dates: int | None
     publish_epoch: str | None
+    # Some native PIT backfills publish a date-sealed rank artifact but do not
+    # emit the live daily acceptance manifest. Historical completeness may use
+    # that artifact contract only when this is explicitly false; current-date
+    # health always remains strict.
+    historical_health_manifest_required: bool
     health: HealthSpec
     backfill: BackfillSpec | None
     repair: RepairSpec | None
@@ -271,6 +283,24 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return list(value)
     return [value]
+
+
+def _assert_unique_yaml_keys(node: Node, *, location: str = "root") -> None:
+    """Reject duplicate mapping keys before PyYAML can silently overwrite them."""
+    if isinstance(node, MappingNode):
+        seen: set[str] = set()
+        for key_node, value_node in node.value:
+            key = str(getattr(key_node, "value", ""))
+            if key in seen:
+                line = int(key_node.start_mark.line) + 1
+                raise ValueError(
+                    f"registry duplicate key {key!r} at {location} (line {line})"
+                )
+            seen.add(key)
+            _assert_unique_yaml_keys(value_node, location=f"{location}.{key}")
+    elif isinstance(node, SequenceNode):
+        for index, child in enumerate(node.value):
+            _assert_unique_yaml_keys(child, location=f"{location}[{index}]")
 
 
 _PROBE_KINDS = frozenset({"sqlite_max_date", "manifest_date", "deadline_schedule"})
@@ -327,7 +357,12 @@ def _parse_freshness_probes(sector_name: str, raw_probes: Any) -> list[Freshness
 
 
 def load_registry(path: Path) -> Registry:
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    source = Path(path).read_text(encoding="utf-8")
+    document = yaml.compose(source, Loader=yaml.SafeLoader)
+    if document is None:
+        raise ValueError(f"registry {path} is empty")
+    _assert_unique_yaml_keys(document)
+    raw = yaml.safe_load(source)
     if not isinstance(raw, dict) or "sectors" not in raw:
         raise ValueError(f"registry {path} missing top-level 'sectors'")
     defaults = raw.get("defaults") or {}
@@ -355,10 +390,17 @@ def load_registry(path: Path) -> Registry:
                 script=str(backfill_raw["script"]),
                 args_template=list(backfill_raw.get("args_template") or []),
                 per_date=bool(backfill_raw.get("per_date", False)),
+                covers_target=bool(backfill_raw.get("covers_target", False)),
                 note=str(backfill_raw.get("note") or ""),
             )
         elif backfill_raw and backfill_raw.get("note"):
-            backfill = BackfillSpec(script="", args_template=[], per_date=False, note=str(backfill_raw["note"]))
+            backfill = BackfillSpec(
+                script="",
+                args_template=[],
+                per_date=False,
+                covers_target=False,
+                note=str(backfill_raw["note"]),
+            )
         repair_raw = entry.get("repair")
         repair = None
         if repair_raw:
@@ -389,7 +431,15 @@ def load_registry(path: Path) -> Registry:
                 backfill_window_days=(
                     int(entry["backfill_window_days"]) if entry.get("backfill_window_days") is not None else None
                 ),
+                native_backfill_min_dates=(
+                    int(entry["native_backfill_min_dates"])
+                    if entry.get("native_backfill_min_dates") is not None
+                    else None
+                ),
                 publish_epoch=(parse_iso(str(entry["publish_epoch"])) if entry.get("publish_epoch") else None),
+                historical_health_manifest_required=bool(
+                    entry.get("historical_health_manifest_required", True)
+                ),
                 health=health,
                 backfill=backfill,
                 repair=repair,
@@ -422,6 +472,32 @@ def load_registry(path: Path) -> Registry:
             raise ValueError(f"sector {sector.name}: staleness_tolerance_days must be >= 0")
         if sector.backfill_window_days is not None and sector.backfill_window_days < 0:
             raise ValueError(f"sector {sector.name}: backfill_window_days must be >= 0")
+        if (
+            sector.native_backfill_min_dates is not None
+            and sector.native_backfill_min_dates < 1
+        ):
+            raise ValueError(
+                f"sector {sector.name}: native_backfill_min_dates must be >= 1"
+            )
+        if sector.native_backfill_min_dates is not None and (
+            sector.backfill is None or not sector.backfill.script
+        ):
+            raise ValueError(
+                f"sector {sector.name}: native_backfill_min_dates requires a native backfill script"
+            )
+        if sector.backfill is not None and sector.backfill.covers_target:
+            if sector.backfill.per_date:
+                raise ValueError(
+                    f"sector {sector.name}: backfill.covers_target requires per_date=false"
+                )
+            if sector.daily_post_steps:
+                raise ValueError(
+                    f"sector {sector.name}: backfill.covers_target cannot be combined with daily_post_steps"
+                )
+            if "{to}" not in sector.backfill.args_template:
+                raise ValueError(
+                    f"sector {sector.name}: backfill.covers_target requires {{to}} in args_template"
+                )
         if sector.publish_glob.count("{date}") != 1:
             raise ValueError(f"sector {sector.name}: publish_glob must contain exactly one {{date}}")
     group_order = {str(k): list(v) for k, v in (raw.get("group_order") or {}).items()}
@@ -722,6 +798,18 @@ def trading_dates_in_range(reg: Registry, start: str, end: str) -> list[str]:
     return sorted(out)
 
 
+def is_first_trading_session_of_week(iso_date: str) -> bool:
+    """Return true when ``iso_date`` is the first market session in its ISO week."""
+    target = _to_date(iso_date)
+    week = target.isocalendar()[:2]
+    cursor = target - timedelta(days=1)
+    while cursor.isocalendar()[:2] == week:
+        if is_trading_day(cursor):
+            return False
+        cursor -= timedelta(days=1)
+    return True
+
+
 def _missing_from_expected(published: set[str], expected: list[str]) -> list[str]:
     return sorted(d for d in expected if d not in published)
 
@@ -751,10 +839,25 @@ def save_gap_markers(markers: dict[str, Any], path: Path = GAP_MARKER_PATH) -> N
     write_atomic(Path(path), json.dumps(markers, indent=2, sort_keys=True) + "\n")
 
 
-def permanent_gap_dates(markers: dict[str, Any], sector_name: str) -> set[str]:
+def permanent_gap_dates(
+    markers: dict[str, Any],
+    sector_name: str,
+    *,
+    include_auto: bool = True,
+) -> set[str]:
+    """Return permanent gaps, optionally excluding automatic tombstones.
+
+    An explicit operator catch-up is a deliberate retry after code/data repair, so it
+    may revisit automatically tombstoned dates. Operator-marked (and legacy records
+    without a source) remain permanent until explicitly cleared.
+    """
     out: set[str] = set()
     for iso_date, rec in (markers.get("sectors", {}).get(sector_name) or {}).items():
-        if isinstance(rec, dict) and rec.get("permanent"):
+        if (
+            isinstance(rec, dict)
+            and rec.get("permanent")
+            and (include_auto or str(rec.get("source") or "") != "auto")
+        ):
             out.add(str(iso_date))
     return out
 
@@ -794,19 +897,25 @@ class GapReport:
     """Per-sector missing-date classification for one catch-up target."""
 
     target_missing: bool
-    backfill_missing: list[str]  # auto-run candidates, NEWEST-first
+    backfill_missing: list[str]  # auto-run candidates, OLDEST-first
     historical_gaps: list[str]  # inside the outer window but older than the backfill window
     permanent_gaps: list[str]  # tombstoned by marker; skipped but surfaced
 
 
 def sector_gap_report(
-    reg: Registry, sector: Sector, target: str, *, markers: dict[str, Any] | None = None
+    reg: Registry,
+    sector: Sector,
+    target: str,
+    *,
+    markers: dict[str, Any] | None = None,
+    catch_up_from: str | None = None,
 ) -> GapReport:
-    """Classify this sector's unpublished trading dates up to `target`.
+    """Classify this sector's unpublished or contract-incomplete dates.
 
     The CURRENT target date is classified separately (target_missing) and is never
     window-bounded or tombstoned: current production is always attempted. Historical
-    dates are auto-run candidates only within [target - backfill_window_days, target);
+    dates are auto-run candidates only within [target - backfill_window_days, target),
+    unless an operator supplies catch_up_from as an explicit inclusive lower bound;
     older in-(outer-)window gaps are surfaced as historical_gaps for reporting. Dates
     before the sector's publish_epoch (or before its first publish, or beyond
     catch_up_window_days) are exempt entirely -- a repointed publish_glob must not
@@ -822,13 +931,52 @@ def sector_gap_report(
     floor = max(published_on_or_before[0], outer_start)
     if sector.publish_epoch:
         floor = max(floor, sector.publish_epoch)
+    if catch_up_from:
+        floor = max(floor, catch_up_from)
     if floor > target:
         return GapReport(target_missing, [], [], [])
     expected = trading_dates_in_range(reg, floor, target)
-    missing_all = [d for d in expected if d not in published and d != target]
-    window_start = max(floor, (_to_date(target) - timedelta(days=sector_backfill_window_days(sector))).isoformat())
-    tombstoned = permanent_gap_dates(markers if markers is not None else load_gap_markers(), sector.name)
-    backfill = sorted((d for d in missing_all if d >= window_start and d not in tombstoned), reverse=True)
+    expected_set = set(expected)
+    # A dated rank file alone is not a complete publication. Historical
+    # catch-up must also detect malformed/date-mismatched files and required
+    # lineage sidecars that are absent or invalid. Root health manifests are
+    # current-state artifacts and cannot certify an older date. A manifest with
+    # a {date} partition is different: it is immutable per session and must be
+    # healthy before that historical date counts as complete. This distinction
+    # prevents an old final artifact from hiding a failed portfolio run.
+    verify_historical_manifest = bool(
+        sector.historical_health_manifest_required
+        and sector.health.manifest
+        and "{date}" in sector.health.manifest
+    )
+    complete_historical = {
+        d
+        for d in published
+        if d == target
+        or (
+            d in expected_set
+            and verify_published_artifact_for_date(
+                sector,
+                d,
+                verify_manifest=verify_historical_manifest,
+                policy_context="historical",
+            )[0]
+        )
+    }
+    missing_all = [d for d in expected if d not in complete_historical and d != target]
+    window_start = (
+        floor
+        if catch_up_from
+        else max(floor, (_to_date(target) - timedelta(days=sector_backfill_window_days(sector))).isoformat())
+    )
+    tombstoned = permanent_gap_dates(
+        markers if markers is not None else load_gap_markers(),
+        sector.name,
+        # --catch-up-from is an explicit bounded retry. It overrides only
+        # auto-tombstones; operator/legacy permanent gaps remain fail-closed.
+        include_auto=not bool(catch_up_from),
+    )
+    backfill = sorted(d for d in missing_all if d >= window_start and d not in tombstoned)
     historical = sorted(d for d in missing_all if d < window_start and d not in tombstoned)
     permanent = sorted(d for d in missing_all if d in tombstoned)
     return GapReport(target_missing, backfill, historical, permanent)
@@ -874,7 +1022,12 @@ def weekly_pre_commands(sector: Sector, iso_date: str) -> list[list[str]]:
     return cmds
 
 
-def daily_post_commands(sector: Sector, iso_date: str) -> list[list[str]]:
+def daily_post_commands(
+    sector: Sector,
+    iso_date: str,
+    *,
+    historical: bool = False,
+) -> list[list[str]]:
     """Post-publish steps that must run (in order) AFTER the sector's daily publish.
 
     Used by med_devices to run 76_mark_med_device_oos_provenance.py after the refresh
@@ -886,26 +1039,48 @@ def daily_post_commands(sector: Sector, iso_date: str) -> list[list[str]]:
     """
     cmds: list[list[str]] = []
     for step in sector.daily_post_steps:
+        if bool(step.get("historical_only", False)) and not historical:
+            continue
         script = str(step["script"])
-        cmds.append([PY, str(PROJECT_ROOT / script)] + _sub(list(step.get("args_template") or []), {"date": iso_date}))
+        raw_template = (
+            step.get("historical_args_template")
+            if historical and step.get("historical_args_template") is not None
+            else step.get("args_template")
+        )
+        cmds.append(
+            [PY, str(PROJECT_ROOT / script)]
+            + _sub(list(raw_template or []), {"date": iso_date})
+        )
     return cmds
 
 
-def backfill_commands(sector: Sector, frm: str, to: str, reg: Registry) -> tuple[list[list[str]], str]:
+def backfill_commands(
+    sector: Sector,
+    frm: str,
+    to: str,
+    reg: Registry,
+    *,
+    exact_dates: list[str] | None = None,
+) -> tuple[list[list[str]], str]:
     """Return (commands, note). Empty commands with a note => nothing native to run."""
     if sector.backfill is None or not sector.backfill.script:
         note = sector.backfill.note if sector.backfill else "no native backfill entry"
         return [], note
+    dates = list(exact_dates) if exact_dates is not None else trading_dates_in_range(reg, frm, to)
+    dates_csv = ",".join(dates)
     if sector.backfill.per_date:
-        dates = trading_dates_in_range(reg, frm, to)
         cmds = [
             [PY, str(PROJECT_ROOT / sector.backfill.script)]
-            + _sub(sector.backfill.args_template, {"date": d, "from": frm, "to": to})
+            + _sub(
+                sector.backfill.args_template,
+                {"date": d, "dates": d, "from": frm, "to": to},
+            )
             for d in dates
         ]
         return cmds, ""
     cmd = [PY, str(PROJECT_ROOT / sector.backfill.script)] + _sub(
-        sector.backfill.args_template, {"from": frm, "to": to}
+        sector.backfill.args_template,
+        {"dates": dates_csv, "from": frm, "to": to},
     )
     return [cmd], ""
 
@@ -951,32 +1126,40 @@ def _catch_up_daily_command(
     command = daily_command(sector, iso_date, force=force)
     if sector.name == "portfolio_layer" and iso_date < live_completed_session:
         command.append("--historical-catchup")
+        # Catch-up repairs an incomplete dated run; it is not an implicit
+        # historical recalibration. Preserve same-date sealed parents and let
+        # Stage 12's manifest gates resume at the first missing/failed child.
+        # An operator who intentionally wants a current-code reconstruction can
+        # still pass run_all --force explicitly.
     return command
 
 
 @dataclass(frozen=True)
 class CatchUpPlan:
-    """Execution plan for one sector's catch-up: CURRENT target first, then
-    best-effort historical backfill groups, newest-first."""
+    """Execution plan: strict prerequisites, oldest-first gaps, current target last."""
 
     target: str
     target_missing: bool
     target_unhealthy: bool
+    target_reasons: tuple[str, ...]
+    pre_commands: list[list[str]]
     target_commands: list[list[str]]  # empty only when target is published and healthy
-    backfill_groups: list[tuple[tuple[str, ...], list[list[str]]]]  # (dates, commands), newest-first
+    backfill_groups: list[tuple[tuple[str, ...], list[list[str]]]]  # (dates, commands), oldest-first
     historical_gaps: list[str]
     permanent_gaps: list[str]
     used_native_backfill: bool
+    native_backfill_covers_target: bool
 
     @property
     def target_needs_run(self) -> bool:
-        return self.target_missing or self.target_unhealthy
+        return bool(self.target_commands)
 
     @property
     def all_commands(self) -> list[list[str]]:
-        out = list(self.target_commands)
+        out = list(self.pre_commands)
         for _dates, cmds in self.backfill_groups:
             out.extend(cmds)
+        out.extend(self.target_commands)
         return out
 
     @property
@@ -985,13 +1168,16 @@ class CatchUpPlan:
 
 
 def plan_note(plan: CatchUpPlan) -> str:
-    return (
+    note = (
         f"target_missing={plan.target_missing}"
         f" target_unhealthy={plan.target_unhealthy}"
         f" backfill={len(plan.backfill_dates)}"
         f" historical_gaps={len(plan.historical_gaps)}"
         f" permanent_gaps={len(plan.permanent_gaps)}"
     )
+    if plan.target_reasons:
+        note += " target_reasons=" + "|".join(plan.target_reasons)
+    return note
 
 
 def build_catch_up_plan(
@@ -1003,13 +1189,14 @@ def build_catch_up_plan(
     include_weekly_pre: bool = False,
     live_completed_session: str | None = None,
     markers: dict[str, Any] | None = None,
+    catch_up_from: str | None = None,
 ) -> CatchUpPlan:
-    """CURRENT-TARGET-FIRST catch-up plan.
+    """Build a state-safe oldest-first catch-up plan.
 
-    The current target date always leads (an unavailable historical date must never
-    prevent producing the current book); historical backfill follows newest-first so
-    the most valuable missing dates fill first, each date/group independent
-    (best-effort). Gaps larger than catch_up_gap_backfill_threshold use the sector's
+    Historical dates are attempted oldest-first because sector databases and root
+    manifests advance monotonically. Their failures remain best-effort and never
+    block the final current-target rebuild. Gaps larger than
+    catch_up_gap_backfill_threshold use the sector's
     native backfill entry, CHUNKED to at most threshold dates per command so one
     subprocess never has to fit N full per-date rebuilds inside the single-command
     timeout ceiling; every chunk still runs the per-date daily_post_steps (e.g.
@@ -1020,48 +1207,122 @@ def build_catch_up_plan(
     # it next to the target) so a run spanning the 17:00 ET close cannot reclassify
     # the intended current-session command as historical hours later.
     live_session = live_completed_session or latest_completed_trading_session()
-    report = sector_gap_report(reg, sector, target, markers=markers)
+    report = sector_gap_report(
+        reg,
+        sector,
+        target,
+        markers=markers,
+        catch_up_from=catch_up_from,
+    )
+    missing_weekly_session = any(
+        is_first_trading_session_of_week(iso_date)
+        for iso_date in report.backfill_missing
+    )
+    weekly_due = bool(sector.weekly_pre_steps) and (
+        include_weekly_pre or missing_weekly_session
+    )
     target_unhealthy = False
+    target_reasons: list[str] = []
     if not report.target_missing:
-        target_ok, _target_reasons = verify_published_artifact_for_date(sector, target)
+        target_ok, target_reasons = verify_published_artifact_for_date(sector, target)
         target_unhealthy = not target_ok
-    target_cmds: list[list[str]] = []
-    if report.target_missing or target_unhealthy:
-        if include_weekly_pre:
-            target_cmds.extend(weekly_pre_commands(sector, target))
-        target_cmds.append(_catch_up_daily_command(sector, target, force=force, live_completed_session=live_session))
-        target_cmds.extend(daily_post_commands(sector, target))
+    # If a missed first session skipped a weekly prerequisite, refresh that
+    # prerequisite before rebuilding the current target. This keeps a Friday
+    # catch-up from silently consuming the previous week's universe screen.
+    if weekly_due:
+        target_unhealthy = True
+        target_reasons.append("weekly prerequisite due for actionable first-session gap")
+    pre_cmds = weekly_pre_commands(sector, target) if weekly_due else []
     groups: list[tuple[tuple[str, ...], list[list[str]]]] = []
-    missing = report.backfill_missing  # newest-first
+    missing = report.backfill_missing  # oldest-first
+    native_min_dates = (
+        sector.native_backfill_min_dates
+        if sector.native_backfill_min_dates is not None
+        else reg.catch_up_gap_backfill_threshold + 1
+    )
     used_native = (
-        len(missing) > reg.catch_up_gap_backfill_threshold
+        len(missing) >= native_min_dates
         and sector.backfill is not None
         and bool(sector.backfill.script)
     )
     if used_native:
         ascending = sorted(missing)
-        chunk_size = reg.catch_up_gap_backfill_threshold
-        chunks = [ascending[i : i + chunk_size] for i in range(0, len(ascending), chunk_size)]
-        for chunk in reversed(chunks):  # newest chunk first
-            cmds, _bf_note = backfill_commands(sector, chunk[0], chunk[-1], reg)
-            for iso_date in chunk:
-                cmds.extend(daily_post_commands(sector, iso_date))
-            groups.append((tuple(chunk), cmds))
+        if sector.backfill is not None and sector.backfill.covers_target:
+            cmds, _bf_note = backfill_commands(
+                sector,
+                ascending[0],
+                target,
+                reg,
+                exact_dates=ascending,
+            )
+            groups.append((tuple(ascending), cmds))
+        else:
+            chunk_size = reg.catch_up_gap_backfill_threshold
+            chunks = [ascending[i : i + chunk_size] for i in range(0, len(ascending), chunk_size)]
+            for chunk in chunks:
+                cmds, _bf_note = backfill_commands(
+                    sector,
+                    chunk[0],
+                    chunk[-1],
+                    reg,
+                    exact_dates=chunk,
+                )
+                for iso_date in chunk:
+                    cmds.extend(daily_post_commands(sector, iso_date, historical=True))
+                groups.append((tuple(chunk), cmds))
     else:
         for iso_date in missing:
             cmds = [_catch_up_daily_command(sector, iso_date, force=force, live_completed_session=live_session)]
             # Preserve the exact daily post-publish contract for every date.
-            cmds.extend(daily_post_commands(sector, iso_date))
+            cmds.extend(daily_post_commands(sector, iso_date, historical=True))
             groups.append(((iso_date,), cmds))
+    # Any historical work can leave global root tables/manifests on the last
+    # backfill date. Rebuild the current target last even when its dated file
+    # already existed before this run.
+    target_cmds: list[list[str]] = []
+    native_covers_target = bool(
+        used_native
+        and sector.backfill is not None
+        and sector.backfill.covers_target
+    )
+    historical_work_requires_target_restore = bool(groups) and (
+        sector.name != "portfolio_layer"
+    )
+    if (
+        report.target_missing
+        or target_unhealthy
+        or historical_work_requires_target_restore
+    ) and not native_covers_target:
+        # Sector backfills can leave mutable root tables on an older date, so
+        # their target restoration remains forced. Portfolio-layer history is
+        # date-partitioned (persistent stores are append-only by as-of), and its
+        # own manifest DAG safely resumes at the first incomplete group. Its
+        # dated artifacts do not need a target replay when the target already
+        # verifies healthy.
+        target_force = force or (
+            bool(groups) and sector.name != "portfolio_layer"
+        )
+        target_cmds.append(
+            _catch_up_daily_command(
+                sector,
+                target,
+                force=target_force,
+                live_completed_session=live_session,
+            )
+        )
+        target_cmds.extend(daily_post_commands(sector, target))
     return CatchUpPlan(
         target=target,
         target_missing=report.target_missing,
         target_unhealthy=target_unhealthy,
+        target_reasons=tuple(target_reasons),
+        pre_commands=pre_cmds,
         target_commands=target_cmds,
         backfill_groups=groups,
         historical_gaps=report.historical_gaps,
         permanent_gaps=report.permanent_gaps,
         used_native_backfill=used_native,
+        native_backfill_covers_target=native_covers_target,
     )
 
 
@@ -1691,6 +1952,7 @@ def verify_published_artifact_for_date(
     iso_date: str,
     *,
     verify_manifest: bool = True,
+    policy_context: str = "production",
 ) -> tuple[bool, list[str]]:
     """Strict post-run acceptance for one published date (findings 3 & 4):
     artifact exists at that date's folder AND has rows AND (oos/gate-valid rows where
@@ -1734,7 +1996,10 @@ def verify_published_artifact_for_date(
         date_checked, date_ok, date_detail = _csv_date_column_matches(artifact, iso_date)
         if date_checked and not date_ok:
             reasons.append(f"internal as-of column mismatch: {date_detail}")
-        lineage_policy_mode = policy_for_model_family(sector.name).mode_for_asof("production", iso_date)
+        lineage_policy_mode = policy_for_model_family(sector.name).mode_for_asof(
+            policy_context,
+            iso_date,
+        )
         if lineage_policy_mode != POLICY_DISABLED:
             lineage_artifact = _financial_lineage_artifact_for_date(
                 sector,
@@ -1777,6 +2042,49 @@ def verify_published_artifact_for_date(
 def verify_published_artifact(sector: Sector, target: str) -> tuple[bool, list[str]]:
     """Strict post-run acceptance for the EXACT target date (daily mode)."""
     return verify_published_artifact_for_date(sector, target)
+
+
+def clear_resolved_auto_gap_records(
+    sector: Sector,
+    target: str,
+    *,
+    markers_path: Path = GAP_MARKER_PATH,
+) -> list[str]:
+    """Remove obsolete automatic tombstones after their artifacts verify again.
+
+    Operator markers are governance decisions and are never changed here. A
+    verification exception also preserves the marker, so cleanup cannot turn an
+    unreadable artifact into an accepted date.
+    """
+    resolved: list[str] = []
+    with _GAP_MARKER_LOCK:
+        markers = load_gap_markers(markers_path)
+        per_sector = markers.get("sectors", {}).get(sector.name)
+        if not isinstance(per_sector, dict):
+            return resolved
+        for iso_date, record in list(per_sector.items()):
+            if (
+                not isinstance(record, dict)
+                or str(record.get("source") or "") != "auto"
+                or str(iso_date) > target
+            ):
+                continue
+            try:
+                parse_iso(str(iso_date))
+                artifact_ok, _ = verify_published_artifact_for_date(
+                    sector,
+                    str(iso_date),
+                    verify_manifest=False,
+                    policy_context="historical",
+                )
+            except (OSError, ValueError, csv.Error):
+                artifact_ok = False
+            if artifact_ok:
+                clear_gap_record(markers, sector.name, str(iso_date))
+                resolved.append(str(iso_date))
+        if resolved:
+            save_gap_markers(markers, markers_path)
+    return sorted(resolved)
 
 
 def health_check(reg: Registry, sectors: list[Sector], target: str) -> dict[str, Any]:
@@ -2155,17 +2463,16 @@ def run_catch_up_sector(
     markers_path: Path = GAP_MARKER_PATH,
     runner=None,
 ) -> RunResult:
-    """Execute one sector's catch-up plan: CURRENT TARGET FIRST, then best-effort
-    historical backfill (newest-first, per-group independent).
+    """Execute strict prerequisites, best-effort history, then the current target.
 
     Acceptance is the CURRENT date alone: a current-date execution/verification
     failure fails the sector exactly like daily mode; failed backfill dates are
     recorded per-date (status PASS_WITH_BACKFILL_GAPS) and never fail the master.
     Verification runs IMMEDIATELY after each date's commands so a sector whose
     health manifest is a global latest-run file is checked while that manifest
-    still describes the date just built (execution order is current-first /
-    newest-first, so end-of-run verification would compare against the OLDEST
-    date). `runner` is injectable for the no-subprocess selftest.
+    still describes the date just built. The final current-target rebuild leaves
+    every global latest-state artifact on the requested target. `runner` is
+    injectable for the no-subprocess selftest.
     """
     result = RunResult(sector=sector.name, commands=plan.all_commands, backfill=None)
     started = time.perf_counter()
@@ -2180,36 +2487,21 @@ def run_catch_up_sector(
                 return int(runner(command))
             return _run_one(sector, command, net_sem=net_sem, logfile=logfile)
 
-        # ---- 1) CURRENT TARGET FIRST -------------------------------------- #
-        if plan.target_needs_run:
-            target_ok = True
-            for command in plan.target_commands:
-                rc = _exec(command)
-                result.return_codes.append(rc)
-                if rc != 0:
-                    target_ok = False
-                    break
-            if not target_ok:
-                result.status = "FAIL"
-                result.note = f"current target {plan.target} failed; backfill not attempted"
-            else:
-                ok, reasons = verify_published_artifact_for_date(sector, plan.target)
-                if ok:
-                    result.status = "PASS"
-                else:
-                    result.status = "FAIL"
-                    result.note = "artifact_verify_failed: " + "; ".join(reasons)
-        else:
-            # Target already published (e.g. by a prior/concurrent run): verify it
-            # BEFORE any backfill can overwrite a global latest-run manifest.
-            ok, reasons = verify_published_artifact_for_date(sector, plan.target)
-            if ok:
-                result.status = "UP_TO_DATE"
-            else:
-                result.status = "FAIL"
-                result.note = f"target {plan.target} published but unverifiable: " + "; ".join(reasons)
-        # ---- 2) historical backfill, best-effort, newest-first ------------- #
-        if result.status in {"PASS", "UP_TO_DATE"} and plan.backfill_groups:
+        # ---- 1) strict shared prerequisites ------------------------------- #
+        prerequisites_ok = True
+        for command in plan.pre_commands:
+            rc = _exec(command)
+            result.return_codes.append(rc)
+            if rc != 0:
+                prerequisites_ok = False
+                break
+        if not prerequisites_ok:
+            result.status = "FAIL"
+            result.note = "catch-up prerequisite failed"
+
+        # ---- 2) historical backfill, best-effort, oldest-first ------------ #
+        embedded_target_failed = False
+        if prerequisites_ok and plan.backfill_groups:
             for dates, cmds in plan.backfill_groups:
                 group_rc = 0
                 for command in cmds:
@@ -2220,20 +2512,59 @@ def run_catch_up_sector(
                 if group_rc != 0:
                     for iso_date in dates:
                         backfill_failed[iso_date] = f"rc={group_rc}"
+                    if plan.native_backfill_covers_target:
+                        embedded_target_failed = True
+                        break
                     continue
                 for iso_date in dates:
-                    # Global latest-run manifests are only trustworthy per-date on
-                    # the per-date route (verified immediately after that date's
-                    # run); a native backfill chunk writes them once, so only
-                    # {date}-partitioned manifests are checked there.
+                    # A native multi-date backfill writes a global manifest only
+                    # once, so only date-partitioned manifests can be checked for
+                    # each member of such a chunk.
+                    verify_backfill_manifest = bool(
+                        sector.historical_health_manifest_required
+                        and ((not plan.used_native_backfill) or date_partitioned_manifest)
+                    )
                     ok_d, reasons_d = verify_published_artifact_for_date(
                         sector,
                         iso_date,
-                        verify_manifest=(not plan.used_native_backfill) or date_partitioned_manifest,
+                        verify_manifest=verify_backfill_manifest,
+                        policy_context="historical",
                     )
                     if not ok_d:
                         backfill_failed[iso_date] = "verify: " + "; ".join(reasons_d)
-    # ---- 3) marker bookkeeping + status ---------------------------------- #
+
+        # ---- 3) CURRENT TARGET LAST (strict) ------------------------------ #
+        if prerequisites_ok and embedded_target_failed:
+            result.status = "FAIL"
+            result.note = f"native backfill/current target {plan.target} failed"
+        elif prerequisites_ok and plan.target_needs_run:
+            target_ok = True
+            for command in plan.target_commands:
+                rc = _exec(command)
+                result.return_codes.append(rc)
+                if rc != 0:
+                    target_ok = False
+                    break
+            if not target_ok:
+                result.status = "FAIL"
+                result.note = f"current target {plan.target} failed"
+            else:
+                ok, reasons = verify_published_artifact_for_date(sector, plan.target)
+                if ok:
+                    result.status = "PASS"
+                else:
+                    result.status = "FAIL"
+                    result.note = "artifact_verify_failed: " + "; ".join(reasons)
+        elif prerequisites_ok:
+            # With no backfill groups, an already-current target needs only a
+            # strict artifact verification.
+            ok, reasons = verify_published_artifact_for_date(sector, plan.target)
+            if ok:
+                result.status = "UP_TO_DATE"
+            else:
+                result.status = "FAIL"
+                result.note = f"target {plan.target} published but unverifiable: " + "; ".join(reasons)
+    # ---- 4) marker bookkeeping + status ---------------------------------- #
     if plan.backfill_dates:
         with _GAP_MARKER_LOCK:
             markers = load_gap_markers(markers_path)
@@ -2249,6 +2580,16 @@ def run_catch_up_sector(
                 if iso_date not in backfill_failed:
                     clear_gap_record(markers, sector.name, iso_date)
             save_gap_markers(markers, markers_path)
+    resolved_markers = clear_resolved_auto_gap_records(
+        sector,
+        plan.target,
+        markers_path=markers_path,
+    )
+    if resolved_markers:
+        log(
+            f"  [{sector.name}] cleared resolved automatic gap markers: "
+            + ",".join(resolved_markers)
+        )
     if result.status in {"PASS", "UP_TO_DATE"}:
         if backfill_failed:
             result.status = "PASS_WITH_BACKFILL_GAPS"
@@ -2276,8 +2617,15 @@ def _should_retry_rc(rc: int) -> bool:
     return rc not in (0, 78, 124)
 
 
+def _is_sector_entry_command(sector: Sector, command: list[str]) -> bool:
+    entry = sector.entry_script.replace("\\", "/").lower()
+    return any(str(part).replace("\\", "/").lower().endswith(entry) for part in command)
+
+
 def _command_for_attempt(sector: Sector, command: list[str], attempt: int) -> list[str]:
     if attempt <= 1 or not sector.retry_args:
+        return list(command)
+    if not _is_sector_entry_command(sector, command):
         return list(command)
     width = len(sector.retry_args)
     if any(command[idx : idx + width] == sector.retry_args for idx in range(len(command) - width + 1)):
@@ -2287,11 +2635,9 @@ def _command_for_attempt(sector: Sector, command: list[str], attempt: int) -> li
 
 def _commands_for_master_resume(sector: Sector, commands: list[list[str]]) -> list[list[str]]:
     """Apply native resume args only to the sector entry command."""
-    entry = sector.entry_script.replace("\\", "/").lower()
     resumed: list[list[str]] = []
     for command in commands:
-        is_entry = any(str(part).replace("\\", "/").lower().endswith(entry) for part in command)
-        resumed.append(_command_for_attempt(sector, command, 2) if is_entry else list(command))
+        resumed.append(_command_for_attempt(sector, command, 2))
     return resumed
 
 
@@ -2586,7 +2932,7 @@ def build_sector_commands(
                 args.from_date,
                 args.to_date,
             ):
-                cmds.extend(daily_post_commands(sector, iso_date))
+                cmds.extend(daily_post_commands(sector, iso_date, historical=True))
             note = "backfill+post_steps"
         return cmds, note
     if args.mode == "repair":
@@ -2605,6 +2951,7 @@ def build_sector_commands(
             force=args.force,
             include_weekly_pre=args.cadence == "weekly",
             live_completed_session=getattr(args, "live_session", None),
+            catch_up_from=getattr(args, "catch_up_from", None),
         )
         return plan.all_commands, plan_note(plan)
     # daily
@@ -2669,11 +3016,9 @@ def finalize_result(
 ) -> RunResult:
     """Apply strict artifact verification (daily) and optional-sector downgrade.
 
-    Daily verifies the single target date. Catch-up verification happens INLINE in
-    run_catch_up_sector (target strictly, each backfill date immediately after its
-    own run, best-effort), so only the optional-sector downgrade applies here --
-    re-verifying at the end would compare a global latest-run manifest against the
-    wrong (oldest) date under current-first/newest-first execution order.
+    Daily verifies the single target date. Catch-up verification happens inline in
+    run_catch_up_sector (each backfill immediately, target strictly after all gaps),
+    so only the optional-sector downgrade applies here.
     """
     if not dry_run and mode == "daily" and res.status in {"PASS", "UP_TO_DATE"}:
         _, reasons = verify_published_artifact(sector, target)
@@ -2691,6 +3036,22 @@ def _set_artifact(sector: Sector, res: RunResult, target: str, *, dry_run: bool)
     res.artifact = str(artifact)
     if not dry_run:
         res.sha256 = sha256_file(artifact)
+
+
+def _unexpected_lane_failure(sector: Sector, exc: Exception) -> RunResult:
+    """Convert an escaped lane exception into a fail-visible sector result.
+
+    Command failures normally become ``RunResult`` instances inside ``run_commands``.
+    This guard covers orchestration/finalization defects (for example an artifact or
+    checkpoint read raising after the child process succeeded).  One broken worker
+    must not discard the results already checkpointed by every other lane.
+    """
+    status = "FAIL" if sector.required else "OPTIONAL_FAIL"
+    return RunResult(
+        sector=sector.name,
+        status=status,
+        note=f"unexpected_lane_exception:{type(exc).__name__}:{exc}",
+    )
 
 
 def run_tier0(
@@ -2721,6 +3082,7 @@ def run_tier0(
                 {
                     "run_stamp": run_dir.name,
                     "mode": args.mode,
+                    "catch_up_from": getattr(args, "catch_up_from", None) or "",
                     "cadence": args.cadence,
                     "target": target,
                     "master_pid": os.getpid(),
@@ -2735,8 +3097,8 @@ def run_tier0(
         for sector in members:
             plan: CatchUpPlan | None = None
             if args.mode == "catch-up":
-                # CURRENT-TARGET-FIRST plan; verification happens inline in
-                # run_catch_up_sector (per date, immediately after each run).
+                # Stateful catch-up plan: oldest gap first, current target last;
+                # verification happens inline immediately after each date.
                 plan = build_catch_up_plan(
                     reg,
                     sector,
@@ -2744,6 +3106,7 @@ def run_tier0(
                     force=args.force,
                     include_weekly_pre=args.cadence == "weekly",
                     live_completed_session=getattr(args, "live_session", None),
+                    catch_up_from=getattr(args, "catch_up_from", None),
                 )
                 commands, note = plan.all_commands, plan_note(plan)
             else:
@@ -2808,9 +3171,28 @@ def run_tier0(
 
     workers = max(1, len(lanes))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(run_lane, members) for members in lanes]
+        futures = {pool.submit(run_lane, members): members for members in lanes}
         for fut in concurrent.futures.as_completed(futures):
-            fut.result()
+            members = futures[fut]
+            try:
+                fut.result()
+            except Exception as exc:
+                names = [sector.name for sector in members]
+                log(
+                    "  [lane] FAIL unexpected exception "
+                    f"members={names} error={type(exc).__name__}:{exc}"
+                )
+                # Completed members were checkpointed before the exception and must
+                # remain authoritative. Mark only the failed/not-started tail.
+                for sector in members:
+                    with lock:
+                        already_recorded = sector.name in results
+                    if already_recorded:
+                        continue
+                    res = _unexpected_lane_failure(sector, exc)
+                    parent, filename = publish_dir_root(sector)
+                    res.artifact = str(parent / _publish_folder_name(sector, target) / filename)
+                    record_progress(res)
     return results
 
 
@@ -2908,6 +3290,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--catch-up", action="store_true", help="Run every missing trading date per sector through the target."
+    )
+    p.add_argument(
+        "--catch-up-from",
+        default="",
+        help="Operator override: in catch-up mode, fill missing sessions no earlier than YYYY-MM-DD.",
     )
     p.add_argument(
         "--repair",
@@ -3052,6 +3439,16 @@ def main(argv: list[str] | None = None) -> int:
     skip = [s.strip() for s in args.skip_sectors.split(",") if s.strip()]
     selected = select_sectors(reg, only, skip)
     target = resolve_target_date(args.as_of)
+    if args.catch_up_from:
+        if args.mode != "catch-up":
+            raise SystemExit("--catch-up-from requires --catch-up")
+        args.catch_up_from = parse_iso(args.catch_up_from)
+        if args.catch_up_from > target:
+            raise SystemExit(
+                f"--catch-up-from ({args.catch_up_from}) must not be after target ({target})"
+            )
+    else:
+        args.catch_up_from = None
     # Sample the live completed session ONCE, next to target resolution, so a run
     # spanning the 17:00 ET close cannot reclassify the intended current-session
     # command as historical at command-build time hours later.
@@ -3111,6 +3508,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "run_stamp": run_stamp,
                 "mode": args.mode,
+                "catch_up_from": getattr(args, "catch_up_from", None) or "",
                 "cadence": args.cadence,
                 "target": target,
                 "dry_run": True,
@@ -3132,6 +3530,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "run_stamp": run_stamp,
                 "mode": args.mode,
+                "catch_up_from": getattr(args, "catch_up_from", None) or "",
                 "cadence": args.cadence,
                 "target": target,
                 "master_pid": os.getpid(),
@@ -3179,8 +3578,8 @@ def main(argv: list[str] | None = None) -> int:
                 if gate_ok or args.ignore_gate:
                     for sector in tier1_selected:
                         if args.mode == "catch-up":
-                            # CURRENT-TARGET-FIRST: the current book is attempted
-                            # before (and independently of) any historical backfill.
+                            # Historical books are built oldest-first and the
+                            # current book is rebuilt strictly at the end.
                             plan = build_catch_up_plan(
                                 reg,
                                 sector,
@@ -3188,6 +3587,7 @@ def main(argv: list[str] | None = None) -> int:
                                 force=args.force,
                                 include_weekly_pre=args.cadence == "weekly",
                                 live_completed_session=getattr(args, "live_session", None),
+                                catch_up_from=getattr(args, "catch_up_from", None),
                             )
                             commands, note = plan.all_commands, plan_note(plan)
                             res = run_catch_up_sector(reg, sector, plan, run_dir=run_dir, net_sem=net_sem, log=log)
@@ -3213,6 +3613,7 @@ def main(argv: list[str] | None = None) -> int:
                             {
                                 "run_stamp": run_stamp,
                                 "mode": args.mode,
+                                "catch_up_from": getattr(args, "catch_up_from", None) or "",
                                 "cadence": args.cadence,
                                 "target": target,
                                 "master_pid": os.getpid(),
@@ -3251,6 +3652,7 @@ def main(argv: list[str] | None = None) -> int:
             payload: dict[str, Any] = {
                 "run_stamp": run_stamp,
                 "mode": args.mode,
+                "catch_up_from": getattr(args, "catch_up_from", None) or "",
                 "cadence": args.cadence,
                 "target": target,
                 "master_pid": os.getpid(),
@@ -3527,7 +3929,9 @@ def run_selftest() -> int:
         live_completed_session="2026-07-17",
     )
     ok("catch_up_historical_portfolio_suppresses_event_cycle", "--historical-catchup" in historical_portfolio)
+    ok("catch_up_historical_portfolio_keeps_resume", "--force" not in historical_portfolio)
     ok("catch_up_live_portfolio_keeps_event_cycle", "--historical-catchup" not in live_portfolio)
+    ok("catch_up_live_portfolio_keeps_resume", "--force" not in live_portfolio)
 
     # --- repair selection (two-stage) ---
     rmap = parse_repair_arg(reg, "alpha:s1,mach_x")
@@ -3778,6 +4182,10 @@ def run_selftest() -> int:
         "daily_historical_portfolio_suppresses_event_cycle",
         "--historical-catchup" in historical_daily_cmds[0],
     )
+    ok(
+        "daily_historical_portfolio_keeps_resume",
+        "--force" not in historical_daily_cmds[0],
+    )
     args_daily.live_session = "2026-07-17"
     live_daily_cmds, _ = build_sector_commands(reg, portfolio, args_daily, "2026-07-17", {})
     ok("daily_live_portfolio_keeps_event_cycle", "--historical-catchup" not in live_daily_cmds[0])
@@ -3835,7 +4243,9 @@ def run_selftest() -> int:
             require_oos_valid=True,
             staleness_tolerance_days=3,
             backfill_window_days=None,
+            native_backfill_min_dates=None,
             publish_epoch=None,
+            historical_health_manifest_required=True,
             health=HealthSpec(manifest=None, status_keys=[]),
             backfill=None,
             repair=None,
@@ -3939,8 +4349,8 @@ def run_selftest() -> int:
 
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    # --- catch-up policy (2026-08-07 redesign): current-first, bounded window,
-    # --- epoch exemption, permanent-gap markers, newest-first, best-effort backfill ---
+    # --- catch-up policy: bounded window, epoch exemption, permanent-gap
+    # --- markers, oldest-first best-effort history, strict current target last ---
     cu_root = Path(tempfile.mkdtemp())
     _saved_cu_root = _globals["PROJECT_ROOT"]
     try:
@@ -3984,11 +4394,120 @@ def run_selftest() -> int:
             _publish(cusec, d)
         rep = sector_gap_report(reg, cusec, target_cu, markers={"sectors": {}})
         ok("cu_target_missing_detected", rep.target_missing)
-        ok("cu_window_bounded_by_tolerance", rep.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"])
-        ok("cu_newest_first_ordering", rep.backfill_missing == sorted(rep.backfill_missing, reverse=True))
+        ok("cu_window_bounded_by_tolerance", rep.backfill_missing == ["2026-07-14", "2026-07-15", "2026-07-16"])
+        ok("cu_oldest_first_ordering", rep.backfill_missing == sorted(rep.backfill_missing))
         ok(
             "cu_historical_gaps_surfaced_not_run",
             rep.historical_gaps == ["2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10"],
+        )
+        # A present file with a broken dated contract is still a catch-up gap.
+        incomplete = _sector(name="incomplete", publish_glob="cu_incomplete/{date}/t.csv")
+        for d in ("2026-07-13", "2026-07-14", "2026-07-16"):
+            _publish(incomplete, d)
+        bad_historical = cu_root / "cu_incomplete" / "2026-07-15"
+        bad_historical.mkdir(parents=True, exist_ok=True)
+        (bad_historical / "t.csv").write_text(
+            "asof_date,oos_score_valid_flag,ticker\n2026-07-14,1,T0\n",
+            encoding="utf-8",
+        )
+        rep_incomplete = sector_gap_report(
+            reg,
+            incomplete,
+            target_cu,
+            markers={"sectors": {}},
+            catch_up_from="2026-07-13",
+        )
+        ok(
+            "cu_present_but_incomplete_historical_is_gap",
+            rep_incomplete.backfill_missing == ["2026-07-15"],
+        )
+        # A date-partitioned terminal manifest is historical evidence, not a
+        # mutable latest-state file. Its failed verdict must make an otherwise
+        # valid dated artifact actionable again.
+        dated_health = _sector(
+            name="dated_health",
+            publish_glob="cu_dated_health/{date}/t.csv",
+            health=HealthSpec(
+                manifest="cu_dated_health/{date}/health.json",
+                status_keys=["acceptance"],
+            ),
+        )
+        for d in ("2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16"):
+            _publish(dated_health, d)
+            health_path = cu_root / "cu_dated_health" / d / "health.json"
+            health_path.write_text(
+                json.dumps({
+                    "acceptance": "FAIL" if d == "2026-07-15" else "PASS",
+                    "asof_date": d,
+                }),
+                encoding="utf-8",
+            )
+        rep_dated_health = sector_gap_report(
+            reg,
+            dated_health,
+            target_cu,
+            markers={"sectors": {}},
+            catch_up_from="2026-07-13",
+        )
+        ok(
+            "cu_failed_dated_health_manifest_is_gap",
+            rep_dated_health.backfill_missing == ["2026-07-15"],
+        )
+        historical_artifact_health = _sector(
+            name="historical_artifact_health",
+            publish_glob="cu_dated_health/{date}/t.csv",
+            historical_health_manifest_required=False,
+            health=HealthSpec(
+                manifest="cu_dated_health/{date}/health.json",
+                status_keys=["acceptance"],
+            ),
+        )
+        rep_artifact_health = sector_gap_report(
+            reg,
+            historical_artifact_health,
+            target_cu,
+            markers={"sectors": {}},
+            catch_up_from="2026-07-13",
+        )
+        ok(
+            "cu_explicit_artifact_only_history_ignores_live_manifest",
+            rep_artifact_health.backfill_missing == [],
+        )
+        ok(
+            "cu_artifact_only_history_keeps_current_health_strict",
+            not verify_published_artifact_for_date(
+                historical_artifact_health,
+                "2026-07-15",
+            )[0],
+        )
+
+        # A root/latest manifest cannot be applied retroactively. Historical
+        # completeness therefore remains tied to the dated artifact itself.
+        root_health = _sector(
+            name="root_health",
+            publish_glob="cu_root_health/{date}/t.csv",
+            health=HealthSpec(
+                manifest="cu_root_health/latest_health.json",
+                status_keys=["acceptance"],
+            ),
+        )
+        for d in ("2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16"):
+            _publish(root_health, d)
+        root_health_path = cu_root / "cu_root_health" / "latest_health.json"
+        root_health_path.write_text(
+            json.dumps({"acceptance": "FAIL", "asof_date": "2026-07-16"}),
+            encoding="utf-8",
+        )
+        rep_root_health = sector_gap_report(
+            reg,
+            root_health,
+            target_cu,
+            markers={"sectors": {}},
+            catch_up_from="2026-07-13",
+        )
+        ok(
+            "cu_root_health_manifest_not_retroactive",
+            rep_root_health.backfill_missing == [],
         )
         cusec_w = _sector(name="cusec", publish_glob="cu/{date}/t.csv", backfill_window_days=7)
         rep_w = sector_gap_report(reg, cusec_w, target_cu, markers={"sectors": {}})
@@ -3996,13 +4515,68 @@ def run_selftest() -> int:
             "cu_backfill_window_days_override",
             "2026-07-10" in rep_w.backfill_missing and "2026-07-09" not in rep_w.backfill_missing,
         )
+        rep_explicit = sector_gap_report(
+            reg,
+            cusec_w,
+            target_cu,
+            markers={"sectors": {}},
+            catch_up_from="2026-07-07",
+        )
+        ok(
+            "cu_explicit_lower_bound_overrides_auto_window",
+            "2026-07-07" in rep_explicit.backfill_missing
+            and rep_explicit.historical_gaps == [],
+        )
+
+        # Missing the first session of the week must rerun the weekly prerequisite
+        # before the current target. Otherwise a Friday catch-up can publish a fresh
+        # file against the previous week's universe/configuration.
+        cusec_weekly = _sector(
+            name="cusec_weekly",
+            publish_glob="cu_weekly/{date}/t.csv",
+            weekly_pre_steps=[{"script": "x/weekly.py", "args_template": ["--asof", "{date}"]}],
+        )
+        _publish(cusec_weekly, "2026-07-10")
+        plan_weekly = build_catch_up_plan(
+            reg,
+            cusec_weekly,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers={"sectors": {}},
+            catch_up_from="2026-07-13",
+        )
+        ok(
+            "cu_missed_weekly_session_refreshes_current_target",
+            plan_weekly.target_unhealthy
+            and len(plan_weekly.pre_commands) == 1
+            and "weekly.py" in " ".join(plan_weekly.pre_commands[0])
+            and bool(plan_weekly.target_commands)
+            and target_cu in " ".join(plan_weekly.target_commands[0]),
+        )
+
+        # Old gaps outside the actionable catch-up window are diagnostic only.
+        # They must not make every current no-op launch an expensive weekly job.
+        plan_inert_historical_weekly = build_catch_up_plan(
+            reg,
+            cusec_weekly,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers={"sectors": {}},
+        )
+        ok(
+            "cu_inert_historical_gap_does_not_repeat_weekly_prerequisite",
+            bool(plan_inert_historical_weekly.historical_gaps)
+            and plan_inert_historical_weekly.pre_commands == [],
+        )
 
         # publish-convention epoch: pre-epoch dates exempt from missing-detection
         cusec_e = _sector(name="cusec", publish_glob="cu/{date}/t.csv", publish_epoch="2026-07-13")
         rep_e = sector_gap_report(reg, cusec_e, target_cu, markers={"sectors": {}})
         ok(
             "cu_epoch_exempts_preepoch_dates",
-            rep_e.historical_gaps == [] and rep_e.backfill_missing == ["2026-07-16", "2026-07-15", "2026-07-14"],
+            rep_e.historical_gaps == [] and rep_e.backfill_missing == ["2026-07-14", "2026-07-15", "2026-07-16"],
         )
 
         # permanent-gap markers: auto-tombstone after N failures; respected by scans
@@ -4016,28 +4590,107 @@ def run_selftest() -> int:
             "cu_permanent_gap_not_retried",
             "2026-07-15" not in rep_m.backfill_missing and rep_m.permanent_gaps == ["2026-07-15"],
         )
+        rep_auto_retry = sector_gap_report(
+            reg,
+            cusec,
+            target_cu,
+            markers=mk,
+            catch_up_from="2026-07-13",
+        )
+        ok(
+            "cu_explicit_range_retries_auto_tombstone",
+            "2026-07-15" in rep_auto_retry.backfill_missing
+            and rep_auto_retry.permanent_gaps == [],
+        )
+        weekly_mk = {"sectors": {"cusec_weekly": {"2026-07-13": {"permanent": True}}}}
+        for published_date in ("2026-07-14", "2026-07-15", "2026-07-16", target_cu):
+            _publish(cusec_weekly, published_date)
+        plan_permanent_weekly = build_catch_up_plan(
+            reg,
+            cusec_weekly,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers=weekly_mk,
+            catch_up_from="2026-07-13",
+        )
+        ok(
+            "cu_permanent_weekly_gap_does_not_repeat_prerequisite",
+            plan_permanent_weekly.permanent_gaps == ["2026-07-13"]
+            and plan_permanent_weekly.pre_commands == []
+            and plan_permanent_weekly.target_commands == []
+            and not plan_permanent_weekly.target_unhealthy,
+        )
         clear_gap_record(mk, "cusec", "2026-07-15")
         ok("cu_marker_cleared", permanent_gap_dates(mk, "cusec") == set())
 
-        # plan: CURRENT TARGET FIRST, then newest-first backfill, post steps per date
+        # plan: oldest-first backfill, then CURRENT TARGET LAST; post steps per date
         plan_cu = build_catch_up_plan(
             reg, cusec, target_cu, force=False, live_completed_session=target_cu, markers={"sectors": {}}
         )
-        ok("cu_plan_current_target_first", plan_cu.target_missing and target_cu in " ".join(plan_cu.all_commands[0]))
-        ok("cu_plan_target_post_step", "post.py" in " ".join(plan_cu.all_commands[1]))
-        ok("cu_plan_backfill_newest_first", plan_cu.backfill_dates == ["2026-07-16", "2026-07-15", "2026-07-14"])
+        ok("cu_plan_current_target_last", plan_cu.target_missing and target_cu in " ".join(plan_cu.all_commands[-2]))
+        ok("cu_plan_target_post_step", "post.py" in " ".join(plan_cu.all_commands[-1]))
+        ok("cu_plan_backfill_oldest_first", plan_cu.backfill_dates == ["2026-07-14", "2026-07-15", "2026-07-16"])
         ok(
-            "cu_plan_backfill_after_target",
+            "cu_plan_backfill_before_target",
             all(target_cu in " ".join(c) for c in plan_cu.target_commands)
-            and plan_cu.all_commands[: len(plan_cu.target_commands)] == plan_cu.target_commands,
+            and plan_cu.all_commands[-len(plan_cu.target_commands) :] == plan_cu.target_commands,
         )
         ok(
             "cu_plan_historical_flag_on_backfill_only",
             all("--historical-catchup" not in c for c in plan_cu.target_commands),
         )
+        forceable_cusec = Sector(
+            **{**cusec.__dict__, "force_args": ["--force"]}
+        )
+        plan_forceable_cu = build_catch_up_plan(
+            reg,
+            forceable_cusec,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers={"sectors": {}},
+        )
+        ok(
+            "cu_sector_target_restore_is_forced",
+            "--force" in plan_forceable_cu.target_commands[0],
+        )
+        portfolio_cu = Sector(
+            **{
+                **cusec.__dict__,
+                "name": "portfolio_layer",
+                "force_args": ["--force"],
+            }
+        )
+        plan_portfolio_cu = build_catch_up_plan(
+            reg,
+            portfolio_cu,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers={"sectors": {}},
+        )
+        ok(
+            "cu_portfolio_missing_target_is_rebuilt_incrementally",
+            "--force" not in plan_portfolio_cu.target_commands[0],
+        )
+        _publish(portfolio_cu, target_cu)
+        plan_portfolio_healthy_target = build_catch_up_plan(
+            reg,
+            portfolio_cu,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers={"sectors": {}},
+        )
+        ok(
+            "cu_portfolio_historical_repair_preserves_healthy_target",
+            bool(plan_portfolio_healthy_target.backfill_groups)
+            and plan_portfolio_healthy_target.target_commands == [],
+        )
 
-        # native backfill route: chunked to <= threshold dates per command, newest chunk
-        # first, per-date post steps preserved on the backfill route too
+        # native backfill route: chunked to <= threshold dates per command,
+        # oldest chunk first, per-date post steps preserved too
         cusec_bf = _sector(
             name="cusec_bf",
             publish_glob="cubf/{date}/t.csv",
@@ -4045,7 +4698,20 @@ def run_selftest() -> int:
             backfill=BackfillSpec(
                 script="a/bf.py", args_template=["--start", "{from}", "--end", "{to}"], per_date=False
             ),
-            daily_post_steps=[{"script": "x/post.py", "args_template": ["--asof", "{date}"]}],
+            daily_post_steps=[
+                {"script": "x/post.py", "args_template": ["--asof", "{date}"]},
+                {
+                    "script": "x/historical.py",
+                    "args_template": ["--asof", "{date}", "--context", "production"],
+                    "historical_args_template": [
+                        "--asof",
+                        "{date}",
+                        "--context",
+                        "historical",
+                    ],
+                    "historical_only": True,
+                },
+            ],
         )
         _publish(cusec_bf, "2026-07-06")
         plan_bf = build_catch_up_plan(
@@ -4058,11 +4724,85 @@ def run_selftest() -> int:
             and all(len(dates) <= reg.catch_up_gap_backfill_threshold for dates, _c in plan_bf.backfill_groups),
         )
         ok(
-            "cu_native_chunks_newest_first",
-            plan_bf.backfill_groups[0][0] == ("2026-07-15", "2026-07-16")
-            and plan_bf.backfill_groups[-1][0][0] == "2026-07-07",
+            "cu_native_chunks_oldest_first",
+            plan_bf.backfill_groups[0][0][0] == "2026-07-07"
+            and plan_bf.backfill_groups[-1][0] == ("2026-07-15", "2026-07-16"),
         )
-        ok("cu_native_chunk_post_steps", sum("post.py" in " ".join(c) for c in plan_bf.backfill_groups[0][1]) == 2)
+        first_chunk_dates, first_chunk_commands = plan_bf.backfill_groups[0]
+        ok(
+            "cu_native_chunk_post_steps",
+            sum("post.py" in " ".join(c) for c in first_chunk_commands)
+            == len(first_chunk_dates),
+        )
+        ok(
+            "cu_native_historical_only_post_context",
+            sum(
+                "historical.py" in " ".join(c)
+                and "--context historical" in " ".join(c)
+                for c in first_chunk_commands
+            )
+            == len(first_chunk_dates)
+            and all("historical.py" not in " ".join(c) for c in plan_bf.target_commands),
+        )
+        exact_dates_sector = _sector(
+            name="cu_exact_dates",
+            publish_glob="cuexact/{date}/t.csv",
+            backfill_window_days=10,
+            native_backfill_min_dates=1,
+            backfill=BackfillSpec(
+                script="a/bf.py",
+                args_template=["--history-dates", "{dates}"],
+                per_date=False,
+            ),
+        )
+        _publish(exact_dates_sector, "2026-07-13")
+        _publish(exact_dates_sector, "2026-07-15")
+        exact_plan = build_catch_up_plan(
+            reg,
+            exact_dates_sector,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers={"sectors": {}},
+        )
+        exact_command = " ".join(exact_plan.backfill_groups[0][1][0])
+        ok(
+            "cu_native_receives_exact_missing_dates_not_range",
+            "--history-dates 2026-07-14,2026-07-16" in exact_command,
+        )
+        # Some native range runners (machinery) rebuild the current target and
+        # all historical gaps in one monotone command. They must not be split
+        # into regressive chunks or followed by a duplicate current rebuild.
+        cusec_cover = _sector(
+            name="cusec_cover",
+            publish_glob="cucover/{date}/t.csv",
+            backfill_window_days=10,
+            native_backfill_min_dates=1,
+            backfill=BackfillSpec(
+                script="a/bf.py",
+                args_template=["--start", "{from}", "--asof", "{to}"],
+                per_date=False,
+                covers_target=True,
+            ),
+        )
+        _publish(cusec_cover, "2026-07-06")
+        plan_cover = build_catch_up_plan(
+            reg,
+            cusec_cover,
+            target_cu,
+            force=False,
+            live_completed_session=target_cu,
+            markers={"sectors": {}},
+        )
+        cover_command = " ".join(plan_cover.backfill_groups[0][1][0])
+        ok(
+            "cu_native_covers_target_single_monotone_command",
+            plan_cover.native_backfill_covers_target
+            and len(plan_cover.backfill_groups) == 1
+            and "2026-07-07" in cover_command
+            and target_cu in cover_command
+            and plan_cover.target_commands == [],
+        )
         direct_bf_args = argparse.Namespace(
             mode="backfill",
             from_date="2026-07-14",
@@ -4079,6 +4819,15 @@ def run_selftest() -> int:
             "direct_backfill_preserves_daily_post_steps",
             direct_bf_note == "backfill+post_steps"
             and sum("post.py" in " ".join(c) for c in direct_bf_cmds) == 3,
+        )
+        ok(
+            "direct_backfill_uses_historical_post_context",
+            sum(
+                "historical.py" in " ".join(c)
+                and "--context historical" in " ".join(c)
+                for c in direct_bf_cmds
+            )
+            == 3,
         )
 
         # execution: a failed backfill date NEVER fails the sector/master; the failed
@@ -4144,8 +4893,8 @@ def run_selftest() -> int:
             plan_a3.backfill_dates == [] and plan_a3.permanent_gaps == ["2026-07-15"],
         )
 
-        # execution: CURRENT-date failure fails the sector exactly like daily and
-        # skips backfill (no historical mutation on a failed night)
+        # execution: CURRENT-date failure fails the sector exactly like daily,
+        # after best-effort history has already been recovered oldest-first
         cus_b = _sector(name="cus_b", publish_glob="cub/{date}/t.csv")
         for d in ("2026-07-06", "2026-07-13"):
             _publish(cus_b, d)
@@ -4163,7 +4912,11 @@ def run_selftest() -> int:
             runner=_mk_runner({target_cu}, cus_b),
         )
         ok("cu_exec_current_failure_fails_sector", res_b.status == "FAIL")
-        ok("cu_exec_current_failure_skips_backfill", res_b.return_codes == [1])
+        ok(
+            "cu_exec_current_failure_follows_backfill",
+            res_b.return_codes[-1] == 1
+            and all((cu_root / "cub" / d / "t.csv").exists() for d in ("2026-07-14", "2026-07-15", "2026-07-16")),
+        )
 
         # fully current catch-up -> UP_TO_DATE (healthy), never NOTE/FAIL
         cus_c = _sector(name="cus_c", publish_glob="cuc/{date}/t.csv")
@@ -4327,6 +5080,21 @@ def run_selftest() -> int:
     finally:
         load_registry(tmp)  # restore the plain fake registry's (empty) closure set
     ok("closure_restored_after_reload", is_trading_day(date(2026, 7, 15)))
+    duplicate_registry = ctmp.parent / "duplicate_registry.yaml"
+    duplicate_registry.write_text(
+        "defaults:\n  retries: 1\n  retries: 2\nsectors: []\n",
+        encoding="utf-8",
+    )
+    try:
+        load_registry(duplicate_registry)
+        ok("registry_duplicate_keys_fail_closed", False)
+    except ValueError as exc:
+        ok(
+            "registry_duplicate_keys_fail_closed",
+            "duplicate key 'retries'" in str(exc),
+        )
+    finally:
+        load_registry(tmp)
 
     # --- explicit --as-of must be a real session ---
     try:
@@ -4337,7 +5105,13 @@ def run_selftest() -> int:
 
     # --- retry policy: success and TIMEOUT are terminal, other failures retry ---
     ok("timeout_not_retried", not _should_retry_rc(124) and not _should_retry_rc(78) and not _should_retry_rc(0) and _should_retry_rc(1))
-    retry_sector = Sector(**{**reg.by_name("alpha").__dict__, "retry_args": ["--resume"]})
+    retry_sector = Sector(
+        **{
+            **reg.by_name("alpha").__dict__,
+            "entry_script": "runner.py",
+            "retry_args": ["--resume"],
+        }
+    )
     retry_base = ["python", "runner.py", "--asof", "2026-07-17"]
     ok("retry_args_absent_first_attempt", _command_for_attempt(retry_sector, retry_base, 1) == retry_base)
     ok(
@@ -4348,14 +5122,29 @@ def run_selftest() -> int:
         "retry_args_not_duplicated",
         _command_for_attempt(retry_sector, [*retry_base, "--resume"], 2) == [*retry_base, "--resume"],
     )
-    native_resume_sector = Sector(
-        **{**retry_sector.__dict__, "entry_script": "runner.py"}
-    )
     post_command = ["python", "post_publish.py", "--asof", "2026-07-17"]
     ok(
+        "retry_args_never_added_to_post_step",
+        _command_for_attempt(retry_sector, post_command, 2) == post_command,
+    )
+    ok(
         "master_resume_only_updates_entry_command",
-        _commands_for_master_resume(native_resume_sector, [retry_base, post_command])
+        _commands_for_master_resume(retry_sector, [retry_base, post_command])
         == [[*retry_base, "--resume"], post_command],
+    )
+    req_lane_failure = _unexpected_lane_failure(_sector(name="req_lane", required=True), RuntimeError("boom"))
+    opt_lane_failure = _unexpected_lane_failure(_sector(name="opt_lane", required=False), OSError("disk"))
+    ok(
+        "unexpected_required_lane_exception_is_fail_visible",
+        req_lane_failure.status == "FAIL"
+        and req_lane_failure.sector == "req_lane"
+        and "RuntimeError:boom" in req_lane_failure.note,
+    )
+    ok(
+        "unexpected_optional_lane_exception_is_nonblocking_visible",
+        opt_lane_failure.status == "OPTIONAL_FAIL"
+        and opt_lane_failure.sector == "opt_lane"
+        and "OSError:disk" in opt_lane_failure.note,
     )
 
     # --- sealed-manifest gate value preserves the BYPASSED distinction ---
@@ -4684,7 +5473,7 @@ def run_selftest() -> int:
 
     # --- real registry loads and every entry_script exists ---
     real = load_registry(DEFAULT_REGISTRY)
-    ok("real_registry_sectors", len(real.sectors) == 9)
+    ok("real_registry_sectors", len(real.sectors) == 10)
     try:
         validate_registry_paths(real)
         ok("real_registry_all_script_paths_exist", True)
@@ -4697,6 +5486,10 @@ def run_selftest() -> int:
     ok("real_portfolio_tier1", real.by_name("portfolio_layer").dependency_tier == 1)
     # M10: publish/health gate on end-of-run artifacts, with the advisory verdict healthy.
     rport = real.by_name("portfolio_layer")
+    ok(
+        "real_portfolio_retry_reuses_risk_price_data",
+        rport.retry_args == ["--reuse-risk-price-data"],
+    )
     ok("m10_real_portfolio_publish_final_manifest", rport.publish_glob.endswith("/final/final_manifest.json"))
     ok(
         "m10_real_portfolio_health_orchestration_meta",
@@ -4710,13 +5503,42 @@ def run_selftest() -> int:
     ok("real_defense_weekly_no_promotion", not rdef.weekly_pre_steps)
     rbio = real.by_name("biotech")
     ok("real_biotech_oos_column", rbio.oos_column == "oos_score_valid_flag" and rbio.require_oos_valid)
+    ok(
+        "real_biotech_backfill_uses_exact_master_dates",
+        rbio.backfill is not None
+        and "--history-dates" in rbio.backfill.args_template
+        and "{dates}" in rbio.backfill.args_template,
+    )
     rmed = real.by_name("med_devices")
     ok("real_med_devices_require_oos", rmed.require_oos_valid)
+    ok("real_med_current_restore_is_incremental", "--force-refresh" not in rmed.force_args)
     # finding 1: daily self-certifies within the replay window, then script 76 records provenance.
     ok("real_med_oos_score_valid_flag", "--oos-score-valid" in rmed.args_template)
     ok(
         "real_med_post_step_76",
         any("76_mark_med_device_oos_provenance" in str(step.get("script", "")) for step in rmed.daily_post_steps),
+    )
+    med_source_step = next(
+        step
+        for step in rmed.daily_post_steps
+        if "81_build_med_device_source_incorporation" in str(step.get("script", ""))
+    )
+    ok(
+        "real_med_source_incorporation_historical_only",
+        med_source_step.get("historical_only") is True
+        and "historical" in list(med_source_step.get("historical_args_template") or [])
+        and all(
+            "81_build_med_device_source_incorporation" not in " ".join(command)
+            for command in daily_post_commands(rmed, "2026-08-28")
+        )
+        and any(
+            "--policy-context historical" in " ".join(command)
+            for command in daily_post_commands(
+                rmed,
+                "2026-08-27",
+                historical=True,
+            )
+        ),
     )
     # finding 7: 63 rebuild sits in the repair rebuild chain, before the institutional-flow rebuild it feeds.
     ok(
@@ -4737,6 +5559,15 @@ def run_selftest() -> int:
         and "--include-stage11-survivorship-panel" in rsemi.backfill.args_template,
     )
     ok("real_semi_repair_rebuild", rsemi.repair is not None and bool(rsemi.repair.rebuild_steps))
+    rmach = real.by_name("machinery")
+    ok(
+        "real_machinery_uses_native_gap_backfill",
+        rmach.native_backfill_min_dates == 1
+        and rmach.backfill is not None
+        and bool(rmach.backfill.script)
+        and rmach.backfill.covers_target
+        and "--overwrite-outputs" in rmach.backfill.args_template,
+    )
     # freshness sentinel seeds: probes parse and carry the intended shape.
     ok(
         "real_defense_freshness_probe_names",

@@ -19,6 +19,7 @@ from dedicated_parser.sec_paths import (
     SEC_ARCHIVE_ENTRY_SUFFIXES,
     SEC_DOCUMENT_SUFFIXES,
     SEC_SUBMISSIONS_ARCHIVE_SUFFIXES,
+    quote_sec_relative_document_path,
     resolve_sec_relative_document_path,
     validate_sec_relative_document_path,
 )
@@ -52,7 +53,7 @@ CORE_FORM_FAMILIES = {
 EVENT_FORMS = frozenset({'8-K', '8-K/A', '6-K', '6-K/A'})
 CAPTURE_FORMS = frozenset({*CORE_FORM_FAMILIES, *EVENT_FORMS})
 INVENTORY_POLICY_VERSION = 'consumer_defensive_historical_inventory_v1'
-EVENT_DOCUMENT_POLICY_VERSION = 'consumer_defensive_event_documents_v2'
+EVENT_DOCUMENT_POLICY_VERSION = 'consumer_defensive_event_documents_v4'
 _ACCESSION_RE = re.compile(r'^[0-9]{10}-[0-9]{2}-[0-9]{6}$')
 _EVENT_EXHIBIT_TYPE_RE = re.compile(r'^EX-99(?:\.|$)', re.IGNORECASE)
 _EVENT_DESCRIPTION_RE = re.compile(
@@ -71,6 +72,9 @@ def _event_document_policy_sha256(maximum_documents: int) -> str:
         'description_pattern': _EVENT_DESCRIPTION_RE.pattern,
         'allowed_document_suffixes': sorted(SEC_DOCUMENT_SUFFIXES),
         'selection_order': 'primary_then_ex99_then_contextual_index_order',
+        'membership_authority': (
+            'directory_index_or_exact_same_accession_direct_or_ix_href'
+        ),
     }).encode()).hexdigest()
 
 
@@ -122,24 +126,34 @@ class _EventFilingIndexHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.rows: list[tuple[str, ...]] = []
+        self.row_hrefs: list[tuple[str, ...]] = []
         self._row: list[str] | None = None
+        self._row_hrefs: list[str] | None = None
         self._cell: list[str] | None = None
         self._anchor: list[str] | None = None
+        self._anchor_hrefs: list[str] | None = None
         self._inside_anchor = False
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
-        del attrs
         lowered = tag.casefold()
         if lowered == 'tr':
             self._row = []
+            self._row_hrefs = []
         elif lowered in {'td', 'th'} and self._row is not None:
             self._cell = []
             self._anchor = None
+            self._anchor_hrefs = []
             self._inside_anchor = False
         elif lowered == 'a' and self._cell is not None:
             self._anchor = []
+            assert self._anchor_hrefs is not None
+            hrefs = [
+                value for key, value in attrs
+                if key.casefold() == 'href' and value is not None
+            ]
+            self._anchor_hrefs.extend(hrefs)
             self._inside_anchor = True
 
     def handle_data(self, data: str) -> None:
@@ -154,17 +168,25 @@ class _EventFilingIndexHTMLParser(HTMLParser):
             self._inside_anchor = False
         elif lowered in {'td', 'th'} and self._cell is not None:
             assert self._row is not None
+            assert self._row_hrefs is not None
             source = self._anchor if self._anchor else self._cell
             self._row.append(' '.join(''.join(source).split()))
+            hrefs = self._anchor_hrefs or []
+            self._row_hrefs.append(hrefs[0] if len(hrefs) == 1 else '')
             self._cell = None
             self._anchor = None
+            self._anchor_hrefs = None
             self._inside_anchor = False
         elif lowered == 'tr' and self._row is not None:
             if self._row:
                 self.rows.append(tuple(self._row))
+                assert self._row_hrefs is not None
+                self.row_hrefs.append(tuple(self._row_hrefs))
             self._row = None
+            self._row_hrefs = None
             self._cell = None
             self._anchor = None
+            self._anchor_hrefs = None
             self._inside_anchor = False
 
 
@@ -185,7 +207,7 @@ def _parse_event_filing_index_html(
         ) from exc
     output: list[dict[str, str]] = []
     seen: set[str] = set()
-    for row in parser.rows:
+    for row, row_hrefs in zip(parser.rows, parser.row_hrefs, strict=True):
         if len(row) < 4:
             continue
         sequence, description, name, sec_type = row[:4]
@@ -207,12 +229,98 @@ def _parse_event_filing_index_html(
             'type': sec_type.strip().upper(),
             'description': description.strip(),
             'sequence': sequence.strip(),
+            'href': row_hrefs[2] if len(row_hrefs) > 2 else '',
         })
     if not output:
         raise ValueError(
             f'Event filing index HTML contains no document rows: {logical_path}'
         )
     return tuple(output)
+
+
+def _event_item_has_exact_same_accession_href(
+    item: dict[str, str],
+    *,
+    archive_cik: str,
+    accession_number: str,
+) -> bool:
+    '''Prove an HTML-index item points to this exact SEC accession member.
+
+    Some historical EDGAR ``index.json`` responses omit exhibits that remain
+    listed in, and directly retrievable from, the accession's filing-index
+    HTML.  The HTML is a valid secondary membership authority only when its
+    anchor target is an exact canonical SEC path for the same CIK, accession,
+    and already-validated document name.  The only query form admitted is the
+    SEC's exact one-parameter iXBRL viewer wrapper, ``/ix?doc=<exact path>``.
+    Extra parameters, fragments, alternate hosts, traversal, and
+    cross-accession links therefore remain fail-closed.
+    '''
+    cik = str(archive_cik).strip()
+    if not cik.isdigit() or len(cik) > 10:
+        raise ValueError(f'Invalid event archive CIK: {archive_cik!r}')
+    if not _ACCESSION_RE.fullmatch(accession_number):
+        raise ValueError(
+            f'Invalid event accession number: {accession_number!r}'
+        )
+    name = validate_sec_relative_document_path(
+        item.get('name'),
+        allowed_suffixes=SEC_DOCUMENT_SUFFIXES,
+        context='Event filing index HTML membership document',
+    )
+    href = item.get('href')
+    if not isinstance(href, str) or not href:
+        return False
+    quoted_name = quote_sec_relative_document_path(
+        name,
+        allowed_suffixes=SEC_DOCUMENT_SUFFIXES,
+        context='Event filing index HTML membership URL',
+    )
+    exact_path = (
+        f'/Archives/edgar/data/{int(cik)}/'
+        f'{accession_number.replace("-", "")}/{quoted_name}'
+    )
+    exact_hrefs = {
+        exact_path,
+        f'https://www.sec.gov{exact_path}',
+        f'/ix?doc={exact_path}',
+        f'https://www.sec.gov/ix?doc={exact_path}',
+    }
+    return href in exact_hrefs
+
+
+def _validate_selected_event_document_membership(
+    directory_items: Iterable[dict[str, str]],
+    selected_items: Iterable[dict[str, str]],
+    *,
+    archive_cik: str,
+    accession_number: str,
+    context: str,
+) -> tuple[str, ...]:
+    '''Return audited JSON-index discrepancies or reject unbound documents.'''
+    directory_names = {
+        str(item['name']).casefold() for item in directory_items
+    }
+    discrepancies: list[str] = []
+    unbound: list[str] = []
+    for item in selected_items:
+        name = str(item['name'])
+        if name.casefold() in directory_names:
+            continue
+        if _event_item_has_exact_same_accession_href(
+            item,
+            archive_cik=archive_cik,
+            accession_number=accession_number,
+        ):
+            discrepancies.append(name)
+        else:
+            unbound.append(name)
+    if unbound:
+        raise RuntimeError(
+            'Filing index HTML selected documents absent from the exact '
+            'directory index without an exact same-accession SEC href: '
+            f'{context}: {unbound}'
+        )
+    return tuple(discrepancies)
 
 
 def _event_filing_index_name(
@@ -1169,6 +1277,11 @@ def hydrate_event_document_snapshot(
             'asof_date': as_of,
             'indexed_filing_count': int(existing['indexed_filing_count']),
             'document_count': selected,
+            'directory_index_discrepancy_documents': int(
+                existing_metadata.get(
+                    'directory_index_discrepancy_documents', 0
+                )
+            ),
             'manifest_sha256': str(existing['manifest_sha256']),
             'seal_relative_path': str(existing['seal_relative_path']),
         }
@@ -1332,29 +1445,27 @@ def hydrate_event_document_snapshot(
         filing_items = _parse_event_filing_index_html(
             filing_index_payload, logical_path=filing_index_logical
         )
-        directory_names = {
-            str(item['name']).casefold() for item in directory_items
-        }
         selected = _select_event_documents(
             filing_items,
             primary_document=primary,
             maximum_documents=maximum_documents,
         )
-        missing = [
-            str(item['name']) for item in selected
-            if str(item['name']).casefold() not in directory_names
-        ]
-        if missing:
-            raise RuntimeError(
-                'Filing index HTML selected documents absent from the exact '
-                f'directory index: {ticker}/{accession}: {missing}'
+        directory_index_discrepancies = (
+            _validate_selected_event_document_membership(
+                directory_items,
+                selected,
+                archive_cik=cik,
+                accession_number=accession,
+                context=f'{ticker}/{accession}',
             )
+        )
         return {
             'directory_path': directory_path,
             'directory_payload': directory_payload,
             'filing_index_path': filing_index_path,
             'filing_index_payload': filing_index_payload,
             'selected': selected,
+            'directory_index_discrepancies': directory_index_discrepancies,
         }
 
     def prefetch_index(row: dict[str, Any]) -> tuple[dict[str, str], ...]:
@@ -1447,6 +1558,7 @@ def hydrate_event_document_snapshot(
     cache_records_by_path: dict[str, dict[str, Any]] = {}
     staged_rows: list[dict[str, Any]] = []
     no_exhibit_filings = 0
+    directory_index_discrepancy_documents = 0
     try:
         for position, row in enumerate(targets, start=1):
             ticker = str(row['ticker'])
@@ -1454,6 +1566,9 @@ def hydrate_event_document_snapshot(
             cik = str(row['archive_cik']).zfill(10)
             artifacts = load_event_index_artifacts(row)
             selected = tuple(artifacts['selected'])
+            directory_index_discrepancy_documents += len(
+                artifacts['directory_index_discrepancies']
+            )
             if len(selected) == 1:
                 no_exhibit_filings += 1
             for index_path_key, index_payload_key in (
@@ -1588,6 +1703,9 @@ def hydrate_event_document_snapshot(
                         'event_policy_sha256': event_policy_sha256,
                         'maximum_documents_per_filing': maximum_documents,
                         'filings_without_selected_exhibit': no_exhibit_filings,
+                        'directory_index_discrepancy_documents': (
+                            directory_index_discrepancy_documents
+                        ),
                         'manifest_file_count': int(projection['files']),
                         'manifest_bytes': int(projection['bytes']),
                         'event_hydration_workers': worker_count,
@@ -1603,6 +1721,9 @@ def hydrate_event_document_snapshot(
             'indexed_filing_count': len(targets),
             'document_count': len(staged_rows),
             'filings_without_selected_exhibit': no_exhibit_filings,
+            'directory_index_discrepancy_documents': (
+                directory_index_discrepancy_documents
+            ),
             'unique_object_count': int(projection['files']),
             'bytes': int(projection['bytes']),
             'manifest_sha256': str(projection['sha256']),

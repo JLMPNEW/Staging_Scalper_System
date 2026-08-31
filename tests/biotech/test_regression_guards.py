@@ -274,6 +274,71 @@ def test_forward_guidance_worker_exception_propagates(monkeypatch: pytest.Monkey
         )
 
 
+def test_forward_guidance_metadata_uses_canonical_documents_without_reading_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_script_module("19_parse_forward_guidance.py", "forward_guidance_metadata_regression")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE companies(company_id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, company_name TEXT);
+        CREATE TABLE sec_filings(
+            accession_nodash TEXT PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            filing_date TEXT NOT NULL,
+            form TEXT NOT NULL,
+            archive_url TEXT
+        );
+        CREATE TABLE sec_filing_latest_document(
+            accession_nodash TEXT PRIMARY KEY,
+            document_id INTEGER NOT NULL,
+            document_url TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            text_hash TEXT NOT NULL
+        );
+        CREATE TABLE sec_filing_documents(
+            document_id INTEGER PRIMARY KEY,
+            accession_nodash TEXT NOT NULL,
+            document_url TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            text_content TEXT,
+            text_hash TEXT
+        );
+        INSERT INTO companies VALUES (1, 'TST', 'Test Co');
+        INSERT INTO sec_filings VALUES ('A1', 1, '2026-05-01', '8-K', 'archive-1');
+        INSERT INTO sec_filings VALUES ('A2', 1, '2026-05-02', '8-K', 'archive-2');
+        INSERT INTO sec_filing_documents VALUES (1, 'A1', 'doc-1', 'complete_submission_text', 'large body 1', 'h1');
+        INSERT INTO sec_filing_documents VALUES (2, 'A2', 'doc-2', 'complete_submission_text', 'large body 2', 'h2');
+        INSERT INTO sec_filing_latest_document VALUES ('A1', 1, 'doc-1', 'complete_submission_text', 'h1');
+        """
+    )
+
+    def refresh_missing(target_conn: sqlite3.Connection, accessions: list[str]) -> int:
+        assert accessions == ["A2"]
+        target_conn.execute(
+            "INSERT INTO sec_filing_latest_document VALUES ('A2', 2, 'doc-2', 'complete_submission_text', 'h2')"
+        )
+        return 1
+
+    monkeypatch.setattr(module, "refresh_sec_latest_documents", refresh_missing)
+    trace: list[str] = []
+    conn.set_trace_callback(trace.append)
+    rows = module.load_filing_metadata_bulk(
+        conn,
+        company_ids=[1],
+        asof_date=date(2026, 5, 8),
+        lookback_days=30,
+        forms={"8-K"},
+        max_filings_per_company=8,
+    )
+    conn.set_trace_callback(None)
+
+    assert [row.accession_nodash for row in rows] == ["A2", "A1"]
+    assert [row.text_hash for row in rows] == ["h2", "h1"]
+    assert not any("text_content" in statement.lower() for statement in trace)
+
+
 def test_score_rows_missing_risk_score_raw_uses_default() -> None:
     module = load_script_module("11_score_biotech_index.py", "score_biotech_regression")
     rows = [

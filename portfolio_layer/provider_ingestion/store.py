@@ -1790,7 +1790,7 @@ def _change_integrity_errors(conn: sqlite3.Connection) -> list[str]:
         "LEFT JOIN estimate_versions pv ON pv.version_id=c.prior_version_id "
         "LEFT JOIN estimate_versions nv ON nv.version_id=c.new_version_id "
         "ORDER BY c.change_id"
-    ).fetchall()
+    )
     for row in rows:
         change_id = str(row["change_id"])
         if change_id != digest({"prior": row["prior_observation_id"], "new": row["new_observation_id"]}):
@@ -1879,9 +1879,67 @@ def _artifact_integrity_errors(conn: sqlite3.Connection) -> list[str]:
     return errors
 
 
+def verify_store_head(conn: sqlite3.Connection) -> list[str]:
+    """Run bounded integrity checks for scheduler no-op polls.
+
+    Every capture validates the complete append-only store before its child can
+    return success, and the nightly portfolio run performs the exhaustive
+    validator again.  Polling that same million-row history every ten minutes is
+    unnecessary and can overlap the next capture.  This check recomputes the
+    newest run digest and verifies the newest dispatch and accepted-run chain
+    edge, so a new or partially sealed head still fails closed.
+    """
+    errors: list[str] = []
+    latest = conn.execute(
+        "SELECT rowid AS storage_rowid,* FROM capture_runs WHERE status<>'MIGRATED' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    if latest is not None:
+        run_id = str(latest["run_id"])
+        if str(latest["run_digest"]) != _stored_run_digest(conn, run_id):
+            errors.append(f"run_digest_mismatch:{run_id}")
+        previous = conn.execute(
+            "SELECT run_digest FROM capture_runs "
+            "WHERE status IN ('PASS','PASS_WITH_WARNINGS','MIGRATED') AND rowid<? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (int(latest["storage_rowid"]),),
+        ).fetchone()
+        expected_previous = EMPTY_DIGEST if previous is None else str(previous["run_digest"])
+        if str(latest["previous_pass_digest"]) != expected_previous:
+            errors.append(f"run_chain_head_break:{run_id}")
+
+    dispatch = conn.execute(
+        "SELECT * FROM scheduled_dispatch_attempts ORDER BY started_at_utc DESC,cycle_id DESC LIMIT 1"
+    ).fetchone()
+    if dispatch is not None:
+        cycle_id = str(dispatch["cycle_id"])
+        if str(dispatch["attempt_digest"]) != digest(_dispatch_attempt_identity(dict(dispatch))):
+            errors.append(f"dispatch_attempt_digest_mismatch:{cycle_id}")
+        state = str(dispatch["state"])
+        completed = str(dispatch["completed_at_utc"])
+        if state == "STARTED" and completed:
+            errors.append(f"dispatch_started_has_completion:{cycle_id}")
+        if state != "STARTED" and not completed:
+            errors.append(f"dispatch_terminal_missing_completion:{cycle_id}")
+        if state == "PASS" and int(dispatch["return_code"] if dispatch["return_code"] is not None else -1) != 0:
+            errors.append(f"dispatch_pass_return_code_invalid:{cycle_id}")
+        artifact_path = str(dispatch["artifact_path"])
+        artifact_sha = str(dispatch["artifact_sha256"])
+        if bool(artifact_path) != bool(artifact_sha):
+            errors.append(f"dispatch_artifact_contract_incomplete:{cycle_id}")
+        elif artifact_path:
+            path = Path(artifact_path)
+            if not path.is_absolute():
+                errors.append(f"dispatch_artifact_path_not_absolute:{cycle_id}")
+            elif not path.is_file():
+                errors.append(f"dispatch_artifact_missing:{cycle_id}")
+            elif not _is_sha256(artifact_sha) or source_digest(path) != artifact_sha:
+                errors.append(f"dispatch_artifact_hash_mismatch:{cycle_id}")
+    return errors
+
+
 def verify_store(conn: sqlite3.Connection) -> list[str]:
     errors: list[str] = []
-    dispatches = conn.execute("SELECT * FROM scheduled_dispatch_attempts ORDER BY started_at_utc,cycle_id").fetchall()
+    dispatches = conn.execute("SELECT * FROM scheduled_dispatch_attempts ORDER BY started_at_utc,cycle_id")
     for row in dispatches:
         if str(row["attempt_digest"]) != digest(_dispatch_attempt_identity(dict(row))):
             errors.append(f"dispatch_attempt_digest_mismatch:{row['cycle_id']}")
@@ -1923,10 +1981,14 @@ def verify_store(conn: sqlite3.Connection) -> list[str]:
         "cr.completed_at_utc AS cycle_completed_at_utc,"
         "COALESCE(obs.observation_count,0) AS observation_count "
         "FROM capture_requests q JOIN capture_runs cr ON cr.run_id=q.run_id "
-        "LEFT JOIN (SELECT request_id,COUNT(*) AS observation_count "
-        "FROM estimate_observations GROUP BY request_id) obs ON obs.request_id=q.request_id "
+        # The observation uniqueness index is ordered (run_id, request_id,
+        # version_id). Group on its full prefix so validation streams that
+        # covering index instead of materializing a multi-gigabyte temp B-tree.
+        "LEFT JOIN (SELECT run_id,request_id,COUNT(*) AS observation_count "
+        "FROM estimate_observations GROUP BY run_id,request_id) obs "
+        "ON obs.run_id=q.run_id AND obs.request_id=q.request_id "
         "ORDER BY q.run_id,q.request_id"
-    ).fetchall()
+    )
     for row in request_rows:
         expected_request_id = digest(
             {
@@ -1975,7 +2037,7 @@ def verify_store(conn: sqlite3.Connection) -> list[str]:
         "COALESCE(SUM(CASE WHEN q.status NOT IN ('AVAILABLE','EMPTY') THEN 1 ELSE 0 END),0) "
         "AS actual_errors,COALESCE(SUM(q.normalized_row_count),0) AS actual_normalized "
         "FROM capture_runs cr LEFT JOIN capture_requests q ON q.run_id=cr.run_id GROUP BY cr.run_id"
-    ).fetchall()
+    )
     for row in run_counts:
         expected_counts = (
             int(row["request_count"]),
@@ -1997,14 +2059,14 @@ def verify_store(conn: sqlite3.Connection) -> list[str]:
                 break
     live_runs = conn.execute(
         "SELECT run_id,run_digest FROM capture_runs WHERE status<>'MIGRATED' ORDER BY rowid"
-    ).fetchall()
+    )
     for row in live_runs:
         expected = _stored_run_digest(conn, str(row["run_id"]))
         if str(row["run_digest"]) != expected:
             errors.append(f"run_digest_mismatch:{row['run_id']}")
     runs = conn.execute(
         "SELECT * FROM capture_runs WHERE status IN ('PASS','PASS_WITH_WARNINGS','MIGRATED') ORDER BY rowid"
-    ).fetchall()
+    )
     previous = EMPTY_DIGEST
     for row in runs:
         if str(row["previous_pass_digest"]) != previous:
@@ -2039,11 +2101,13 @@ def verify_store(conn: sqlite3.Connection) -> list[str]:
     ).fetchone()[0]
     if int(failed_change_count):
         errors.append(f"failed_capture_changes:{failed_change_count}")
+    # The production store contains millions of observations. Iterate cursors
+    # directly so exhaustive integrity validation remains memory-bounded.
     observations = conn.execute(
         "SELECT observation_id,run_id,request_id,version_id,observed_at_utc,"
         "available_at_utc,effective_trading_date,effective_from_utc,"
         "prior_observation_id,observation_digest FROM estimate_observations"
-    ).fetchall()
+    )
     for row in observations:
         observation_id = str(row["observation_id"])
         expected_id = digest(
@@ -2099,7 +2163,7 @@ def verify_store(conn: sqlite3.Connection) -> list[str]:
         "LEFT JOIN estimate_versions v ON v.version_id=o.version_id "
         "LEFT JOIN estimate_versions pv ON pv.version_id=p.version_id "
         "WHERE o.prior_observation_id IS NOT NULL ORDER BY o.observation_id"
-    ).fetchall()
+    )
     for row in priors:
         observation_id = str(row["observation_id"])
         if row["prior_version"] is None:

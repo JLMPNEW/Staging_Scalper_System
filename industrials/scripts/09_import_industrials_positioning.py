@@ -26,6 +26,7 @@ from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.sec_13f_calendar import sec_13f_snapshot_is_stale  # noqa: E402
 from industrials.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
 from industrials.core.text_norm import normalize_cik, normalize_ticker  # noqa: E402
+from industrials.core.ticker_continuity import ticker_continuity_chain  # noqa: E402
 
 
 LOGGER = logging.getLogger("import_industrials_positioning")
@@ -1207,6 +1208,7 @@ def latest_row(
     *,
     source_ids: list[str],
     tiebreak_cols: tuple[str, ...] = (),
+    lookup_tickers: tuple[str, ...] | None = None,
 ) -> sqlite3.Row | None:
     # SC-17: positioning fact tables are keyed by source_id, so a second registered
     # source would otherwise bleed into features nondeterministically. Restrict to
@@ -1218,50 +1220,87 @@ def latest_row(
     # arbitrary row on equal ORDER BY keys. Each tiebreak column sorts DESC ahead
     # of the source rank so the newest bucket wins deterministically.
     tiebreak_sql = "".join(f"{col} DESC, " for col in tiebreak_cols)
+    physical_tickers = lookup_tickers or (ticker,)
+    ticker_rank = " ".join(
+        f"WHEN ? THEN {rank}" for rank in range(len(physical_tickers))
+    )
     return conn.execute(
         f"""
         SELECT * FROM {table}
-        WHERE ticker = ? AND {date_col} <= ?
+        WHERE ticker IN ({qmarks(list(physical_tickers))}) AND {date_col} <= ?
           AND source_id IN ({qmarks(source_ids)})
-        ORDER BY {date_col} DESC, {tiebreak_sql}{source_rank_case(source_ids)} ASC
+        ORDER BY {date_col} DESC, {tiebreak_sql}
+                 CASE ticker {ticker_rank} ELSE 9 END ASC,
+                 {source_rank_case(source_ids)} ASC
         LIMIT 1
         """,
-        (ticker, asof_iso, *source_ids, *source_ids),
+        (*physical_tickers, asof_iso, *source_ids, *physical_tickers, *source_ids),
     ).fetchone()
 
 
-def latest_short_row(conn: Any, ticker: str, asof_iso: str, *, source_ids: list[str]) -> sqlite3.Row | None:
+def latest_short_row(
+    conn: Any,
+    ticker: str,
+    asof_iso: str,
+    *,
+    source_ids: list[str],
+    lookup_tickers: tuple[str, ...] | None = None,
+) -> sqlite3.Row | None:
     # Point-in-time: FINRA short interest is only known once published; when
     # publication_date is missing, assume the typical settlement+14d lag.
     # SC-17: filter by the configured source_id(s); latest published settlement
     # wins, with the configured rank breaking same-settlement-date ties.
+    physical_tickers = lookup_tickers or (ticker,)
+    ticker_rank = " ".join(
+        f"WHEN ? THEN {rank}" for rank in range(len(physical_tickers))
+    )
     return conn.execute(
         f"""
         SELECT * FROM fact_short_interest
-        WHERE ticker = ? AND settlement_date <= ?
+        WHERE ticker IN ({qmarks(list(physical_tickers))}) AND settlement_date <= ?
           AND source_id IN ({qmarks(source_ids)})
           AND (
               (COALESCE(publication_date, '') <> '' AND publication_date <= ?)
               OR (COALESCE(publication_date, '') = '' AND DATE(settlement_date, '+14 day') <= ?)
           )
-        ORDER BY settlement_date DESC, {source_rank_case(source_ids)} ASC
+        ORDER BY settlement_date DESC,
+                 CASE ticker {ticker_rank} ELSE 9 END ASC,
+                 {source_rank_case(source_ids)} ASC
         LIMIT 1
         """,
-        (ticker, asof_iso, *source_ids, asof_iso, asof_iso, *source_ids),
+        (
+            *physical_tickers,
+            asof_iso,
+            *source_ids,
+            asof_iso,
+            asof_iso,
+            *physical_tickers,
+            *source_ids,
+        ),
     ).fetchone()
 
 
-def preferred_form4_source(conn: Any, ticker: str, *, window_start: str, asof_iso: str, direct_source: str, upstream_source: str) -> str:
+def preferred_form4_source(
+    conn: Any,
+    ticker: str,
+    *,
+    window_start: str,
+    asof_iso: str,
+    direct_source: str,
+    upstream_source: str,
+    lookup_tickers: tuple[str, ...] | None = None,
+) -> str:
     """The same Form 4 can exist under both source feeds; aggregate exactly one."""
+    physical_tickers = lookup_tickers or (ticker,)
     rows = conn.execute(
-        """
+        f"""
         SELECT source_id, COUNT(*) AS n
         FROM fact_sec_form4_transaction
-        WHERE ticker = ? AND source_id IN (?, ?)
+        WHERE ticker IN ({qmarks(list(physical_tickers))}) AND source_id IN (?, ?)
           AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
         GROUP BY source_id
         """,
-        (ticker, direct_source, upstream_source, window_start, asof_iso),
+        (*physical_tickers, direct_source, upstream_source, window_start, asof_iso),
     ).fetchall()
     counts = {str(row["source_id"]): int(row["n"] or 0) for row in rows}
     return direct_source if counts.get(direct_source, 0) > 0 else upstream_source
@@ -1328,6 +1367,7 @@ def build_positioning_features(
             (asof.isoformat(), feature_source_id, model_family, *tickers),
         )
     for ticker in tickers:
+        lookup_tickers = ticker_continuity_chain(conn, ticker, asof=asof) or (ticker,)
         insider_source = preferred_form4_source(
             conn,
             ticker,
@@ -1335,47 +1375,48 @@ def build_positioning_features(
             asof_iso=asof.isoformat(),
             direct_source=direct_source,
             upstream_source=upstream_source,
+            lookup_tickers=lookup_tickers,
         )
         # Rows are stored per reporting owner, so a joint filing repeats the same
         # economic transaction; dedupe on (accession_number, nonderiv_trans_sk) for
         # counts/values while keeping owners (cluster buyers) from the raw rows.
         purchase = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS n, COALESCE(SUM(transaction_value), 0) AS v,
                    (
                        SELECT COUNT(DISTINCT rptowner_cik)
                        FROM fact_sec_form4_transaction
-                       WHERE ticker = ? AND source_id = ?
+                       WHERE ticker IN ({qmarks(list(lookup_tickers))}) AND source_id = ?
                          AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
                          AND is_open_market_purchase = 1
                    ) AS owners
             FROM (
                 SELECT accession_number, nonderiv_trans_sk, MAX(transaction_value) AS transaction_value
                 FROM fact_sec_form4_transaction
-                WHERE ticker = ? AND source_id = ?
+                WHERE ticker IN ({qmarks(list(lookup_tickers))}) AND source_id = ?
                   AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
                   AND is_open_market_purchase = 1
                 GROUP BY accession_number, nonderiv_trans_sk
             )
             """,
             (
-                ticker, insider_source, insider_start, asof.isoformat(),
-                ticker, insider_source, insider_start, asof.isoformat(),
+                *lookup_tickers, insider_source, insider_start, asof.isoformat(),
+                *lookup_tickers, insider_source, insider_start, asof.isoformat(),
             ),
         ).fetchone()
         sale = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS n, COALESCE(SUM(transaction_value), 0) AS v
             FROM (
                 SELECT accession_number, nonderiv_trans_sk, MAX(transaction_value) AS transaction_value
                 FROM fact_sec_form4_transaction
-                WHERE ticker = ? AND source_id = ?
+                WHERE ticker IN ({qmarks(list(lookup_tickers))}) AND source_id = ?
                   AND COALESCE(NULLIF(filing_date, ''), transaction_date) BETWEEN ? AND ?
                   AND is_open_market_sale = 1
                 GROUP BY accession_number, nonderiv_trans_sk
             )
             """,
-            (ticker, insider_source, insider_start, asof.isoformat()),
+            (*lookup_tickers, insider_source, insider_start, asof.isoformat()),
         ).fetchone()
         inst = latest_row(
             conn,
@@ -1388,6 +1429,7 @@ def build_positioning_features(
             # stamps every period it carries with the import date; the newest
             # period must win deterministically.
             tiebreak_cols=("period_of_report",),
+            lookup_tickers=lookup_tickers,
         )
         # A snapshot older than the policy window must not satisfy the gate or
         # populate features as if current; NULL the fields and flag for review.
@@ -1412,8 +1454,22 @@ def build_positioning_features(
             ):
                 inst = None
                 inst_stale = True
-        short = latest_short_row(conn, ticker, asof.isoformat(), source_ids=preferred_source_ids)
-        borrow = latest_row(conn, "fact_ibkr_borrow_snapshot", ticker, "asof_date", asof.isoformat(), source_ids=preferred_source_ids)
+        short = latest_short_row(
+            conn,
+            ticker,
+            asof.isoformat(),
+            source_ids=preferred_source_ids,
+            lookup_tickers=lookup_tickers,
+        )
+        borrow = latest_row(
+            conn,
+            "fact_ibkr_borrow_snapshot",
+            ticker,
+            "asof_date",
+            asof.isoformat(),
+            source_ids=preferred_source_ids,
+            lookup_tickers=lookup_tickers,
+        )
         borrow_stale = False
         if borrow is not None and max_borrow_staleness_days > 0:
             borrow_asof = parse_date(borrow["asof_date"])
@@ -1427,16 +1483,26 @@ def build_positioning_features(
                 f"""
                 SELECT short_interest_pct_float, short_interest_shares, float_shares
                 FROM fact_short_interest
-                WHERE ticker = ? AND settlement_date <= ?
+                WHERE ticker IN ({qmarks(list(lookup_tickers))}) AND settlement_date <= ?
                   AND source_id IN ({qmarks(preferred_source_ids)})
                   AND (
                       (COALESCE(publication_date, '') <> '' AND publication_date <= ?)
                       OR (COALESCE(publication_date, '') = '' AND DATE(settlement_date, '+14 day') <= ?)
                   )
-                ORDER BY settlement_date DESC, {source_rank_case(preferred_source_ids)} ASC
+                ORDER BY settlement_date DESC,
+                         CASE ticker {' '.join(f'WHEN ? THEN {rank}' for rank in range(len(lookup_tickers)))} ELSE 9 END ASC,
+                         {source_rank_case(preferred_source_ids)} ASC
                 LIMIT 1
                 """,
-                (ticker, short_prior_cutoff, *preferred_source_ids, asof.isoformat(), asof.isoformat(), *preferred_source_ids),
+                (
+                    *lookup_tickers,
+                    short_prior_cutoff,
+                    *preferred_source_ids,
+                    asof.isoformat(),
+                    asof.isoformat(),
+                    *lookup_tickers,
+                    *preferred_source_ids,
+                ),
             ).fetchone()
             # Change in percent-of-float, so the signal is comparable across companies.
             latest_pct = safe_float(short["short_interest_pct_float"])

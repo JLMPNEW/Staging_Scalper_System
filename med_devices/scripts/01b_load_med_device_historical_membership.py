@@ -32,7 +32,7 @@ VALID_COHORTS = {
     "capital_equipment_procedure_platforms",
     "diagnostics_clinical_tests",
     "elective_vision_dental_aesthetic_devices",
-    "emerging_single_product_therapeutic_platforms",
+    "emerging_single_product_medtech_platforms",
     "healthcare_services_cro_lab_services",
     "home_chronic_care_devices_dme_drug_delivery",
     "hospital_supplies_surgical_consumables_oem",
@@ -203,7 +203,7 @@ def procedure_sensitivity(cohort: str) -> str:
 
 
 def single_product_risk_flag(cohort: str) -> int:
-    return int(cohort == "emerging_single_product_therapeutic_platforms")
+    return int(cohort == "emerging_single_product_medtech_platforms")
 
 
 def upsert_historical_member(conn: Any, row: dict[str, str], *, source_id: str) -> int:

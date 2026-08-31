@@ -832,6 +832,7 @@ def static_source_paths(config: dict[str, Any], *, base_dir: Path) -> list[tuple
         ("company_risk_events", "company_risk_events.input_csv"),
         ("analyst_review_decisions", "med_devices_analyst_review.decisions_csv"),
         ("historical_membership", "med_devices_universe.historical_membership_csv"),
+        ("universe_actions", "med_devices_universe.universe_actions_csv"),
         ("share_count_overrides", "financial_features.share_count_override_csv"),
         ("fda_product_family_mapping", "fda_product_family_review.product_family_mapping_csv"),
         ("fda_product_family_exposure", "fda_product_family_review.product_family_exposure_csv"),
@@ -1132,6 +1133,60 @@ def validate_daily_db_reconciliation(
         observed=f"csv={csv_row_count} db={db_count}",
         expected="csv row count equals med_device_daily_scores count for the as-of date",
         details="Published dated daily CSVs must reconcile with the med_device_daily_scores table.",
+    )
+
+    history_table = db_conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'dim_company_model_taxonomy_history'
+        """
+    ).fetchone()
+    if history_table is None:
+        add_check(
+            checks,
+            asof=asof,
+            artifact=artifact,
+            check_id="taxonomy_history_score_cohort_reconciliation",
+            severity="CRITICAL",
+            passed=False,
+            observed="taxonomy_history_table_missing",
+            expected="PIT taxonomy history exists and matches every scored row",
+            details="Historical calibration cannot use an unversioned current taxonomy snapshot.",
+        )
+        return
+    history_count_row = db_conn.execute(
+        "SELECT COUNT(*) FROM dim_company_model_taxonomy_history WHERE asof_date = ?",
+        (asof,),
+    ).fetchone()
+    history_count = int(history_count_row[0]) if history_count_row else 0
+    mismatch_row = db_conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM med_device_daily_scores s
+        LEFT JOIN dim_company_model_taxonomy_history h
+          ON h.asof_date = s.asof_date
+         AND h.company_id = s.company_id
+        WHERE s.asof_date = ?
+          AND (
+              h.company_id IS NULL
+              OR TRIM(COALESCE(h.calibration_cohort, ''))
+                 <> TRIM(COALESCE(s.calibration_cohort, ''))
+          )
+        """,
+        (asof,),
+    ).fetchone()
+    mismatch_count = int(mismatch_row[0]) if mismatch_row else 0
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="taxonomy_history_score_cohort_reconciliation",
+        severity="CRITICAL",
+        passed=history_count >= db_count and mismatch_count == 0,
+        observed=f"taxonomy_rows={history_count} score_rows={db_count} mismatches={mismatch_count}",
+        expected="taxonomy history covers every scored company and cohort labels match",
+        details="Each historical score must be traceable to its exact as-of taxonomy snapshot.",
     )
 
 

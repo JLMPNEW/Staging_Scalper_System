@@ -116,7 +116,7 @@ def bootstrap_stage5(conn: sqlite3.Connection, bundle: ConfigBundle) -> None:
 
 def _reviewed_positioning_identifiers(
     bundle: ConfigBundle,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     path = resolve_path(
         cfg_get(bundle.payload, "positioning.source_identifier_map"),
         base_dir=bundle.base_dir,
@@ -137,7 +137,8 @@ def _reviewed_positioning_identifiers(
                 "Stage 5 source-identifier map must contain exactly "
                 f"{sorted(required)}; got {sorted(reader.fieldnames or ())}."
             )
-        records: dict[str, dict[str, str]] = {}
+        records: dict[str, dict[str, Any]] = {}
+        finra_owners: dict[str, str] = {}
         for position, row in enumerate(reader, start=2):
             ticker = normalize_ticker(row.get("ticker"))
             if not ticker or ticker in records:
@@ -151,10 +152,27 @@ def _reviewed_positioning_identifiers(
             cusip = str(row.get("cusip") or "").strip().upper().replace(" ", "")
             if cusip and (len(cusip) != 9 or not cusip.isalnum()):
                 raise ValueError(f"Invalid reviewed 13F CUSIP for {ticker}: {cusip!r}")
-            finra_symbol = normalize_ticker(row.get("finra_symbol"))
-            if not cusip and not finra_symbol:
+            finra_symbols = tuple(
+                dict.fromkeys(
+                    symbol
+                    for symbol in (
+                        normalize_ticker(value)
+                        for value in str(row.get("finra_symbol") or "").split(";")
+                    )
+                    if symbol
+                )
+            )
+            if not cusip and not finra_symbols:
                 raise ValueError(f"Stage 5 identifier row has no source identifier: {ticker}")
-            records[ticker] = {"cusip": cusip, "finra_symbol": finra_symbol}
+            for finra_symbol in finra_symbols:
+                prior_owner = finra_owners.get(finra_symbol)
+                if prior_owner is not None and prior_owner != ticker:
+                    raise ValueError(
+                        f"Reviewed FINRA symbol {finra_symbol} maps to multiple "
+                        f"canonical tickers: {prior_owner}, {ticker}"
+                    )
+                finra_owners[finra_symbol] = ticker
+            records[ticker] = {"cusip": cusip, "finra_symbols": finra_symbols}
     return records
 
 
@@ -183,8 +201,9 @@ def build_positioning_universe_rows(
                 (row["company_id"],),
             )
         }
-        rows.append(
-            {
+        finra_symbols = tuple(source_identifiers.get("finra_symbols") or (ticker,))
+        for finra_symbol in finra_symbols:
+            rows.append({
                 "ticker": ticker,
                 "internal_ticker": ticker,
                 "exchange_ticker": ticker,
@@ -192,15 +211,14 @@ def build_positioning_universe_rows(
                 "issuer_name": str(row["company_name"] or ""),
                 "cik": str(row["cik"] or ""),
                 "cusip": source_identifiers.get("cusip") or identifiers.get("cusip", ""),
-                "finra_symbol": source_identifiers.get("finra_symbol") or ticker,
+                "finra_symbol": finra_symbol,
                 "exchange": str(row["exchange"] or ""),
                 "ibkr_ticker": str(row["provider_price_symbol"] or ticker).replace("-", " "),
                 "membership_start_date": str(row["first_membership_date"] or ""),
                 "membership_end_date": str(row["last_membership_end"] or ""),
                 "listing_status": str(row["listing_status"] or ""),
                 "source_membership": "consumer_defensive_point_in_time",
-            }
-        )
+            })
     return rows
 
 

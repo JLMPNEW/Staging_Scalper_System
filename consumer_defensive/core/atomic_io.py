@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Iterator, TextIO
 
 
+_ATOMIC_TEMP_PREFIX = '.cd-atomic-'
+_ATOMIC_TEMP_SUFFIX = '.tmp'
+
+
 @contextmanager
 def atomic_text_writer(
     path: Path, *, encoding: str = 'utf-8', newline: str | None = None,
@@ -19,8 +23,11 @@ def atomic_text_writer(
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=destination.parent,
-        prefix=f'.{destination.name}.',
-        suffix='.tmp',
+        # Keep the temporary component independent of the destination name.
+        # A valid near-NAME_MAX destination would otherwise become invalid
+        # after adding the random mkstemp characters and suffix on Windows.
+        prefix=_ATOMIC_TEMP_PREFIX,
+        suffix=_ATOMIC_TEMP_SUFFIX,
     )
     temporary = Path(temporary_name)
     handle: TextIO | None = None

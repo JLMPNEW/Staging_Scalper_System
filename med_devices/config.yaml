@@ -106,6 +106,7 @@ source_registry:
 
 med_devices_universe:
   seed_csv: "../ticker_mapping/med_dev_tickers_clean_keep.csv"
+  universe_actions_csv: "data/med_device_universe_actions.csv"
   historical_membership_csv: "data/med_device_historical_membership.csv"
   historical_membership_source_id: "med_device_historical_membership_seed"
   min_historical_membership_tickers: 35
@@ -221,6 +222,42 @@ universe_validation:
       listing_start_date: "2017-06-30"
       reviewed_at: "2026-08-22"
       reason: "ticker_transition_guard_precipio_not_premerger_transgenomic_history"
+    MDXG:
+      cik: "0001376339"
+      cusip: "602496101"
+      listing_start_date: "2008-04-02"
+      reviewed_at: "2026-08-30"
+      reason: "ticker_history_guard_same_issuer_otc_and_nasdaq_intervals"
+    ORGO:
+      cik: "0001661181"
+      cusip: "68621F102"
+      listing_start_date: "2018-12-11"
+      reviewed_at: "2026-08-30"
+      reason: "ticker_transition_guard_post_business_combination_not_ahpa_spac_history"
+    CAI:
+      cik: "0002019410"
+      cusip: "142152107"
+      listing_start_date: "2025-06-18"
+      reviewed_at: "2026-08-30"
+      reason: "ticker_reuse_guard_caris_not_cai_international"
+    LNTH:
+      cik: "0001521036"
+      cusip: "516544103"
+      listing_start_date: "2015-06-25"
+      reviewed_at: "2026-08-30"
+      reason: "audited_ipo_identity_and_listing_start"
+    ANIK:
+      cik: "0000898437"
+      cusip: "035255108"
+      listing_start_date: "1993-05-03"
+      reviewed_at: "2026-08-30"
+      reason: "audited_long_running_security_identity_and_listing_start"
+    TECH:
+      cik: "0000842023"
+      cusip: "09073M104"
+      listing_start_date: "1989-02-09"
+      reviewed_at: "2026-08-30"
+      reason: "audited_long_running_security_identity_and_listing_start"
   non_investable_listing_statuses:
     - active_financial_status_d
     - active_financial_status_e
@@ -886,7 +923,7 @@ technical_features:
       mode: "neutral_overlay"
       reliability: 0.0
       rationale: "weak_unstable_technical_orthopedics_spine_dental_2026_05_31"
-    emerging_single_product_therapeutic_platforms:
+    emerging_single_product_medtech_platforms:
       mode: "neutral_overlay"
       reliability: 0.0
       rationale: "neutralized_after_taxonomy_rebuild_emerging_binary_platforms_2026_06_07"
@@ -1212,6 +1249,9 @@ ibkr_borrow_ingestion:
   generic_tick_list: "236,499"
   default_exchange: "SMART"
   default_currency: "USD"
+  # Stay below IB's 100 simultaneous market-data-line limit. Borrow snapshots
+  # are requested concurrently per batch and cancelled before the next batch.
+  batch_size: 75
   sleep_sec: 0.25
   snapshot_timeout_sec: 4.0
   connect_timeout_sec: 15.0
@@ -1333,7 +1373,7 @@ market_positioning_update:
 
 scoring:
   model_family: "med_devices"
-  model_version: "med_device_score_v24_2026_07_hospital_supplies_promotion"
+  model_version: "med_device_score_v25_2026_08_taxonomy_rebuild"
   scoring_contract_version: "stocks_scores_v1"
   oos_replay_window_days: 5
   output_csv: "../output/med_devices_reports/med_device_daily_composite_scores.csv"
@@ -1491,8 +1531,8 @@ scoring:
     allow_production_replace: false
     phase1_safety_lock: true
     production_score_regime_effective_from: "2026-07-27"
-    locked_production_score_regime_version: "med_devices_baseline_composite_shadow_locked_v2_20260727"
-    locked_scoring_model_version: "med_device_score_v24_2026_07_hospital_supplies_promotion_shadow_lock_v2_20260727"
+    locked_production_score_regime_version: "med_devices_baseline_composite_shadow_locked_v3_20260830"
+    locked_scoring_model_version: "med_device_score_v25_2026_08_taxonomy_rebuild"
     source_csv: "../output/med_devices_reports/calibration/med_device_component_ic_by_cohort.csv"
     horizon_days: 120
     ic_metric: "net_spearman_ic_excess"
@@ -1530,8 +1570,9 @@ scoring:
     healthcare_services_cro_lab_services: healthcare_services_cro_other
     hospital_supplies_consumables_dme: hospital_supplies_surgical_consumables_oem
     hospital_supplies_surgical_consumables_oem: hospital_supplies_consumables_dme
-    implantable_interventional_devices_other: emerging_single_product_therapeutic_platforms
-    emerging_single_product_therapeutic_platforms: implantable_interventional_devices_other
+    implantable_interventional_devices_other: emerging_single_product_medtech_platforms
+    emerging_single_product_therapeutic_platforms: emerging_single_product_medtech_platforms
+    emerging_single_product_medtech_platforms: implantable_interventional_devices_other
     orthopedics_spine_dental: orthopedics_spine_sports_implants
     orthopedics_spine_sports_implants: orthopedics_spine_dental
     surgical_robotics_platforms: capital_equipment_procedure_platforms
@@ -1947,7 +1988,7 @@ scoring:
         technical_entry_min: 0
         value_trap_max: 25
         data_completeness_min: 85
-    emerging_single_product_therapeutic_platforms:
+    emerging_single_product_medtech_platforms:
       enabled: true
       calibration_status: "excluded_from_tier1"
       calibration_status_reason: "event_driven_binary_risk_cohort_pending_dedicated_special_situation_calibration"
@@ -1975,12 +2016,11 @@ scoring:
 
 historical_backfill:
   start_asof: "2019-01-04"
-  end_asof: "2026-06-27"
-  # v23 model lock date (med_device_score_v23_2026_07_oos_lock_pit_policy). Script 76 refuses
-  # strict-OOS promotion for any as-of before this date and demotes prior pre-lock promotions:
-  # a model locked 2026-07 cannot produce strict out-of-sample scores for earlier dates
-  # (portfolio_layer/docs/score_eligibility_flags.md: pre-lock snapshots must be oos=0).
-  strict_oos_start_date: "2026-07-01"
+  end_asof: "latest_market_date"
+  # v25 taxonomy/model lock was reviewed on 2026-08-30. Historical rebuilds remain
+  # research-calibration observations; strict live OOS eligibility starts with the first
+  # subsequent business date and is promoted only by script 76.
+  strict_oos_start_date: "2026-08-31"
   ticker_oos_promotion_exceptions:
     ISRG:
       valid_from: "2026-08-14"
@@ -1999,12 +2039,12 @@ historical_backfill:
   frequency: "daily"
   weekday: "friday"
   run_setup: true
-  setup_stages: "init_db,historical_membership,taxonomy"
+  setup_stages: "init_db,historical_membership"
   # Keep in sync with DEFAULT_STAGES in scripts/21 (this string overrides it).
   # fda_product_family_shadow runs script 78 per as-of: mapping/exposure CSVs are
   # valid_from-gated and oos_valid=0 outside the live replay window, so it is
   # safe historically and keeps the shadow columns populated across the panel.
-  stages: "financial,fda,fda_product_family_shadow,reimbursement,technical,borrow,short_interest,institutional_flow,insider_activity,scores,review_pack"
+  stages: "taxonomy,financial,fda,fda_product_family_shadow,reimbursement,technical,borrow,short_interest,institutional_flow,insider_activity,scores,review_pack"
   horizons: "30,60,120"
   include_historical_members: true
   skip_existing: false
@@ -2021,6 +2061,8 @@ historical_backfill:
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
 
 calibration:
+  dev_window_start: "2019-01-04"
+  dev_window_end: "2025-12-31"
   taxonomy_output_csv: "../output/med_devices_reports/calibration/med_device_calibration_cohorts.csv"
   taxonomy_override_csv: "data/calibration_cohort_overrides.csv"
   cohort_neutral_backtest_csv: "../output/med_devices_reports/calibration/med_device_cohort_neutral_backtest.csv"
@@ -2182,7 +2224,7 @@ calibration:
       hospital_supplies_surgical_consumables_oem: "2026-07-17"
     manual_production_seed_cohorts: "orthopedics_spine_sports_implants,life_science_tools_research_instruments"
     watchlist_seed_cohorts: "capital_equipment_procedure_platforms"
-    event_driven_excluded_cohorts: "implantable_interventional_devices_direct_payment,emerging_single_product_therapeutic_platforms"
+    event_driven_excluded_cohorts: "implantable_interventional_devices_direct_payment,emerging_single_product_medtech_platforms"
     min_selected_obs: 10
     min_unique_tickers: 3
     preferred_min_unique_tickers: 4
@@ -2260,7 +2302,7 @@ calibration:
   technical_alpha_policy_top25_csv: "../output/med_devices_reports/calibration/med_device_technical_alpha_policy_top25.csv"
   technical_alpha_policy_candidate_weights: "0.05,0.075,0.10,0.125"
   bad_cohort_component_diagnostics:
-    cohorts: "capital_equipment_procedure_platforms,diagnostics_clinical_tests,elective_vision_dental_aesthetic_devices,emerging_single_product_therapeutic_platforms,healthcare_services_cro_lab_services,home_chronic_care_devices_dme_drug_delivery,hospital_supplies_surgical_consumables_oem,implantable_interventional_devices_direct_payment,life_science_tools_research_instruments,orthopedics_spine_sports_implants"
+    cohorts: "capital_equipment_procedure_platforms,diagnostics_clinical_tests,elective_vision_dental_aesthetic_devices,emerging_single_product_medtech_platforms,healthcare_services_cro_lab_services,home_chronic_care_devices_dme_drug_delivery,hospital_supplies_surgical_consumables_oem,implantable_interventional_devices_direct_payment,life_science_tools_research_instruments,orthopedics_spine_sports_implants"
     output_csv: "../output/med_devices_reports/calibration/med_device_bad_cohort_component_diagnostics.csv"
     summary_csv: "../output/med_devices_reports/calibration/med_device_bad_cohort_component_diagnostic_summary.csv"
   restricted_cohort_templates:

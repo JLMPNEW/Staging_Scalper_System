@@ -265,10 +265,10 @@ def validate_current_rows(rows: list[dict[str, str]], policy: UniversePolicy) ->
         raise ValueError(f"Duplicate live tickers: {duplicates}")
     if "CENT" in tickers or "CENTA" not in tickers:
         raise ValueError("The reviewed liquid class decision requires CENTA and excludes CENT.")
-    if "FDP" not in tickers or "DMC" in tickers or "BOOM" in tickers:
+    if "DMC" not in tickers or "FDP" in tickers or "BOOM" in tickers:
         raise ValueError(
-            "Fresh Del Monte Produce must use its reviewed NYSE ticker FDP; "
-            "DMC/DMC Global/BOOM are out of scope."
+            "Del Monte Corporation must use its reviewed NYSE ticker DMC; "
+            "historical FDP and unrelated DMC Global/BOOM are out of the live scope."
         )
     allowed_types = set(policy.payload["allowed_security_types"])
     allowed_statuses = {str(x).casefold() for x in policy.payload["active_listing_statuses"]}
@@ -374,6 +374,51 @@ def _upsert_security(conn: sqlite3.Connection, row: dict[str, str], company_id: 
                 'active',
                 1,
                 row['currency'],
+                now,
+                security_id,
+            ),
+        )
+        return security_id
+
+    # A reviewed ticker transition can restore a canonical ticker that already
+    # exists as a dormant row in a long-lived database. Reuse that row when it
+    # belongs to the same issuer and exchange so its stable security_id and
+    # historical lineage survive the refresh. Inserting a second row here
+    # would later collide when the Norgate loader restores listing_start_date.
+    dormant = conn.execute(
+        """
+        SELECT security_id
+        FROM dim_security
+        WHERE ticker=? AND company_id=?
+          AND COALESCE(exchange, '')=COALESCE(?, '')
+          AND COALESCE(listing_status, '')<>'active'
+        ORDER BY security_id
+        """,
+        (ticker, company_id, row["exchange"]),
+    ).fetchall()
+    if len(dormant) > 1:
+        raise ValueError(
+            f"Multiple dormant security rows found for reviewed current identity {ticker}."
+        )
+    if dormant:
+        security_id = int(dormant[0][0])
+        conn.execute(
+            """
+            UPDATE dim_security SET
+                company_id=?, ticker=?, exchange=?, listing_country=?,
+                security_type=?, adr_ads_flag=?, listing_status='active',
+                is_primary_listing=1, currency=?, listing_end_date=NULL,
+                updated_at=?
+            WHERE security_id=?
+            """,
+            (
+                company_id,
+                ticker,
+                row["exchange"],
+                row["country"],
+                normalize_security_type(row["security_type"]),
+                int(normalize_security_type(row["security_type"]) == "ADR/ADS"),
+                row["currency"],
                 now,
                 security_id,
             ),

@@ -24,6 +24,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
+from technology.core.cik_lineage import (  # noqa: E402
+    expand_company_cik_lineage,
+    upsert_configured_cik_identifiers,
+)
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
@@ -1352,7 +1356,12 @@ def main() -> None:
                 companies = companies[:max_tickers]
             if not companies:
                 raise ValueError(f"No SEC universe tickers found for model_family={model_family}.")
+            companies = expand_company_cik_lineage(
+                companies,
+                cfg_get(config, "sec_fundamentals.legacy_cik_aliases", {}),
+            )
             with conn:
+                upsert_configured_cik_identifiers(conn, companies)
                 processed = [company["ticker"] for company in companies]
                 if processed:
                     placeholders = ",".join("?" for _ in processed)

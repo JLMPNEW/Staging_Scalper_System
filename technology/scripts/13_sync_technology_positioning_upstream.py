@@ -46,6 +46,7 @@ from technology.core.positioning_window import (  # noqa: E402
     PositioningWindows,
     resolve_positioning_windows,
 )
+from technology.core.text_norm import normalize_ticker  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_technology_positioning_upstream")
@@ -65,6 +66,17 @@ def parse_13f_date(raw: object) -> date | None:
     return mp_parse_date(text)
 
 
+def ibkr_borrow_duration(start_date: date, end_date: date, *, full_history: bool) -> str:
+    if end_date < start_date:
+        raise ValueError("IBKR borrow end date must not precede start date")
+    if full_history:
+        return "7 Y"
+    days = max(1, (end_date - start_date).days)
+    if days <= 365:
+        return f"{days} D"
+    return f"{(days + 364) // 365} Y"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -82,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-history", action="store_true")
     parser.add_argument("--end-date", default=date.today().isoformat())
     parser.add_argument("--tickers-csv", type=Path, default=None)
+    parser.add_argument(
+        "--tickers",
+        default="",
+        help="Optional comma-separated ticker subset applied to --tickers-csv.",
+    )
     parser.add_argument("--market-positioning-db", type=Path, default=None)
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--user-agent", default="")
@@ -148,6 +165,80 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle)]
+
+
+def write_filtered_tickers_csv(
+    source_path: Path,
+    output_path: Path,
+    ticker_filter: set[str],
+) -> Path:
+    rows = read_csv_rows(source_path)
+    selected = [
+        row
+        for row in rows
+        if normalize_ticker(row.get("ticker") or row.get("symbol")) in ticker_filter
+    ]
+    found = {
+        normalize_ticker(row.get("ticker") or row.get("symbol"))
+        for row in selected
+    }
+    missing = sorted(ticker_filter - found)
+    if missing:
+        raise ValueError(f"Requested ticker subset is absent from {source_path}: {missing}")
+    if not selected:
+        raise ValueError("Ticker subset produced an empty positioning universe")
+    fieldnames = list(rows[0]) if rows else []
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fieldnames,
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(selected)
+    return output_path
+
+
+def write_configured_13f_cusip_map_csv(
+    config: dict[str, Any],
+    universe_csv: Path,
+    output_path: Path,
+) -> Path:
+    """Write reviewed CUSIP aliases for the selected technology universe."""
+
+    configured = cfg_get(config, "positioning_import.sec_13f_cusip_aliases", {})
+    if configured in (None, ""):
+        return universe_csv
+    if not isinstance(configured, dict):
+        raise ValueError("positioning_import.sec_13f_cusip_aliases must be a mapping")
+
+    selected_tickers = set(load_universe_tickers(universe_csv))
+    rows: list[dict[str, str]] = []
+    owner_by_cusip: dict[str, str] = {}
+    for raw_ticker, raw_aliases in configured.items():
+        ticker = normalize_ticker(raw_ticker)
+        if not ticker or ticker not in selected_tickers:
+            continue
+        aliases = raw_aliases if isinstance(raw_aliases, list) else [raw_aliases]
+        for raw_cusip in aliases:
+            cusip = normalize_cusip(raw_cusip)
+            if len(cusip) != 9:
+                raise ValueError(f"Invalid reviewed 13F CUSIP for {ticker}: {raw_cusip!r}")
+            prior = owner_by_cusip.get(cusip)
+            if prior is not None and prior != ticker:
+                raise ValueError(f"Reviewed 13F CUSIP {cusip} maps to both {prior} and {ticker}")
+            owner_by_cusip[cusip] = ticker
+            rows.append({"ticker": ticker, "cusip": cusip})
+
+    if not rows:
+        return universe_csv
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["ticker", "cusip"], lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(sorted(rows, key=lambda row: (row["ticker"], row["cusip"])))
+    return output_path
 
 
 def build_positioning_universe_csv(config: dict[str, Any], *, base_dir: Path, output_path: Path) -> Path:
@@ -272,6 +363,7 @@ def aggregate_13f_ownership_for_tickers(
     source: str = "sec_13f_data_sets",
     history_start_date: date | None = None,
     end_date: date | None = None,
+    max_filing_lag_days: int = 75,
 ) -> int:
     """Aggregate 13F holdings into one snapshot per (ticker, period_of_report).
 
@@ -282,6 +374,8 @@ def aggregate_13f_ownership_for_tickers(
     """
     if not tickers:
         return 0
+    if max_filing_lag_days < 45:
+        raise ValueError("max_filing_lag_days must be at least the statutory 45-day 13F window")
     qmarks = ",".join("?" for _ in tickers)
     history_clause = ""
     history_params: tuple[str, ...] = ()
@@ -314,7 +408,15 @@ def aggregate_13f_ownership_for_tickers(
     # per (ticker, period): manager -> (latest filing_date, latest accession, shares, value)
     buckets: dict[tuple[str, str], dict[str, tuple[str, str, float, float]]] = {}
     latest_filing: dict[tuple[str, str], str] = {}
+    late_filing_rows_excluded = 0
     for row in rows:
+        period_date = parse_13f_date(row["period_of_report"])
+        filing_date_value = parse_13f_date(row["filing_date"])
+        if period_date is None or filing_date_value is None:
+            continue
+        if filing_date_value > period_date + timedelta(days=max_filing_lag_days):
+            late_filing_rows_excluded += 1
+            continue
         key = (str(row["ticker"]), str(row["period_of_report"]))
         manager = str(row["manager_key"] or "").strip()
         if not manager:
@@ -410,6 +512,12 @@ def aggregate_13f_ownership_for_tickers(
         """,
         records,
     )
+    LOGGER.info(
+        "13F PIT aggregation rows=%d late_filing_rows_excluded=%d max_filing_lag_days=%d",
+        len(records),
+        late_filing_rows_excluded,
+        max_filing_lag_days,
+    )
     return len(records)
 
 
@@ -426,6 +534,7 @@ def sync_sec_13f_data_sets_streaming(
     timeout_sec: float = 120.0,
     sleep_sec: float = 0.2,
     max_archives: int = 0,
+    max_filing_lag_days: int = 75,
     batch_size: int = 5000,
 ) -> SyncResult:
     tickers = load_universe_tickers(tickers_csv)
@@ -557,6 +666,7 @@ def sync_sec_13f_data_sets_streaming(
         source="sec_13f_data_sets",
         history_start_date=history_start_date,
         end_date=end_date,
+        max_filing_lag_days=max_filing_lag_days,
     )
     total_table_holdings = int(conn.execute("SELECT COUNT(*) FROM institutional_13f_holdings").fetchone()[0])
     message = (
@@ -636,6 +746,30 @@ def main() -> None:
         )
     else:
         tickers_csv = resolve_path(cfg_get(config, "technology_universe.seed_csv"), base_dir=base_dir)
+    ticker_filter = {
+        normalize_ticker(value)
+        for value in args.tickers.split(",")
+        if normalize_ticker(value)
+    }
+    if ticker_filter:
+        tickers_csv = write_filtered_tickers_csv(
+            tickers_csv,
+            cache_dir
+            / "ticker_subsets"
+            / "_".join(sorted(ticker_filter))
+            / "tickers.csv",
+            ticker_filter,
+        )
+    cusip_map_csv = write_configured_13f_cusip_map_csv(
+        config,
+        tickers_csv,
+        cache_dir
+        / "sec_13f_cusip_maps"
+        / f"{tickers_csv.parent.name}_{tickers_csv.stem}_cusips.csv",
+    )
+    max_13f_filing_lag_days = int(
+        cfg_get(config, "positioning_import.sec_13f_snapshot_max_filing_lag_days", 75)
+    )
     user_agent = expand_env_vars(args.user_agent or str(cfg_get(config, "yahoo_price_ingestion.user_agent", DEFAULT_USER_AGENT)))
     allow_stale_market_positioning = bool(args.allow_stale_market_positioning_on_error) or cfg_bool(
         config,
@@ -652,10 +786,10 @@ def main() -> None:
         windows.borrow_start,
         end_date,
     )
-    borrow_duration = (
-        "7 Y"
-        if args.full_history
-        else f"{max(1, (end_date - windows.borrow_start).days)} D"
+    borrow_duration = ibkr_borrow_duration(
+        windows.borrow_start,
+        end_date,
+        full_history=bool(args.full_history),
     )
 
     try:
@@ -670,6 +804,7 @@ def main() -> None:
                         source="sec_13f_data_sets",
                         history_start_date=windows.institutional_13f_start,
                         end_date=end_date,
+                        max_filing_lag_days=max_13f_filing_lag_days,
                     )
                 LOGGER.info(
                     "Reaggregated 13F ownership snapshots: rows=%d tickers=%d",
@@ -698,12 +833,13 @@ def main() -> None:
                 result = sync_sec_13f_data_sets_streaming(
                     conn,
                     tickers_csv=tickers_csv,
-                    cusip_ticker_map_csv=tickers_csv,
+                    cusip_ticker_map_csv=cusip_map_csv,
                     history_start_date=windows.institutional_13f_start,
                     end_date=end_date,
                     cache_dir=cache_dir / "sec_13f",
                     user_agent=user_agent,
                     max_archives=args.sec_13f_max_archives,
+                    max_filing_lag_days=max_13f_filing_lag_days,
                 )
                 LOGGER.info("%s rows=%d message=%s", result.feed_name, result.rows, result.message)
             if not args.skip_ibkr_borrow:

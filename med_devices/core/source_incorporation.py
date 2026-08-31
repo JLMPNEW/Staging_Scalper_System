@@ -23,6 +23,7 @@ CORE_COLUMNS = (
 )
 SOURCE_INCORPORATION_FIELDS = (
     *LINEAGE_FIELDS,
+    "portfolio_candidate_gate_before_lineage",
     "sec_live_discovery_status",
     "sec_live_discovery_time",
     "selected_financial_accessions",
@@ -223,6 +224,11 @@ def build_med_device_source_incorporation(
     for source in score_rows:
         original = {key: str(value or "") for key, value in dict(source).items()}
         row = dict(original)
+        candidate_gate_before_lineage = str(
+            original.get("portfolio_candidate_gate_before_lineage")
+            or original.get("portfolio_candidate_gate")
+            or ""
+        ).strip()
         ticker = normalize_ticker(row.get("ticker"))
         company = companies.get(ticker)
         reasons: list[str] = []
@@ -319,13 +325,12 @@ def build_med_device_source_incorporation(
             "source_incorporation_reason": reason_text,
         }
         row.update(evidence)
-        evidence_row = dict(original)
-        evidence_row.update(evidence)
-        evidence_rows.append(evidence_row)
         if not incorporated and str(row.get("portfolio_candidate_gate") or "") == "1":
             row["portfolio_candidate_gate"] = "0"
             row["portfolio_candidate_status"] = "data_review_required"
             row["portfolio_candidate_reason"] = f"source_incorporation_required:{reason_text}"
+        row["portfolio_candidate_gate_before_lineage"] = candidate_gate_before_lineage
         gated_rows.append(row)
+        evidence_rows.append(dict(row))
 
     return gated_rows, evidence_rows

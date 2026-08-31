@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
+import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 from consumer_defensive.adapters.factor_validation import (
+    _campaign_id,
+    _candidate_scopes,
+    _factor_config_payload,
     run_consumer_defensive_factor_validation,
     validate_consumer_defensive_factor_validation,
 )
@@ -30,7 +37,9 @@ from consumer_defensive.core.specialized_metrics import (
     stage6b_policy_sha256,
 )
 from consumer_defensive.core.stage6c_panel import (
+    _best_observation,
     build_stage6c_panel,
+    stage6c_config_sha256,
     validate_stage6c_panel,
     write_stage6c_reports,
 )
@@ -214,6 +223,13 @@ def _prepared(tmp_path: Path):
                         observation['production_status'], None,
                     ),
                 )
+        observation_hashes = [
+            str(row[0]) for row in conn.execute(
+                '''SELECT observation_sha256
+                   FROM fact_specialized_metric_observation
+                   ORDER BY observation_sha256'''
+            )
+        ]
         conn.execute(
             '''INSERT INTO stage6b_specialized_run(
                    asof_date,adapter_version,policy_sha256,
@@ -226,7 +242,13 @@ def _prepared(tmp_path: Path):
             (
                 stage6b_policy_sha256(), 'a' * 64, 'b' * 64, 'c' * 64,
                 'd' * 64, now, now, 12 * 11,
-                json.dumps({'fixture': True}, sort_keys=True),
+                json.dumps(
+                    {
+                        'fixture': True,
+                        'observation_sha256s': observation_hashes,
+                    },
+                    sort_keys=True,
+                ),
             ),
         )
     return bundle, conn
@@ -299,7 +321,304 @@ def test_stage6c_schema_panel_and_shared_factor_evidence(tmp_path: Path) -> None
             campaign_id=campaign['campaign_id'],
         )
         assert verified['status'] == 'PASS'
-        assert verified['cell_count'] == 4
+        assert verified['cell_count'] == 2
+        report_path = Path(campaign['report_path'])
+        report_payload = json.loads(report_path.read_text(encoding='utf-8'))
+        report_payload['package_state_counts'] = ['malformed']
+        report_path.write_text(
+            json.dumps(report_payload), encoding='utf-8'
+        )
+        tampered = validate_consumer_defensive_factor_validation(
+            output_root,
+            campaign_id=campaign['campaign_id'],
+        )
+        assert tampered['status'] == 'FAIL'
+        assert 'report_package_state_count_mismatch' in tampered['errors']
+    finally:
+        conn.close()
+
+
+def test_stage6c_validation_supports_a_strictly_read_only_connection(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared(tmp_path)
+    db_path = tmp_path / 'stage6c.sqlite'
+    try:
+        built = build_stage6c_panel(
+            conn,
+            bundle,
+            as_of='2022-12-30',
+            history_start='2019-01-02',
+        )
+        stage6c_run_id = int(built['stage6c_run_id'])
+    finally:
+        conn.close()
+
+    readonly = sqlite3.connect(
+        f'{db_path.resolve().as_uri()}?mode=ro', uri=True
+    )
+    readonly.row_factory = sqlite3.Row
+    readonly.execute('PRAGMA query_only = ON')
+    readonly.execute('PRAGMA foreign_keys = ON')
+    try:
+        validation = validate_stage6c_panel(
+            readonly, stage6c_run_id=stage6c_run_id
+        )
+    finally:
+        readonly.close()
+    assert validation['status'] == 'PASS'
+
+
+def test_stage6c_observation_selection_is_period_first_and_pit_safe() -> None:
+    rows = [
+        {
+            'observation_id': 1,
+            'period_end': '2024-03-31',
+            'accepted_at': '2024-04-15T12:00:00Z',
+            'scope': 'consolidated',
+            'confidence': 0.99,
+        },
+        {
+            'observation_id': 2,
+            'period_end': '2024-06-30',
+            'accepted_at': '2024-06-28T12:00:00Z',
+            'scope': 'reported_scope',
+            'confidence': 0.95,
+        },
+    ]
+    assert _best_observation(rows, as_of='2024-06-29') is rows[0]
+    assert _best_observation(rows, as_of='2024-06-30') is rows[1]
+
+
+def test_factor_adapter_binds_exact_exported_feature_manifest(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared(tmp_path)
+    try:
+        built = build_stage6c_panel(
+            conn,
+            bundle,
+            as_of='2022-12-30',
+            history_start='2019-01-02',
+        )
+        stage6c_dir = tmp_path / 'stage6c-output'
+        write_stage6c_reports(
+            conn,
+            stage6c_run_id=built['stage6c_run_id'],
+            output_dir=stage6c_dir,
+        )
+        manifest_path = stage6c_dir / 'stage6c_feature_manifest.csv'
+        with manifest_path.open(
+            'r', encoding='utf-8-sig', newline=''
+        ) as handle:
+            rows = list(csv.DictReader(handle))
+            headers = list(rows[0])
+        rows[0]['created_at'] = '2099-01-01T00:00:00Z'
+        with manifest_path.open(
+            'w', encoding='utf-8', newline=''
+        ) as handle:
+            writer = csv.DictWriter(
+                handle, fieldnames=headers, lineterminator='\n'
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        with pytest.raises(
+            ValueError, match='not an exact database export'
+        ):
+            run_consumer_defensive_factor_validation(
+                conn,
+                bundle,
+                stage6c_run_id=built['stage6c_run_id'],
+                panel_path=(
+                    stage6c_dir / 'stage6c_specialized_factor_panel.csv'
+                ),
+                feature_manifest_path=manifest_path,
+                output_root=tmp_path / 'factor-validation',
+                factor_ids=['organic_revenue_growth_pct'],
+                horizons=[21],
+            )
+    finally:
+        conn.close()
+
+
+def test_stage6c_manifest_mutation_and_invalid_export_fail_closed(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared(tmp_path)
+    try:
+        built = build_stage6c_panel(
+            conn,
+            bundle,
+            as_of='2022-12-30',
+            history_start='2019-01-02',
+        )
+        with conn:
+            conn.execute(
+                '''UPDATE stage6c_feature_manifest
+                   SET factor_direction='lower_is_better'
+                   WHERE stage6c_run_id=?
+                     AND factor_id='organic_revenue_growth_pct' ''',
+                (built['stage6c_run_id'],),
+            )
+        validation = validate_stage6c_panel(
+            conn, stage6c_run_id=built['stage6c_run_id']
+        )
+        failed = {
+            row['check'] for row in validation['checks']
+            if row['status'] == 'FAIL'
+        }
+        assert 'feature_manifest_hashes_exact' in failed
+        assert 'feature_manifest_registry_bound' in failed
+        with pytest.raises(RuntimeError, match='Refusing to export invalid'):
+            write_stage6c_reports(
+                conn,
+                stage6c_run_id=built['stage6c_run_id'],
+                output_dir=tmp_path / 'invalid-export',
+            )
+    finally:
+        conn.close()
+
+
+def test_factor_scope_router_uses_subtypes_only_when_cohort_is_impossible() -> None:
+    bundle = _bundle()
+    rows = [
+        {
+            'factor_id': 'narrow_factor',
+            'asof_date': '2026-01-30',
+            'ticker': f'T{_index}',
+            'cohort_id': 'beverages',
+            'applicability_subtype': subtype,
+        }
+        for subtype in ('alcohol', 'non_alcohol')
+        for _index in range(3)
+    ]
+    manifest = {
+        'factor_id': 'narrow_factor',
+        'cohorts_json': json.dumps(['beverages']),
+        'applicability_subtypes_json': json.dumps(
+            ['alcohol', 'non_alcohol']
+        ),
+    }
+    registered, skipped = _candidate_scopes(rows, manifest, bundle)
+    assert len(registered) == 2
+    assert len({row['scope_id'] for row in registered}) == 2
+    assert all(
+        row['scope_id'].startswith('subtype__')
+        and len(row['scope_id']) <= 64
+        and row['cohort_id'] == 'beverages'
+        for row in registered
+    )
+    assert {
+        row['applicability_subtype'] for row in registered
+    } == {'alcohol', 'non_alcohol'}
+    assert any(
+        row['scope_id'] == 'beverages'
+        and row['reason'] == 'structurally_below_registered_cross_section'
+        for row in skipped
+    )
+
+
+def test_campaign_identity_changes_with_methodology() -> None:
+    first = _campaign_id(
+        as_of='2026-08-14',
+        panel_sha256='a' * 64,
+        cell_keys=['cell'],
+        methodology_sha256='b' * 64,
+    )
+    second = _campaign_id(
+        as_of='2026-08-14',
+        panel_sha256='a' * 64,
+        cell_keys=['cell'],
+        methodology_sha256='c' * 64,
+    )
+    assert first != second
+
+
+def test_upstream_semantic_configs_ignore_stage7_campaign_reference() -> None:
+    bundle = _bundle()
+    panel_sha = stage6c_config_sha256(bundle)
+    factor_payload = _factor_config_payload(bundle)
+    changed = copy.deepcopy(bundle.payload)
+    changed['stage7_scoring']['factor_validation_campaign_id'] = 'replacement'
+    changed['stage7_scoring']['source_id'] = 'replacement'
+    downstream_only = ConfigBundle(bundle.path, bundle.base_dir, changed)
+    assert stage6c_config_sha256(downstream_only) == panel_sha
+    assert _factor_config_payload(downstream_only) == factor_payload
+
+    changed = copy.deepcopy(bundle.payload)
+    changed['factor_validation']['sector_minimum_cross_section'] += 1
+    upstream = ConfigBundle(bundle.path, bundle.base_dir, changed)
+    assert stage6c_config_sha256(upstream) == panel_sha
+    assert _factor_config_payload(upstream) != factor_payload
+
+
+def test_stage6c_uses_only_observations_in_sealed_stage6b_run(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared(tmp_path)
+    try:
+        now = utc_now()
+        observation = {
+            'ticker': 'T01',
+            'metric_id': 'organic_revenue_growth_pct',
+            'period_start': '',
+            'period_end': '2022-09-30',
+            'accepted_at': '2022-11-01T12:00:00Z',
+            'numeric_value': 999.0,
+            'unit': 'percent',
+            'definition_version': (
+                'consumer_defensive_specialized_measurements_v1'
+            ),
+            'applicability_status': 'applicable',
+            'evidence_status': 'accepted_measurement_only',
+            'evidence_key': 'unsealed-observation',
+            'source_id': 'shared_dedicated_sec_parser',
+            'source_document': 'unsealed.htm',
+            'confidence': 1.0,
+            'extraction_method': 'fixture',
+            'scope': 'consolidated',
+            'lineage_json': '{}',
+            'production_status': 'measurement_only',
+            'parser_run_id': None,
+        }
+        observation['observation_sha256'] = specialized_observation_sha256(
+            observation
+        )
+        with conn:
+            conn.execute(
+                '''INSERT INTO fact_specialized_metric_observation(
+                       ticker,metric_id,period_start,period_end,accepted_at,
+                       numeric_value,unit,definition_version,
+                       applicability_status,evidence_status,evidence_key,
+                       source_id,source_document,created_at,confidence,
+                       extraction_method,scope,lineage_json,
+                       observation_sha256,production_status,parser_run_id
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (
+                    observation['ticker'], observation['metric_id'], '',
+                    observation['period_end'], observation['accepted_at'],
+                    observation['numeric_value'], observation['unit'],
+                    observation['definition_version'], 'applicable',
+                    'accepted_measurement_only', observation['evidence_key'],
+                    observation['source_id'], observation['source_document'],
+                    now, 1.0, 'fixture', 'consolidated', '{}',
+                    observation['observation_sha256'], 'measurement_only', None,
+                ),
+            )
+        built = build_stage6c_panel(
+            conn,
+            bundle,
+            as_of='2022-12-30',
+            history_start='2019-01-02',
+        )
+        assert conn.execute(
+            '''SELECT COUNT(*) FROM stage6c_specialized_factor_panel
+               WHERE stage6c_run_id=? AND source_observation_sha256=?''',
+            (built['stage6c_run_id'], observation['observation_sha256']),
+        ).fetchone()[0] == 0
+        assert validate_stage6c_panel(
+            conn, stage6c_run_id=built['stage6c_run_id']
+        )['status'] == 'PASS'
     finally:
         conn.close()
 

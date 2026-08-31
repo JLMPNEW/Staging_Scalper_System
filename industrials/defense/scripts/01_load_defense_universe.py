@@ -457,6 +457,7 @@ def upsert_universe(
     cohort_source_id: str,
     start_date: str,
     listing_windows: dict[str, ListingWindow],
+    preserved_historical_tickers: set[str],
 ) -> int:
     now = utc_now()
     seed_source_id = source_id_or_none(conn, source_id)
@@ -477,6 +478,7 @@ def upsert_universe(
         model_family=companies[0].model_family,
         seed_source_id=seed_source_id,
         incoming_tickers=set(tickers),
+        preserved_historical_tickers=preserved_historical_tickers,
     )
     if stale_count:
         LOGGER.info("Removed stale active defense seed entities: count=%d", stale_count)
@@ -708,6 +710,7 @@ def reset_stale_active_seed_entities(
     model_family: str,
     seed_source_id: str,
     incoming_tickers: set[str],
+    preserved_historical_tickers: set[str],
 ) -> int:
     existing_rows = conn.execute(
         """
@@ -719,7 +722,67 @@ def reset_stale_active_seed_entities(
         """,
         (model_family, seed_source_id),
     ).fetchall()
-    stale_tickers = sorted({str(row["ticker"]) for row in existing_rows} - incoming_tickers)
+    stale_ticker_set = {str(row["ticker"]) for row in existing_rows} - incoming_tickers
+    # Derive predecessor transitions from the governed historical contract, not
+    # only from current-seed rows that happen to remain in the database. A prior
+    # partial load may already have deleted the old current membership while
+    # leaving dim_company.is_active=1; relying on stale_ticker_set then leaks the
+    # predecessor back into current publishers (ISSC after the IA transition).
+    transition_candidates = sorted(preserved_historical_tickers.difference(incoming_tickers))
+    transitioned_tickers: list[str] = []
+    if transition_candidates:
+        candidate_placeholders = ",".join("?" for _ in transition_candidates)
+        rows = conn.execute(
+            f"""
+            SELECT c.ticker
+            FROM dim_company c
+            WHERE c.ticker IN ({candidate_placeholders})
+              AND c.is_active = 1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM dim_universe_membership m
+                  WHERE m.company_id = c.company_id
+                    AND m.is_current_member = 1
+                    AND NOT (
+                        m.model_family = ?
+                        AND m.membership_source_id = ?
+                        AND m.membership_basis = 'current_source_of_truth'
+                    )
+              )
+            ORDER BY c.ticker
+            """,
+            (*transition_candidates, model_family, seed_source_id),
+        ).fetchall()
+        transitioned_tickers = [str(row["ticker"]) for row in rows]
+    stale_tickers = sorted(stale_ticker_set.difference(preserved_historical_tickers))
+    if transitioned_tickers:
+        LOGGER.info(
+            "Preserving predecessor data for explicit historical transition(s): %s",
+            ",".join(transitioned_tickers),
+        )
+        transitioned_placeholders = ",".join("?" for _ in transitioned_tickers)
+        conn.execute(
+            f"""
+            UPDATE dim_company
+            SET universe_status = 'historical_transition',
+                is_active = 0,
+                updated_at = ?
+            WHERE ticker IN ({transitioned_placeholders})
+              AND is_active = 1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM dim_universe_membership m
+                  WHERE m.company_id = dim_company.company_id
+                    AND m.is_current_member = 1
+                    AND NOT (
+                        m.model_family = ?
+                        AND m.membership_source_id = ?
+                        AND m.membership_basis = 'current_source_of_truth'
+                    )
+              )
+            """,
+            (utc_now(), *transitioned_tickers, model_family, seed_source_id),
+        )
     if not stale_tickers:
         return 0
 
@@ -770,6 +833,14 @@ def main() -> int:
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     universe_csv = args.universe_csv.expanduser().resolve() if args.universe_csv else resolve_path(cfg_get(config, "industrials_universe.seed_csv"), base_dir=base_dir)
     listing_dates_csv = args.listing_dates_csv.expanduser().resolve() if args.listing_dates_csv else resolve_path(cfg_get(config, "industrials_universe.listing_dates_csv"), base_dir=base_dir)
+    historical_membership_csv = resolve_path(
+        cfg_get(config, "industrials_universe.historical_membership_csv"),
+        base_dir=base_dir,
+    )
+    delisted_seed_csv = resolve_path(
+        cfg_get(config, "industrials_universe.delisted_seed_csv"),
+        base_dir=base_dir,
+    )
     policy_path = args.policy.expanduser().resolve() if args.policy else resolve_path(cfg_get(config, "industrials_universe.policy_path"), base_dir=base_dir)
     cohort_path = args.cohorts.expanduser().resolve() if args.cohorts else resolve_path(cfg_get(config, "industrials_universe.cohort_path"), base_dir=base_dir)
     cik_overrides_path = resolve_path(cfg_get(config, "industrials_universe.cik_ticker_overrides_csv"), base_dir=base_dir)
@@ -781,6 +852,12 @@ def main() -> int:
     cohort_map = load_cohort_assignments(cohort_path, expected_model_family=model_family)
     cik_overrides = load_cik_overrides(cik_overrides_path)
     listing_windows = load_listing_windows(listing_dates_csv)
+    preserved_historical_tickers = {
+        ticker
+        for path in (historical_membership_csv, delisted_seed_csv)
+        for row in read_csv_flexible(path)
+        if (ticker := normalize_ticker(row_get(row, "ticker")))
+    }
     companies = parse_universe_rows(
         universe_csv,
         policy=policy,
@@ -806,6 +883,7 @@ def main() -> int:
                     cohort_source_id=cohort_source_id,
                     start_date=start_date,
                     listing_windows=listing_windows,
+                    preserved_historical_tickers=preserved_historical_tickers,
                 )
             finish_run(
                 conn,

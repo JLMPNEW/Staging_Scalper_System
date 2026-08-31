@@ -32,8 +32,8 @@ defaults:
   timeout_sec: 21600            # 6h per-sector subprocess ceiling
   retries: 1                    # attempts AFTER the first (so 2 total); a TIMEOUT (rc 124) is never retried
   max_concurrent_network_lanes: 2   # global cap on simultaneous network-heavy lanes (SEC/Yahoo rate limits)
-  # Catch-up policy (2026-08-07 redesign): the CURRENT target date always runs FIRST
-  # and alone decides the sector's health; historical backfill follows newest-first,
+  # Catch-up policy (2026-08-29 correction): historical gaps run oldest-first,
+  # then the CURRENT target is rebuilt last and alone decides sector health.
   # best-effort (failed dates -> PASS_WITH_BACKFILL_GAPS + per-date manifest records,
   # never a master FAIL). Auto-run backfill is bounded per sector by
   # backfill_window_days (default: that sector's staleness_tolerance_days); older
@@ -61,6 +61,7 @@ group_order:
   technology: [semiconductors, software_infrastructure, technology_hardware]
   biotech: [biotech]
   med_devices: [med_devices]
+  consumer_defensive: [consumer_defensive]
 
 sectors:
   # ---------------------------------------------------------------- biotech
@@ -75,12 +76,18 @@ sectors:
     force_args: []                      # runner has no --force flag
     publish_glob: "output/biotech_index_reports/{date}/biotech_daily_scores.csv"
     publish_date_format: "%Y%m%d"       # biotech dated folder is compact YYYYMMDD
+    # Native --history-restatement publishes a PIT-sealed daily score CSV plus
+    # historical manifests, but intentionally does not fabricate the live-only
+    # biotech_refresh_acceptance_manifest. The rank artifact contract is the
+    # historical terminal check; current daily runs still require health below.
+    historical_health_manifest_required: false
     # The published biotech_daily_scores.csv carries oos_score_valid_flag; the portfolio
     # adapter requires it (require_oos_score_valid: true). Keep parity here so the health
     # check fails closed on a table with no oos-valid rows. (Flag values are "1.0"/"0.0".)
     oos_column: "oos_score_valid_flag"
     require_oos_valid: true
     staleness_tolerance_days: 3
+    native_backfill_min_dates: 1  # historical dates use --history-restatement, never live provider watermarks
     # 12h = 2x the 6h default. Derivation: 24's configured per-step budget is
     # biotech_refresh.step_timeout_sec = 28800s (8h, biotech_index/config.yaml),
     # so the 21600s default ceiling could kill the sector while a single step was
@@ -103,7 +110,10 @@ sectors:
       status_keys: ["status", "acceptance"]
     backfill:
       script: biotech_index/scripts/24_run_biotech_refresh_pipeline.py
-      args_template: ["--history-restatement", "--history-start-asof", "{from}", "--history-end-asof", "{to}"]
+      # The exact missing-session list comes from the master calendar. Do not
+      # infer it from daily_scores: those rows are absent by definition during
+      # a gap fill, which used to produce an empty date grid and skip the gap.
+      args_template: ["--history-restatement", "--history-dates", "{dates}"]
       per_date: false
     # Two-stage repair: re-run IB market + shared positioning sources, then rebuild the
     # dependent feature/score/report chain so the published scores reflect the repair.
@@ -139,7 +149,11 @@ sectors:
     # A daily_post_step then runs script 76 (sole strict-OOS promoter) to record the evidence /
     # provenance-ledger row and reconcile the flag against the database (finding 1).
     args_template: ["--asof", "{date}", "--oos-score-valid"]
-    force_args: ["--force-refresh"]
+    # A current-date run always rebuilds features/scores after a historical
+    # snapshot chunk. --force-refresh only adds a full SEC cache refetch; it is
+    # unnecessary for root restoration and turns a bounded catch-up into an
+    # expensive history reload.
+    force_args: []
     # Retry through the med runner's own manifest. This preserves successful
     # network steps (notably FDA) and resumes at the first required failure.
     retry_args: ["--resume"]
@@ -153,6 +167,7 @@ sectors:
     gate_column: "portfolio_candidate_gate"
     require_oos_valid: true
     staleness_tolerance_days: 3
+    native_backfill_min_dates: 1  # replay sealed PIT inputs; never move live FDA watermarks backward
     health:
       manifest: "output/med_devices_reports/orchestration/med_devices_refresh_manifest.json"
       status_keys: ["status"]
@@ -165,10 +180,13 @@ sectors:
     # remain 76's exclusive path via the backfill pipeline. run_all executes daily_post_steps
     # sequentially after the publish and fails the sector on any non-zero rc.
     daily_post_steps:
-      # Rebuild the governed sidecar after every publish mode. The live pipeline already
-      # runs this step, but historical chunk generation does not.
+      # The live pipeline already runs source incorporation under production policy.
+      # Historical chunk generation does not, so run it only on historical routes and
+      # use the historical policy context explicitly.
       - script: med_devices/scripts/81_build_med_device_source_incorporation.py
-        args_template: ["--asof", "{date}"]
+        args_template: ["--asof", "{date}", "--policy-context", "production"]
+        historical_args_template: ["--asof", "{date}", "--policy-context", "historical"]
+        historical_only: true
       - script: med_devices/scripts/76_mark_med_device_oos_provenance.py
         args_template: ["--asof", "{date}"]
     backfill:
@@ -206,11 +224,11 @@ sectors:
     # skip the governance publish here. Governance/lockbox is NOT part of the
     # tier-0 gate and the pipeline audit only requires the governance outputs to
     # exist (existence-only, not freshness), so a periodic no-asof "latest" run
-    # refreshes the ledger. Semiconductors has only 16_publish_governance.
+    # refreshes the ledger. Both semiconductor governance steps are latest-only.
     # Attempt IBKR borrow collection, but if TWS is unavailable retain the latest
     # sealed borrow observations; Stage 5's configured staleness gate remains
     # authoritative and will fail the sector once those observations are too old.
-    args_template: ["--asof", "{date}", "--allow-stale-ibkr-borrow-on-error", "--skip-step", "16_publish_governance"]
+    args_template: ["--asof", "{date}", "--allow-stale-ibkr-borrow-on-error", "--skip-step", "16_publish_governance", "--skip-step", "16_validate_governance"]
     force_args: ["--force-refresh"]
     publish_glob: "output/technology_reports/semi_dashboard/{date}/semiconductor_final_rank_table.csv"
     financial_lineage_artifact: "output/technology_reports/semiconductors/financial_lineage_shadow/{date}/semiconductor_financial_lineage_shadow.csv"
@@ -218,6 +236,7 @@ sectors:
     oos_column: "oos_score_valid_flag"
     require_oos_valid: true
     staleness_tolerance_days: 3
+    native_backfill_min_dates: 1  # every historical gap uses the dated technology PIT publisher
     health:
       manifest: "output/technology_reports/orchestration/semiconductor_refresh_manifest.json"
       status_keys: ["status"]
@@ -256,6 +275,7 @@ sectors:
     oos_column: "oos_score_valid_flag"
     require_oos_valid: true
     staleness_tolerance_days: 3
+    native_backfill_min_dates: 1  # every historical gap uses the dated technology PIT publisher
     health:
       manifest: "output/technology_reports/software_infrastructure/orchestration/software_infrastructure_refresh_manifest.json"
       status_keys: ["status"]
@@ -289,6 +309,7 @@ sectors:
     oos_column: "oos_score_valid_flag"
     require_oos_valid: true
     staleness_tolerance_days: 3
+    native_backfill_min_dates: 1  # every historical gap uses the dated technology PIT publisher
     health:
       manifest: "output/technology_reports/technology_hardware/orchestration/technology_hardware_refresh_manifest.json"
       status_keys: ["status"]
@@ -393,21 +414,26 @@ sectors:
     entry_script: industrials/machinery/scripts/17_run_machinery_refresh_pipeline.py
     date_flag: "--asof"
     args_template: ["--asof", "{date}"]
-    force_args: ["--force"]
+    # The master uses force_args when restoring current root artifacts after a
+    # historical catch-up. Rebuild derived outputs only; --force would turn a
+    # one-day run into a full SEC/companyfacts/archive refetch for 136 names.
+    force_args: ["--overwrite-outputs"]
     retry_args: ["--resume"]          # resume at the terminal failed step
     publish_glob: "output/industrials/machinery/dashboard/{date}/machinery_final_rank_table.csv"
     publish_date_format: "%Y-%m-%d"
     oos_column: "oos_score_valid_flag"
     require_oos_valid: true
     staleness_tolerance_days: 3
+    native_backfill_min_dates: 1  # use the machinery-owned range backfill for every historical gap
     health:
       manifest: "output/industrials/machinery/orchestration/machinery_refresh_manifest.json"
       status_keys: ["acceptance"]
     # Machinery builds its own dashboard history via the daily runner's flag.
     backfill:
       script: industrials/machinery/scripts/17_run_machinery_refresh_pipeline.py
-      args_template: ["--asof", "{to}", "--include-historical-backfill", "--history-start-date", "{from}"]
+      args_template: ["--asof", "{to}", "--include-historical-backfill", "--history-start-date", "{from}", "--overwrite-outputs"]
       per_date: false
+      covers_target: true
     # Two-stage repair: re-sync SEC ownership + positioning, then rebuild
     # import->positioning validate->eligibility->scoring->scores->publish->validate.
     repair:
@@ -519,7 +545,7 @@ sectors:
           publication_lag_days: 12
         tolerance_days: 7
         warn_lead_days: 3
-        notes: "Transportation last swept FINRA in its 2026-07-30 full-mode run (settlement 2026-07-15)."
+        notes: "Cycle-aware daily FINRA sweep; latest loaded cycle is replayed inclusively to repair partial-family coverage."
       - name: institutional_13f_period
         kind: deadline_schedule
         target:
@@ -532,6 +558,39 @@ sectors:
         warn_lead_days: 7
         notes: "Advisory; transportation's own gate is pinned to 2026-03-31 and satisfied."
 
+  # ------------------------------------------------ consumer_defensive
+  # Consumer-owned production refresh lane. It refreshes Consumer inputs and then
+  # materializes immutable, activation-registry-bound OOS ranks. The terminal
+  # refresh manifest verifies the publisher artifacts before Tier 0 can pass.
+  - name: consumer_defensive
+    db_group: consumer_defensive
+    dependency_tier: 0
+    required: true
+    network: true
+    entry_script: consumer_defensive/scripts/32_run_consumer_defensive_production_refresh_v3.py
+    date_flag: "--asof"
+    args_template: ["--asof", "{date}"]
+    force_args: []
+    # First attempts preserve immutable dated dashboards. If a partial run has
+    # already published before a later step fails, retry from the failed local
+    # step and explicitly authorize the deterministic exact-date republish.
+    retry_args: ["--resume", "--force-publish"]
+    publish_glob: "output/consumer_defensive/dashboard/{date}/consumer_defensive_final_rank_table.csv"
+    publish_date_format: "%Y-%m-%d"
+    # The production-rank convention begins with the four-layer deployment on
+    # 2026-08-28. Foundation-only dates are exempt from missing-run detection.
+    publish_epoch: "2026-08-28"
+    oos_column: "oos_score_valid_flag"
+    require_oos_valid: true
+    staleness_tolerance_days: 3
+    health:
+      manifest: "output/consumer_defensive/orchestration/{date}/consumer_defensive_production_refresh_manifest_v3.json"
+      status_keys: ["status"]
+    weekly_pre_steps: []
+    backfill: null
+    repair: null
+    freshness_probes: []
+
   - name: portfolio_layer
     db_group: portfolio
     dependency_tier: 1                  # runs only after the Tier-0 gate passes
@@ -541,6 +600,10 @@ sectors:
     date_flag: "--as-of"                # NOTE: hyphenated, unlike sectors' --asof
     args_template: ["--as-of", "{date}"]
     force_args: ["--force"]
+    # A failed Tier-1 attempt may already have sealed the expensive risk/liquidity
+    # inputs. Retry from those exact artifacts instead of re-requesting hundreds of
+    # live IB subscriptions or redownloading the same price panel.
+    retry_args: ["--reuse-risk-price-data"]
     # Publish/health must gate on END-of-run artifacts, not Stage-1 outputs:
     # stocks_scores.csv + manifest.json[hard_gate_acceptance] exist minutes into a
     # run, so a run dying after scores used to count as published+healthy and was

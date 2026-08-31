@@ -72,6 +72,7 @@ DIAGNOSTICS_CLINICAL_TESTS = {
     "BDSX",
     "BIAF",
     "BLLN",
+    "CAI",
     "CDNA",
     "CODX",
     "CSTL",
@@ -80,9 +81,10 @@ DIAGNOSTICS_CLINICAL_TESTS = {
     "FRNM",
     "GH",
     "GRAL",
+    "IDXX",
     "IMDX",
     "LH",
-    "MDAI",
+    "LNTH",
     "MYGN",
     "NEO",
     "NTRA",
@@ -98,6 +100,7 @@ DIAGNOSTICS_CLINICAL_TESTS = {
 }
 LIFE_SCIENCE_TOOLS = {
     "A",
+    "ALMR",
     "ATR",
     "AVTR",
     "AZTA",
@@ -107,39 +110,50 @@ LIFE_SCIENCE_TOOLS = {
     "CRL",
     "CTKB",
     "DHR",
-    "FEED",
-    "IDXX",
     "LAB",
-    "MASS",
     "MTD",
-    "NEOG",
     "PACB",
     "PDEX",
     "QSI",
     "QTRX",
     "RGEN",
     "RVTY",
+    "TECH",
     "TMO",
     "TWST",
     "UFPT",
     "WAT",
 }
-HEALTHCARE_SERVICES = {"AHCO", "FMS", "IQV", "MEDP", "RDNT", "SHC", "VMD", "XWEL"}
-DIABETES_WEARABLES_DRUG_DELIVERY = {"BBNX", "DXCM", "GCTK", "PODD", "SENS", "TNDM", "VTAK"}
-SURGICAL_ROBOTICS_PLATFORMS = {"ISRG", "MBOT", "PRCT", "TMDX"}
+HEALTHCARE_SERVICES = {'AHCO', 'FMS', 'IQV', 'LMRI', 'MEDP', 'RDNT', 'SHC', 'VMD'}
+DIABETES_WEARABLES_DRUG_DELIVERY = {'BBNX', 'DXCM', 'EMBC', 'KRMD', 'NVCR', 'OWLT', 'PODD', 'SENS', 'TCMD', 'TNDM'}
+EMERGING_SINGLE_PRODUCT_MEDTECH = {
+    "AVR",
+    "DCTH",
+    "FEED",
+    "GCTK",
+    "MBOT",
+    "MDAI",
+    "PLSE",
+    "SNWV",
+    "TLSI",
+}
+SURGICAL_ROBOTICS_PLATFORMS = {'ISRG', 'PRCT', 'TMDX'}
 CAPITAL_EQUIPMENT_IMAGING = {
     "BFLY",
+    "CBLL",
     "GEHC",
     "ILMN",
     "MASI",
-    "NVCR",
     "PHG",
+    "PROF",
     "SOLV",
     "STE",
-    "VREX",
+    "STIM",
 }
 ORTHOPEDICS_SPINE_DENTAL = {
     "ALGN",
+    "ANIK",
+    "BVS",
     "ATEC",
     "AXGN",
     "BLCO",
@@ -150,44 +164,52 @@ ORTHOPEDICS_SPINE_DENTAL = {
     "NVST",
     "OFIX",
     "RXST",
+    "SI",
+    "SIBN",
+    "TMCI",
     "XRAY",
     "ZBH",
 }
 HOSPITAL_SUPPLIES_CONSUMABLES_DME = {
     "AVNS",
+    "CERS",
     "BAX",
     "BDX",
+    "CNMD",
     "COO",
     "ELMD",
     "ICUI",
     "INFU",
     "INGN",
     "ITGR",
+    "MDLN",
+    "MDXG",
+    "ORGO",
+    "RCEL",
     "RMD",
     "SMTI",
-    "WRBY",
     "WST",
 }
 IMPLANTABLE_INTERVENTIONAL = {
     "ABT",
+    "AORT",
     "ANG",
     "ANGO",
     "ATRC",
-    "AVR",
     "BSX",
-    "CBLL",
     "CLPT",
     "CVRX",
-    "DCTH",
     "EW",
     "HAE",
     "IART",
     "INSP",
     "IRTC",
-    "LMAT",
     "LIVN",
+    "LMAT",
     "MDT",
+    "MOBI",
     "MMSI",
+    "NPCE",
     "PEN",
     "PLSE",
     "SNWV",
@@ -200,11 +222,11 @@ HEALTHCARE_SERVICES_CRO_LAB_SERVICES = "healthcare_services_cro_lab_services"
 HOSPITAL_SUPPLIES_SURGICAL_CONSUMABLES_OEM = "hospital_supplies_surgical_consumables_oem"
 IMPLANTABLE_DIRECT_PAYMENT_COHORT = "implantable_interventional_devices_direct_payment"
 IMPLANTABLE_PROCEDURE_BUNDLED_COHORT = "implantable_interventional_devices_procedure_bundled"
-EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS = "emerging_single_product_therapeutic_platforms"
-IMPLANTABLE_MIXED_OTHER_COHORT = EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS
+EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS = "emerging_single_product_medtech_platforms"
+IMPLANTABLE_MIXED_OTHER_COHORT = EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS
 ELECTIVE_VISION_DENTAL_AESTHETIC_DEVICES = "elective_vision_dental_aesthetic_devices"
 ORTHOPEDICS_SPINE_SPORTS_IMPLANTS = "orthopedics_spine_sports_implants"
-ELECTIVE_VISION_DENTAL = {"LNSR"}
+ELECTIVE_VISION_DENTAL = {"ESTA", "LNSR", "SGHT"}
 VALID_CALIBRATION_COHORTS = {
     "diagnostics_clinical_tests",
     "life_science_tools_research_instruments",
@@ -215,7 +237,7 @@ VALID_CALIBRATION_COHORTS = {
     IMPLANTABLE_DIRECT_PAYMENT_COHORT,
     IMPLANTABLE_PROCEDURE_BUNDLED_COHORT,
     ELECTIVE_VISION_DENTAL_AESTHETIC_DEVICES,
-    EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS,
+    EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS,
     ORTHOPEDICS_SPINE_SPORTS_IMPLANTS,
 }
 SINGLE_PRODUCT_RISK = {
@@ -248,6 +270,7 @@ TICKER_HEURISTIC_UNIVERSE_TICKERS = (
     | LIFE_SCIENCE_TOOLS
     | HEALTHCARE_SERVICES
     | DIABETES_WEARABLES_DRUG_DELIVERY
+    | EMERGING_SINGLE_PRODUCT_MEDTECH
     | SURGICAL_ROBOTICS_PLATFORMS
     | CAPITAL_EQUIPMENT_IMAGING
     | ORTHOPEDICS_SPINE_DENTAL
@@ -273,7 +296,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--active-universe",
         action="store_true",
-        help="Use the current active universe for a recent live replay instead of PIT membership.",
+        help="Use only the current active universe for a recent live replay.",
+    )
+    parser.add_argument(
+        "--historical-panel",
+        action="store_true",
+        help="Use current active companies plus PIT historical members for the requested as-of date.",
     )
     return parser.parse_args()
 
@@ -334,6 +362,52 @@ def create_taxonomy_table(conn: Any) -> None:
         if column not in existing:
             conn.execute(f"ALTER TABLE dim_company_model_taxonomy ADD COLUMN {column} TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_company_model_taxonomy_cohort ON dim_company_model_taxonomy(calibration_cohort)")
+
+
+def create_taxonomy_history_table(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dim_company_model_taxonomy_history (
+            asof_date TEXT NOT NULL,
+            company_id INTEGER NOT NULL,
+            model_family TEXT NOT NULL DEFAULT 'med_devices',
+            ticker TEXT NOT NULL,
+            company_name TEXT,
+            primary_subsector_raw TEXT,
+            calibration_cohort TEXT NOT NULL,
+            reimbursement_model TEXT,
+            regulatory_model TEXT,
+            business_model TEXT,
+            procedure_sensitivity TEXT,
+            capital_equipment_flag INTEGER NOT NULL DEFAULT 0,
+            consumables_flag INTEGER NOT NULL DEFAULT 0,
+            diagnostics_flag INTEGER NOT NULL DEFAULT 0,
+            implantable_flag INTEGER NOT NULL DEFAULT 0,
+            single_product_risk_flag INTEGER NOT NULL DEFAULT 0,
+            taxonomy_confidence REAL NOT NULL DEFAULT 0.0,
+            taxonomy_source TEXT,
+            valid_from TEXT,
+            valid_to TEXT,
+            reviewed_at TEXT,
+            analyst_reviewed INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (asof_date, company_id),
+            FOREIGN KEY (company_id) REFERENCES dim_company(company_id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_company_model_taxonomy_history_cohort_asof
+        ON dim_company_model_taxonomy_history(calibration_cohort, asof_date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_company_model_taxonomy_history_ticker_asof
+        ON dim_company_model_taxonomy_history(ticker, asof_date)
+        """
+    )
 
 
 def latest_feature_asof(conn: Any) -> str:
@@ -406,6 +480,8 @@ def load_taxonomy_overrides(
                 f"Invalid calibration_cohort {cohort!r} for ticker {ticker} in {path}; "
                 f"expected one of {sorted(VALID_CALIBRATION_COHORTS)}"
             )
+        if ticker in overrides:
+            raise ValueError(f"Multiple effective taxonomy overrides for ticker {ticker} as of {asof}")
         overrides[ticker] = {
             "calibration_cohort": cohort,
             "reason": str(row.get("reason") or "").strip(),
@@ -422,6 +498,9 @@ def flag(raw: object) -> bool:
 
 
 def classify_cohort(ticker: str, raw_subsector: str) -> tuple[str, float, str]:
+    normalized_subsector = raw_subsector.strip()
+    if normalized_subsector in VALID_CALIBRATION_COHORTS:
+        return normalized_subsector, 0.98, "authoritative_subsector_cohort"
     if ticker in DIAGNOSTICS_CLINICAL_TESTS:
         return "diagnostics_clinical_tests", 0.92, "ticker_heuristic"
     if ticker in LIFE_SCIENCE_TOOLS:
@@ -430,6 +509,8 @@ def classify_cohort(ticker: str, raw_subsector: str) -> tuple[str, float, str]:
         return HEALTHCARE_SERVICES_CRO_LAB_SERVICES, 0.88, "ticker_heuristic"
     if ticker in DIABETES_WEARABLES_DRUG_DELIVERY:
         return HOME_CHRONIC_CARE_DEVICES_DME_DRUG_DELIVERY, 0.92, "ticker_heuristic"
+    if ticker in EMERGING_SINGLE_PRODUCT_MEDTECH:
+        return EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS, 0.92, "ticker_heuristic"
     if ticker in SURGICAL_ROBOTICS_PLATFORMS:
         return CAPITAL_EQUIPMENT_PROCEDURE_PLATFORMS, 0.88, "ticker_heuristic"
     if ticker in CAPITAL_EQUIPMENT_IMAGING:
@@ -450,7 +531,7 @@ def classify_cohort(ticker: str, raw_subsector: str) -> tuple[str, float, str]:
         return HEALTHCARE_SERVICES_CRO_LAB_SERVICES, 0.65, "subsector_fallback"
     if "instrument" in text or "supplies" in text:
         return HOSPITAL_SUPPLIES_SURGICAL_CONSUMABLES_OEM, 0.65, "subsector_fallback"
-    return EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS, 0.55, "default_med_device"
+    return EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS, 0.55, "default_med_device"
 
 
 def reimbursement_model(row: dict[str, Any] | None, cohort: str) -> str:
@@ -493,7 +574,7 @@ def regulatory_model(row: dict[str, Any] | None, ticker: str, cohort: str) -> st
             return state
     if cohort in {"life_science_tools_research_instruments", HEALTHCARE_SERVICES_CRO_LAB_SERVICES}:
         return "low_fda_exposure"
-    if cohort == EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS:
+    if cohort == EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS:
         return "development_stage_fda"
     if ticker in {"AVR", "GCTK", "MBOT", "PLSE", "CATX"}:
         return "development_stage_fda"
@@ -506,7 +587,7 @@ def business_model(cohort: str) -> str:
     return {
         IMPLANTABLE_DIRECT_PAYMENT_COHORT: "procedure_volume_sensitive_direct_payment",
         IMPLANTABLE_PROCEDURE_BUNDLED_COHORT: "procedure_volume_sensitive_bundled",
-        EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS: "single_product_binary_therapeutic_platform",
+        EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS: "single_product_binary_medtech_platform",
         ORTHOPEDICS_SPINE_SPORTS_IMPLANTS: "orthopedics_spine_sports_implants",
         ELECTIVE_VISION_DENTAL_AESTHETIC_DEVICES: "elective_vision_dental_aesthetic_devices",
         HOME_CHRONIC_CARE_DEVICES_DME_DRUG_DELIVERY: "home_chronic_care_dme_drug_delivery",
@@ -521,25 +602,48 @@ def business_model(cohort: str) -> str:
 def procedure_sensitivity(cohort: str) -> str:
     if cohort in {"life_science_tools_research_instruments", HEALTHCARE_SERVICES_CRO_LAB_SERVICES}:
         return "low"
-    if cohort == EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS:
+    if cohort == EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS:
         return "binary_event_sensitive"
     if cohort in {HOME_CHRONIC_CARE_DEVICES_DME_DRUG_DELIVERY, ELECTIVE_VISION_DENTAL_AESTHETIC_DEVICES}:
         return "medium"
     return "high"
 
 
-def build_rows(
+def load_taxonomy_companies(
     conn: Any,
     *,
-    taxonomy_overrides: dict[str, dict[str, str]],
-    asof: str | None = None,
-    include_active_universe: bool = False,
-) -> list[dict[str, Any]]:
-    reimbursement = latest_feature_rows(conn, "feature_reimbursement", asof=asof)
-    fda = latest_feature_rows(conn, "feature_fda_product_risk", asof=asof)
+    asof: str | None,
+    include_active_universe: bool,
+    include_historical_panel: bool,
+) -> list[Any]:
+    if include_active_universe and include_historical_panel:
+        raise ValueError("active-universe and historical-panel modes are mutually exclusive")
+    if include_historical_panel:
+        if not asof:
+            raise ValueError("historical-panel mode requires an as-of date")
+        status_placeholders = ", ".join("?" for _ in PIT_EXCLUDED_MEMBERSHIP_STATUSES)
+        return conn.execute(
+            f"""
+            SELECT c.company_id, c.ticker, c.company_name, c.subsector
+            FROM dim_company c
+            WHERE c.is_active = 1
+               OR EXISTS (
+                    SELECT 1
+                    FROM dim_universe_membership m
+                    WHERE m.company_id = c.company_id
+                      AND m.model_family = 'med_devices'
+                      AND m.point_in_time_flag = 1
+                      AND LOWER(COALESCE(m.membership_status, '')) NOT IN ({status_placeholders})
+                      AND m.start_date <= ?
+                      AND (m.end_date IS NULL OR m.end_date >= ?)
+                )
+            ORDER BY c.ticker
+            """,
+            (*PIT_EXCLUDED_MEMBERSHIP_STATUSES, asof, asof),
+        ).fetchall()
     if asof and not include_active_universe:
         status_placeholders = ", ".join("?" for _ in PIT_EXCLUDED_MEMBERSHIP_STATUSES)
-        companies = conn.execute(
+        return conn.execute(
             f"""
             SELECT c.company_id, c.ticker, c.company_name, c.subsector
             FROM dim_company c
@@ -557,15 +661,32 @@ def build_rows(
             """,
             (*PIT_EXCLUDED_MEMBERSHIP_STATUSES, asof, asof),
         ).fetchall()
-    else:
-        companies = conn.execute(
-            """
-            SELECT company_id, ticker, company_name, subsector
-            FROM dim_company
-            WHERE is_active = 1
-            ORDER BY ticker
-            """
-        ).fetchall()
+    return conn.execute(
+        """
+        SELECT company_id, ticker, company_name, subsector
+        FROM dim_company
+        WHERE is_active = 1
+        ORDER BY ticker
+        """
+    ).fetchall()
+
+
+def build_rows(
+    conn: Any,
+    *,
+    taxonomy_overrides: dict[str, dict[str, str]],
+    asof: str | None = None,
+    include_active_universe: bool = False,
+    include_historical_panel: bool = False,
+) -> list[dict[str, Any]]:
+    reimbursement = latest_feature_rows(conn, "feature_reimbursement", asof=asof)
+    fda = latest_feature_rows(conn, "feature_fda_product_risk", asof=asof)
+    companies = load_taxonomy_companies(
+        conn,
+        asof=asof,
+        include_active_universe=include_active_universe,
+        include_historical_panel=include_historical_panel,
+    )
     now = utc_now()
     out: list[dict[str, Any]] = []
     for company in companies:
@@ -609,7 +730,7 @@ def build_rows(
             or cohort in {ORTHOPEDICS_SPINE_SPORTS_IMPLANTS, ELECTIVE_VISION_DENTAL_AESTHETIC_DEVICES}
             else 0,
             "single_product_risk_flag": 1
-            if ticker in SINGLE_PRODUCT_RISK or cohort == EMERGING_SINGLE_PRODUCT_THERAPEUTIC_PLATFORMS
+            if ticker in SINGLE_PRODUCT_RISK or cohort == EMERGING_SINGLE_PRODUCT_MEDTECH_PLATFORMS
             else 0,
             "taxonomy_confidence": confidence,
             "taxonomy_source": source,
@@ -627,7 +748,7 @@ def fallback_ticker_heuristic_rows(rows: list[dict[str, Any]]) -> list[dict[str,
     return [
         row
         for row in rows
-        if str(row.get("ticker") or "").upper() not in TICKER_HEURISTIC_UNIVERSE_TICKERS
+        if str(row.get("taxonomy_source") or "") in {"subsector_fallback", "default_med_device"}
         and int(row.get("analyst_reviewed") or 0) == 0
     ]
 
@@ -672,7 +793,9 @@ def write_fallback_review_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def upsert_rows(conn: Any, rows: list[dict[str, Any]]) -> None:
+def upsert_rows(conn: Any, rows: list[dict[str, Any]], *, replace_snapshot: bool = False) -> None:
+    if replace_snapshot:
+        conn.execute("DELETE FROM dim_company_model_taxonomy")
     if not rows:
         return
     columns = list(FIELDNAMES)
@@ -690,6 +813,23 @@ def upsert_rows(conn: Any, rows: list[dict[str, Any]]) -> None:
         ON CONFLICT(company_id) DO UPDATE SET {updates}
         """,
         [tuple(row[column] for column in columns) for row in rows],
+    )
+
+
+def replace_taxonomy_history_rows(conn: Any, *, asof: str, rows: list[dict[str, Any]]) -> None:
+    if parse_iso_date(asof) is None:
+        raise ValueError(f"Invalid taxonomy history as-of date: {asof!r}")
+    conn.execute("DELETE FROM dim_company_model_taxonomy_history WHERE asof_date = ?", (asof,))
+    if not rows:
+        return
+    columns = ["asof_date", *FIELDNAMES]
+    placeholders = ", ".join("?" for _ in columns)
+    conn.executemany(
+        f"""
+        INSERT INTO dim_company_model_taxonomy_history({", ".join(columns)})
+        VALUES ({placeholders})
+        """,
+        [(asof, *(row[column] for column in FIELDNAMES)) for row in rows],
     )
 
 
@@ -719,7 +859,11 @@ def main() -> None:
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
         create_taxonomy_table(conn)
-        asof_text = args.asof.strip() if args.asof else latest_feature_asof(conn)
+        create_taxonomy_history_table(conn)
+        if args.active_universe and args.historical_panel:
+            raise ValueError("--active-universe and --historical-panel are mutually exclusive")
+        explicit_asof = bool(args.asof.strip())
+        asof_text = args.asof.strip() if explicit_asof else latest_feature_asof(conn)
         parsed_asof = parse_iso_date(asof_text)
         if parsed_asof is None:
             LOGGER.warning("Unable to infer calibration cohort as-of date from feature tables.")
@@ -733,6 +877,8 @@ def main() -> None:
                     "--active-universe is restricted to recent live replays: "
                     f"asof={asof_text} age_days={asof_age_days} max_age_days={replay_window_days}"
                 )
+        historical_panel = args.historical_panel or (explicit_asof and not args.active_universe)
+        active_universe = args.active_universe or not explicit_asof
         taxonomy_overrides = load_taxonomy_overrides(
             override_csv,
             asof=asof_text,
@@ -742,12 +888,14 @@ def main() -> None:
             conn,
             taxonomy_overrides=taxonomy_overrides,
             asof=asof_text,
-            include_active_universe=args.active_universe,
+            include_active_universe=active_universe,
+            include_historical_panel=historical_panel,
         )
         validate_final_rows(rows)
         missing_override_tickers = warn_on_unmatched_taxonomy_overrides(rows, taxonomy_overrides)
         fallback_rows = warn_on_unmapped_ticker_heuristics(rows)
-        upsert_rows(conn, rows)
+        upsert_rows(conn, rows, replace_snapshot=True)
+        replace_taxonomy_history_rows(conn, asof=asof_text, rows=rows)
     write_csv(output_csv, rows)
     fallback_review_csv = output_csv.with_name(f"{output_csv.stem}_fallback_review.csv")
     write_fallback_review_csv(fallback_review_csv, fallback_rows)
@@ -755,7 +903,8 @@ def main() -> None:
     print(
         f"taxonomy_csv={output_csv} rows={len(rows)} cohorts={len(cohorts)} "
         f"fallback_review_csv={fallback_review_csv} fallback_rows={len(fallback_rows)} "
-        f"missing_override_tickers={len(missing_override_tickers)}"
+        f"missing_override_tickers={len(missing_override_tickers)} "
+        f"mode={'historical_panel' if historical_panel else 'active_universe'} asof={asof_text}"
     )
 
 

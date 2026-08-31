@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import runpy
 from pathlib import Path
 
 import pytest
@@ -168,6 +169,34 @@ def test_transportation_foundation_load_and_validate(tmp_path: Path) -> None:
         assert active_industries["AER"] == "Rental & Leasing Services"
         assert active_industries["ZIM"] == "Marine Shipping"
         assert "Transportation" not in set(active_industries.values())
+        # The historical loader is also a supported independent command. A
+        # second history-only load must preserve the authoritative active
+        # taxonomy rather than replacing it with the generic family label.
+        load_historical_and_delisted(
+            conn,
+            historical_path=Path(paths["historical"]),
+            delisted_path=Path(paths["delisted"]),
+            cohort_path=Path(paths["cohorts"]),
+            model_family=MODEL_FAMILY,
+            historical_source_id=str(paths["historical_source"]),
+            delisted_source_id=str(paths["delisted_source"]),
+            default_start_date=str(paths["default_start"]),
+        )
+        reloaded_active_industries = dict(
+            conn.execute(
+                """
+                SELECT t.ticker, t.industry
+                FROM dim_industrials_taxonomy AS t
+                JOIN dim_universe_membership AS m
+                  ON m.ticker=t.ticker AND m.model_family=t.model_family
+                WHERE t.model_family=?
+                  AND m.membership_source_id=?
+                  AND m.membership_status='active'
+                """,
+                (MODEL_FAMILY, str(paths["seed_source"])),
+            ).fetchall()
+        )
+        assert reloaded_active_industries == active_industries
         historical_industries = dict(
             conn.execute(
                 """
@@ -186,6 +215,146 @@ def test_transportation_foundation_load_and_validate(tmp_path: Path) -> None:
         assert historical_industries["AYR"] == "Rental & Leasing Services"
         assert historical_industries["DRYS"] == "Marine Shipping"
         assert "Transportation" not in set(historical_industries.values())
+        fly = conn.execute(
+            "SELECT universe_status, is_active, cik, company_name "
+            "FROM dim_company WHERE ticker='FLY-DEL2021'"
+        ).fetchone()
+        assert fly is not None
+        assert fly["universe_status"] == "historical_delisted"
+        assert fly["is_active"] == 0
+        assert fly["cik"] == "0001407298"
+        assert fly["company_name"] == "Fly Leasing"
+        egl = conn.execute(
+            "SELECT cik, company_name FROM dim_company WHERE ticker='EGL-DEL2007'"
+        ).fetchone()
+        assert egl is not None
+        assert egl["cik"] == "0001001718"
+        assert egl["company_name"] == "EGL Inc (Eagle Global Logistics)"
+
+
+def test_disclosure_validator_derives_current_universe_census(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "transportation.sqlite"
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "transportation"
+            / "scripts"
+            / "08c_validate_transportation_specialized_disclosures.py"
+        )
+    )
+    with connect(db_path) as conn:
+        paths = load_foundation(conn)
+        roles = namespace["_expected_universe_roles"](
+            conn,
+            asof="2026-08-24",
+            active_source_id=str(paths["seed_source"]),
+            historical_source_id=str(paths["historical_source"]),
+            include_historical=True,
+        )
+    assert len(roles) == 168
+    assert sum(role == "active" for role in roles.values()) == 120
+
+
+def test_transportation_historical_ticker_reuse_preserves_current_issuer(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "ticker_reuse.sqlite"
+    paths = resolved_paths()
+    with connect(db_path) as conn:
+        init_db(conn)
+        upsert_source_registry(conn, load_source_registry(Path(paths["registry"])))
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO dim_company(
+                ticker, cik, company_name, sector, industry, subsector, country,
+                currency, universe_status, is_active, data_quality_status,
+                first_seen_at, updated_at
+            ) VALUES ('FLY', '0001860160', 'Firefly Aerospace Inc.', 'Industrials',
+                      'Aerospace & Defense', 'Defense', 'United States', 'USD',
+                      'investable', 1, 'defense_sentinel', ?, ?)
+            """,
+            (now, now),
+        )
+        current_company_id = int(
+            conn.execute("SELECT company_id FROM dim_company WHERE ticker='FLY'").fetchone()[0]
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_industrials_taxonomy(
+                company_id, ticker, model_family, sector, industry, subsector,
+                calibration_cohort_id, calibration_cohort, calibration_use,
+                development_stage, taxonomy_confidence, taxonomy_source,
+                analyst_reviewed, updated_at
+            ) VALUES (?, 'FLY', 'transportation', 'Industrials',
+                      'Rental & Leasing Services', 'Transportation',
+                      'air_transport_and_aviation_services',
+                      'Air Transport & Aviation Services', 'historical_research',
+                      'historical_delisted', 1.0,
+                      'transportation_delisted_calibration_seed', 1, ?)
+            """,
+            (current_company_id, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_security(
+                company_id, ticker, exchange, security_type, listing_status,
+                is_primary_listing, currency, created_at, updated_at
+            ) VALUES (?, 'FLY', 'historical_delisted', 'Common Stock',
+                      'historical_delisted', 0, 'USD', ?, ?)
+            """,
+            (current_company_id, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO dim_identifier(
+                company_id, identifier_type, identifier_value, source_id,
+                confidence, created_at, updated_at
+            ) VALUES (?, 'CIK', '0001407298',
+                      'transportation_delisted_calibration_seed', 0.95, ?, ?)
+            """,
+            (current_company_id, now, now),
+        )
+        load_foundation(conn)
+
+        identities = {
+            row["ticker"]: (row["cik"], row["company_name"])
+            for row in conn.execute(
+                "SELECT ticker, cik, company_name FROM dim_company "
+                "WHERE ticker IN ('FLY', 'FLY-DEL2021')"
+            )
+        }
+        assert identities == {
+            "FLY": ("0001860160", "Firefly Aerospace Inc."),
+            "FLY-DEL2021": ("0001407298", "Fly Leasing"),
+        }
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM dim_industrials_taxonomy "
+                "WHERE company_id=? AND model_family='transportation'",
+                (current_company_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM dim_security "
+                "WHERE company_id=? AND exchange='historical_delisted'",
+                (current_company_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM dim_identifier "
+                "WHERE company_id=? AND identifier_value='0001407298'",
+                (current_company_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_security_continuity_contract_is_verified_and_persists(tmp_path: Path) -> None:

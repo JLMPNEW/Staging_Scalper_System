@@ -1,5 +1,11 @@
 # Consumer Defensive Implementation Stages And Acceptance Tests
 
+> **Promotion interpretation (2026-08-25):** A stage execution or artifact
+> validation `PASS` is not a predictive or capital-promotion `PASS`. Consumer
+> Defensive remains disabled and zero-cap. Legacy Stage 8/9/10 and Stage 10B
+> evidence cannot authorize promotion; see
+> [PRODUCTION_PROMOTION_AUDIT_2026-08-25.md](../PRODUCTION_PROMOTION_AUDIT_2026-08-25.md).
+
 This contract follows `technology/STAGE_GATES.md`. Script numbers are organizational; the Stage 12 runner's explicit step table becomes authoritative after it exists.
 
 ## Stage 0 - Architecture And Governance
@@ -316,7 +322,16 @@ Acceptance tests:
 - Selective SEC disclosures such as market-share changes remain in the measurement panel but are excluded from factor validation until a separate coverage-bias policy is validated.
 - The Consumer Defensive adapter uses the shared top-level `factor_validation` statistical kernel; it does not import Technology scripts or write production scores.
 
-Measured acceptance at `2026-08-14` is PASS. Stage 6C run 1 contains 81,221 rows, 30,309 numeric rows, 86 monthly evaluation dates, all 38 metrics, and exact panel SHA-256 `1c83868c680e5cb9e5a5533760c25a03df3824dfdc22abd2eb946c188dc5e479`; all 10 checks pass. Shared campaign `cdfv_20260814_1c83868c680e_0b1ba11163e0` validates cleanly with 276 sector/cohort cells and 77 evidence-eligible cells, but none passes the sealed 5% family FDR gate (best raw p-value `0.155087`). This is a valid negative research result: production weights stay zero, and Stage 7 cannot infer or optimize nonzero specialized weights from coverage alone.
+Corrected measured acceptance at `2026-08-14` is PASS. Stage 6C run 3
+contains 81,221 rows, 28,487 valid numeric rows, 86 monthly evaluation dates,
+all 38 metrics, and exact panel SHA-256
+`d2c7155be91cf21c2826e911e083e662bf203119ee087baf12f754ac2d2adcf0`;
+all 18 checks pass. Corrected campaign
+`cdfv_20260814_d2c7155be91c_2498172c7161_a6495192b5` validates cleanly with
+174 registered cells, 90 evidence-eligible cells, and eight testable metrics.
+One alcohol-depletion cell passed 5% family FDR (`p=q=0.0117267`) but had a
+negative mean IC against its pre-registered `higher_is_better` direction, so
+zero cells passed every acceptance gate. Production weights stay zero.
 
 Scoring-feature definition v2 makes the missing-data policy explicit. A metric that is not applicable to a ticker's reviewed cohort/subtype is excluded from that ticker's specialized completeness denominator. A missing applicable metric remains null, contributes zero, and does not cause the weights of available metrics to be increased. Full-data confidence counts accepted specialized observations, and cohort overlay weights can activate only from shared factor-validation evidence accepted for that cohort.
 
@@ -341,6 +356,13 @@ Acceptance tests:
 
 Goal: produce the reviewed baseline ranking layer from the validated Stage 6 contract.
 
+Run:
+
+```powershell
+python consumer_defensive\scripts\16_build_consumer_defensive_stage7_scores.py --as-of YYYY-MM-DD
+python consumer_defensive\scripts\16a_validate_consumer_defensive_stage7_scores.py --as-of YYYY-MM-DD
+```
+
 Acceptance tests:
 
 - Unknown component or subfeature weights fail fast.
@@ -348,6 +370,29 @@ Acceptance tests:
 - Stage 7 does not overwrite Stage 6 feature rows.
 - Shadow scores remain observable while every portfolio gate stays off.
 - Production weights are versioned and governance-controlled.
+
+Measured isolated acceptance at `2026-08-14` is PASS. The additive v1 schema,
+versioned v2 model contract, exact component-weight registry, immutable score snapshot, build
+script and independent validator are implemented. The real-data rehearsal
+contains 108/108 deterministic shadow outputs; 94 are rank-ready and 14 retain
+explicit review reasons, for `87.04%` readiness against the frozen `85%` floor.
+All 15 checks pass. Cohort readiness is 19/22 beverages, 19/22
+distribution/retail, 22/25 household/personal/tobacco, and 34/39 packaged
+foods/agriculture. All 38 specialized components remain zero-weight because the
+corrected campaign accepted no directionally consistent hypothesis. Every row remains
+`shadow_monitor` with `portfolio_candidate_gate=0` and
+`oos_score_valid_flag=0`.
+
+The Stage 7 contract SHA-256 is
+`d5184d007b89f3be62c61277cd4ddcb864f15ff0ccd09d9234de31922cf909c8`.
+The exact input/output manifest pair is
+`ad90697b81c020c3666d47b04aa2ece231a2d8b7793dc00d23e27dd907f2500a` /
+`abcca120e948d45a440b5f421809f3fb98b656484a4439d8b493e8a852fe93e8`,
+and a same-date replay reproduced both hashes. The rehearsal also exposed and
+fixed Stage 6B/6C source-lineage and point-in-time defects; the unchanged Stage
+6A validator passes after the exact-run overlay, and regressions protect the
+selection and lineage rules. Production is unchanged; final migration remains a
+later deployment gate.
 
 ## Stage 8 - Constrained Calibration Research
 
@@ -362,6 +407,23 @@ Acceptance tests:
 - Stage 8 cannot modify Stage 7 weights automatically.
 - Failed promotion evidence may remain useful for shadow monitoring.
 
+Measured legacy reconstruction at `2026-08-14` is internally reproducible for
+run `cds8_2a94264294f4b58b1444fb2d`; it is not a predictive-validation or
+promotion PASS. The immutable evidence panel contains 9,036
+rows, 116 tickers and 86 monthly dates. The frozen Stage 7 baseline eligibility
+census selects 56 dates beginning `2021-07-30`; 30 earlier dates remain visible
+but are excluded because fewer than 30 names are rank-ready. The split contains
+30 training, seven embargo, six validation, seven embargo and six final-holdout
+dates. All 24 artifact checks pass, but all 320 candidates accessed the final
+holdout; only two were authorized, leaving 318 unauthorized candidates and
+5,088 unauthorized holdout-period rows. Candidate-dependent samples, stale
+positioning inputs, incomplete source identity and historical membership,
+partial-month cadence, and mismatched later Stage 9 targets provide additional
+blockers. The corrected non-overlapping Stage 7 core evidence is positive at
+3/2/1 observations for 21/63/126 sessions, below the required 12/6/4. The
+Stage 7 core baseline is retained, specialized weights remain zero, and every
+production/OOS/portfolio gate stays off. Exact replay proves byte identity only.
+
 ## Stage 9 - Portfolio Backtest
 
 Goal: compare Stage 7 and registered Stage 8 candidates through report-only portfolio simulations.
@@ -374,6 +436,17 @@ Acceptance tests:
 - Terminal values are consumed for eligible delisted outcomes.
 - Stage 9 writes no production score changes.
 
+Measured retrospective reconstruction at `2026-08-14`: report-only run
+`cds9_63065740a60179d1a1abc968` evaluates all 320 preregistered Stage 8
+candidates across four portfolio specifications and two return bases. It
+publishes 2,560 summaries, 46,280 periods and 377,106 holdings over 40 selected
+windows; 16 schedule slots were discarded rather than evaluated as cash. All
+31 internal artifact checks pass, including source tieout, holdings/return/cost
+reconciliation, terminal attribution, methodology hashes and zero database
+writes. They do not cure the burned holdout or Stage 8/9 target mismatch. The
+Stage 7 baseline remains the Stage 10 source; no OOS, promotion or portfolio
+gate is enabled.
+
 ## Stage 10 - Dashboard And Static Reports
 
 Goal: publish current and dated final-rank tables, scorecards, cohort summaries, risk flags, review queues, overlay coverage, and backtest links.
@@ -385,6 +458,16 @@ Acceptance tests:
 - Historical sidecar rows are always non-investable.
 - Dashboard publishing is read-only with respect to source data and scores.
 
+Measured isolated acceptance at `2026-08-14`: Stage 10 v3 run
+`cds10_729cbfd933b3c0ddc912b999` passes 17/17 checks after a fresh 31/31 Stage
+9 artifact-integrity validation. It publishes 108 score/review rows, including
+94 rank-ready and 14 review-required names, and 543/971
+measurement-qualified applicable specialized pairs (55.92%). All 38
+specialized metrics remain zero-weight, every OOS and portfolio gate remains
+zero, and database writes are zero. The dated and latest copies replay
+byte-for-byte across all 28 file hashes. This is publishing integrity, not
+predictive acceptance.
+
 ## Stage 10B - Governance Lockbox And Signal Registry
 
 Goal: publish auditable evidence, weights, promotion state, and artifact hashes.
@@ -395,6 +478,13 @@ Acceptance tests:
 - Production-locked, research-candidate, measurement-only, and zero-weight signals are distinct.
 - Stage 8, walk-forward, and Stage 9 decisions are recorded.
 - `promoted`, `shadow_monitor`, and `deferred` states cannot be confused.
+- A promotion candidate binds a passing prospective evaluation hash and a
+  separate independent review; the evidence evaluator cannot activate capital.
+
+Status: the legacy Stage 10B package is implemented as zero-cap shadow
+governance. It predates the corrected V6 audit and is superseded for promotion
+use. A future promotion must use the canonical three-authority evidence,
+external-timestamp, and market-data-attestation route.
 
 ## Stage 11 - Portfolio Layer Adapter And End-To-End Handoff
 
@@ -420,6 +510,13 @@ Acceptance tests:
 - The runner stops on first failure by default.
 - Step logs and run manifests are published.
 - Promoted and shadow profiles use the same independent DB lane with different governance settings.
+- Promotion-facing capture uses the canonical fixed trust registry and three
+  independent authorities; caller-supplied trust roots or a local signature
+  alone are prohibited.
+- The external append-only timestamp proves registration/capture chronology,
+  and independently attested market outcomes are consumed only after maturity.
+- Historical backfill and ordinary refresh output never start the prospective
+  evidence clock or authorize capital.
 
 ## Post-Stage-12 Historical Dashboard Backfill
 

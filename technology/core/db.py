@@ -502,6 +502,7 @@ CREATE TABLE IF NOT EXISTS fact_financial_statement_canonical (
     fiscal_period TEXT,
     form_type TEXT,
     filing_date TEXT,
+    accepted_at TEXT,
     accession_number TEXT NOT NULL,
     canonical_metric TEXT NOT NULL,
     value_reported_currency REAL,
@@ -1154,6 +1155,9 @@ CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_ticker_date
 CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_source_date
     ON fact_price_ohlcv(source_id, bar_date);
 
+CREATE INDEX IF NOT EXISTS idx_fact_price_ohlcv_pit_lookup
+    ON fact_price_ohlcv(source_id, ticker, bar_date DESC);
+
 CREATE INDEX IF NOT EXISTS idx_fact_corporate_action_ticker_date
     ON fact_corporate_action(ticker, action_date);
 
@@ -1162,6 +1166,9 @@ CREATE INDEX IF NOT EXISTS idx_fact_market_snapshot_ticker_asof
 
 CREATE INDEX IF NOT EXISTS idx_feature_market_technical_asof
     ON feature_market_technical(model_family, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_feature_market_technical_pit_lookup
+    ON feature_market_technical(model_family, source_id, ticker, asof_date DESC);
 
 CREATE INDEX IF NOT EXISTS idx_fact_sec_filing_ticker_date
     ON fact_sec_filing(ticker, filing_date);
@@ -1186,6 +1193,11 @@ CREATE INDEX IF NOT EXISTS idx_fact_fx_rate_lookup
 
 CREATE INDEX IF NOT EXISTS idx_feature_financial_statement_ticker_asof
     ON feature_financial_statement(model_family, ticker, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_feature_financial_statement_pit_lookup
+    ON feature_financial_statement(
+        model_family, source_id, ticker, asof_date, fiscal_period_end DESC
+    );
 
 CREATE INDEX IF NOT EXISTS idx_fact_sec_form4_transaction_ticker_date
     ON fact_sec_form4_transaction(ticker, transaction_date);
@@ -1220,8 +1232,14 @@ CREATE INDEX IF NOT EXISTS idx_fact_ibkr_borrow_snapshot_ticker_asof
 CREATE INDEX IF NOT EXISTS idx_feature_positioning_asof
     ON feature_positioning(model_family, asof_date);
 
+CREATE INDEX IF NOT EXISTS idx_feature_positioning_pit_lookup
+    ON feature_positioning(model_family, source_id, ticker, asof_date DESC);
+
 CREATE INDEX IF NOT EXISTS idx_feature_scoring_input_asof
     ON feature_scoring_input(model_family, asof_date);
+
+CREATE INDEX IF NOT EXISTS idx_feature_scoring_input_pit_lookup
+    ON feature_scoring_input(model_family, source_id, ticker, asof_date DESC);
 
 CREATE INDEX IF NOT EXISTS idx_feature_scoring_component_lookup
     ON feature_scoring_component(model_family, asof_date, component_name);
@@ -1356,6 +1374,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "fact_sec_xbrl_fact_raw", "source_detail", "TEXT")
     ensure_column(conn, "fact_sec_xbrl_fact_raw", "source_accession_url", "TEXT")
     ensure_column(conn, "fact_financial_statement_canonical", "source_detail", "TEXT")
+    ensure_column(conn, "fact_financial_statement_canonical", "accepted_at", "TEXT")
     ensure_column(conn, "feature_scoring_input", "rel_strength_bench_3m", "REAL")
     ensure_column(conn, "feature_scoring_input", "financial_source_accession", "TEXT")
     ensure_column(conn, "feature_scoring_input", "financial_source_fiscal_period_end", "TEXT")

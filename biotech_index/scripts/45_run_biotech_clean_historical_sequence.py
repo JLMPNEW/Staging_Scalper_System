@@ -28,7 +28,7 @@ from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 LOGGER = logging.getLogger("run_biotech_clean_historical_sequence")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "output" / "biotech_index_reports" / "clean_historical_sequence"
-DEFAULT_OPTUNA_SCRIPT = PACKAGE_ROOT / "scripts" / "46_optuna_biotech_candidate_optimizer.py"
+DEFAULT_OPTUNA_SCRIPT = PACKAGE_ROOT / "scripts" / "60_run_biotech_walk_forward_calibration.py"
 
 ALLOWED_CALIBRATION_COHORTS = frozenset(
     {
@@ -777,7 +777,7 @@ def planned_sequence(args: argparse.Namespace) -> list[str]:
     if args.run_candidate_calibration:
         steps.append("candidate_calibration")
     if args.run_optuna:
-        steps.append("gated_optuna")
+        steps.append("nested_walk_forward_optuna")
     return steps
 
 
@@ -1082,37 +1082,39 @@ def main() -> None:
 
     optuna_status = "not_requested"
     if args.run_optuna:
-        optuna_script = validate_optuna_gate(args)
+        walk_forward_script = validate_optuna_gate(args)
+        observation_csv = (
+            output_dir
+            / "candidate_calibration"
+            / "_progress"
+            / "tier1_observations_with_forward_returns.csv"
+        )
         cmd = [
             sys.executable,
-            str(optuna_script),
+            str(walk_forward_script),
             "--config",
             str(config_path),
-            "--db",
-            str(db_path),
-            "--input-dir",
-            str(output_dir / "candidate_calibration"),
-            "--feature-ic-dir",
-            str(output_dir / "feature_ic_monitor"),
+            "--observations-csv",
+            str(observation_csv),
             "--output-dir",
-            str(output_dir / "optuna"),
-            "--start-asof",
-            start_asof,
-            "--end-asof",
-            end_asof,
-            "--horizons",
-            args.horizons,
-            "--top-n",
-            args.top_n,
+            str(output_dir / "walk_forward"),
+            "--run-optuna",
         ]
-        run_command(label="gated_optuna", command=cmd, output_dir=output_dir, dry_run=args.dry_run, timeout_sec=step_timeout_sec, timing_rows=timing_rows)
-        optuna_manifest_path = output_dir / "optuna" / "optuna_optimizer_manifest.json"
-        if not args.dry_run and optuna_manifest_path.exists():
-            optuna_manifest = json.loads(optuna_manifest_path.read_text(encoding="utf-8"))
+        run_command(
+            label="nested_walk_forward_optuna",
+            command=cmd,
+            output_dir=output_dir,
+            dry_run=args.dry_run,
+            timeout_sec=step_timeout_sec,
+            timing_rows=timing_rows,
+        )
+        walk_forward_manifest_path = output_dir / "walk_forward" / "walk_forward_run_manifest.json"
+        if not args.dry_run and walk_forward_manifest_path.exists():
+            walk_forward_manifest = json.loads(walk_forward_manifest_path.read_text(encoding="utf-8"))
             optuna_status = (
-                "success"
-                if bool(optuna_manifest.get("production_promotion_authorized"))
-                else "research_only_success"
+                "promotion_authorized"
+                if bool(walk_forward_manifest.get("production_promotion_authorized"))
+                else str(walk_forward_manifest.get("status") or "research_only_success")
             )
         else:
             optuna_status = "dry_run"

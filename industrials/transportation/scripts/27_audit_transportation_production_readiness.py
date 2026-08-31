@@ -26,6 +26,9 @@ from industrials.core.reports import (  # noqa: E402
     write_text_atomic,
 )
 from industrials.transportation.contracts import read_rows  # noqa: E402
+from industrials.transportation.legacy_production_routes import (  # noqa: E402
+    route_diagnostic,
+)
 from industrials.transportation.scripts._shared import (  # noqa: E402
     DEFAULT_CONFIG,
 )
@@ -206,6 +209,12 @@ def main() -> int:
         ):
             artifact_hash_issues.append(f"{path_key}: hash mismatch")
     issues.extend(artifact_hash_issues)
+    supersession = route_diagnostic(
+        "27_audit_transportation_production_readiness"
+    )
+    issues.append(
+        "legacy retrospective generic-OOS evidence cannot authorize production"
+    )
     gates = [
         {
             "gate": "daily_history",
@@ -255,6 +264,11 @@ def main() -> int:
             "status": "PASS" if not artifact_hash_issues else "FAIL",
             "detail": ";".join(artifact_hash_issues),
         },
+        {
+            "gate": "canonical_prospective_activation",
+            "status": "FAIL",
+            "detail": str(supersession["route_status"]),
+        },
     ]
     report_path = (
         research_root
@@ -273,10 +287,14 @@ def main() -> int:
         "artifact_family": "transportation_production_readiness_audit",
         "model_family": "transportation",
         "audit_acceptance": "PASS",
-        "promotion_readiness": "PASS" if not issues else "FAIL",
-        "promotion_eligible": not issues,
+        "promotion_readiness": "FAIL",
+        "promotion_eligible": False,
+        "production_activation_authorized": False,
+        "portfolio_allocation_authorized": False,
+        "evidence_scope": "RETROSPECTIVE_DIAGNOSTIC_ONLY",
         "frozen_surface_universe": frozen_surface_universe,
         "asof_date": args.asof,
+        "legacy_route": supersession,
         "selected_candidate_id": calibration.get(
             "selected_candidate_id", ""
         ),
@@ -299,7 +317,7 @@ def main() -> int:
         json.dumps(result, indent=2, sort_keys=True) + "\n",
     )
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return 1
 
 
 if __name__ == "__main__":

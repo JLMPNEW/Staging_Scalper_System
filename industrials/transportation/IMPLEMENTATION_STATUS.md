@@ -1,5 +1,12 @@
 # Transportation Implementation Status
 
+> **Superseding correction (2026-08-25):** This file is retained as historical
+> implementation history. Its `PASS` labels describe execution, data, audit, or
+> artifact integrity; they do not establish predictive acceptance. The current
+> verdict is predictive `FAIL`, capital-promotion eligibility `false`, and zero
+> Portfolio allocation. See
+> [TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md](TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md).
+
 Status date: 2026-07-31
 
 ## Definitive historical rebuild and calibration result (2026-07-31)

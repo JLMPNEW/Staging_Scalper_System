@@ -13,3 +13,15 @@ MOBI,NCT05691023,include,legacy_operating_subsidiary,MicroTransponder Inc.,"[""v
 MOBI,NCT06485206,exclude,product_name_collision,Highridge Medical,"[""mobi-c"",""acdf""]",2024-07-03,,2026-08-22,1.0,Mobi-C cervical disc study owned by Highridge Medical; unrelated to Mobia Medical.
 MOBI,NCT04012996,exclude,product_name_collision,Centinel Spine,"[""mobi-c"",""prodisc""]",2019-07-09,,2026-08-22,1.0,Centinel Spine study uses Mobi-C only as the active comparator; unrelated to Mobia Medical.
 MOBI,NCT00389597,exclude,product_name_collision,,"[""mobi-c"",""cervical disc""]",2006-11-01,,2026-08-22,1.0,Completed Mobi-C pivotal IDE study; unrelated to Mobia Medical and Vivistim.
+ANIK,NCT02659215,include,direct_sponsor,"Anika Therapeutics, Inc.","[""hyalofast""]",2016-01-20,,2026-08-30,1.0,Direct-sponsored HyaloFAST cartilage-repair study.
+ANIK,NCT06741527,include,direct_sponsor,"Anika Therapeutics, Inc.","[""integrity implant""]",2024-12-19,,2026-08-30,1.0,Direct-sponsored Integrity Implant post-market study.
+MDXG,NCT06236750,include,direct_sponsor,"MiMedx Group, Inc.","[""dehydrated human amnion chorion membrane""]",2024-02-01,,2026-08-30,1.0,Direct-sponsored DHACM post-marketing surveillance study.
+MDXG,NCT06600724,include,direct_sponsor,"MiMedx Group, Inc.","[""pplhacm""]",2024-09-19,,2026-08-30,1.0,Direct-sponsored placental tissue DFU platform study.
+MDXG,NCT07173621,include,issuer_product_collaboration,Sarasota Memorial Health Care System,"[""amnioeffect""]",2025-09-15,,2026-08-30,0.95,External sponsor evaluating the issuer's AMNIOEFFECT product.
+LNTH,NCT05641688,include,direct_sponsor,Lantheus Biosciences Ltd.,"[""pi 2620""]",2022-12-08,,2026-08-30,1.0,Direct-sponsored PI-2620 phase 3 histopathology study.
+LNTH,NCT06074510,include,direct_sponsor,Lantheus Medical Imaging,"[""pylarify""]",2023-10-10,,2026-08-30,1.0,Direct-sponsored PYLARIFY imaging study.
+LNTH,NCT06298916,include,direct_sponsor,Lantheus Medical Imaging,"[""64cu lnth 1363s""]",2024-03-07,,2026-08-30,1.0,Direct-sponsored imaging-agent study.
+LNTH,NCT06790394,include,direct_sponsor,Lantheus Germany GmbH,"[""18f fbb""]",2025-01-24,,2026-08-30,1.0,Direct-sponsored cardiac amyloidosis imaging study.
+LNTH,NCT07357519,include,direct_sponsor,Lantheus Medical Imaging,"[""lu targo""]",2026-01-22,,2026-08-30,1.0,Direct-sponsored targeted osteosarcoma therapy study.
+TECH,NCT06966089,include,subsidiary_product_collaboration,Icahn School of Medicine at Mount Sinai,"[""exosomedx""]",2025-05-11,,2026-08-30,0.95,External sponsor evaluating Bio-Techne subsidiary ExosomeDx; exact product term required.
+TECH,NCT06349772,exclude,ticker_token_collision,,"[""texas tech university""]",2024-04-05,,2026-08-30,1.0,Texas Tech University study is unrelated to Bio-Techne; generic TECH matching is prohibited.

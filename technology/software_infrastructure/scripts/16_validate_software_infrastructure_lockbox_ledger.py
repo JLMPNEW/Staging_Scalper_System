@@ -178,13 +178,19 @@ def main() -> int:
             if int(lockbox.get("automatic_promotion_applied") or 0) != 0:
                 errors.append("LCR applied automatic promotion; expected review-only mode.")
             latest_status = lockbox.get("latest_stage8_research_candidate_status")
-            if latest_status not in {"report_only_not_promoted", "promotable_pending_manual_review"}:
+            if latest_status not in {"report_only_not_promoted", "promotable_pending_manual_review", "manual_economic_override_promoted"}:
                 errors.append(f"Unexpected latest_stage8_research_candidate_status: {latest_status}")
             promotion = lockbox.get("promotion_decision") or {}
-            if promotion.get("decision") != "stage8_promoted_to_production":
+            if promotion.get("decision") != "stage8_manual_economic_override_promoted":
                 errors.append(f"Unexpected promotion decision: {promotion.get('decision')}")
-            if int(promotion.get("latest_research_candidate_promoted") or 0) != 0:
-                errors.append("Latest research candidate was promoted automatically; expected 0.")
+            if int(promotion.get("latest_research_candidate_promoted") or 0) != 1:
+                errors.append("Lockbox does not identify the sealed latest candidate as manually promoted.")
+            if lockbox.get("promotion_decision_type") != "manual_economic_override":
+                errors.append("Lockbox is missing the manual economic override decision type.")
+            if int(lockbox.get("strict_gate_failure_acknowledged") or 0) != 1:
+                errors.append("Lockbox does not acknowledge the strict statistical gate failure.")
+            if int(lockbox.get("production_binding_valid") or 0) != 1:
+                errors.append(f"Invalid production binding: {lockbox.get('production_binding_status')} {lockbox.get('production_binding_reasons')}")
             if (lockbox.get("missing_required_artifacts") or []):
                 errors.append(f"Lockbox reports missing required artifacts: {lockbox.get('missing_required_artifacts')}")
             registry_summary = lockbox.get("signal_registry_summary") or {}
@@ -206,10 +212,10 @@ def main() -> int:
                 errors.append("Manifest indicates automatic promotion; expected 0.")
             if manifest.get("production_model_status") != "stage8_active":
                 errors.append(f"Unexpected manifest production status: {manifest.get('production_model_status')}")
-            if manifest.get("stage8_candidate_status") != "promoted_to_production":
+            if manifest.get("stage8_candidate_status") != "manual_economic_override_promoted":
                 errors.append(f"Unexpected stage8 candidate status: {manifest.get('stage8_candidate_status')}")
             latest_status = manifest.get("latest_stage8_research_candidate_status")
-            if latest_status not in {"report_only_not_promoted", "promotable_pending_manual_review"}:
+            if latest_status not in {"report_only_not_promoted", "promotable_pending_manual_review", "manual_economic_override_promoted"}:
                 errors.append(f"Unexpected manifest latest research status: {latest_status}")
         except json.JSONDecodeError as exc:
             errors.append(f"Invalid governance manifest JSON: {exc}")

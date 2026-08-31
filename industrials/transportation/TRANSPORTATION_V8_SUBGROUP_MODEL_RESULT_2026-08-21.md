@@ -1,5 +1,12 @@
 # Transportation v8 subgroup model result — 2026-08-21
 
+> **Superseded for correctness:** The conflict-resolution, coverage,
+> calibration, and production-readiness claims in this note are diagnostic
+> history only. The authoritative result is
+> [TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md](TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md),
+> which withdraws the prior 765 deterministic conflict resolutions and keeps
+> Transportation shadow-only and zero-cap.
+
 ## Outcome
 
 The corrected sequence completed through the diagnostic gate:
@@ -72,4 +79,3 @@ The next admissible evidence is future-only subgroup monitoring under the frozen
 - Group-first calibration: `industrials/transportation/scripts/42_run_transportation_v8_subgroup_calibration.py`
 - Score manifest: `output/industrials/transportation/investable_v5/subgroup_scores_v8/2026-08-21/transportation_v8_subgroup_score_history.json`
 - Calibration manifest: `output/industrials/transportation/investable_v5/subgroup_calibration_v8/2026-08-21/transportation_v8_subgroup_calibration.json`
-

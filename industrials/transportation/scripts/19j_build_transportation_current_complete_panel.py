@@ -37,7 +37,7 @@ from industrials.transportation.selected_feature_history import (  # noqa: E402
 )
 
 
-CURRENT_PANEL_VERSION = "transportation_current_complete_panel_v1"
+CURRENT_PANEL_VERSION = "transportation_current_complete_panel_v2"
 DEFAULT_FROZEN_CONTRACT_DIR = (
     PROJECT_ROOT
     / "output"
@@ -99,6 +99,7 @@ def _valid_existing(
     frozen_panel_hash: str,
     frozen_validation_hash: str,
     generator_hash: str,
+    materializer_hash: str,
 ) -> bool:
     if not all(
         path.is_file()
@@ -134,6 +135,8 @@ def _valid_existing(
         == frozen_validation_hash
         and str((manifest.get("generator") or {}).get("sha256") or "")
         == generator_hash
+        and str((manifest.get("materializer") or {}).get("sha256") or "")
+        == materializer_hash
         and str((artifacts.get("complete_panel") or {}).get("sha256") or "")
         == sha256(complete_path)
         and str(
@@ -284,11 +287,13 @@ def main() -> int:
         output_dir / "transportation_current_complete_panel_manifest.json"
     )
     generator_path = Path(__file__).resolve()
+    materializer_path = Path(materialize_panels.__code__.co_filename).resolve()
     snapshot_hash = sha256(availability_path)
     preflight_hash = sha256(preflight_path)
     frozen_panel_hash = sha256(frozen_panel_manifest_path)
     frozen_validation_hash = sha256(frozen_panel_validation_path)
     generator_hash = sha256(generator_path)
+    materializer_hash = sha256(materializer_path)
     if _valid_existing(
         manifest_path=manifest_path,
         complete_path=complete_path,
@@ -300,6 +305,7 @@ def main() -> int:
         frozen_panel_hash=frozen_panel_hash,
         frozen_validation_hash=frozen_validation_hash,
         generator_hash=generator_hash,
+        materializer_hash=materializer_hash,
     ):
         print(manifest_path.read_text(encoding="utf-8"), end="")
         return 0
@@ -328,6 +334,7 @@ def main() -> int:
         accepted=accepted,
         discovery_path=specialized_path,
         complete_path=complete_path,
+        allow_out_of_scope_tickers=True,
     )
     write_csv_atomic(
         coverage_path,
@@ -366,6 +373,13 @@ def main() -> int:
         "model_family": MODEL_FAMILY,
         "asof_date": asof,
         "membership_row_count": membership_count,
+        "current_snapshot_ticker_count": membership_count
+        + len(result["out_of_scope_tickers"]),
+        "frozen_scope_excluded_ticker_count": len(
+            result["out_of_scope_tickers"]
+        ),
+        "frozen_scope_excluded_tickers": result["out_of_scope_tickers"],
+        "scope_expansion_deferred": bool(result["out_of_scope_tickers"]),
         "generic_metric_count": len(generic_ids),
         "specialized_metric_count": len(registry_rows),
         "complete_metric_count": len(generic_ids) + len(registry_rows),
@@ -417,6 +431,10 @@ def main() -> int:
         "generator": {
             "path": str(generator_path),
             "sha256": generator_hash,
+        },
+        "materializer": {
+            "path": str(materializer_path),
+            "sha256": materializer_hash,
         },
         "operations": {
             "current_panel_materializations": 1,

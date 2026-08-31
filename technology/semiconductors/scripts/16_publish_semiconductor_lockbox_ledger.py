@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from technology.core.promotion_governance import resolve_production_binding  # noqa: E402
 from technology.core.scoring_features import SUBFEATURE_SPECS  # noqa: E402
 from technology.semiconductors.calibrated_scoring import (  # noqa: E402
     component_weight_specs,
@@ -94,6 +95,15 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+LEDGER_CHAIN_FIELDS = ("previous_snapshot_path", "previous_snapshot_sha256", "ledger_content_sha256")
+
+
+def ledger_content_sha256(payload: dict[str, Any]) -> str:
+    content = {key: value for key, value in payload.items() if key not in LEDGER_CHAIN_FIELDS}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def csv_row_count(path: Path) -> int | str:
@@ -460,7 +470,14 @@ def main() -> int:
     audit_summary = read_json(audit_dir / "semiconductor_pipeline_audit.json")
     best_backtest = best_backtest_row(backtest_rows)
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    snapshot_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    snapshot_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+
+    production_binding = resolve_production_binding(
+        config,
+        config_path=config_path,
+        family="semiconductors",
+        governance_config_key="semiconductor_governance_reports",
+    )
 
     artifacts = [
         artifact_row("technology_config", "input_config", config_path),
@@ -474,6 +491,8 @@ def main() -> int:
         artifact_row("signal_birthdates", "diagnostics", diagnostics_dir / "signal_birthdates.csv"),
         artifact_row("wsts_cycle_regime_ic", "diagnostics", diagnostics_dir / "wsts_cycle_regime_ic.csv", required=False),
         artifact_row("stage8_best_weights", "research_calibration", optuna_dir / "stage8_best_weights.json", required=False),
+        artifact_row("stage8_run_manifest", "research_calibration", optuna_dir / "stage8_run_manifest.json", required=False),
+        artifact_row("walk_forward_run_manifest", "research_calibration", optuna_dir / "walk_forward" / "walk_forward_run_manifest.json", required=False),
         artifact_row("stage8_trials", "research_calibration", optuna_dir / "stage8_trials.csv", required=False),
         artifact_row("walk_forward_summary", "research_calibration", optuna_dir / "walk_forward" / "walk_forward_summary.json", required=False),
         artifact_row("portfolio_backtest_summary", "backtest", backtest_dir / "semiconductor_portfolio_backtest_summary.csv"),
@@ -492,11 +511,16 @@ def main() -> int:
         "config_sha256": sha256_file(config_path),
         "registry_sha256": sha256_file(registry_path),
         "model_family": model_family,
+        "production_binding_valid": int(production_binding.valid),
+        "production_binding_status": production_binding.status,
+        "production_binding_reasons": list(production_binding.reasons),
         "production_source_id": stage7_source_id,
         "stage7_summary": stage7_summary,
         "top10_rank_ready": top10,
         "stage8_research_decision": {
-            "promotion_candidate": stage8_weights.get("promotion_candidate", ""),
+            "stage8_gate_pass": stage8_weights.get("stage8_gate_pass", ""),
+            "promotion_candidate": walk_forward_summary.get("final_promotion_eligible", 0),
+            "promotion_scope": "walk_forward_complete_manual_approval_required",
             "objective_improvement": stage8_weights.get("objective_improvement", ""),
             "fold_win_fraction": stage8_weights.get("fold_win_fraction", ""),
             "source_id": stage8_weights.get("source_id", ""),
@@ -505,6 +529,10 @@ def main() -> int:
             "procedure_adds_value": walk_forward_summary.get("procedure_adds_value", ""),
             "refit_win_rate": walk_forward_summary.get("refit_win_rate", ""),
             "mean_objective_improvement": walk_forward_summary.get("mean_objective_improvement", ""),
+            "improvement_paired_t": walk_forward_summary.get("improvement_paired_t", ""),
+            "promotion_gate_pass_rate": walk_forward_summary.get("promotion_gate_pass_rate", ""),
+            "final_promotion_eligible": walk_forward_summary.get("final_promotion_eligible", 0),
+            "final_promotion_reasons": walk_forward_summary.get("final_promotion_reasons", []),
         },
         "backtest_reference": best_backtest,
         "dashboard_manifest": dashboard_manifest,
@@ -531,6 +559,12 @@ def main() -> int:
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshot_json = snapshot_dir / f"semiconductor_lockbox_ledger_{snapshot_stamp}.json"
 
+    previous_snapshots = sorted(snapshot_dir.glob("semiconductor_lockbox_ledger_*.json"))
+    previous_snapshot = previous_snapshots[-1] if previous_snapshots else None
+    lockbox["previous_snapshot_path"] = rel_or_abs(previous_snapshot) if previous_snapshot else ""
+    lockbox["previous_snapshot_sha256"] = sha256_file(previous_snapshot) if previous_snapshot else ""
+    lockbox["ledger_content_sha256"] = ledger_content_sha256(lockbox)
+
     lockbox_json.write_text(json.dumps(lockbox, indent=2, sort_keys=True, default=str), encoding="utf-8")
     snapshot_json.write_text(json.dumps(lockbox, indent=2, sort_keys=True, default=str), encoding="utf-8")
     write_csv(lockbox_csv, artifacts)
@@ -538,6 +572,12 @@ def main() -> int:
         "generated_at_utc": generated_at,
         "snapshot_id": lockbox["snapshot_id"],
         "database_path": str(db_path),
+        "production_binding_valid": int(production_binding.valid),
+        "production_binding_status": production_binding.status,
+        "production_binding_reasons": list(production_binding.reasons),
+        "previous_snapshot_path": lockbox["previous_snapshot_path"],
+        "previous_snapshot_sha256": lockbox["previous_snapshot_sha256"],
+        "ledger_content_sha256": lockbox["ledger_content_sha256"],
         "outputs": {
             "signal_registry_csv": str(signal_registry_csv),
             "signal_registry_json": str(signal_registry_json),
@@ -550,7 +590,7 @@ def main() -> int:
     }
     manifest_json.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str), encoding="utf-8")
     print(json.dumps(manifest, indent=2, sort_keys=True, default=str))
-    return 1 if lockbox["missing_required_artifacts"] else 0
+    return 1 if lockbox["missing_required_artifacts"] or not production_binding.valid else 0
 
 
 if __name__ == "__main__":

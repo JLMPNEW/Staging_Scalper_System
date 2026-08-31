@@ -3,6 +3,8 @@
 Four shapes cover all sub-sectors:
   - tech_family : semiconductors, software_infrastructure, technology_hardware (shared `final_score`)
   - industrial_family : industrials final-rank tables using the shared `final_score` contract
+  - transportation_subgroup : Transportation v8 rows with sealed group recipes
+  - consumer_defensive : Consumer Staples final-rank tables with explicit promotion governance
   - biotech     : biotech_index daily scores using `portfolio_candidate_*` when present
   - med_devices : med_device daily composite scores gated by `portfolio_candidate_gate`
 
@@ -10,11 +12,17 @@ Adapters read files only. They never import a sector package or open a sector DB
 """
 from __future__ import annotations
 
-import math
+import csv
+import hashlib
+import io
+import json
 import logging
+import math
 import re
+from collections import defaultdict
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from orchestration_contracts.financial_lineage import (
     financial_lineage_sidecar_alignment_errors,
@@ -27,7 +35,6 @@ from orchestration_contracts.financial_lineage import (
 from portfolio_layer.core.contracts import AdapterResult, CanonicalScore
 from portfolio_layer.core.contracts import FINANCIAL_LINEAGE_FIELDS
 from portfolio_layer.core.contracts import read_csv
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +75,136 @@ INDUSTRIAL_FAMILY_ONE_OF_COLUMNS = (
     ("industry_aggregate", "subsector"),
     ("score_confidence", "data_quality_confidence"),
 )
+
+
+# Keep this schema local to Portfolio Layer. The adapter is deliberately a
+# file-contract boundary: importing the sector package (or opening its DB)
+# would couple portfolio construction to a mutable upstream implementation.
+CONSUMER_DEFENSIVE_REQUIRED_COLUMNS = (
+    *INDUSTRIAL_FAMILY_REQUIRED_COLUMNS,
+    'industry_aggregate',
+    'promotion_state',
+)
+
+CONSUMER_DEFENSIVE_PROMOTION_STATES = frozenset(
+    {'promoted', 'shadow_monitor', 'deferred'}
+)
+CONSUMER_DEFENSIVE_COHORTS = frozenset(
+    {
+        "beverages",
+        "consumer_staples_distribution_retail",
+        "household_personal_tobacco",
+        "packaged_foods_agricultural_products",
+    }
+)
+# Portfolio Layer accepts only the standard-allocation state from the current
+# Consumer Defensive production contract. The retired canary/pilot/scaled
+# ladder must not be reintroduced by pinning an old, otherwise validly hashed
+# registry. Non-promoted cohorts keep their equal-budget slot in cash.
+CONSUMER_DEFENSIVE_V3_STANDARD_STATE = "active_full"
+CONSUMER_DEFENSIVE_V3_NON_DEPLOYABLE_STATES = frozenset(
+    {"rollback", "benchmark_production"}
+)
+CONSUMER_DEFENSIVE_V3_ALLOWED_STATES = frozenset(
+    {
+        CONSUMER_DEFENSIVE_V3_STANDARD_STATE,
+        *CONSUMER_DEFENSIVE_V3_NON_DEPLOYABLE_STATES,
+    }
+)
+CONSUMER_DEFENSIVE_V3_REGISTRY_KEYS = frozenset(
+    {
+        "schema_version", "model_family", "asof_date", "effective_from",
+        "valid_until", "maximum_activation_age_days", "decision_sha256",
+        "framework_sha256", "source_input_sha256", "calibration_write_performed",
+        "portfolio_write_performed", "cohorts", "payload_sha256",
+    }
+)
+CONSUMER_DEFENSIVE_V3_LOCK_KEYS = frozenset(
+    {
+        "schema_version", "model_family", "cohort", "lock_id", "effective_from",
+        "valid_until", "deployment_state", "promotion_state", "investable",
+        "tier_deployment_fraction", "effective_deployment_fraction",
+        "approved_full_portfolio_cap", "optimizer_cap", "expected_alpha_at_full",
+        "confidence_multiplier", "decision_sha256", "framework_sha256",
+        "source_input_sha256", "model_contract_sha256", "selected_candidate_id",
+        "score_model_version", "scoring_contract_version", "payload_sha256",
+    }
+)
+CONSUMER_DEFENSIVE_V3_ROW_LOCK_FIELDS = {
+    "consumer_defensive_production_lock_id": "lock_id",
+    "consumer_defensive_production_lock_sha256": "payload_sha256",
+    "consumer_defensive_model_contract_sha256": "model_contract_sha256",
+    "consumer_defensive_decision_sha256": "decision_sha256",
+    "consumer_defensive_selected_candidate_id": "selected_candidate_id",
+    "consumer_defensive_deployment_state": "deployment_state",
+}
+CONSUMER_DEFENSIVE_CALIBRATION_SCOPE_KEYS = frozenset(
+    {
+        "mode",
+        "enforcement_stage",
+        "selection_basis",
+        "evidence_classification",
+        "strict_oos_eligible",
+        "preserve_source_history",
+        "production_promotion_requires_fresh_post_scope_evidence",
+        "reviewed_as_of",
+        "excluded_tickers_by_cohort",
+        "excluded_tickers",
+        "excluded_ticker_count",
+        "expected_remaining_current_ticker_count",
+        "expected_remaining_current_tickers_sha256",
+        "expected_remaining_current_by_cohort",
+        "payload_sha256",
+    }
+)
+CONSUMER_DEFENSIVE_V3_PRODUCTION_COLUMNS = (
+    *CONSUMER_DEFENSIVE_REQUIRED_COLUMNS,
+    *CONSUMER_DEFENSIVE_V3_ROW_LOCK_FIELDS,
+    "consumer_defensive_optimizer_cap",
+    "consumer_defensive_confidence_multiplier",
+    "signal_asof_date",
+    "allocation_asof_date",
+    "entry_lag_trading_sessions",
+    "source_input_observation_id",
+    "source_stage6_contract_sha256",
+    "source_component_manifest_sha256",
+    "consumer_defensive_calibration_scope_sha256",
+    "row_sha256",
+)
+
+TRANSPORTATION_SUBGROUP_REQUIRED_COLUMNS = (
+    *INDUSTRIAL_FAMILY_REQUIRED_COLUMNS,
+    "industry_aggregate",
+    "transportation_scoring_mode",
+    "transportation_production_state",
+    "transportation_group_recipe_version",
+    "transportation_subgroup_policy_sha256",
+    "transportation_cohort_id",
+    "transportation_group_id",
+    "transportation_group_recipe_key",
+    "transportation_group_recipe_sha256",
+    "transportation_group_ranking_mode",
+    "transportation_group_aggregate_weight",
+    "transportation_group_rank",
+    "transportation_membership_scope",
+    "transportation_membership_effective_from",
+    "transportation_membership_effective_to",
+    "transportation_component_recipe_state",
+    "transportation_applied_component_weights_sha256",
+    "transportation_subgroup_score_sha256",
+    "transportation_expected_group_count",
+    "transportation_expected_ticker_count",
+    "transportation_group_expected_ticker_count",
+    "transportation_production_lock_id",
+    "transportation_decision_manifest_sha256",
+)
+TRANSPORTATION_SUBGROUP_SHA_FIELDS = (
+    "transportation_subgroup_policy_sha256",
+    "transportation_group_recipe_sha256",
+    "transportation_applied_component_weights_sha256",
+    "transportation_subgroup_score_sha256",
+)
+TRANSPORTATION_SUBGROUP_STATES = frozenset({"shadow", "promoted"})
 
 
 def _f(value: Any) -> float | None:
@@ -439,6 +576,17 @@ def _adapt_final_rank_family(
                 else r.get("data_quality_confidence")
             ),
             source_asof_date=_source_asof(r),
+            model_scope_id=(
+                str(r.get("calibration_cohort") or "").strip()
+                if str(cfg.get("model_family") or "") == "consumer_defensive"
+                else str(r.get("model_scope_id") or "").strip()
+            ),
+            production_policy_id=str(
+                r.get("consumer_defensive_production_lock_id") or ""
+            ).strip(),
+            production_policy_sha256=str(
+                r.get("consumer_defensive_production_lock_sha256") or ""
+            ).strip().lower(),
             financial_lineage_checked_asof_date=lineage_checked,
             financial_lineage_status=lineage_status,
             financial_lineage_gate=int(lineage_gate),
@@ -484,6 +632,1341 @@ def _adapt_industrial_family(cfg: dict[str, Any], rows: list[dict[str, str]]) ->
                 f"must include one column from each group: {missing_groups}"
             )
     return _adapt_final_rank_family(cfg, rows, enforce_candidate_status=True)
+
+
+def _transportation_iso(
+    value: object,
+    *,
+    label: str,
+    required: bool,
+) -> date | None:
+    text = str(value or "").strip()[:10]
+    if not text:
+        if required:
+            raise ValueError(f"{label} is required")
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} is not an ISO date") from exc
+
+
+def _require_zero_transportation_shadow_alpha(cfg: dict[str, Any]) -> None:
+    calibration = cfg.get("calibration")
+    if not isinstance(calibration, dict):
+        raise ValueError(
+            "shadow Transportation source requires an explicit zero-alpha calibration"
+        )
+    alpha = _f(calibration.get("expected_alpha_at_full"))
+    if alpha is None or not math.isclose(alpha, 0.0, abs_tol=1e-12):
+        raise ValueError(
+            "shadow Transportation source requires expected_alpha_at_full=0"
+        )
+
+
+def _require_zero_consumer_defensive_shadow_alpha(
+    cfg: dict[str, Any],
+) -> None:
+    calibration = cfg.get("calibration")
+    if not isinstance(calibration, dict):
+        raise ValueError(
+            "shadow Consumer Defensive source requires an explicit "
+            "zero-alpha calibration"
+        )
+    alpha = _f(calibration.get("expected_alpha_at_full"))
+    if alpha is None or not math.isclose(alpha, 0.0, abs_tol=1e-12):
+        raise ValueError(
+            "shadow Consumer Defensive source requires "
+            "expected_alpha_at_full=0"
+        )
+
+
+def _adapt_transportation_subgroup(
+    cfg: dict[str, Any],
+    rows: list[dict[str, str]],
+) -> list[CanonicalScore]:
+    """Consume only complete, unambiguous Transportation subgroup lineage."""
+    if str(cfg.get("model_family") or "") != "transportation":
+        raise ValueError(
+            "transportation_subgroup adapter is reserved for transportation"
+        )
+    if not rows:
+        return []
+    scoring_modes = {
+        str(row.get("transportation_scoring_mode") or "").strip()
+        for row in rows
+    }
+    if scoring_modes == {""}:
+        # Preserve read-only diagnostics for immutable pre-v8 shadow files.
+        # They can never assert OOS/candidate gates through this compatibility
+        # branch and the configured Transportation alpha/cap remain zero.
+        for row in rows:
+            ticker = str(row.get("ticker") or "").strip().upper() or "<blank>"
+            if (
+                _truthy(row.get("portfolio_candidate_gate"))
+                or _truthy(row.get("oos_score_valid_flag"))
+                or str(row.get("portfolio_candidate_status") or "")
+                != "shadow_only"
+            ):
+                raise ValueError(
+                    f"{ticker}: legacy Transportation row is not shadow-only"
+                )
+            if (
+                _truthy(row.get("research_calibration_input_eligible_flag"))
+                or _truthy(row.get("stage11_calibration_input_eligible_flag"))
+                or _truthy(row.get("survivorship_corrected_panel_flag"))
+            ):
+                raise ValueError(
+                    f"{ticker}: legacy Transportation shadow row cannot assert research lineage"
+                )
+        _require_zero_transportation_shadow_alpha(cfg)
+        return _adapt_industrial_family(cfg, rows)
+    if scoring_modes != {"subgroup_v8"}:
+        raise ValueError(
+            "transportation_subgroup file mixes subgroup and legacy scoring modes"
+        )
+    tickers: set[str] = set()
+    group_recipe_hashes: dict[str, set[str]] = defaultdict(set)
+    group_modes: dict[str, set[str]] = defaultdict(set)
+    group_weights: dict[str, set[float]] = defaultdict(set)
+    group_expected_counts: dict[str, set[int]] = defaultdict(set)
+    group_ranks: dict[str, list[int]] = defaultdict(list)
+    group_cohorts: dict[str, str] = {}
+    recipe_versions: set[str] = set()
+    policy_hashes: set[str] = set()
+    states: set[str] = set()
+    production_lock_ids: set[str] = set()
+    decision_hashes: set[str] = set()
+    expected_group_counts: set[int] = set()
+    expected_ticker_counts: set[int] = set()
+    for idx, row in enumerate(rows, start=1):
+        ticker = str(row.get("ticker") or "").strip().upper() or "<blank>"
+        missing = sorted(
+            set(TRANSPORTATION_SUBGROUP_REQUIRED_COLUMNS) - set(row)
+        )
+        if missing:
+            raise ValueError(
+                "transportation_subgroup score file row "
+                f"{idx} ticker={ticker} is missing required columns: {missing}"
+            )
+        if ticker in tickers:
+            raise ValueError(
+                f"transportation_subgroup has duplicate/ambiguous ticker={ticker}"
+            )
+        tickers.add(ticker)
+        if str(row.get("sector") or "").strip() != "Industrials":
+            raise ValueError(
+                f"{ticker}: Transportation row must use sector=Industrials"
+            )
+        if str(row.get("industry_aggregate") or "").strip() != "Transportation":
+            raise ValueError(
+                f"{ticker}: Transportation row has wrong industry_aggregate"
+            )
+        if str(row.get("transportation_scoring_mode") or "") != "subgroup_v8":
+            raise ValueError(
+                f"{ticker}: unsupported transportation_scoring_mode"
+            )
+        state = str(row.get("transportation_production_state") or "")
+        if state not in TRANSPORTATION_SUBGROUP_STATES:
+            raise ValueError(
+                f"{ticker}: invalid transportation_production_state={state!r}"
+            )
+        states.add(state)
+        for field in TRANSPORTATION_SUBGROUP_SHA_FIELDS:
+            value = str(row.get(field) or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError(f"{ticker}: invalid {field}")
+        cohort_id = str(row.get("transportation_cohort_id") or "").strip()
+        group_id = str(row.get("transportation_group_id") or "").strip()
+        recipe_key = str(
+            row.get("transportation_group_recipe_key") or ""
+        ).strip()
+        if not cohort_id or not group_id or recipe_key != f"{cohort_id}::{group_id}":
+            raise ValueError(f"{ticker}: subgroup recipe identity is inconsistent")
+        ranking_mode = str(
+            row.get("transportation_group_ranking_mode") or ""
+        )
+        if ranking_mode not in {"ranked", "eligibility_equal_weight"}:
+            raise ValueError(f"{ticker}: invalid subgroup ranking mode")
+        recipe_state = str(
+            row.get("transportation_component_recipe_state") or ""
+        )
+        if recipe_state not in {"active", "fallback"}:
+            raise ValueError(f"{ticker}: invalid component recipe state")
+        membership_scope = str(
+            row.get("transportation_membership_scope") or ""
+        )
+        if membership_scope not in {
+            "current_recipe",
+            "historical_calibration_only",
+            "pre_effective_policy_diagnostic_replay",
+        }:
+            raise ValueError(f"{ticker}: invalid subgroup membership scope")
+        asof = _transportation_iso(
+            row.get("asof_date"),
+            label=f"{ticker}.asof_date",
+            required=True,
+        )
+        assert asof is not None
+        start = _transportation_iso(
+            row.get("transportation_membership_effective_from"),
+            label=f"{ticker}.transportation_membership_effective_from",
+            required=False,
+        )
+        end = _transportation_iso(
+            row.get("transportation_membership_effective_to"),
+            label=f"{ticker}.transportation_membership_effective_to",
+            required=False,
+        )
+        if (start is not None and start > asof) or (
+            end is not None and end < asof
+        ):
+            raise ValueError(
+                f"{ticker}: subgroup membership does not cover score date"
+            )
+        if start is not None and end is not None and start > end:
+            raise ValueError(f"{ticker}: subgroup membership range is reversed")
+        if membership_scope in {
+            "historical_calibration_only",
+            "pre_effective_policy_diagnostic_replay",
+        } and (start is None or end is None):
+            raise ValueError(
+                f"{ticker}: historical subgroup membership must be bounded"
+            )
+        if membership_scope == "current_recipe" and start is None:
+            raise ValueError(
+                f"{ticker}: current subgroup membership must have an effective start"
+            )
+        if state == "shadow":
+            if _truthy(row.get("portfolio_candidate_gate")) or _truthy(
+                row.get("oos_score_valid_flag")
+            ):
+                raise ValueError(
+                    f"{ticker}: shadow subgroup row cannot assert portfolio/OOS gates"
+                )
+            if str(row.get("portfolio_candidate_status") or "") != "shadow_only":
+                raise ValueError(
+                    f"{ticker}: shadow subgroup row must use status=shadow_only"
+                )
+            if _truthy(
+                row.get("research_calibration_input_eligible_flag")
+            ) or _truthy(row.get("stage11_calibration_input_eligible_flag")) or _truthy(
+                row.get("survivorship_corrected_panel_flag")
+            ):
+                raise ValueError(
+                    f"{ticker}: shadow subgroup row cannot assert research gates"
+                )
+            if str(row.get("transportation_production_lock_id") or "").strip():
+                raise ValueError(
+                    f"{ticker}: shadow subgroup row cannot assert a production lock"
+                )
+            if str(
+                row.get("transportation_decision_manifest_sha256") or ""
+            ).strip():
+                raise ValueError(
+                    f"{ticker}: shadow subgroup row cannot assert decision lineage"
+                )
+        else:
+            lock_id = str(
+                row.get("transportation_production_lock_id") or ""
+            ).strip()
+            decision_sha = str(
+                row.get("transportation_decision_manifest_sha256") or ""
+            ).strip().lower()
+            if not lock_id or not re.fullmatch(r"[0-9a-f]{64}", decision_sha):
+                raise ValueError(
+                    f"{ticker}: promoted subgroup row lacks lock/decision lineage"
+                )
+            production_lock_ids.add(lock_id)
+            decision_hashes.add(decision_sha)
+        weight = _f(row.get("transportation_group_aggregate_weight"))
+        if weight is None or not 0.0 < weight <= 1.0:
+            raise ValueError(f"{ticker}: invalid group aggregate weight")
+        try:
+            expected_groups = int(
+                str(row.get("transportation_expected_group_count") or "")
+            )
+            expected_tickers = int(
+                str(row.get("transportation_expected_ticker_count") or "")
+            )
+            expected_in_group = int(
+                str(
+                    row.get(
+                        "transportation_group_expected_ticker_count"
+                    )
+                    or ""
+                )
+            )
+            group_rank = int(
+                str(row.get("transportation_group_rank") or "")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"{ticker}: invalid subgroup census/rank fields"
+            ) from exc
+        if min(
+            expected_groups,
+            expected_tickers,
+            expected_in_group,
+            group_rank,
+        ) <= 0:
+            raise ValueError(f"{ticker}: subgroup census/rank must be positive")
+        recipe_versions.add(
+            str(row.get("transportation_group_recipe_version") or "")
+        )
+        policy_hashes.add(
+            str(row.get("transportation_subgroup_policy_sha256") or "")
+        )
+        expected_group_counts.add(expected_groups)
+        expected_ticker_counts.add(expected_tickers)
+        group_recipe_hashes[recipe_key].add(
+            str(row.get("transportation_group_recipe_sha256") or "")
+        )
+        group_modes[recipe_key].add(ranking_mode)
+        group_weights[recipe_key].add(weight)
+        group_expected_counts[recipe_key].add(expected_in_group)
+        group_ranks[recipe_key].append(group_rank)
+        group_cohorts[recipe_key] = cohort_id
+
+    if any(
+        len(values) != 1
+        for values in (
+            recipe_versions,
+            policy_hashes,
+            states,
+            expected_group_counts,
+            expected_ticker_counts,
+        )
+    ):
+        raise ValueError(
+            "transportation_subgroup file has mixed lock/policy/state lineage"
+        )
+    if not next(iter(recipe_versions)).strip():
+        raise ValueError("transportation_subgroup recipe version is blank")
+    state = next(iter(states))
+    if state == "shadow":
+        _require_zero_transportation_shadow_alpha(cfg)
+    if state == "promoted" and (
+        len(production_lock_ids) != 1 or len(decision_hashes) != 1
+    ):
+        raise ValueError(
+            "transportation_subgroup promoted rows have mixed lock lineage"
+        )
+    expected_group_count = next(iter(expected_group_counts))
+    expected_ticker_count = next(iter(expected_ticker_counts))
+    if len(group_recipe_hashes) != expected_group_count:
+        raise ValueError(
+            "transportation_subgroup file is missing or has extra group recipes"
+        )
+    if len(tickers) != expected_ticker_count:
+        raise ValueError(
+            "transportation_subgroup ticker census does not tie"
+        )
+    for recipe_key in group_recipe_hashes:
+        if (
+            len(group_recipe_hashes[recipe_key]) != 1
+            or len(group_modes[recipe_key]) != 1
+            or len(group_weights[recipe_key]) != 1
+            or len(group_expected_counts[recipe_key]) != 1
+        ):
+            raise ValueError(
+                f"{recipe_key}: ambiguous subgroup recipe lineage"
+            )
+        expected = next(iter(group_expected_counts[recipe_key]))
+        if len(group_ranks[recipe_key]) != expected:
+            raise ValueError(
+                f"{recipe_key}: subgroup ticker census does not tie"
+            )
+        if sorted(group_ranks[recipe_key]) != list(
+            range(1, expected + 1)
+        ):
+            raise ValueError(f"{recipe_key}: subgroup ranks are not contiguous")
+    cohort_weight_sums: dict[str, float] = defaultdict(float)
+    for recipe_key, values in group_weights.items():
+        cohort_weight_sums[group_cohorts[recipe_key]] += next(iter(values))
+    for cohort_id, total in cohort_weight_sums.items():
+        if not math.isclose(total, 1.0, abs_tol=1e-9):
+            raise ValueError(
+                f"{cohort_id}: locked subgroup aggregate weights do not sum to one"
+            )
+    if state == "promoted":
+        raise ValueError(
+            "promoted Transportation subgroup consumption is disabled until "
+            "hash-bound lock/decision verification and fixed-group portfolio "
+            "aggregation are implemented"
+        )
+    return _adapt_final_rank_family(
+        cfg,
+        rows,
+        enforce_candidate_status=True,
+    )
+
+
+def _consumer_v3_sha(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _consumer_v3_date(value: object, *, label: str) -> date:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a canonical ISO date")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a canonical ISO date") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{label} must be a canonical ISO date")
+    return parsed
+
+
+def _consumer_v3_canonical_sha256(payload: dict[str, Any]) -> str:
+    body = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    encoded = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _consumer_v3_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _consumer_v3_read_csv_snapshot(
+    path: Path,
+) -> tuple[list[dict[str, str]], tuple[str, ...], str]:
+    """Read and hash one immutable byte snapshot to avoid path re-read races."""
+
+    raw = path.read_bytes()
+    text = raw.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    fieldnames = tuple(reader.fieldnames or ())
+    if (
+        not fieldnames
+        or any(not field.strip() for field in fieldnames)
+        or len(fieldnames) != len(set(fieldnames))
+    ):
+        raise ValueError(
+            "Consumer Defensive score CSV has blank or duplicate headers"
+        )
+    return list(reader), fieldnames, hashlib.sha256(raw).hexdigest()
+
+
+def _consumer_v3_value_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _consumer_v3_rank_row_sha256(row: Mapping[str, Any]) -> str:
+    expected = set(CONSUMER_DEFENSIVE_V3_PRODUCTION_COLUMNS) - {"row_sha256"}
+    observed = set(row) - {"row_sha256"}
+    if observed != expected:
+        raise ValueError("Consumer Defensive rank-row schema drifted")
+    body = {
+        field: "" if row[field] is None else str(row[field])
+        for field in CONSUMER_DEFENSIVE_V3_PRODUCTION_COLUMNS
+        if field != "row_sha256"
+    }
+    return _consumer_v3_canonical_sha256(body)
+
+
+def _consumer_v3_strict_json_snapshot(
+    path: Path,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], str]:
+    """Parse and hash one JSON byte snapshot without re-reading its path."""
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{label} duplicates key={key!r}")
+            result[key] = value
+        return result
+
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+        payload = json.loads(
+            text,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(
+                    f"{label} rejects non-finite JSON constant {value}"
+                )
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is not valid UTF-8 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_consumer_calibration_scope(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != (
+        CONSUMER_DEFENSIVE_CALIBRATION_SCOPE_KEYS
+    ):
+        raise ValueError("Consumer calibration-scope contract has the wrong schema")
+    scope = dict(payload)
+    if scope["mode"] != "explicit_ticker_exclusions" or scope[
+        "enforcement_stage"
+    ] != "before_cross_section_normalization":
+        raise ValueError("Consumer calibration-scope enforcement policy changed")
+    cohorts = scope["excluded_tickers_by_cohort"]
+    expected_counts = scope["expected_remaining_current_by_cohort"]
+    if (
+        not isinstance(cohorts, dict)
+        or not isinstance(expected_counts, dict)
+        or set(cohorts) != CONSUMER_DEFENSIVE_COHORTS
+        or set(expected_counts) != CONSUMER_DEFENSIVE_COHORTS
+    ):
+        raise ValueError("Consumer calibration-scope cohort census changed")
+    excluded: list[str] = []
+    for cohort in sorted(CONSUMER_DEFENSIVE_COHORTS):
+        values = cohorts[cohort]
+        if (
+            not isinstance(values, list)
+            or any(not isinstance(value, str) or not value.strip() for value in values)
+            or values != sorted(set(values))
+        ):
+            raise ValueError(f"Consumer calibration exclusions for {cohort} are invalid")
+        excluded.extend(values)
+        count = expected_counts[cohort]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError(f"Consumer calibration-scope count for {cohort} is invalid")
+    if len(excluded) != len(set(excluded)):
+        raise ValueError("Consumer calibration exclusions overlap across cohorts")
+    if scope["excluded_tickers"] != sorted(excluded) or int(
+        scope["excluded_ticker_count"]
+    ) != len(excluded):
+        raise ValueError("Consumer calibration exclusion census does not tie")
+    if int(scope["expected_remaining_current_ticker_count"]) != sum(
+        int(value) for value in expected_counts.values()
+    ):
+        raise ValueError("Consumer remaining ticker census does not tie")
+    remaining_ticker_sha = _consumer_v3_sha(
+        scope["expected_remaining_current_tickers_sha256"],
+        label="Consumer expected remaining ticker-set SHA",
+    )
+    scope["expected_remaining_current_tickers_sha256"] = remaining_ticker_sha
+    observed_sha = _consumer_v3_canonical_sha256(scope)
+    if observed_sha != _consumer_v3_sha(
+        scope["payload_sha256"], label="Consumer calibration-scope payload hash"
+    ):
+        raise ValueError("Consumer calibration-scope self-hash mismatch")
+    return scope
+
+
+def _load_consumer_v3_score_manifest(
+    cfg: dict[str, Any],
+    source_file: Path,
+    rows: list[dict[str, str]],
+    *,
+    source_asof: str,
+    source_file_sha256: str,
+) -> tuple[dict[str, Any], Path, dict[str, Any], str]:
+    filename = str(cfg.get("production_score_manifest_filename") or "").strip()
+    configured_scope_sha = str(
+        cfg.get("production_calibration_scope_sha256") or ""
+    ).strip()
+    if not filename or Path(filename).name != filename:
+        raise ValueError("Consumer production score-manifest filename is invalid")
+    scope_pin = _consumer_v3_sha(
+        configured_scope_sha,
+        label="configured Consumer calibration-scope SHA",
+    )
+    manifest_path = source_file.with_name(filename).resolve()
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError(f"Consumer production score manifest is missing or unsafe: {manifest_path}")
+    manifest, manifest_file_sha256 = _consumer_v3_strict_json_snapshot(
+        manifest_path,
+        label="Consumer production score manifest",
+    )
+    if (
+        manifest.get("schema_version")
+        != "consumer_defensive_production_score_manifest_v3"
+        or str(manifest.get("status") or "").upper() != "PASS"
+    ):
+        raise ValueError("Consumer production score manifest is not a v3 PASS artifact")
+    unsigned = dict(manifest)
+    payload_sha = str(unsigned.pop("payload_sha256", ""))
+    if payload_sha != _consumer_v3_canonical_sha256(unsigned):
+        raise ValueError("Consumer production score manifest self-hash mismatch")
+    if str(manifest.get("allocation_asof_date") or "") != source_asof:
+        raise ValueError("Consumer production score manifest date mismatch")
+    declared_rank = Path(str(manifest.get("rank_csv_path") or "")).resolve()
+    if declared_rank != source_file.resolve() or str(
+        manifest.get("rank_csv_file_sha256") or ""
+    ) != source_file_sha256:
+        raise ValueError("Consumer production score manifest/rank binding failed")
+    scope = _validate_consumer_calibration_scope(
+        manifest.get("calibration_scope_contract")
+    )
+    if scope["payload_sha256"] != scope_pin or str(
+        manifest.get("calibration_scope_sha256") or ""
+    ) != scope_pin:
+        raise ValueError("Consumer calibration scope does not match the Portfolio pin")
+    tickers = [str(row.get("ticker") or "").strip().upper() for row in rows]
+    if any(
+        str(row.get("row_sha256") or "")
+        != _consumer_v3_rank_row_sha256(row)
+        for row in rows
+    ):
+        raise ValueError("Consumer production score row self-hash mismatch")
+    cohort_counts = {
+        cohort: sum(
+            str(row.get("calibration_cohort") or "").strip() == cohort
+            for row in rows
+        )
+        for cohort in sorted(CONSUMER_DEFENSIVE_COHORTS)
+    }
+    if (
+        len(tickers) != len(set(tickers))
+        or int(manifest.get("rank_row_count", -1)) != len(rows)
+        or int(manifest.get("published_ticker_count", -1)) != len(rows)
+        or str(manifest.get("published_tickers_sha256") or "")
+        != _consumer_v3_value_sha256(sorted(tickers))
+        or str(manifest.get("published_tickers_sha256") or "")
+        != str(scope["expected_remaining_current_tickers_sha256"])
+        or manifest.get("published_tickers_by_cohort") != cohort_counts
+    ):
+        raise ValueError("Consumer production score-manifest ticker census drifted")
+    return scope, manifest_path, manifest, manifest_file_sha256
+
+
+def _resolve_consumer_v3_terminal_manifest(
+    cfg: Mapping[str, Any],
+    root: Path,
+    *,
+    source_asof: str,
+) -> Path:
+    template = str(
+        cfg.get("production_terminal_manifest_file_path") or ""
+    ).strip()
+    if "{yyyy-mm-dd}" in template:
+        relative = template.replace("{yyyy-mm-dd}", source_asof)
+    elif "{yyyymmdd}" in template:
+        relative = template.replace(
+            "{yyyymmdd}", source_asof.replace("-", "")
+        )
+    else:
+        raise ValueError(
+            "Consumer production terminal-manifest path must contain "
+            "{yyyy-mm-dd} or {yyyymmdd}"
+        )
+    base = root.expanduser().resolve()
+    unresolved = Path(relative).expanduser()
+    if unresolved.is_absolute():
+        raise ValueError(
+            "Consumer production terminal-manifest path must be relative"
+        )
+    path = (base / unresolved).resolve()
+    try:
+        path.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(
+            "Consumer production terminal manifest escapes sector_output_root"
+        ) from exc
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(
+            "Consumer production terminal manifest is missing or unsafe: "
+            f"{path}"
+        )
+    return path
+
+
+def _load_consumer_v3_terminal_manifest(
+    cfg: Mapping[str, Any],
+    root: Path,
+    *,
+    source_asof: str,
+    source_file: Path,
+    source_file_sha256: str,
+    source_row_count: int,
+    score_manifest_path: Path,
+    score_manifest: Mapping[str, Any],
+    score_manifest_file_sha256: str,
+    calibration_scope_sha256: str,
+) -> Path:
+    """Require the same-date terminal PASS that sealed parsed score bytes."""
+
+    terminal_path = _resolve_consumer_v3_terminal_manifest(
+        cfg,
+        root,
+        source_asof=source_asof,
+    )
+    terminal, _terminal_file_sha256 = _consumer_v3_strict_json_snapshot(
+        terminal_path,
+        label="Consumer production terminal manifest",
+    )
+    if (
+        terminal.get("schema_version")
+        != "consumer_defensive_production_refresh_manifest_v3"
+        or str(terminal.get("status") or "").upper() != "PASS"
+    ):
+        raise ValueError(
+            "Consumer production terminal manifest is not a v3 PASS artifact"
+        )
+    if (
+        str(terminal.get("asof_date") or "") != source_asof
+        or str(terminal.get("signal_asof_date") or "")
+        != str(score_manifest.get("signal_asof_date") or "")
+    ):
+        raise ValueError("Consumer production terminal manifest date mismatch")
+    if terminal.get("failure") not in (None, ""):
+        raise ValueError("Consumer production terminal PASS contains a failure")
+
+    artifacts = terminal.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != {
+        "rank_table",
+        "publisher_manifest",
+    }:
+        raise ValueError(
+            "Consumer production terminal artifact census is invalid"
+        )
+    rank = artifacts["rank_table"]
+    publisher = artifacts["publisher_manifest"]
+    if not isinstance(rank, dict) or not isinstance(publisher, dict):
+        raise ValueError(
+            "Consumer production terminal artifact records are invalid"
+        )
+    if (
+        Path(str(rank.get("path") or "")).resolve()
+        != source_file.resolve()
+        or str(rank.get("sha256") or "") != source_file_sha256
+        or int(rank.get("rows", -1)) != source_row_count
+        or str(rank.get("calibration_scope_sha256") or "")
+        != calibration_scope_sha256
+    ):
+        raise ValueError(
+            "Consumer production terminal/rank byte binding failed"
+        )
+    if (
+        Path(str(publisher.get("path") or "")).resolve()
+        != score_manifest_path.resolve()
+        or str(publisher.get("sha256") or "")
+        != score_manifest_file_sha256
+        or str(publisher.get("status") or "").upper() != "PASS"
+    ):
+        raise ValueError(
+            "Consumer production terminal/publisher byte binding failed"
+        )
+
+    steps = terminal.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("Consumer production terminal has no completed steps")
+    for expected_sequence, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            raise ValueError(
+                "Consumer production terminal contains an invalid step"
+            )
+        sequence = step.get("sequence")
+        return_code = step.get("return_code")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence != expected_sequence
+            or str(step.get("status") or "").upper() != "PASS"
+            or isinstance(return_code, bool)
+            or not isinstance(return_code, int)
+            or return_code != 0
+        ):
+            raise ValueError(
+                "Consumer production terminal contains a non-PASS step"
+            )
+    return terminal_path
+
+
+def _consumer_v3_finite(value: object, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be finite numeric evidence")
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be finite numeric evidence") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{label} must be finite numeric evidence")
+    return parsed
+
+
+def _validate_consumer_v3_activation_registry(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != CONSUMER_DEFENSIVE_V3_REGISTRY_KEYS:
+        raise ValueError("Consumer Defensive activation registry has the wrong root schema")
+    registry = dict(payload)
+    if (
+        registry["schema_version"]
+        != "consumer_defensive_production_activation_registry_v3"
+        or registry["model_family"] != "consumer_defensive"
+    ):
+        raise ValueError("unsupported Consumer Defensive activation registry")
+    registry_asof = _consumer_v3_date(
+        registry["asof_date"], label="Consumer registry asof_date"
+    )
+    effective = _consumer_v3_date(
+        registry["effective_from"], label="Consumer registry effective_from"
+    )
+    expiry = _consumer_v3_date(
+        registry["valid_until"], label="Consumer registry valid_until"
+    )
+    maximum_age = registry["maximum_activation_age_days"]
+    if isinstance(maximum_age, bool) or not isinstance(maximum_age, int) or maximum_age != 63:
+        raise ValueError("Consumer registry maximum activation age must be 63 days")
+    if not registry_asof <= effective <= expiry:
+        raise ValueError("Consumer registry dates violate the v3 activation policy")
+    authority_deadline = registry_asof + timedelta(days=maximum_age)
+    if effective > authority_deadline or expiry > authority_deadline:
+        raise ValueError(
+            "Consumer registry dates exceed the decision-anchored authority window"
+        )
+    for field in ("decision_sha256", "framework_sha256", "source_input_sha256"):
+        _consumer_v3_sha(registry[field], label=f"Consumer registry {field}")
+    if type(registry["calibration_write_performed"]) is not bool or type(
+        registry["portfolio_write_performed"]
+    ) is not bool:
+        raise ValueError("Consumer registry write flags must be booleans")
+    if registry["calibration_write_performed"] or registry["portfolio_write_performed"]:
+        raise ValueError("Consumer registry cannot claim calibration or Portfolio writes")
+    cohorts = registry["cohorts"]
+    if not isinstance(cohorts, dict) or set(cohorts) != CONSUMER_DEFENSIVE_COHORTS:
+        raise ValueError("Consumer registry cohort census changed")
+    normalized: dict[str, Any] = {}
+    approved_full_caps: dict[str, float] = {}
+    for cohort in sorted(CONSUMER_DEFENSIVE_COHORTS):
+        raw = cohorts[cohort]
+        if not isinstance(raw, dict) or set(raw) != CONSUMER_DEFENSIVE_V3_LOCK_KEYS:
+            raise ValueError(f"Consumer activation lock {cohort} has the wrong schema")
+        lock = dict(raw)
+        if (
+            lock["schema_version"] != "consumer_defensive_activation_lock_v3"
+            or lock["model_family"] != "consumer_defensive"
+            or lock["cohort"] != cohort
+        ):
+            raise ValueError(f"Consumer activation lock {cohort} identity mismatch")
+        state = str(lock["deployment_state"])
+        if state not in CONSUMER_DEFENSIVE_V3_ALLOWED_STATES:
+            raise ValueError(f"Consumer activation lock {cohort} has an invalid state")
+        if type(lock["investable"]) is not bool:
+            raise ValueError(f"Consumer activation lock {cohort} investable must be boolean")
+        lock_effective = _consumer_v3_date(
+            lock["effective_from"], label=f"Consumer lock {cohort} effective_from"
+        )
+        lock_expiry = _consumer_v3_date(
+            lock["valid_until"], label=f"Consumer lock {cohort} valid_until"
+        )
+        if lock_effective != effective or lock_expiry != expiry:
+            raise ValueError(f"Consumer activation lock {cohort} dates are not registry-bound")
+        for field in (
+            "decision_sha256", "framework_sha256", "source_input_sha256",
+            "model_contract_sha256", "payload_sha256",
+        ):
+            _consumer_v3_sha(lock[field], label=f"Consumer lock {cohort}.{field}")
+        if (
+            lock["decision_sha256"] != registry["decision_sha256"]
+            or lock["framework_sha256"] != registry["framework_sha256"]
+            or lock["source_input_sha256"] != registry["source_input_sha256"]
+        ):
+            raise ValueError(f"Consumer activation lock {cohort} lineage mismatch")
+        expected_lock_id = "cdv3_" + hashlib.sha256(
+            json.dumps(
+                {
+                    "cohort": cohort,
+                    "decision_sha256": lock["decision_sha256"],
+                    "effective_from": lock["effective_from"],
+                    "model_contract_sha256": lock["model_contract_sha256"],
+                    "valid_until": lock["valid_until"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+        if lock["lock_id"] != expected_lock_id:
+            raise ValueError(f"Consumer activation lock {cohort} id is not reproducible")
+        numbers = {
+            field: _consumer_v3_finite(lock[field], label=f"Consumer lock {cohort}.{field}")
+            for field in (
+                "tier_deployment_fraction", "effective_deployment_fraction",
+                "approved_full_portfolio_cap", "optimizer_cap",
+                "expected_alpha_at_full", "confidence_multiplier",
+            )
+        }
+        if not all(0.0 <= numbers[field] <= 1.0 for field in (
+            "tier_deployment_fraction", "effective_deployment_fraction",
+            "approved_full_portfolio_cap", "optimizer_cap", "confidence_multiplier",
+        )) or numbers["expected_alpha_at_full"] < 0.0:
+            raise ValueError(f"Consumer activation lock {cohort} numeric bounds failed")
+        if numbers["confidence_multiplier"] <= 0.0:
+            raise ValueError(f"Consumer activation lock {cohort} confidence must be positive")
+        if not math.isclose(
+            numbers["optimizer_cap"],
+            numbers["approved_full_portfolio_cap"]
+            * numbers["effective_deployment_fraction"],
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(f"Consumer activation lock {cohort} cap arithmetic failed")
+        if state == CONSUMER_DEFENSIVE_V3_STANDARD_STATE:
+            if (
+                lock["investable"] is not True
+                or lock["promotion_state"] != "promoted"
+                or numbers["approved_full_portfolio_cap"] <= 0.0
+                or numbers["expected_alpha_at_full"] <= 0.0
+                or not math.isclose(
+                    numbers["tier_deployment_fraction"], 1.0, abs_tol=1e-12
+                )
+                or not math.isclose(
+                    numbers["effective_deployment_fraction"], 1.0, abs_tol=1e-12
+                )
+                or not math.isclose(
+                    numbers["optimizer_cap"],
+                    numbers["approved_full_portfolio_cap"],
+                    abs_tol=1e-12,
+                )
+            ):
+                raise ValueError(
+                    f"Consumer activation lock {cohort} is not a full standard allocation"
+                )
+        elif (
+            lock["investable"] is not False
+            or lock["promotion_state"] != "shadow_monitor"
+            or not math.isclose(
+                numbers["tier_deployment_fraction"], 0.0, abs_tol=1e-12
+            )
+            or not math.isclose(
+                numbers["effective_deployment_fraction"], 0.0, abs_tol=1e-12
+            )
+            or not math.isclose(numbers["optimizer_cap"], 0.0, abs_tol=1e-12)
+            or not math.isclose(
+                numbers["expected_alpha_at_full"], 0.0, abs_tol=1e-12
+            )
+        ):
+            raise ValueError(
+                f"Consumer activation lock {cohort} non-promoted slot must remain cash"
+            )
+        for field in ("selected_candidate_id", "score_model_version", "scoring_contract_version"):
+            if not isinstance(lock[field], str) or not lock[field].strip():
+                raise ValueError(f"Consumer activation lock {cohort}.{field} is blank")
+        if _consumer_v3_canonical_sha256(lock) != lock["payload_sha256"]:
+            raise ValueError(f"Consumer activation lock {cohort} self-hash mismatch")
+        approved_full_caps[cohort] = numbers["approved_full_portfolio_cap"]
+        normalized[cohort] = lock
+    first_cap = approved_full_caps[sorted(approved_full_caps)[0]]
+    if first_cap <= 0.0 or any(
+        not math.isclose(cap, first_cap, rel_tol=0.0, abs_tol=1e-12)
+        for cap in approved_full_caps.values()
+    ):
+        raise ValueError("Consumer registry must reserve equal cohort allocation slots")
+    if sum(approved_full_caps.values()) > 1.0 + 1e-12:
+        raise ValueError("Consumer registry approved sector allocation exceeds gross")
+    if _consumer_v3_canonical_sha256(registry) != _consumer_v3_sha(
+        registry["payload_sha256"], label="Consumer registry payload hash"
+    ):
+        raise ValueError("Consumer activation registry self-hash mismatch")
+    return {**registry, "cohorts": normalized}
+
+
+def _load_consumer_v3_activation_registry(
+    cfg: dict[str, Any],
+    root: Path,
+    *,
+    source_asof: str,
+    portfolio_asof: str,
+) -> tuple[dict[str, dict[str, Any]], Path | None]:
+    raw_path = str(cfg.get("production_activation_registry_file_path") or "").strip()
+    configured_sha = str(cfg.get("production_activation_registry_sha256") or "").strip()
+    if bool(raw_path) != bool(configured_sha):
+        raise ValueError("Consumer activation registry path and SHA must be configured together")
+    if str(cfg.get("production_change_control_public_key_path") or "").strip():
+        raise ValueError("Consumer public-key configuration is unsupported until signature verification exists")
+    if not raw_path:
+        return {}, None
+    base = root.expanduser().resolve()
+    unresolved = Path(raw_path).expanduser()
+    candidate = (base / unresolved).resolve() if not unresolved.is_absolute() else unresolved.resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ValueError("Consumer activation registry escapes sector_output_root") from exc
+    if not candidate.is_file() or candidate.is_symlink():
+        raise ValueError(f"Consumer activation registry is missing or unsafe: {candidate}")
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Consumer activation registry duplicates key={key!r}")
+            result[key] = value
+        return result
+    payload = json.loads(
+        candidate.read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicates,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f"Consumer registry rejects non-finite JSON constant {value}")
+        ),
+    )
+    registry = _validate_consumer_v3_activation_registry(payload)
+    if registry["payload_sha256"] != _consumer_v3_sha(
+        configured_sha, label="configured Consumer activation registry SHA"
+    ):
+        raise ValueError("Consumer activation registry does not match the configured SHA pin")
+    configured_caps = cfg.get("optimizer_cap_by_scope") or {}
+    configured_calibrations = cfg.get("calibration_by_scope") or {}
+    if not isinstance(configured_caps, Mapping) or not isinstance(
+        configured_calibrations, Mapping
+    ):
+        raise ValueError("Consumer v3 per-cohort capital maps must be mappings")
+    if (
+        set(configured_caps) != CONSUMER_DEFENSIVE_COHORTS
+        or set(configured_calibrations) != CONSUMER_DEFENSIVE_COHORTS
+    ):
+        raise ValueError("Consumer v3 authority requires the exact per-cohort census")
+    for cohort, lock in registry["cohorts"].items():
+        calibration = configured_calibrations.get(cohort)
+        if not isinstance(calibration, Mapping):
+            raise ValueError(f"Consumer calibration {cohort} must be a mapping")
+        configured_cap = _consumer_v3_finite(
+            configured_caps[cohort], label=f"Consumer configured cap {cohort}"
+        )
+        configured_alpha = _consumer_v3_finite(
+            calibration.get("expected_alpha_at_full"), label=f"Consumer configured alpha {cohort}"
+        )
+        if not math.isclose(configured_cap, float(lock["optimizer_cap"]), abs_tol=1e-12):
+            raise ValueError(f"Consumer configured cap {cohort} is not bound to registry authority")
+        if not math.isclose(
+            configured_alpha, float(lock["expected_alpha_at_full"]), abs_tol=1e-12
+        ):
+            raise ValueError(f"Consumer configured alpha {cohort} is not bound to registry authority")
+    configured_sector_cap = _consumer_v3_finite(
+        cfg.get("optimizer_sector_cap"),
+        label="Consumer configured sector cap",
+    )
+    registry_sector_cap = sum(
+        float(lock["approved_full_portfolio_cap"])
+        for lock in registry["cohorts"].values()
+    )
+    if not math.isclose(
+        configured_sector_cap,
+        registry_sector_cap,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "Consumer configured sector cap is not bound to registry allocation slots"
+        )
+    effective = _consumer_v3_date(
+        registry["effective_from"], label="registry effective_from"
+    )
+    expiry = _consumer_v3_date(registry["valid_until"], label="registry valid_until")
+    source_date = _consumer_v3_date(source_asof, label="Consumer score source asof_date")
+    if not effective <= source_date <= expiry:
+        raise ValueError("Consumer score snapshot falls outside registry authority dates")
+    portfolio_date = _consumer_v3_date(
+        portfolio_asof, label="Portfolio run asof_date"
+    )
+    if not effective <= portfolio_date <= expiry:
+        raise ValueError("Portfolio run date falls outside Consumer registry authority dates")
+    return dict(registry["cohorts"]), candidate
+
+
+def validate_consumer_v3_runtime_authority(
+    cfg: dict[str, Any],
+    root: Path,
+    *,
+    source_asof: str,
+    portfolio_asof: str,
+) -> None:
+    """Revalidate a pinned registry against both source and final Portfolio dates."""
+
+    _load_consumer_v3_activation_registry(
+        cfg,
+        root,
+        source_asof=source_asof,
+        portfolio_asof=portfolio_asof,
+    )
+
+
+def validate_consumer_v3_optimizer_cap_binding(
+    score_cfg: Mapping[str, Any], optimizer_cfg: Mapping[str, Any]
+) -> None:
+    """Bind reviewed Consumer lock caps to the independent optimizer surfaces."""
+
+    score_caps_raw = score_cfg.get("optimizer_cap_by_scope") or {}
+    optimizer_caps_root = optimizer_cfg.get("scope_weight_caps") or {}
+    if not isinstance(score_caps_raw, Mapping) or not isinstance(
+        optimizer_caps_root, Mapping
+    ):
+        raise ValueError("Consumer optimizer cap surfaces must be mappings")
+    optimizer_caps_raw = optimizer_caps_root.get("consumer_defensive") or {}
+    if not isinstance(optimizer_caps_raw, Mapping):
+        raise ValueError("optimizer Consumer scope caps must be a mapping")
+    if (
+        set(score_caps_raw) != CONSUMER_DEFENSIVE_COHORTS
+        or set(optimizer_caps_raw) != CONSUMER_DEFENSIVE_COHORTS
+    ):
+        raise ValueError("Consumer optimizer cap surfaces require the exact cohort census")
+    score_caps = {
+        cohort: _consumer_v3_finite(
+            score_caps_raw[cohort], label=f"Consumer score cap {cohort}"
+        )
+        for cohort in CONSUMER_DEFENSIVE_COHORTS
+    }
+    optimizer_caps = {
+        cohort: _consumer_v3_finite(
+            optimizer_caps_raw[cohort], label=f"Consumer optimizer cap {cohort}"
+        )
+        for cohort in CONSUMER_DEFENSIVE_COHORTS
+    }
+    if any(value < 0.0 for value in [*score_caps.values(), *optimizer_caps.values()]):
+        raise ValueError("Consumer optimizer caps cannot be negative")
+    mismatches = [
+        cohort for cohort in CONSUMER_DEFENSIVE_COHORTS
+        if not math.isclose(score_caps[cohort], optimizer_caps[cohort], abs_tol=1e-12)
+    ]
+    if mismatches:
+        raise ValueError(f"Consumer registry/optimizer scope caps diverge: {sorted(mismatches)}")
+    sector_caps = optimizer_cfg.get("sector_weight_caps") or {}
+    if not isinstance(sector_caps, Mapping) or "consumer_defensive" not in sector_caps:
+        raise ValueError("Consumer optimizer sector cap is missing")
+    sector_cap = _consumer_v3_finite(
+        sector_caps["consumer_defensive"], label="Consumer optimizer sector cap"
+    )
+    score_sector_cap = _consumer_v3_finite(
+        score_cfg.get("optimizer_sector_cap"),
+        label="Consumer score-contract sector cap",
+    )
+    aggregate_authority = sum(score_caps.values())
+    if sector_cap < 0.0 or score_sector_cap < 0.0:
+        raise ValueError("Consumer sector caps cannot be negative")
+    if not math.isclose(
+        sector_cap, score_sector_cap, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise ValueError("Consumer score/optimizer sector caps diverge")
+    if aggregate_authority > 0.0 and sector_cap <= 0.0:
+        raise ValueError("positive Consumer cohort authority requires a positive sector cap")
+    if aggregate_authority > sector_cap + 1e-12:
+        raise ValueError("Consumer cohort authority exceeds the sector cap")
+    gross_exposure = _consumer_v3_finite(
+        optimizer_cfg.get("gross_exposure", 1.0), label="optimizer gross exposure"
+    )
+    if aggregate_authority > 0.0 and not 0.0 < gross_exposure <= 1.0:
+        raise ValueError(
+            "positive Consumer authority requires gross exposure in (0, 1]"
+        )
+
+
+def _adapt_consumer_defensive(
+    cfg: dict[str, Any], rows: list[dict[str, str]]
+) -> list[CanonicalScore]:
+    '''Adapt Consumer Defensive rows through a strict sector contract.
+
+    A row can be investable only when upstream governance is ``promoted`` and
+    the ordinary candidate/OOS gates pass. Shadow and deferred files remain
+    readable for diagnostics but cannot become investable through a permissive
+    Portfolio Layer configuration.
+    '''
+
+    if str(cfg.get('model_family') or '') != 'consumer_defensive':
+        raise ValueError(
+            'consumer_defensive adapter is reserved for consumer_defensive'
+        )
+    promoted_scopes = {
+        str(row.get("calibration_cohort") or "").strip()
+        for row in rows
+        if str(row.get("promotion_state") or "").strip().lower() == "promoted"
+    }
+    effective_locks = dict(cfg.get("_consumer_defensive_effective_locks") or {})
+    scope_contract = dict(
+        cfg.get("_consumer_defensive_calibration_scope_contract") or {}
+    )
+    if effective_locks and set(effective_locks) != CONSUMER_DEFENSIVE_COHORTS:
+        raise ValueError("Consumer Defensive effective-lock cohort census changed")
+    if effective_locks and not scope_contract:
+        raise ValueError(
+            "Consumer Defensive v3 activation requires a verified calibration scope"
+        )
+    if promoted_scopes and not effective_locks:
+        raise ValueError(
+            "Consumer Defensive promoted rows require a cryptographically "
+            "verified and configured v3 activation registry"
+        )
+    if rows and not promoted_scopes and not effective_locks:
+        _require_zero_consumer_defensive_shadow_alpha(cfg)
+    scope_calibrations = dict(cfg.get("calibration_by_scope") or {})
+    scope_caps = dict(cfg.get("optimizer_cap_by_scope") or {})
+    if effective_locks and (
+        set(scope_calibrations) != CONSUMER_DEFENSIVE_COHORTS
+        or set(scope_caps) != CONSUMER_DEFENSIVE_COHORTS
+    ):
+        raise ValueError("Consumer v3 activation requires exact per-cohort alpha and cap maps")
+    if scope_contract:
+        scope_contract = _validate_consumer_calibration_scope(scope_contract)
+        row_tickers = [
+            str(row.get("ticker") or "").strip().upper() for row in rows
+        ]
+        if any(not ticker for ticker in row_tickers) or len(row_tickers) != len(
+            set(row_tickers)
+        ):
+            raise ValueError("Consumer Defensive score rows contain blank/duplicate tickers")
+        leaked = sorted(
+            set(scope_contract["excluded_tickers"]).intersection(row_tickers)
+        )
+        if leaked:
+            raise ValueError(
+                "Consumer Defensive score rows contain reviewed excluded tickers: "
+                + ", ".join(leaked[:10])
+            )
+        observed_by_cohort = {
+            cohort: sum(
+                str(row.get("calibration_cohort") or "").strip() == cohort
+                for row in rows
+            )
+            for cohort in sorted(CONSUMER_DEFENSIVE_COHORTS)
+        }
+        expected_by_cohort = {
+            str(cohort): int(count)
+            for cohort, count in scope_contract[
+                "expected_remaining_current_by_cohort"
+            ].items()
+        }
+        if (
+            len(rows)
+            != int(scope_contract["expected_remaining_current_ticker_count"])
+            or observed_by_cohort != expected_by_cohort
+            or _consumer_v3_value_sha256(sorted(row_tickers))
+            != str(
+                scope_contract["expected_remaining_current_tickers_sha256"]
+            )
+        ):
+            raise ValueError(
+                "Consumer Defensive score rows differ from the reviewed scope census"
+            )
+        if any(
+            str(
+                row.get("consumer_defensive_calibration_scope_sha256") or ""
+            ).strip()
+            != str(scope_contract["payload_sha256"])
+            for row in rows
+        ):
+            raise ValueError(
+                "Consumer Defensive score rows are not bound to the reviewed scope"
+            )
+    for idx, row in enumerate(rows, start=1):
+        ticker = str(row.get('ticker') or '').strip().upper() or '<blank>'
+        missing = sorted(set(CONSUMER_DEFENSIVE_REQUIRED_COLUMNS) - set(row))
+        if missing:
+            raise ValueError(
+                'consumer_defensive score file row '
+                f'{idx} ticker={ticker} is missing required columns: {missing}'
+            )
+        if str(row.get('sector') or '').strip() != 'Consumer Staples':
+            raise ValueError(
+                f'consumer_defensive row ticker={ticker} must map to '
+                'canonical sector Consumer Staples'
+            )
+        state = str(row.get('promotion_state') or '').strip().lower()
+        if state not in CONSUMER_DEFENSIVE_PROMOTION_STATES:
+            raise ValueError(
+                f'consumer_defensive row ticker={ticker} has invalid '
+                f'promotion_state={state!r}'
+            )
+        scope = str(row.get('calibration_cohort') or '').strip()
+        if scope not in CONSUMER_DEFENSIVE_COHORTS:
+            raise ValueError(f'consumer_defensive row ticker={ticker} has unsupported cohort={scope!r}')
+        lock = effective_locks.get(scope)
+        if effective_locks:
+            if not isinstance(lock, dict):
+                raise ValueError(f'{ticker}: Consumer v3 row has no effective lock for cohort={scope}')
+            if state != str(lock['promotion_state']):
+                raise ValueError(f'{ticker}: promotion state is not bound to its Consumer v3 lock')
+            for field, lock_field in CONSUMER_DEFENSIVE_V3_ROW_LOCK_FIELDS.items():
+                observed = str(row.get(field) or '').strip()
+                expected = str(lock[lock_field]).strip()
+                if field.endswith('sha256'):
+                    observed, expected = observed.lower(), expected.lower()
+                if observed != expected:
+                    raise ValueError(f'{ticker}: Consumer v3 row/lock mismatch for {field}')
+            if str(row.get('score_model_version') or '').strip() != str(
+                lock['score_model_version']
+            ):
+                raise ValueError(f'{ticker}: Consumer v3 row has wrong score model version')
+            if str(row.get('scoring_contract_version') or '').strip() != str(
+                lock['scoring_contract_version']
+            ):
+                raise ValueError(f'{ticker}: Consumer v3 row has wrong scoring contract version')
+            row_cap = _f(row.get('consumer_defensive_optimizer_cap'))
+            row_confidence = _f(row.get('consumer_defensive_confidence_multiplier'))
+            if row_cap is None or not math.isclose(row_cap, float(lock['optimizer_cap']), abs_tol=1e-12):
+                raise ValueError(f'{ticker}: Consumer v3 row has wrong optimizer cap')
+            if row_confidence is None or not math.isclose(
+                row_confidence, float(lock['confidence_multiplier']), abs_tol=1e-12
+            ):
+                raise ValueError(f'{ticker}: Consumer v3 row has wrong confidence multiplier')
+            row_date = _consumer_v3_date(
+                str(row.get('asof_date') or '').strip()[:10],
+                label=f'{ticker} Consumer row asof_date',
+            )
+            if not _consumer_v3_date(lock['effective_from'], label='lock effective_from') <= row_date <= _consumer_v3_date(
+                lock['valid_until'], label='lock valid_until'
+            ):
+                raise ValueError(f'{ticker}: Consumer v3 row is outside lock authority dates')
+            if (state == 'promoted') is not bool(lock['investable']):
+                raise ValueError(f'{ticker}: Consumer v3 investability disagrees with row state')
+        elif state == 'promoted':
+            raise ValueError(f'{ticker}: promoted Consumer row has no verified v3 registry')
+
+        expected_alpha = float(lock['expected_alpha_at_full']) if state == 'promoted' and lock else 0.0
+        expected_cap = float(lock['optimizer_cap']) if state == 'promoted' and lock else 0.0
+        if scope_calibrations:
+            scope_calib = dict(scope_calibrations.get(scope) or {})
+            configured_alpha = _f(scope_calib.get('expected_alpha_at_full'))
+            if configured_alpha is None or not math.isclose(configured_alpha, expected_alpha, abs_tol=1e-12):
+                raise ValueError(f'{scope}: configured alpha is not bound to Consumer v3 authority')
+        if scope_caps:
+            configured_cap = _f(scope_caps.get(scope))
+            if configured_cap is None or not math.isclose(configured_cap, expected_cap, abs_tol=1e-12):
+                raise ValueError(f'{scope}: configured cap is not bound to Consumer v3 authority')
+        if _truthy(row.get('portfolio_candidate_gate')) and state != 'promoted':
+            raise ValueError(
+                f'consumer_defensive row ticker={ticker} asserts a candidate '
+                f'gate while promotion_state={state!r}'
+            )
+        if not effective_locks and _truthy(row.get('oos_score_valid_flag')) and state != 'promoted':
+            raise ValueError(
+                f'consumer_defensive row ticker={ticker} asserts OOS validity '
+                f'while promotion_state={state!r}'
+            )
+        if not effective_locks and state != 'promoted' and (
+            _truthy(row.get('research_calibration_input_eligible_flag'))
+            or _truthy(row.get('stage11_calibration_input_eligible_flag'))
+            or _truthy(row.get('survivorship_corrected_panel_flag'))
+        ):
+            raise ValueError(
+                f'consumer_defensive row ticker={ticker} asserts research '
+                f'lineage while promotion_state={state!r}'
+            )
+    return _adapt_final_rank_family(
+        cfg, rows, enforce_candidate_status=True
+    )
 
 
 def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:
@@ -648,6 +2131,21 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
             survivorship_corrected_panel_flag=int(_survivorship_corrected(r)),
             score_confidence=conf,
             source_asof_date=_source_asof(r),
+            model_scope_id=industry,
+            production_policy_id=str(
+                r.get("biotech_promotion_contract_id") or r.get("tier1_selection_policy") or ""
+            ).strip(),
+            production_policy_sha256=str(r.get("biotech_promotion_contract_sha256") or "").strip().lower(),
+            selection_reliability_class=str(
+                r.get("biotech_selection_reliability_class") or ""
+            ).strip().lower(),
+            active_sleeve_weight=_f(r.get("biotech_active_sleeve_weight")),
+            benchmark_residual_weight=_f(r.get("biotech_xbi_residual_weight")),
+            benchmark_residual_ticker=(
+                str(cfg.get("benchmark_residual_ticker") or "XBI").strip().upper()
+                if str(r.get("biotech_xbi_residual_weight") or "").strip()
+                else ""
+            ),
         ))
     if skipped:
         LOGGER.warning("Adapter %s skipped %d rows with blank ticker or non-finite native score",
@@ -885,8 +2383,15 @@ def _adapt_med_devices(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[
 _ADAPTERS: dict[str, Callable[[dict[str, Any], list[dict[str, str]]], list[CanonicalScore]]] = {
     "tech_family": _adapt_tech_family,
     "industrial_family": _adapt_industrial_family,
+    "transportation_subgroup": _adapt_transportation_subgroup,
+    "consumer_defensive": _adapt_consumer_defensive,
     "biotech": _adapt_biotech,
     "med_devices": _adapt_med_devices,
+}
+
+RESERVED_MODEL_ADAPTERS = {
+    "consumer_defensive": "consumer_defensive",
+    "transportation": "transportation_subgroup",
 }
 
 
@@ -982,7 +2487,7 @@ def stage11_sidecar_only_rows(source_file: Path, as_of_iso: str) -> tuple[list[d
 
     Source precedence: legacy per-date sidecar next to the rank table, else the stage11_combined
     range chunk containing the date (latest range end wins), else the dashboard-root consolidated
-    panel. Returns ([], None) when no source covers the date — tech rows then simply have no
+    panel. Returns ([], None) when no source covers the date â€” tech rows then simply have no
     survivorship-corrected calibration path for that day (flagged downstream, never fabricated).
     """
     if RANK_TABLE_SUFFIX not in source_file.name or not as_of_iso:
@@ -1013,14 +2518,115 @@ def stage11_sidecar_only_rows(source_file: Path, as_of_iso: str) -> tuple[list[d
     return [], None
 
 
+def _as_stage11_calibration_only(row: dict[str, str]) -> dict[str, str]:
+    """Demote a sidecar-only row so research evidence cannot enter production.
+
+    A ticker absent from the dated final-rank table has no production score or
+    lineage authority for that date. Stage 11 may still consume its certified
+    survivorship row, but the portfolio candidate contract must fail closed.
+    """
+    output = dict(row)
+    output.update(
+        {
+            "portfolio_candidate_gate": "0",
+            "rank_ready_flag": "0",
+            "portfolio_candidate_status": "excluded",
+            "portfolio_candidate_reason": "stage11_sidecar_calibration_only",
+            "investable_eligible": "0",
+            "investable_eligible_flag": "0",
+            "production_eligible_flag": "0",
+        }
+    )
+    return output
+
+
 def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | None) -> AdapterResult:
     adapter_name = str(cfg["adapter"])
     if adapter_name not in _ADAPTERS:
         raise ValueError(f"Unknown adapter '{adapter_name}' for {cfg.get('model_family')}")
+    model_family = str(cfg.get("model_family") or "").strip()
+    required_adapter = RESERVED_MODEL_ADAPTERS.get(model_family)
+    if required_adapter is not None and adapter_name != required_adapter:
+        raise ValueError(
+            f"{model_family} is reserved for adapter={required_adapter}; "
+            f"configured adapter={adapter_name} would bypass promotion governance"
+        )
     source_file = _resolve_file(cfg, sector_output_root, run_as_of)
-    rows = read_csv(source_file)
+    consumer_fieldnames: tuple[str, ...] | None = None
+    consumer_source_sha256 = ""
+    if adapter_name == "consumer_defensive":
+        rows, consumer_fieldnames, consumer_source_sha256 = (
+            _consumer_v3_read_csv_snapshot(source_file)
+        )
+    else:
+        rows = read_csv(source_file)
     effective_cfg = dict(cfg)
     source_asof = _snapshot_iso_date(source_file) or _dominant(rows, "asof_date")
+    consumed_consumer_registry: Path | None = None
+    consumed_consumer_score_manifest: Path | None = None
+    consumed_consumer_terminal_manifest: Path | None = None
+    if adapter_name == "consumer_defensive":
+        production_authority_requested = any(
+            str(cfg.get(field) or "").strip()
+            for field in (
+                "production_score_manifest_filename",
+                "production_calibration_scope_sha256",
+                "production_terminal_manifest_file_path",
+                "production_activation_registry_file_path",
+                "production_activation_registry_sha256",
+            )
+        ) or any(
+            str(row.get("promotion_state") or "").strip().lower()
+            == "promoted"
+            for row in rows
+        )
+        if production_authority_requested:
+            if consumer_fieldnames != CONSUMER_DEFENSIVE_V3_PRODUCTION_COLUMNS:
+                raise ValueError(
+                    "Consumer production score CSV schema differs from v3 contract"
+                )
+            (
+                scope_contract,
+                consumed_consumer_score_manifest,
+                consumer_score_manifest,
+                consumer_score_manifest_file_sha256,
+            ) = _load_consumer_v3_score_manifest(
+                cfg,
+                source_file,
+                rows,
+                source_asof=source_asof,
+                source_file_sha256=consumer_source_sha256,
+            )
+            consumed_consumer_terminal_manifest = (
+                _load_consumer_v3_terminal_manifest(
+                    cfg,
+                    sector_output_root,
+                    source_asof=source_asof,
+                    source_file=source_file,
+                    source_file_sha256=consumer_source_sha256,
+                    source_row_count=len(rows),
+                    score_manifest_path=consumed_consumer_score_manifest,
+                    score_manifest=consumer_score_manifest,
+                    score_manifest_file_sha256=(
+                        consumer_score_manifest_file_sha256
+                    ),
+                    calibration_scope_sha256=str(
+                        scope_contract["payload_sha256"]
+                    ),
+                )
+            )
+            effective_cfg[
+                "_consumer_defensive_calibration_scope_contract"
+            ] = scope_contract
+        effective_locks, consumed_consumer_registry = (
+            _load_consumer_v3_activation_registry(
+                cfg,
+                sector_output_root,
+                source_asof=source_asof,
+                portfolio_asof=run_as_of or source_asof,
+            )
+        )
+        effective_cfg["_consumer_defensive_effective_locks"] = effective_locks
     lineage_policy = policy_for_model_family(str(cfg.get("model_family") or ""))
     lineage_policy_mode = lineage_policy.mode_for_asof("production", source_asof)
     effective_cfg["_financial_lineage_policy_mode"] = lineage_policy_mode
@@ -1041,7 +2647,13 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
             source_asof=source_asof,
         )
     consumed_stage11_sidecar: Path | None = None
-    if adapter_name in {"tech_family", "industrial_family"}:
+    if (
+        adapter_name in {
+            "tech_family", "industrial_family", "transportation_subgroup",
+            "consumer_defensive",
+        }
+        and not (adapter_name == "consumer_defensive" and consumed_consumer_registry)
+    ):
         # Final-rank tables may replay the CURRENT universe, so delisted members can exist only in
         # Stage 11 survivorship panels. Merge sidecar-only rows the sector itself certifies as
         # calibration inputs (stage11_calibration_input_eligible_flag=1) so they flow through the
@@ -1060,7 +2672,7 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
                 if not _truthy(r.get("stage11_calibration_input_eligible_flag")):
                     skipped_ineligible += 1
                     continue
-                merged[ticker] = r
+                merged[ticker] = _as_stage11_calibration_only(r)
             if merged:
                 LOGGER.info(
                     "Adapter %s merged %d sidecar-only calibration rows for %s "
@@ -1081,6 +2693,9 @@ def run_adapter(cfg: dict[str, Any], sector_output_root: Path, run_as_of: str | 
             path
             for path in (
                 source_file,
+                consumed_consumer_score_manifest,
+                consumed_consumer_terminal_manifest,
+                consumed_consumer_registry,
                 consumed_lineage_sidecar,
                 consumed_stage11_sidecar,
             )

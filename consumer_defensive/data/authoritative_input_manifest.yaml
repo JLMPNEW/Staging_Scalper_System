@@ -1,5 +1,5 @@
 manifest_version: consumer_defensive_authoritative_inputs_v1
-reviewed_as_of: "2026-08-11"
+reviewed_as_of: "2026-08-27"
 path_base: repository_root
 hash_algorithm: sha256
 record_count_method: parsed_csv_records_excluding_header_and_blank_lines
@@ -18,8 +18,8 @@ inputs:
     stage: stage2
     role: authoritative_current_security_and_taxonomy_source
     schema_version: consumer_defensive_current_universe_v1
-    record_count: 108
-    sha256: 5a37893659fbc906e5848c5c5eed3859761bdac98f9d47853e8804ef9ad7fe62
+    record_count: 110
+    sha256: 85458efd62998e9100d0eced2fe620154773c1214a08d2f47e75e4bddd8ec9de
     review_status: reviewed
 
   - input_id: consumer_defensive_delisted_candidate_seed
@@ -37,8 +37,8 @@ inputs:
     stage: stage2
     role: authoritative_reviewed_security_lineage_events
     schema_version: consumer_defensive_security_events_v1
-    record_count: 2
-    sha256: cc8d0b8272bbfd92318ca08b63f1fb41335092df108f4f5d7af4e62f85f5eaa1
+    record_count: 3
+    sha256: cfbf66d816129ba93990aa4dcf3ec8508368273da2fd245612d6710ae372c3a3
     review_status: reviewed
 
   - input_id: consumer_defensive_terminal_events
@@ -55,8 +55,8 @@ inputs:
     stage: stage2
     role: authoritative_reviewed_ticker_alias_and_continuity_map
     schema_version: consumer_defensive_ticker_aliases_v1
-    record_count: 2
-    sha256: 604ae00abece1ad94bd23d0074cc7764575e533eb0352d06eb28e64a36d3d74d
+    record_count: 3
+    sha256: 9742f10b436f6bcf6e9111a6ee87a6e67cedf37f9217c5f0e7fe275938826b1f
     review_status: reviewed
 
   - input_id: consumer_defensive_historical_issuer_identifiers
@@ -74,25 +74,25 @@ inputs:
     role: authoritative_reviewed_current_norgate_symbol_and_asset_map
     schema_version: consumer_defensive_current_provider_symbols_v1
     record_count: 1
-    sha256: 1f61117d661c357e13a5233eacee04c23366a8a1bcfc42ded706fa2f9e3c3cec
+    sha256: b8b3f0ad2a63d8a3768d618e96069c28bfab31f7a0434f29fc1636b7a0b9fc31
     review_status: reviewed
-    notes: Public ticker remains FDP; Norgate symbol DMC is accepted only while it resolves to reviewed asset 132283.
+    notes: Public ticker is DMC from 2026-06-29; historical FDP and current DMC resolve to reviewed continuous Norgate asset 132283.
 
   - input_id: consumer_defensive_positioning_source_identifiers
     path: consumer_defensive/data/consumer_defensive_positioning_source_identifiers.csv
     stage: stage5
     role: authoritative_reviewed_13f_cusip_and_finra_symbol_map
-    schema_version: consumer_defensive_positioning_source_identifiers_v1
-    record_count: 5
-    sha256: e1710deb164b7be4102a95351f18070d45c1fe39887d7eac537d8c9cdfbaccfe
+    schema_version: consumer_defensive_positioning_source_identifiers_v2
+    record_count: 7
+    sha256: 78b5bc1db3b7a287b9f3b889cc747d38d8bd51af4be1082617919667f02b5245
     review_status: reviewed
-    notes: Explicit source identifiers only; no fuzzy ticker or issuer-name inference.
+    notes: Explicit source identifiers only; semicolon-delimited FINRA aliases preserve reviewed ticker lineage without fuzzy inference.
 
   - input_id: consumer_defensive_metric_applicability
     path: consumer_defensive/data/consumer_defensive_metric_applicability.csv
     stage: stage4
     role: authoritative_reviewed_metric_applicability_and_subtype_map
     schema_version: consumer_defensive_metric_applicability_v1
-    record_count: 119
-    sha256: a63db9112d5e2f0c5ab7fc32c45f6064a53011c5da25812b5d8adc0906d6feec
+    record_count: 121
+    sha256: de2acd0cb91fbc1bf72348ec5e6243ffdf5283b82c0d56ba455ee359cbf7a909
     review_status: reviewed

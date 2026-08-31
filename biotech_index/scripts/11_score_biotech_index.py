@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +47,10 @@ from biotech_index.core.pipeline_guards import (  # noqa: E402
     read_final_scoring_tickers,
     validate_full_universe_coverage,
     validate_layer_freshness,
+)
+from biotech_index.core.promotion_contract import (  # noqa: E402
+    ActivePromotionContract,
+    load_active_promotion_contract,
 )
 from biotech_index.core.report_inputs import (  # noqa: E402
     dated_output_dir,
@@ -143,6 +147,11 @@ PORTFOLIO_LAYER_CONTRACT_FIELDS = [
     "liquidity_score",
     "forward_catalyst_event_date",
     "forward_catalyst_asof_date",
+    "biotech_selection_reliability_class",
+    "biotech_active_sleeve_weight",
+    "biotech_xbi_residual_weight",
+    "biotech_promotion_contract_id",
+    "biotech_promotion_contract_sha256",
 ]
 
 # data_provenance source dates used to derive pit_valid; blank dates pass.
@@ -1393,14 +1402,96 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]], config: dic
 
 
 def _candidate_policy_score(row: dict[str, Any]) -> float:
-    score = to_float(row.get("portfolio_candidate_score"), math.nan)
-    if math.isfinite(score):
-        return score
-    score = to_float(row.get("native_score_value"), math.nan)
-    if math.isfinite(score):
-        return score
-    return to_float(row.get("opportunity_score"), 0.0)
+    """Return the unmodified native score used by calibration and adaptive ranking."""
+    for field in ("native_score_value", "opportunity_score", "portfolio_candidate_score"):
+        score = to_float(row.get(field), math.nan)
+        if math.isfinite(score):
+            return score
+    return 0.0
 
+
+def effective_promotion_contract(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> ActivePromotionContract | None:
+    """Load one immutable contract and enforce one effective-date regime per batch."""
+    active_contract = load_active_promotion_contract(config, base_dir=PACKAGE_ROOT)
+    if active_contract is None or not rows:
+        return active_contract
+    row_dates = {parsed for row in rows if (parsed := parse_date(row.get("asof_date"))) is not None}
+    if row_dates and max(row_dates) < active_contract.effective_date:
+        return None
+    if row_dates and min(row_dates) < active_contract.effective_date <= max(row_dates):
+        raise ValueError("A scoring batch cannot cross the adaptive promotion contract effective date")
+    return active_contract
+
+
+def active_score_spec_for_cohort(
+    active_contract: ActivePromotionContract | None,
+    cohort: str,
+) -> Mapping[str, object] | None:
+    if active_contract is None:
+        return None
+    if active_contract.cohort_policies:
+        promotion = active_contract.policy_for_cohort(cohort)
+        return promotion.score_spec if promotion is not None else None
+    return None
+
+
+def apply_active_cohort_promotion_contract(
+    rows: list[dict[str, Any]],
+    active_contract: ActivePromotionContract,
+) -> None:
+    """Apply independently promoted breadth and exposure only inside each authorized cohort."""
+    for cohort, promotion in active_contract.cohort_policies.items():
+        cohort_rows = [row for row in rows if str(row.get("biotech_primary_cohort") or "").strip() == cohort]
+        base_candidates = [row for row in cohort_rows if _promoted_policy_base_candidate(row)]
+        base_candidates.sort(key=lambda row: (-_candidate_policy_score(row), str(row.get("ticker") or "")))
+        pool = base_candidates[: promotion.candidate_pool_top_n]
+        if 0.0 < promotion.min_score_pct_of_top <= 100.0 and pool:
+            floor = _candidate_policy_score(pool[0]) * promotion.min_score_pct_of_top / 100.0
+            pool = [row for row in pool if _candidate_policy_score(row) >= floor]
+        policy = promotion.policy_payload
+        cohort_cap = max(
+            0,
+            int(
+                to_float(
+                    policy.get("cohort_top_k_per_cohort")
+                    or policy.get("post_selection_cohort_top_k_per_cohort"),
+                    0.0,
+                )
+            ),
+        )
+        max_names = min(promotion.max_names, cohort_cap) if cohort_cap > 0 else promotion.max_names
+        pool = pool[:max_names]
+        min_selected = max(0, int(to_float(policy.get("min_selected_names"), 0.0)))
+        breadth_cash_fallback = min_selected > 0 and len(pool) < min_selected
+        if breadth_cash_fallback:
+            pool = []
+        selected_ids = {id(row) for row in pool}
+        base_ids = {id(row) for row in base_candidates}
+        active_weight = 0.0 if breadth_cash_fallback else promotion.active_weight
+        for row in cohort_rows:
+            row["biotech_selection_reliability_class"] = promotion.reliability_class
+            row["biotech_active_sleeve_weight"] = active_weight
+            row["biotech_xbi_residual_weight"] = round(1.0 - active_weight, 10)
+            row["biotech_promotion_contract_id"] = active_contract.contract_id
+            row["biotech_promotion_contract_sha256"] = active_contract.sha256
+            if id(row) not in base_ids:
+                continue
+            selected = id(row) in selected_ids
+            reason = (
+                f"selected_by_cohort_contract_{promotion.candidate_id}"
+                if selected
+                else "cash_fallback_insufficient_cohort_breadth"
+                if breadth_cash_fallback
+                else f"excluded_by_cohort_contract_{promotion.candidate_id}"
+            )
+            row["portfolio_candidate_gate"] = 1.0 if selected else 0.0
+            row["portfolio_candidate_status"] = "eligible" if selected else "excluded"
+
+            row["portfolio_candidate_reason"] = reason
+            row["eligibility_reason"] = reason
 
 def _promoted_policy_base_candidate(row: dict[str, Any]) -> bool:
     """True when a row can enter the promoted live candidate selector."""
@@ -1418,11 +1509,48 @@ def _promoted_policy_base_candidate(row: dict[str, Any]) -> bool:
     )
 
 
-def apply_promoted_portfolio_candidate_policy(rows: list[dict[str, Any]], config: dict[str, Any]) -> None:
+def apply_promoted_portfolio_candidate_policy(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    active_contract: ActivePromotionContract | None = None,
+) -> None:
     """Apply a promoted live allocation gate without changing raw score fields."""
-    settings = cfg_get(config, "biotech_scoring.portfolio_candidate_policy", {}) or {}
-    if not isinstance(settings, dict) or not as_bool(settings.get("enabled", False), False):
+    active_contract = active_contract or effective_promotion_contract(rows, config)
+    if active_contract is not None and active_contract.cohort_policies:
+        apply_active_cohort_promotion_contract(rows, active_contract)
         return
+    if active_contract is not None:
+        policy = active_contract.policy_payload
+        pre_cohorts = parse_string_list(policy.get("allowed_primary_cohorts"), [])
+        post_cohorts = parse_string_list(policy.get("post_selection_allowed_primary_cohorts"), [])
+        allowed = pre_cohorts or post_cohorts
+        contract_selection_order = "cohort_then_rank" if pre_cohorts else "global_then_cohort"
+        cohort_top_k_raw = (
+            policy.get("cohort_top_k_per_cohort")
+            if pre_cohorts
+            else policy.get("post_selection_cohort_top_k_per_cohort")
+        )
+        cohort_top_k = int(to_float(cohort_top_k_raw, 0.0))
+        settings: dict[str, Any] = {
+            "enabled": True,
+            "name": f"adaptive_contract_{active_contract.candidate_id}",
+            "selection_order": contract_selection_order,
+            "rank_top_n": active_contract.candidate_pool_top_n,
+            "allowed_primary_cohorts": allowed,
+            "cohort_top_k_per_cohort": max(0, cohort_top_k),
+            "total_max": active_contract.max_names,
+            "min_selected_names": max(0, int(to_float(policy.get("min_selected_names"), 0.0))),
+            "below_min_selected_action": str(policy.get("below_min_selected_action") or "cash"),
+            "min_score_pct_of_top": active_contract.min_score_pct_of_top,
+            "selected_reason": f"selected_by_adaptive_contract_{active_contract.candidate_id}",
+            "excluded_reason": f"excluded_by_adaptive_contract_{active_contract.candidate_id}",
+        }
+    else:
+        raw_settings = cfg_get(config, "biotech_scoring.portfolio_candidate_policy", {}) or {}
+        if not isinstance(raw_settings, dict) or not as_bool(raw_settings.get("enabled", False), False):
+            return
+        settings = raw_settings
     allowed_cohorts = set(parse_string_list(settings.get("allowed_primary_cohorts"), []))
     selection_order = str(settings.get("selection_order") or "global_then_cohort").strip().lower()
     supported_selection_orders = {"global_then_cohort", "cohort_then_rank"}
@@ -1511,6 +1639,17 @@ def apply_promoted_portfolio_candidate_policy(rows: list[dict[str, Any]], config
         pool = []
     base_candidate_ids = {id(row) for row in base_candidates}
     selected_tickers = {str(row.get("ticker") or "").strip().upper() for row in pool}
+    if active_contract is not None:
+        for row in rows:
+            row.update(
+                {
+                    "biotech_selection_reliability_class": active_contract.reliability_class,
+                    "biotech_active_sleeve_weight": active_contract.active_weight,
+                    "biotech_xbi_residual_weight": active_contract.xbi_residual_weight,
+                    "biotech_promotion_contract_id": active_contract.contract_id,
+                    "biotech_promotion_contract_sha256": active_contract.sha256,
+                }
+            )
 
     for row in rows:
         ticker = str(row.get("ticker") or "").strip().upper()
@@ -2089,23 +2228,33 @@ def score_bucket(
     return "avoid"
 
 
-def investment_weight_profile(config: dict[str, Any], commercial: dict[str, Any]) -> tuple[str, dict[str, float]]:
+def investment_weight_profile(
+    config: dict[str, Any],
+    commercial: dict[str, Any],
+    profile_overrides: Mapping[str, object] | None = None,
+) -> tuple[str, dict[str, float]]:
     commercial_stage = bool(to_float(commercial.get("commercial_stage_flag"), 0.0))
     profitable = bool(to_float(commercial.get("profitable_flag"), 0.0))
     ttm_revenue = to_float(commercial.get("ttm_revenue"), 0.0)
     revenue_min = float(cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000))
     profile_name = "commercial_stage" if commercial_stage or profitable or ttm_revenue >= revenue_min else "clinical_stage"
-    profiles = cfg_get(config, "biotech_scoring.investment_weight_profiles", {}) or {}
-    fallback = cfg_get(config, "biotech_scoring.investment_weights", {}) or {}
-    raw_profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
-    if raw_profile is None:
-        LOGGER.warning(
-            "Missing biotech_scoring.investment_weight_profiles.%s; using biotech_scoring.investment_weights fallback.",
-            profile_name,
-        )
-    elif isinstance(raw_profile, dict) and not raw_profile:
-        LOGGER.warning("biotech_scoring.investment_weight_profiles.%s is empty; using field defaults.", profile_name)
-    raw_weights = dict(raw_profile if raw_profile is not None else fallback)
+    if profile_overrides is not None:
+        raw_profile = profile_overrides.get(profile_name)
+        if not isinstance(raw_profile, Mapping):
+            raise ValueError(f"Active promotion score specification lacks {profile_name}")
+        raw_weights = dict(raw_profile)
+    else:
+        profiles = cfg_get(config, "biotech_scoring.investment_weight_profiles", {}) or {}
+        fallback = cfg_get(config, "biotech_scoring.investment_weights", {}) or {}
+        raw_profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+        if raw_profile is None:
+            LOGGER.warning(
+                "Missing biotech_scoring.investment_weight_profiles.%s; using biotech_scoring.investment_weights fallback.",
+                profile_name,
+            )
+        elif isinstance(raw_profile, dict) and not raw_profile:
+            LOGGER.warning("biotech_scoring.investment_weight_profiles.%s is empty; using field defaults.", profile_name)
+        raw_weights = dict(raw_profile if raw_profile is not None else fallback)
     if "commercial_value" not in raw_weights and "commercial_quality" in raw_weights:
         LOGGER.warning(
             "biotech_scoring.investment_weight_profiles.%s.commercial_quality is deprecated; rename to commercial_value",
@@ -2266,6 +2415,7 @@ def score_rows(
         str(calibration_cohort_settings.get("version") or "calibration_cohort_unversioned").strip()
         or "calibration_cohort_unversioned"
     )
+    active_promotion_contract = effective_promotion_contract(rows, config)
     weights = cfg_get(config, "biotech_scoring.weights", {}) or {}
     validate_clinical_weights(weights)
     catalyst_w = float(weights.get("catalyst", 0.55))
@@ -2682,6 +2832,37 @@ def score_rows(
             ticker=ticker,
             payload=biotech_taxonomy_payload,
         )
+        scoring_cohort = str(
+            biotech_taxonomy_payload.get("biotech_primary_cohort")
+            or biotech_taxonomy_payload.get("biotech_calibration_cohort")
+            or ""
+        ).strip()
+        active_score_spec = active_score_spec_for_cohort(active_promotion_contract, scoring_cohort)
+        if active_score_spec is not None:
+            row_catalyst_w = to_float(active_score_spec["clinical_catalyst"], math.nan)
+            row_credibility_w = to_float(active_score_spec["clinical_credibility"], math.nan)
+            row_financial_w = to_float(active_score_spec["clinical_financial_quality"], math.nan)
+            row_momentum_w = to_float(active_score_spec["clinical_momentum"], math.nan)
+            row_risk_w = to_float(active_score_spec["clinical_risk_penalty"], math.nan)
+            profile_overrides: Mapping[str, object] | None = {
+                "clinical_stage": active_score_spec["clinical_stage_profile"],
+                "commercial_stage": active_score_spec["commercial_stage_profile"],
+            }
+        else:
+            row_catalyst_w = catalyst_w
+            row_credibility_w = credibility_w
+            row_financial_w = financial_w
+            row_momentum_w = momentum_w
+            row_risk_w = risk_w
+            profile_overrides = None
+        clinical_positive = (
+            row_catalyst_w * catalyst
+            + row_credibility_w * credibility
+            + row_financial_w * financial_quality
+            + row_momentum_w * momentum
+        )
+        clinical_risk_drag = convex_risk_drag(risk, row_risk_w, config, "biotech_scoring")
+        clinical_opportunity = clamp(clinical_positive - clinical_risk_drag)
         use_quality_adjusted_valuation = as_bool(
             cfg_get(config, "biotech_scoring.use_quality_adjusted_valuation_component", True),
             True,
@@ -2698,9 +2879,9 @@ def score_rows(
         used_quality_adjusted_guidance = 1.0 if use_quality_adjusted_guidance else 0.0
         valuation_quality_adjustment_delta = valuation_score - quality_adjusted_valuation_score
         guidance_quality_adjustment_delta = forward_guidance_score - quality_adjusted_guidance_score
-        profile_name, profile_weights = investment_weight_profile(config, commercial)
-        embedded_financial_quality_weight = profile_weights["clinical_opportunity"] * financial_w
-        embedded_momentum_weight = profile_weights["clinical_opportunity"] * momentum_w
+        profile_name, profile_weights = investment_weight_profile(config, commercial, profile_overrides)
+        embedded_financial_quality_weight = profile_weights["clinical_opportunity"] * row_financial_w
+        embedded_momentum_weight = profile_weights["clinical_opportunity"] * row_momentum_w
         # The investment layer uses the raw clinical-positive composite, then
         # adds only residual weights for financial quality and momentum so their
         # total effective allocation equals the profile-level target.
@@ -2800,7 +2981,7 @@ def score_rows(
             purpose="discovery",
             primary_cohort=operational_cohort,
         )
-        discovery_clinical_risk_drag = convex_risk_drag(discovery_risk, risk_w, config, "biotech_scoring")
+        discovery_clinical_risk_drag = convex_risk_drag(discovery_risk, row_risk_w, config, "biotech_scoring")
         discovery_clinical_opportunity = clamp(clinical_positive - discovery_clinical_risk_drag)
         discovery_investment_risk_drag = convex_risk_drag(
             discovery_risk,
@@ -3533,7 +3714,7 @@ def score_rows(
     enrich_biotech_cohort_rank_stats(scored)
     apply_biotech_cohort_policy(scored, cohort_policy)
     enrich_portfolio_layer_contract_rows(scored, config)
-    apply_promoted_portfolio_candidate_policy(scored, config)
+    apply_promoted_portfolio_candidate_policy(scored, config, active_contract=active_promotion_contract)
     if production_score_field == "discovery_opportunity_score":
         # routed_discovery is active: rank must follow the routed production score,
         # not the legacy allocation score.
@@ -3905,6 +4086,9 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "capacity_bucket",
         "forward_catalyst_event_date",
         "forward_catalyst_asof_date",
+        "biotech_selection_reliability_class",
+        "biotech_promotion_contract_id",
+        "biotech_promotion_contract_sha256",
         "tier1_production_score_model",
         "tier1_selection_policy",
         "alpha_multibagger_role",

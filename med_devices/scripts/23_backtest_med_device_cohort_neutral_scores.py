@@ -281,24 +281,28 @@ def return_horizons(rows: list[dict[str, Any]]) -> list[int]:
     return sorted(out)
 
 
-def load_taxonomy(conn: Any) -> dict[str, dict[str, Any]]:
-    row = conn.execute(
-        """
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table' AND name = 'dim_company_model_taxonomy'
-        """
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("dim_company_model_taxonomy is missing; run script 22 first.")
+def load_taxonomy(conn: Any, *, asofs: set[str]) -> dict[tuple[str, str], dict[str, Any]]:
+    if not table_columns(conn, "dim_company_model_taxonomy_history"):
+        raise RuntimeError(
+            "PIT taxonomy history is missing; run script 22 for every calibration as-of before "
+            "running calibration. The current taxonomy snapshot is not a valid fallback."
+        )
+    if not asofs:
+        return {}
     rows = conn.execute(
         """
-        SELECT t.*, c.company_name
-        FROM dim_company_model_taxonomy t
-        JOIN dim_company c ON c.company_id = t.company_id
-        """
+        SELECT h.*, c.company_name
+        FROM dim_company_model_taxonomy_history h
+        JOIN dim_company c ON c.company_id = h.company_id
+        WHERE h.asof_date BETWEEN ? AND ?
+        """,
+        (min(asofs), max(asofs)),
     ).fetchall()
-    return {str(row["ticker"] or "").upper(): dict(row) for row in rows}
+    return {
+        (str(row["asof_date"]), str(row["ticker"] or "").upper()): dict(row)
+        for row in rows
+        if str(row["asof_date"]) in asofs
+    }
 
 
 def table_columns(conn: Any, table: str) -> set[str]:
@@ -312,7 +316,6 @@ def table_columns(conn: Any, table: str) -> set[str]:
 def load_scores(conn: Any, *, asofs: set[str]) -> dict[tuple[str, str], dict[str, Any]]:
     if not asofs:
         return {}
-    placeholders = ",".join("?" for _ in asofs)
     fda_columns = table_columns(conn, "feature_fda_product_risk")
     avg_mapping_expr = (
         "f.avg_mapping_confidence AS avg_fda_mapping_confidence"
@@ -329,19 +332,38 @@ def load_scores(conn: Any, *, asofs: set[str]) -> dict[tuple[str, str], dict[str
         LEFT JOIN feature_fda_product_risk f
           ON f.company_id = s.company_id
          AND f.asof_date = s.asof_date
-        WHERE s.asof_date IN ({placeholders})
+        WHERE s.asof_date BETWEEN ? AND ?
         """,
-        sorted(asofs),
+        (min(asofs), max(asofs)),
     ).fetchall()
-    return {(str(row["asof_date"]), str(row["ticker"] or "").upper()): dict(row) for row in rows}
+    return {
+        (str(row["asof_date"]), str(row["ticker"] or "").upper()): dict(row)
+        for row in rows
+        if str(row["asof_date"]) in asofs
+    }
 
 
-def add_taxonomy_and_scores(rows: list[dict[str, Any]], taxonomy: dict[str, dict[str, Any]], scores: dict[tuple[str, str], dict[str, Any]]) -> None:
+def add_taxonomy_and_scores(
+    rows: list[dict[str, Any]],
+    taxonomy: dict[tuple[str, str], dict[str, Any]],
+    scores: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    missing_taxonomy: set[tuple[str, str]] = set()
+    cohort_mismatches: set[tuple[str, str, str, str]] = set()
     for row in rows:
         ticker = str(row.get("ticker") or "").upper()
         asof = str(row.get("asof_date") or "")
-        tax = taxonomy.get(ticker, {})
-        score = scores.get((asof, ticker), {})
+        key = (asof, ticker)
+        tax = taxonomy.get(key)
+        if tax is None:
+            missing_taxonomy.add(key)
+            continue
+        score = scores.get(key, {})
+        taxonomy_cohort = str(tax.get("calibration_cohort") or "").strip()
+        score_cohort = str(score.get("calibration_cohort") or "").strip()
+        if score_cohort and score_cohort != taxonomy_cohort:
+            cohort_mismatches.add((asof, ticker, taxonomy_cohort, score_cohort))
+            continue
         for field in TAXONOMY_FIELDS:
             row[field] = tax.get(field, "")
         for field in SCORE_FIELDS:
@@ -349,6 +371,21 @@ def add_taxonomy_and_scores(rows: list[dict[str, Any]], taxonomy: dict[str, dict
                 row[field] = score.get(field, "")
         if not row.get("calibration_cohort"):
             row["calibration_cohort"] = "unknown"
+    if missing_taxonomy:
+        examples = ", ".join(f"{asof}:{ticker}" for asof, ticker in sorted(missing_taxonomy)[:25])
+        raise RuntimeError(
+            "PIT taxonomy history does not cover every backtest row; "
+            f"missing={len(missing_taxonomy)} examples={examples}"
+        )
+    if cohort_mismatches:
+        examples = ", ".join(
+            f"{asof}:{ticker} taxonomy={taxonomy_cohort} score={score_cohort}"
+            for asof, ticker, taxonomy_cohort, score_cohort in sorted(cohort_mismatches)[:25]
+        )
+        raise RuntimeError(
+            "PIT taxonomy history disagrees with saved score cohorts; "
+            f"mismatches={len(cohort_mismatches)} examples={examples}"
+        )
 
 
 def add_cohort_percentiles(rows: list[dict[str, Any]]) -> None:
@@ -573,7 +610,7 @@ def main() -> None:
     asofs = {str(row.get("asof_date") or "") for row in rows if str(row.get("asof_date") or "").strip()}
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db_read_tolerant(conn)
-        taxonomy = load_taxonomy(conn)
+        taxonomy = load_taxonomy(conn, asofs=asofs)
         scores = load_scores(conn, asofs=asofs)
     add_taxonomy_and_scores(rows, taxonomy, scores)
     add_cohort_percentiles(rows)

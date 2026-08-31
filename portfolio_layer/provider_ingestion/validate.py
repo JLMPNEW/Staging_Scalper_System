@@ -33,6 +33,7 @@ from portfolio_layer.provider_ingestion.store import (  # noqa: E402
     connect_store_readonly,
     digest,
     verify_store,
+    verify_store_head,
 )
 
 
@@ -48,6 +49,15 @@ def parse_args() -> argparse.Namespace:
         "--require-continuity",
         action="store_true",
         help="Exit nonzero when any elapsed scheduled slot lacks an accepted capture.",
+    )
+    parser.add_argument(
+        "--verification-mode",
+        choices=("exhaustive", "head"),
+        default="exhaustive",
+        help=(
+            "Store-integrity scope. Exhaustive revalidates all append-only history; "
+            "head validates the newest run/chain edge and latest scheduler artifact."
+        ),
     )
     return parser.parse_args()
 
@@ -104,7 +114,11 @@ def main() -> int:
     )
     try:
         conn.execute("BEGIN")
-        errors = verify_store(conn)
+        errors = (
+            verify_store(conn)
+            if args.verification_mode == "exhaustive"
+            else verify_store_head(conn)
+        )
         continuity_rows = capture_continuity_rows(conn, slots=slots)
         counts = {
             table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -153,8 +167,9 @@ def main() -> int:
     write_manifest(
         manifest_path,
         {
-            "schema_version": "provider_store_validation_manifest_v2",
+            "schema_version": "provider_store_validation_manifest_v3",
             "acceptance": acceptance,
+            "verification_mode": args.verification_mode,
             "require_continuity": bool(args.require_continuity),
             "store_errors": errors,
             "continuity_start": continuity_start.isoformat(),
@@ -185,7 +200,10 @@ def main() -> int:
             },
         },
     )
-    print(f"PROVIDER STORE VALIDATION: {acceptance}; counts={counts}; continuity_gaps={len(gaps)}")
+    print(
+        f"PROVIDER STORE VALIDATION: {acceptance}; mode={args.verification_mode}; "
+        f"counts={counts}; continuity_gaps={len(gaps)}"
+    )
     return 1 if errors or strict_continuity_failure else 0
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -29,10 +31,37 @@ CONFIG = ROOT / 'consumer_defensive' / 'config.yaml'
 SOURCES = ROOT / 'consumer_defensive' / 'data' / 'free_source_registry.yaml'
 
 
+def _ticker_set_sha256(tickers: list[str]) -> str:
+    encoded = json.dumps(
+        sorted(tickers),
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _bundle() -> ConfigBundle:
     source = load_config(CONFIG)
     payload = copy.deepcopy(source.payload)
     payload['universe']['expected_current_rows'] = 6
+    payload['calibration_scope']['expected_excluded_ticker_count'] = 0
+    payload['calibration_scope']['expected_remaining_current_ticker_count'] = 6
+    payload['calibration_scope'][
+        'expected_remaining_current_tickers_sha256'
+    ] = _ticker_set_sha256([f'T{i}' for i in range(1, 7)])
+    payload['calibration_scope']['expected_remaining_current_by_cohort'] = {
+        'beverages': 0,
+        'consumer_staples_distribution_retail': 0,
+        'household_personal_tobacco': 0,
+        'packaged_foods_agricultural_products': 6,
+    }
+    payload['calibration_scope']['excluded_tickers_by_cohort'] = {
+        'beverages': [],
+        'consumer_staples_distribution_retail': [],
+        'household_personal_tobacco': [],
+        'packaged_foods_agricultural_products': [],
+    }
     payload['scoring_features']['minimum_normalization_peer_count'] = 5
     payload['scoring_features']['minimum_rank_ready_fraction'] = 0.8
     return ConfigBundle(source.path, source.base_dir, payload)
@@ -175,6 +204,8 @@ def test_atomic_matrix_preserves_missingness_and_zero_weights(tmp_path: Path) ->
         assert build['status'] == 'PASS'
         assert result['status'] == 'PASS'
         assert build['ticker_count'] == 6
+        assert build['source_live_ticker_count'] == 6
+        assert build['excluded_ticker_count'] == 0
         assert build['component_count'] == 6 * (len(CORE_COMPONENT_SPECS) + len(metrics))
         assert build['rank_ready_count'] == 5
         assert conn.execute(
@@ -210,6 +241,75 @@ def test_atomic_matrix_preserves_missingness_and_zero_weights(tmp_path: Path) ->
             WHERE asof_date='2024-12-31'
             '''
         ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_reviewed_exclusion_is_removed_before_normalization(tmp_path: Path) -> None:
+    bundle, conn = _prepared(tmp_path)
+    try:
+        payload = copy.deepcopy(bundle.payload)
+        payload['calibration_scope']['expected_excluded_ticker_count'] = 1
+        payload['calibration_scope']['expected_remaining_current_ticker_count'] = 5
+        payload['calibration_scope'][
+            'expected_remaining_current_tickers_sha256'
+        ] = _ticker_set_sha256([f'T{i}' for i in range(1, 6)])
+        payload['calibration_scope']['expected_remaining_current_by_cohort'][
+            'packaged_foods_agricultural_products'
+        ] = 5
+        payload['calibration_scope']['excluded_tickers_by_cohort'][
+            'packaged_foods_agricultural_products'
+        ] = ['T6']
+        scoped = ConfigBundle(bundle.path, bundle.base_dir, payload)
+
+        build = build_scoring_features(conn, scoped, as_of='2024-12-31')
+        validation = validate_scoring_features(conn, scoped, as_of='2024-12-31')
+
+        assert build['ticker_count'] == 5
+        assert build['excluded_ticker_count'] == 1
+        assert validation['status'] == 'PASS'
+        assert conn.execute(
+            "SELECT COUNT(*) FROM feature_scoring_input WHERE ticker='T6'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM feature_scoring_component WHERE ticker='T6'"
+        ).fetchone()[0] == 0
+        top = conn.execute(
+            """SELECT normalized_value FROM feature_scoring_component
+               WHERE ticker='T5' AND component_name='residual_momentum_63d'"""
+        ).fetchone()[0]
+        assert top == pytest.approx(100.0)
+    finally:
+        conn.close()
+
+
+def test_duplicate_active_membership_fails_before_normalization(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared(tmp_path)
+    try:
+        with conn:
+            conn.execute(
+                '''
+                INSERT INTO dim_universe_membership(
+                    company_id,security_id,ticker,membership_source_id,
+                    membership_basis,start_date,end_date,membership_status,
+                    is_current_member,point_in_time_flag,live_investable_flag,
+                    historical_calibration_eligible_flag,confidence,reason,
+                    created_at,updated_at
+                )
+                SELECT company_id,security_id,ticker,membership_source_id,
+                       'overlap_fixture','2020-01-02',end_date,
+                       membership_status,is_current_member,point_in_time_flag,
+                       live_investable_flag,historical_calibration_eligible_flag,
+                       confidence,'overlapping active membership',created_at,updated_at
+                FROM dim_universe_membership
+                WHERE ticker='T1'
+                LIMIT 1
+                '''
+            )
+        with pytest.raises(ValueError, match='duplicate ticker T1'):
+            build_scoring_features(conn, bundle, as_of='2024-12-31')
     finally:
         conn.close()
 

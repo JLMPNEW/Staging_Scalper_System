@@ -7,6 +7,10 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
+from .calibration_scope import (
+    apply_current_production_scope,
+    calibration_scope_contract,
+)
 from .config import ConfigBundle, cfg_get, resolve_path
 from .db import utc_now
 from .metric_registry import SpecializedMetric, load_metric_registry
@@ -90,6 +94,7 @@ def _contract_payload(
     registry_version: str,
     metrics: Iterable[SpecializedMetric],
 ) -> dict[str, Any]:
+    scope_contract = calibration_scope_contract(bundle)
     return {
         'definition_version': cfg_get(bundle.payload, 'scoring_features.definition_version'),
         'minimum_normalization_peer_count': int(
@@ -100,6 +105,8 @@ def _contract_payload(
             cfg_get(bundle.payload, 'scoring_features.minimum_rank_ready_fraction')
         ),
         'component_weight_default': 0.0,
+        'calibration_scope_sha256': scope_contract['payload_sha256'],
+        'production_scope_policy': 'reviewed_exclusions_before_normalization',
         'specialized_missing_value_policy': (
             'neutral_zero_contribution_no_weight_redistribution'
         ),
@@ -161,7 +168,6 @@ def _current_universe(conn: sqlite3.Connection, as_of: str) -> list[dict[str, An
               AND m.live_investable_flag=1
               AND m.start_date<=?
               AND COALESCE(m.end_date,'9999-12-31')>=?
-            GROUP BY t.ticker,t.calibration_cohort_id,t.applicability_subtype
             ORDER BY t.ticker
             ''',
             (as_of, as_of),
@@ -494,9 +500,13 @@ def build_scoring_features(
         cfg_get(bundle.payload, 'scoring_features.definition_version')
     )
     registry_version, metrics = _metric_registry(bundle)
-    universe = _current_universe(conn, as_of)
-    if not universe:
+    source_universe = _current_universe(conn, as_of)
+    if not source_universe:
         raise RuntimeError(f'Stage 6A has no live PIT universe at {as_of}.')
+    universe, scope_summary = apply_current_production_scope(
+        source_universe,
+        bundle,
+    )
     tickers = {str(row['ticker']) for row in universe}
     if conn.execute(
         '''
@@ -573,6 +583,9 @@ def build_scoring_features(
     for row in components:
         lineage = json.loads(str(row['lineage_json']))
         lineage['normalization_scope'] = row.pop('normalization_scope')
+        lineage['calibration_scope_sha256'] = scope_summary['contract'][
+            'payload_sha256'
+        ]
         row['lineage_json'] = _canonical_json(lineage)
         row['component_observation_id'] = component_observation_id(row)
 
@@ -614,6 +627,9 @@ def build_scoring_features(
                 'specialized_weight_activation_policy': (
                     'shared_factor_validation_acceptance_required'
                 ),
+                'calibration_scope_sha256': scope_summary['contract'][
+                    'payload_sha256'
+                ],
             }
         )
         denominator = len(CORE_COMPONENT_SPECS) + applicable_specialized
@@ -730,6 +746,9 @@ def build_scoring_features(
         'asof_date': as_of,
         'definition_version': definition_version,
         'contract_sha256': contract_sha,
+        'source_live_ticker_count': scope_summary['source_ticker_count'],
+        'excluded_ticker_count': scope_summary['observed_excluded_ticker_count'],
+        'calibration_scope_sha256': scope_summary['contract']['payload_sha256'],
         'ticker_count': len(inputs),
         'component_count': len(components),
         'core_component_count': len(CORE_COMPONENT_SPECS),
@@ -764,7 +783,11 @@ def validate_scoring_features(
     definition_version = str(
         cfg_get(bundle.payload, 'scoring_features.definition_version')
     )
-    universe = _current_universe(conn, as_of)
+    source_universe = _current_universe(conn, as_of)
+    universe, scope_summary = apply_current_production_scope(
+        source_universe,
+        bundle,
+    )
     expected_tickers = {str(row['ticker']) for row in universe}
     expected_components = {
         *(spec.name for spec in CORE_COMPONENT_SPECS),
@@ -786,9 +809,22 @@ def validate_scoring_features(
     _check(
         checks,
         'live_pit_universe_exact',
-        len(expected_tickers) == int(cfg_get(bundle.payload, 'universe.expected_current_rows')),
-        observed=len(expected_tickers),
+        len(source_universe) == int(cfg_get(bundle.payload, 'universe.expected_current_rows')),
+        observed=len(source_universe),
         expected=int(cfg_get(bundle.payload, 'universe.expected_current_rows')),
+    )
+    _check(
+        checks,
+        'reviewed_production_scope_exact',
+        len(expected_tickers)
+        == int(scope_summary['contract']['expected_remaining_current_ticker_count'])
+        and scope_summary['remaining_tickers_by_cohort']
+        == scope_summary['contract']['expected_remaining_current_by_cohort'],
+        observed=len(expected_tickers),
+        expected=int(
+            scope_summary['contract']['expected_remaining_current_ticker_count']
+        ),
+        calibration_scope_sha256=scope_summary['contract']['payload_sha256'],
     )
     source_id = str(cfg_get(bundle.payload, 'scoring_features.source_id'))
     source = conn.execute(
@@ -1113,6 +1149,9 @@ def validate_scoring_features(
         'contract_sha256': contract_sha,
         'checks': checks,
         'summary': {
+            'source_live_ticker_count': len(source_universe),
+            'excluded_ticker_count': scope_summary['observed_excluded_ticker_count'],
+            'calibration_scope_sha256': scope_summary['contract']['payload_sha256'],
             'ticker_count': len(inputs),
             'component_count': len(components),
             'core_component_count': len(CORE_COMPONENT_SPECS),

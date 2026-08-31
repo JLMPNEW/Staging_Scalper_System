@@ -110,3 +110,10 @@ MOBI,"MicroTransponder, Inc.",legacy_operating_name,Legacy Vivistim PMA applican
 "LNSR","LENSAR, Inc.","operating_unit","Verified ophthalmic-laser 510k applicant and SEC legal issuer name","2020-10-01","2026-08-22",""
 "PRPO","Precipio, Inc.","operating_unit","Audited post-merger SEC legal issuer and centralized laboratory name","2017-06-30","2026-08-22",""
 "PRPO","Precipio Diagnostics, LLC","legacy_operating_name","Precipio diagnostic laboratory operating entity before the 2017 public-company merger","2017-06-30","2026-08-22",""
+MDXG,"MiMedx Group, Inc.",security_master,Exact public-parent legal name; do not infer unrelated tissue manufacturers.,2008-04-02,2026-08-30,
+ORGO,Organogenesis Inc.,operating_unit,Exact FDA operating manufacturer under Organogenesis Holdings.,2018-12-11,2026-08-30,
+CAI,"Caris Life Sciences, Inc.",security_master,Exact public-parent and FDA sponsor name.,2025-06-18,2026-08-30,
+LNTH,"Lantheus Holdings, Inc.",security_master,Exact public-parent legal name.,2015-06-25,2026-08-30,
+LNTH,Lantheus Medical Imaging,operating_unit,Issuer operating unit; non-CDRH radiopharmaceutical route remains explicit.,2015-06-25,2026-08-30,
+ANIK,"Anika Therapeutics, Inc.",security_master,Exact FDA manufacturer and public-parent legal name.,1993-05-03,2026-08-30,
+TECH,Bio-Techne Corporation,security_master,Exact public-parent legal name; generic TECH token matching is prohibited.,1989-02-09,2026-08-30,

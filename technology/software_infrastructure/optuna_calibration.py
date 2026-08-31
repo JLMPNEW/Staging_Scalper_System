@@ -25,6 +25,7 @@ from technology.core.calibrated_scoring import (
 from technology.core.calibrated_scoring import (
     subfeature_weight_specs as calibrated_subfeature_weight_specs,
 )
+from technology.core.calibration_governance import incumbent_relative_cohort_cap
 from technology.core.config import cfg_get, load_yaml, resolve_path
 from technology.core.scoring_features import SUBFEATURE_SPECS, percentile_scores, safe_float, weighted_available_score
 from technology.core.signal_diagnostics import quintile_spread, raw_t_stat, spearman
@@ -653,12 +654,20 @@ def optimize_weights(
     timeout_sec: int | None = None,
     storage_url: str | None = None,
     study_name: str | None = None,
+    max_top_cohort_share_override: float | None = None,
 ) -> tuple[Candidate, Any]:
     import optuna
 
     hard_constraints = bool(cfg_get(config, f"{CONFIG_KEY}.hard_constraints_in_search", True))
     max_turnover = float(eval_kwargs["max_turnover"])
-    max_top_cohort_share = float(eval_kwargs["max_top_cohort_share"])
+    configured_cohort_cap = float(eval_kwargs["max_top_cohort_share"])
+    max_top_cohort_share = (
+        configured_cohort_cap
+        if max_top_cohort_share_override is None
+        else float(max_top_cohort_share_override)
+    )
+    if not 0.0 <= max_top_cohort_share <= 1.0:
+        raise ValueError("Effective max_top_cohort_share must be between 0 and 1")
 
     def objective(trial: Any) -> float:
         candidate = sample_candidate(trial, config, bounds)
@@ -670,6 +679,7 @@ def optimize_weights(
         trial.set_user_attr("metrics", {key: value for key, value in metrics.items() if key != "date_rows"})
         trial.set_user_attr("weights", json_ready_weights(candidate))
         trial.set_user_attr("feasible", int(feasible))
+        trial.set_user_attr("effective_max_top_cohort_share", max_top_cohort_share)
         if hard_constraints and not feasible:
             return float(metrics["objective"]) - INFEASIBLE_OBJECTIVE_PENALTY
         return float(metrics["objective"])
@@ -858,6 +868,9 @@ def run_software_infrastructure_optuna_calibration() -> None:
                 "value": trial.value,
                 "state": str(trial.state),
                 "feasible": trial.user_attrs.get("feasible", ""),
+                "effective_max_top_cohort_share": trial.user_attrs.get(
+                    "effective_max_top_cohort_share", eval_kwargs["max_top_cohort_share"]
+                ),
                 **flatten_metrics("train", metrics, horizons),
                 "component_weights_json": json.dumps(weights.get("component_weights", {}), sort_keys=True),
                 "subfeature_weights_json": json.dumps(weights.get("subfeature_weights", {}), sort_keys=True),
@@ -1083,6 +1096,9 @@ def run_software_infrastructure_walk_forward_calibration() -> None:
     min_spread_primary = holdout_gate_value(config, "min_holdout_mean_spread_net", primary, 0.0)
     min_spread_secondary = holdout_gate_value(config, "min_holdout_mean_spread_net", secondary, 0.0)
     min_fold_win_fraction = float(cfg_get(config, f"{CONFIG_KEY}.min_fold_win_fraction", 0.50))
+    cohort_cap_tolerance = float(
+        cfg_get(config, f"{CONFIG_KEY}.walk_forward.max_top_cohort_share_incumbent_tolerance", 0.02)
+    )
 
     block_rows: list[dict[str, Any]] = []
     improvements: list[float] = []
@@ -1103,6 +1119,12 @@ def run_software_infrastructure_walk_forward_calibration() -> None:
         test_dates = panel_dates[test_start: test_start + block_size]
         if len(test_dates) < 4 or len(train_dates) < 20:
             break
+        stage7_train_metrics = evaluate_candidate(panel, train_dates, horizons, stage7, **eval_kwargs)
+        effective_search_cohort_cap = incumbent_relative_cohort_cap(
+            float(eval_kwargs["max_top_cohort_share"]),
+            float(stage7_train_metrics["avg_top_cohort_share"]),
+            cohort_cap_tolerance,
+        )
         candidate, _study = optimize_weights(
             panel,
             train_dates,
@@ -1113,14 +1135,20 @@ def run_software_infrastructure_walk_forward_calibration() -> None:
             n_trials=n_trials,
             seed=seed + block_idx,
             timeout_sec=timeout_sec,
+            max_top_cohort_share_override=effective_search_cohort_cap,
         )
         refit_metrics = evaluate_candidate(panel, test_dates, horizons, candidate, **eval_kwargs)
         stage7_metrics = evaluate_candidate(panel, test_dates, horizons, stage7, **eval_kwargs)
+        effective_test_cohort_cap = incumbent_relative_cohort_cap(
+            float(eval_kwargs["max_top_cohort_share"]),
+            float(stage7_metrics["avg_top_cohort_share"]),
+            cohort_cap_tolerance,
+        )
         improvement = float(refit_metrics.get("objective", 0.0)) - float(stage7_metrics.get("objective", 0.0))
         win = int(improvement > 0)
         constraint_pass = int(
             float(refit_metrics.get("avg_top_turnover", 1.0)) <= eval_kwargs["max_turnover"]
-            and float(refit_metrics.get("avg_top_cohort_share", 1.0)) <= eval_kwargs["max_top_cohort_share"]
+            and float(refit_metrics.get("avg_top_cohort_share", 1.0)) <= effective_test_cohort_cap
         )
         gate_pass = int(
             win
@@ -1163,6 +1191,10 @@ def run_software_infrastructure_walk_forward_calibration() -> None:
                 **{f"refit_mean_spread_net_{h}": refit_metrics.get(f"mean_spread_net_{h}") for h in horizons},
                 "refit_avg_top_turnover": refit_metrics.get("avg_top_turnover"),
                 "refit_avg_top_cohort_share": refit_metrics.get("avg_top_cohort_share"),
+                "stage7_avg_top_cohort_share": stage7_metrics.get("avg_top_cohort_share"),
+                "configured_max_top_cohort_share": eval_kwargs["max_top_cohort_share"],
+                "effective_search_max_top_cohort_share": effective_search_cohort_cap,
+                "effective_max_top_cohort_share": effective_test_cohort_cap,
                 "component_weights_json": json.dumps(candidate.component_weights, sort_keys=True),
             }
         )
@@ -1213,6 +1245,9 @@ def run_software_infrastructure_walk_forward_calibration() -> None:
         "initial_train_dates": initial_train,
         "test_block_dates": block_size,
         "embargo_panel_dates": embargo,
+        "configured_max_top_cohort_share": eval_kwargs["max_top_cohort_share"],
+        "max_top_cohort_share_incumbent_tolerance": cohort_cap_tolerance,
+        "adaptive_cohort_cap_policy": "max_configured_or_incumbent_plus_tolerance",
         "refit_win_rate": win_rate,
         "promotion_gate_pass_rate": gate_pass_rate,
         "constraint_pass_rate": constraint_pass_rate,
@@ -1308,15 +1343,22 @@ def validate_software_infrastructure_walk_forward_calibration() -> int:
 
 
 if __name__ == "__main__":
+    from technology.core.optuna_artifact_governance import (
+        run_stage8_with_governance,
+        run_walk_forward_with_governance,
+        validate_stage8_from_argv,
+        validate_walk_forward_from_argv,
+    )
+
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "validate":
         sys.argv.pop(1)
-        raise SystemExit(validate_software_infrastructure_optuna_calibration())
+        raise SystemExit(max(validate_software_infrastructure_optuna_calibration(), validate_stage8_from_argv("software_infrastructure")))
     if command == "walk-forward":
         sys.argv.pop(1)
-        run_software_infrastructure_walk_forward_calibration()
+        run_walk_forward_with_governance(run_software_infrastructure_walk_forward_calibration, "software_infrastructure")
         raise SystemExit(0)
     if command == "validate-walk-forward":
         sys.argv.pop(1)
-        raise SystemExit(validate_software_infrastructure_walk_forward_calibration())
-    run_software_infrastructure_optuna_calibration()
+        raise SystemExit(max(validate_software_infrastructure_walk_forward_calibration(), validate_walk_forward_from_argv("software_infrastructure")))
+    run_stage8_with_governance(run_software_infrastructure_optuna_calibration, "software_infrastructure")

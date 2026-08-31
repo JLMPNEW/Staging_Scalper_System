@@ -1372,6 +1372,42 @@ def test_historical_positioning_rebuild_is_features_only() -> None:
         assert "--features-only" in step.extra_args
 
 
+def test_historical_dashboard_builds_financial_lineage_before_validation() -> None:
+    module = load_script(
+        "technology/scripts/18_backfill_technology_historical_dashboard_reports.py",
+        "technology_historical_financial_lineage",
+    )
+    families = {
+        module.FAMILIES["semiconductors"].family: module.FAMILIES["semiconductors"],
+        module.FAMILIES["technology_hardware"].family: module.FAMILIES["technology_hardware"],
+        module.FAMILIES["software_infrastructure"].family: module.FAMILIES["software_infrastructure"],
+    }
+    for family, spec in families.items():
+        assert len(spec.pre_steps) == 1
+        financial_rebuild = spec.pre_steps[0]
+        assert financial_rebuild.step_id == "08_rebuild_financial_features"
+        assert financial_rebuild.pass_asof is False
+        assert financial_rebuild.extra_args[:2] == ("--model-family", family)
+        step_ids = [item.step_id for item in spec.steps]
+        lineage = next(
+            item for item in spec.steps if item.step_id == "10c_financial_lineage_shadow"
+        )
+        assert step_ids.index("10b_publish_dashboard") < step_ids.index(
+            "10c_financial_lineage_shadow"
+        )
+        assert step_ids.index("10c_financial_lineage_shadow") < step_ids.index(
+            "10b_validate_dashboard_snapshot"
+        )
+        assert lineage.extra_args == (
+            "--family",
+            family,
+            "--policy-context",
+            "production",
+            "--retrospective-source-discovery-max-days",
+            "7",
+        )
+
+
 def test_historical_refresh_rejects_latest_only_governance_steps() -> None:
     class TestStep:
         def __init__(self, step_id: str) -> None:

@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.machinery.stage12_contract_upgrade import (  # noqa: E402
     migrate_active_adapter_semantic_seal,
+    migrate_active_optimizer_seal,
     upgrade_active_contract,
     upgrade_mapped_fact_idempotency_contract,
     upgrade_financial_lineage_contract,
@@ -53,6 +54,35 @@ def parse_args() -> argparse.Namespace:
             "active machinery universe and sealed rank are unchanged."
         ),
     )
+    operation.add_argument(
+        "--migrate-optimizer-seal",
+        action="store_true",
+        help=(
+            "Reseal one explicitly reviewed optimizer source change after "
+            "exact candidate reproduction."
+        ),
+    )
+    parser.add_argument(
+        "--expected-optimizer-sha256",
+        default="",
+        help="Required reviewed optimizer_core.py SHA-256 for --migrate-optimizer-seal.",
+    )
+    parser.add_argument(
+        "--expected-optimizer-runner-sha256",
+        default="",
+        help=(
+            "Required reviewed 09_run_portfolio_optimizer.py SHA-256 for "
+            "--migrate-optimizer-seal."
+        ),
+    )
+    parser.add_argument(
+        "--expected-adapter-semantic-sha256",
+        default="",
+        help=(
+            "Required reviewed industrial adapter semantic SHA-256 for "
+            "--migrate-optimizer-seal."
+        ),
+    )
     parser.add_argument(
         "--db",
         type=Path,
@@ -89,6 +119,27 @@ def main() -> int:
             governance_root=governance_root,
             asof=args.asof,
             db_path=args.db,
+        )
+    elif args.migrate_optimizer_seal:
+        if (
+            not args.expected_optimizer_sha256
+            or not args.expected_optimizer_runner_sha256
+            or not args.expected_adapter_semantic_sha256
+        ):
+            raise ValueError(
+                "All reviewed portfolio dependency SHA-256 arguments are required with "
+                "--migrate-optimizer-seal"
+            )
+        result = migrate_active_optimizer_seal(
+            config,
+            config_path=config_path,
+            governance_root=governance_root,
+            asof=args.asof,
+            expected_optimizer_sha256=args.expected_optimizer_sha256,
+            expected_runner_sha256=args.expected_optimizer_runner_sha256,
+            expected_adapter_semantic_sha256=(
+                args.expected_adapter_semantic_sha256
+            ),
         )
     else:
         operation = (

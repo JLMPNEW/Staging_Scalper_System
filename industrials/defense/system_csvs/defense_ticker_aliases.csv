@@ -1,1 +1,2 @@
 contract_ticker,active_ticker,predecessor_ticker,effective_date,price_history_csv,issuer_id,reason,source,verified_flag,notes
+IA,IA,ISSC,2026-08-18,,0000836690,ticker_symbol_change_continuous_issuer,https://www.nasdaq.com/press-release/innovative-aerosystems-change-nasdaq-ticker-symbol-ia-following-corporate-rebranding,1,Preserve ISSC history before IA; same issuer and CIK with no corporate-entity break.

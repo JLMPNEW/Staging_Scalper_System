@@ -856,6 +856,13 @@ def main() -> None:
         ic_class_counts = {}
 
     authorization_fields = authorization_output_fields(ic_authorization)
+    # This legacy meta-optimizer uses the calibration holdout while selecting
+    # objective weights. It remains useful for research diagnostics, but only
+    # the nested walk-forward runner may authorize production promotion.
+    authorization_fields["factor_validation_production_promotion_authorized"] = authorization_fields[
+        "production_promotion_authorized"
+    ]
+    authorization_fields["production_promotion_authorized"] = 0
     write_json(
         output_dir / "factor_validation_authorization.json",
         {

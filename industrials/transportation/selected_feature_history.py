@@ -747,6 +747,7 @@ def materialize_panels(
     accepted: Mapping[tuple[str, str], Sequence[Evidence]],
     discovery_path: Path,
     complete_path: Path,
+    allow_out_of_scope_tickers: bool = False,
 ) -> dict[str, Any]:
     scope = {(row["ticker"], row["metric_id"]): row for row in scope_rows}
     scope_by_ticker: dict[str, Mapping[str, str]] = {}
@@ -777,6 +778,7 @@ def materialize_panels(
     discovery_count = 0
     complete_count = 0
     membership_count = 0
+    out_of_scope_tickers: set[str] = set()
     stats: dict[str, dict[str, Any]] = {
         metric_id: {
             "historical": 0,
@@ -797,11 +799,14 @@ def materialize_panels(
             for row in availability_rows:
                 by_ticker[row["ticker"]][row["metric_name"]] = row
             for ticker in sorted(by_ticker):
-                membership_count += 1
                 generic_by_metric = by_ticker[ticker]
                 ticker_scope = scope_by_ticker.get(ticker)
                 if ticker_scope is None:
+                    if allow_out_of_scope_tickers:
+                        out_of_scope_tickers.add(ticker)
+                        continue
                     raise ValueError(f"{asof}: ticker absent from v3 scope={ticker}")
+                membership_count += 1
                 for metric_id in generic_ids:
                     generic = generic_by_metric.get(metric_id)
                     if generic is None:
@@ -893,6 +898,7 @@ def materialize_panels(
         )
     return {
         "membership_row_count": membership_count,
+        "out_of_scope_tickers": sorted(out_of_scope_tickers),
         "discovery_row_count": discovery_count,
         "complete_row_count": complete_count,
         "coverage_rows": coverage_rows_out,

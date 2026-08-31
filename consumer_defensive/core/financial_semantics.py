@@ -167,6 +167,7 @@ DEFAULT_CAPEX_PAYMENT_CONCEPTS = frozenset(
     {
         "PaymentsToAcquirePropertyPlantAndEquipment",
         "PurchaseOfPropertyPlantAndEquipment",
+        "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
     }
 )
 

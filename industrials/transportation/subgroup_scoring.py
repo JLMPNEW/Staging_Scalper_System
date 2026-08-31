@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -12,6 +12,9 @@ from industrials.core.config import load_yaml
 from industrials.transportation.contemporaneous_metric_coverage import (
     availability_date,
     comparison_key,
+)
+from industrials.transportation.financial_contract import (
+    is_rankable_metric_value,
 )
 from industrials.transportation.surface_freight_score_engine import percentile_scores
 
@@ -40,10 +43,14 @@ class AcceptedFact:
     metric_id: str
     value: float
     unit: str
+    period_start: date | None
     period_end: date
     available_on: date
     definition_key: tuple[str, ...]
     source_key: str
+    accession_number: str
+    source_document: str
+    conflict_resolution_status: str
 
 
 def finite_float(value: object) -> float | None:
@@ -202,26 +209,41 @@ def build_fact_history(
             metric_id=metric_id,
             value=value,
             unit=str(row.get("unit") or ""),
+            period_start=iso_date(row.get("period_start")),
             period_end=period_end,
             available_on=available,
             definition_key=comparison_key(row),
             source_key=str(row.get("candidate_key") or row.get("evidence_key") or ""),
+            accession_number=str(row.get("accession_number") or ""),
+            source_document=str(row.get("source_document") or ""),
+            conflict_resolution_status=str(
+                row.get("conflict_resolution_status") or "NOT_AUDITED"
+            ),
         )
         unique[
             (
                 fact.ticker,
                 fact.metric_id,
+                fact.period_start,
                 fact.period_end,
                 fact.value,
                 fact.definition_key,
                 fact.source_key,
+                fact.conflict_resolution_status,
             )
         ] = fact
     output: dict[tuple[str, str], list[AcceptedFact]] = defaultdict(list)
     for fact in unique.values():
         output[(fact.ticker, fact.metric_id)].append(fact)
     for facts in output.values():
-        facts.sort(key=lambda item: (item.period_end, item.available_on, item.source_key))
+        facts.sort(
+            key=lambda item: (
+                item.period_end,
+                item.available_on,
+                item.period_start or date.min,
+                item.source_key,
+            )
+        )
     return dict(output)
 
 
@@ -252,7 +274,169 @@ def _current_fact(
         for fact in _available_facts(history, ticker=ticker, metric_id=metric_id, asof=asof)
         if (asof - fact.period_end).days <= max_staleness_days
     ]
-    return max(candidates, key=lambda item: (item.available_on, item.period_end)) if candidates else None
+    return _latest_unambiguous_fact(candidates)
+
+
+def _latest_unambiguous_fact(
+    candidates: Sequence[AcceptedFact],
+) -> AcceptedFact | None:
+    """Return the latest economic period only when its value is unambiguous.
+
+    Filing and exhibit parsers can emit multiple table cells for one issuer,
+    KPI, period and definition. A candidate-key hash is not a semantic
+    tie-breaker: choosing one hash can silently select a segment, adjusted, or
+    consolidated value. Prefer the latest economic period, then its latest
+    disclosure, and fail closed if that identity still has multiple values.
+    """
+    if not candidates:
+        return None
+    latest_period = max(item.period_end for item in candidates)
+    period_candidates = [
+        item for item in candidates if item.period_end == latest_period
+    ]
+    latest_available = max(item.available_on for item in period_candidates)
+    identity_candidates = [
+        item
+        for item in period_candidates
+        if item.available_on == latest_available
+    ]
+    identity_candidates = _shortest_compatible_duration(identity_candidates)
+    if len({item.value for item in identity_candidates}) != 1:
+        return None
+    return min(identity_candidates, key=lambda item: item.source_key)
+
+
+def _shortest_compatible_duration(
+    candidates: Sequence[AcceptedFact],
+) -> list[AcceptedFact]:
+    """Preserve period-start identity; never choose quarter over YTD."""
+    selected = list(candidates)
+    if (
+        not selected
+        or any(
+            item.conflict_resolution_status == "FAIL_CLOSED_REVIEW_REQUIRED"
+            for item in selected
+        )
+        or any(item.period_start is None for item in selected)
+        or len({item.definition_key for item in selected}) != 1
+        or len({item.period_start for item in selected}) != 1
+    ):
+        return selected
+    return selected
+
+
+def _duration_days(fact: AcceptedFact) -> int | None:
+    if fact.period_start is None:
+        return None
+    return (fact.period_end - fact.period_start).days
+
+
+def _same_disclosure(left: AcceptedFact, right: AcceptedFact) -> bool:
+    if left.accession_number and right.accession_number:
+        return left.accession_number == right.accession_number
+    if left.source_document and right.source_document:
+        return left.source_document == right.source_document
+    return False
+
+
+def _coherent_prior_fact(
+    candidates: Sequence[AcceptedFact],
+    *,
+    current: AcceptedFact,
+) -> AcceptedFact | None:
+    """Resolve an as-reported prior without using a later restatement."""
+    same_disclosure = [
+        item for item in candidates if _same_disclosure(item, current)
+    ]
+    eligible = same_disclosure or [
+        item for item in candidates if item.available_on <= current.available_on
+    ]
+    if not eligible:
+        return None
+    current_duration = _duration_days(current)
+    if current_duration is not None:
+        duration_matched = [
+            item
+            for item in eligible
+            if (duration := _duration_days(item)) is not None
+            and abs(duration - current_duration) <= 15
+        ]
+        if duration_matched:
+            eligible = duration_matched
+    best_gap = min(
+        abs((current.period_end - item.period_end).days - 365)
+        for item in eligible
+    )
+    nearest = [
+        item
+        for item in eligible
+        if abs((current.period_end - item.period_end).days - 365) == best_gap
+    ]
+    return _latest_unambiguous_fact(nearest)
+
+
+def ambiguous_fact_identity_counts(
+    history: Mapping[tuple[str, str], Sequence[AcceptedFact]],
+    *,
+    metric_ids: set[str] | None = None,
+) -> dict[str, int]:
+    """Count accepted fact identities containing conflicting numeric values."""
+    conflicts: Counter[str] = Counter()
+    for (_ticker, metric_id), facts in history.items():
+        if metric_ids is not None and metric_id not in metric_ids:
+            continue
+        identities: dict[
+            tuple[date | None, date, date, tuple[str, ...]], set[float]
+        ] = defaultdict(set)
+        for fact in facts:
+            identities[
+                (
+                    fact.period_start,
+                    fact.period_end,
+                    fact.available_on,
+                    fact.definition_key,
+                )
+            ].add(fact.value)
+        count = sum(
+            len(values) > 1 for values in identities.values()
+        )
+        if count:
+            conflicts[metric_id] += count
+    return dict(sorted(conflicts.items()))
+
+
+def resolver_selection_conflict_counts(
+    history: Mapping[tuple[str, str], Sequence[AcceptedFact]],
+    *,
+    metric_ids: set[str] | None = None,
+) -> dict[str, int]:
+    """Count conflicts at the exact identity used by the current-fact resolver.
+
+    Unlike the within-definition diagnostic above, this intentionally ignores
+    definition_key. The resolver selects one ticker/metric economic period and
+    latest disclosure before it can know which semantic scope is appropriate;
+    different values across those scopes therefore fail closed.
+    """
+    conflicts: Counter[str] = Counter()
+    for (_ticker, metric_id), facts in history.items():
+        if metric_ids is not None and metric_id not in metric_ids:
+            continue
+        identities: dict[tuple[date, date], list[AcceptedFact]] = defaultdict(list)
+        for fact in facts:
+            identities[(fact.period_end, fact.available_on)].append(fact)
+        count = sum(
+            len(
+                {
+                    item.value
+                    for item in _shortest_compatible_duration(candidates)
+                }
+            )
+            > 1
+            for candidates in identities.values()
+        )
+        if count:
+            conflicts[metric_id] += count
+    return dict(sorted(conflicts.items()))
 
 
 def derive_feature(
@@ -291,13 +475,9 @@ def derive_feature(
         ]
         if not priors:
             return None, ()
-        prior = min(
-            priors,
-            key=lambda item: (
-                abs((current.period_end - item.period_end).days - 365),
-                -item.period_end.toordinal(),
-            ),
-        )
+        prior = _coherent_prior_fact(priors, current=current)
+        if prior is None:
+            return None, ()
         if transform == "yoy_growth":
             if prior.value == 0:
                 return None, ()
@@ -409,32 +589,42 @@ def build_v8_score_rows(
                     feature_values[key] = value
                     feature_sources[key] = source_keys
 
-    current_tickers_by_group = {
-        (str(cohort_id), str(group_id)): {
-            str(ticker).upper() for ticker in group["tickers"]
-        }
-        for cohort_id, cohort in policy["cohorts"].items()
-        for group_id, group in cohort["groups"].items()
-    }
     score_dates = sorted({str(row["asof_date"]) for row in rows})
-    latest_date = score_dates[-1]
+    if not score_dates:
+        raise ValueError("v8 score panel contains no policy-eligible rows")
     coverage_rows: list[dict[str, object]] = []
-    activation: dict[tuple[str, str], bool] = {}
+    date_activation: dict[tuple[str, str, str], bool] = {}
+    current_activation: dict[tuple[str, str], bool] = {}
     for cohort_id, cohort in policy["cohorts"].items():
         for group_id, group in cohort["groups"].items():
             pack = group.get("specialized_pack") or {}
             mode = str(group["specialized_activation"])
             date_passes = 0
             latest_pass = False
-            for asof in score_dates:
-                tickers = current_tickers_by_group[(str(cohort_id), str(group_id))]
+            group_dates = sorted(
+                asof
+                for asof, candidate_cohort, candidate_group in by_date_group
+                if candidate_cohort == str(cohort_id)
+                and candidate_group == str(group_id)
+            )
+            for asof in group_dates:
+                tickers = {
+                    str(row["ticker"]).upper()
+                    for row in by_date_group[
+                        (asof, str(cohort_id), str(group_id))
+                    ]
+                }
                 breadth = sum(
                     any((asof, ticker, str(feature_id)) in feature_values for feature_id in pack)
                     for ticker in tickers
                 )
                 passes = bool(pack) and breadth >= int(group["minimum_specialized_breadth"])
                 date_passes += int(passes)
-                latest_pass = passes if asof == latest_date else latest_pass
+                latest_pass = passes
+                date_activation[(asof, str(cohort_id), str(group_id))] = (
+                    mode != "excluded_insufficient_independent_cross_section"
+                    and passes
+                )
                 coverage_rows.append(
                     {
                         "policy_version": POLICY_VERSION,
@@ -447,8 +637,8 @@ def build_v8_score_rows(
                         "date_gate": "PASS" if passes else "FAIL",
                     }
                 )
-            pass_fraction = date_passes / len(score_dates)
-            activation[(str(cohort_id), str(group_id))] = (
+            pass_fraction = date_passes / len(group_dates) if group_dates else 0.0
+            current_activation[(str(cohort_id), str(group_id))] = (
                 mode != "excluded_insufficient_independent_cross_section"
                 and latest_pass
                 and pass_fraction >= float(controls["minimum_specialized_date_fraction"])
@@ -457,7 +647,7 @@ def build_v8_score_rows(
     output: list[dict[str, object]] = []
     for (asof, cohort_id, group_id), date_rows in sorted(by_date_group.items()):
         group = policy["cohorts"][cohort_id]["groups"][group_id]
-        active = activation[(cohort_id, group_id)]
+        active = date_activation.get((asof, cohort_id, group_id), False)
         component_weights = group[
             "component_weights_active" if active else "component_weights_fallback"
         ]
@@ -471,6 +661,7 @@ def build_v8_score_rows(
                     ticker: values[metric_id]
                     for ticker, (values, statuses) in parsed.items()
                     if metric_id in values and statuses.get(metric_id) in OBSERVED_STATUSES
+                    and is_rankable_metric_value(metric_id, values[metric_id])
                 }
                 scores = percentile_scores(
                     raw, winsor_lower=winsor_lower, winsor_upper=winsor_upper
@@ -587,7 +778,7 @@ def build_v8_score_rows(
                 if row["cohort_id"] == str(cohort_id) and row["group_id"] == str(group_id)
             ]
             passing = sum(row["date_gate"] == "PASS" for row in group_coverage)
-            active = activation[(str(cohort_id), str(group_id))]
+            active = current_activation[(str(cohort_id), str(group_id))]
             required = str(group["specialized_activation"]) == "required_for_calibration"
             summary_groups.append(
                 {
@@ -595,14 +786,39 @@ def build_v8_score_rows(
                     "group_id": str(group_id),
                     "ranking_mode": str(group["ranking_mode"]),
                     "specialized_activation_policy": str(group["specialized_activation"]),
-                    "score_date_count": len(score_dates),
+                    "score_date_count": len(group_coverage),
                     "specialized_passing_date_count": passing,
-                    "specialized_passing_date_fraction": passing / len(score_dates),
-                    "latest_date_gate": group_coverage[-1]["date_gate"],
+                    "specialized_passing_date_fraction": (
+                        passing / len(group_coverage) if group_coverage else 0.0
+                    ),
+                    "latest_date_gate": (
+                        group_coverage[-1]["date_gate"]
+                        if group_coverage
+                        else "FAIL"
+                    ),
                     "specialized_pack_active_flag": int(active),
                     "group_calibration_ready_flag": int(not required or active),
                 }
             )
+    source_metric_ids = {
+        str(metric_id)
+        for cohort in policy["cohorts"].values()
+        for group in cohort["groups"].values()
+        for feature in (group.get("specialized_pack") or {}).values()
+        for metric_id in (
+            feature.get("source_metrics")
+            or [feature.get("source_metric")]
+        )
+        if metric_id
+    }
+    conflict_counts = ambiguous_fact_identity_counts(
+        history,
+        metric_ids=source_metric_ids,
+    )
+    selection_conflict_counts = resolver_selection_conflict_counts(
+        history,
+        metric_ids=source_metric_ids,
+    )
     manifest = {
         "policy_version": POLICY_VERSION,
         "score_date_count": len(score_dates),
@@ -611,12 +827,31 @@ def build_v8_score_rows(
         "score_row_count": len(output),
         "group_count": len(summary_groups),
         "group_summaries": summary_groups,
+        "specialized_score_activation_policy": (
+            "point_in_time_group_membership_and_date_gate_no_future_coverage_"
+            "leakage"
+        ),
         "required_group_failure_count": sum(
             int(row["group_calibration_ready_flag"] == 0) for row in summary_groups
+        ),
+        "ambiguous_source_fact_identity_count": sum(
+            selection_conflict_counts.values()
+        ),
+        "ambiguous_source_fact_identity_count_by_metric": (
+            selection_conflict_counts
+        ),
+        "within_definition_source_fact_conflict_count": sum(
+            conflict_counts.values()
+        ),
+        "within_definition_source_fact_conflict_count_by_metric": (
+            conflict_counts
+        ),
+        "ambiguous_source_fact_policy": (
+            "latest_period_latest_disclosure_conflicting_values_across_"
+            "definition_scopes_fail_closed_no_feature_value"
         ),
         "network_requests": 0,
         "parser_invocations": 0,
         "production_activation_authorized": False,
     }
     return output, coverage_rows, manifest
-

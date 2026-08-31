@@ -121,6 +121,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark-tickers", default="", help="Optional comma-separated benchmark ticker override.")
     parser.add_argument("--skip-benchmarks", action="store_true")
     parser.add_argument("--force-refresh", action="store_true")
+    parser.add_argument(
+        "--full-history",
+        action="store_true",
+        help="Explicitly refetch the complete configured history instead of the bounded daily overlap.",
+    )
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -323,15 +328,96 @@ def append_benchmarks(jobs: list[PriceJob], benchmark_tickers: list[str], *, ski
     return out
 
 
-COVERAGE_START_TOLERANCE_DAYS = 7
+def incremental_fetch_start(
+    *,
+    configured_start: date,
+    existing_last_bar: date | None,
+    overlap_calendar_days: int,
+    full_history: bool,
+    adjustment_coverage_complete: bool,
+) -> date:
+    """Choose a bounded daily fetch window without weakening repair semantics.
+
+    A normal stale-ticker refresh overlaps the stored tail so corrected recent
+    bars are observed. Explicit full-history runs and incomplete adjusted-close
+    histories retain the complete configured window.
+    """
+    if full_history or existing_last_bar is None or not adjustment_coverage_complete:
+        return configured_start
+    overlap = max(1, int(overlap_calendar_days))
+    return max(configured_start, existing_last_bar - timedelta(days=overlap))
 
 
-def existing_coverage_row(
+def action_signature(
+    *,
+    action_type: object,
+    action_date: object,
+    cash_amount: object = None,
+    split_numerator: object = None,
+    split_denominator: object = None,
+    split_factor: object = None,
+) -> tuple[str, str, float | None, float | None, float | None, float | None]:
+    def normalized_number(raw: object) -> float | None:
+        value = to_float(raw)
+        return round(value, 12) if value is not None else None
+
+    return (
+        str(action_type or "").strip().lower(),
+        str(action_date or "").strip()[:10],
+        normalized_number(cash_amount),
+        normalized_number(split_numerator),
+        normalized_number(split_denominator),
+        normalized_number(split_factor),
+    )
+
+
+def result_action_signatures(result: FetchResult) -> set[tuple[str, str, float | None, float | None, float | None, float | None]]:
+    return {
+        action_signature(
+            action_type=action.action_type,
+            action_date=action.action_date,
+            cash_amount=action.cash_amount,
+            split_numerator=action.split_numerator,
+            split_denominator=action.split_denominator,
+            split_factor=action.split_factor,
+        )
+        for action in result.actions
+    }
+
+
+def existing_action_signatures(
+    conn: Any,
+    *,
+    ticker: str,
+    source_id: str,
+) -> set[tuple[str, str, float | None, float | None, float | None, float | None]]:
+    rows = conn.execute(
+        """
+        SELECT action_type, action_date, cash_amount,
+               split_numerator, split_denominator, split_factor
+        FROM fact_corporate_action
+        WHERE ticker = ? AND source_id = ?
+        """,
+        (ticker, source_id),
+    ).fetchall()
+    return {
+        action_signature(
+            action_type=row["action_type"],
+            action_date=row["action_date"],
+            cash_amount=row["cash_amount"],
+            split_numerator=row["split_numerator"],
+            split_denominator=row["split_denominator"],
+            split_factor=row["split_factor"],
+        )
+        for row in rows
+    }
+
+
+def existing_price_coverage(
     conn: Any,
     job: PriceJob,
     *,
     source_id: str,
-    required_start_date: date,
     required_through_date: date,
 ) -> dict[str, Any] | None:
     row = conn.execute(
@@ -344,8 +430,9 @@ def existing_coverage_row(
         FROM fact_price_ohlcv
         WHERE ticker = ?
           AND source_id = ?
+          AND bar_date <= ?
         """,
-        (job.ticker, source_id),
+        (job.ticker, source_id, required_through_date.isoformat()),
     ).fetchone()
     if row is None:
         return None
@@ -353,15 +440,39 @@ def existing_coverage_row(
     adjusted_bars = int(row["adjusted_bars"] or 0)
     first_bar_date = parse_date(row["first_bar_date"])
     last_bar_date = parse_date(row["last_bar_date"])
-    if bars == 0 or adjusted_bars == 0 or first_bar_date is None or last_bar_date is None:
+    if bars == 0 or first_bar_date is None or last_bar_date is None:
         return None
-    if adjusted_bars != bars:
+    return {
+        "bars": bars,
+        "adjusted_bars": adjusted_bars,
+        "first_bar_date": first_bar_date,
+        "last_bar_date": last_bar_date,
+        "adjustment_coverage_complete": adjusted_bars == bars,
+    }
+
+
+def existing_coverage_row(
+    conn: Any,
+    job: PriceJob,
+    *,
+    source_id: str,
+    required_start_date: date,
+    required_through_date: date,
+    coverage: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    coverage = coverage or existing_price_coverage(
+        conn,
+        job,
+        source_id=source_id,
+        required_through_date=required_through_date,
+    )
+    if coverage is None:
+        return None
+    adjusted_bars = int(coverage["adjusted_bars"])
+    first_bar_date = cast(date, coverage["first_bar_date"])
+    last_bar_date = cast(date, coverage["last_bar_date"])
+    if adjusted_bars == 0 or not bool(coverage["adjustment_coverage_complete"]):
         # Partial adjustment coverage (NULL adj_close bars) is not "current"; refetch.
-        return None
-    if first_bar_date > required_start_date + timedelta(days=COVERAGE_START_TOLERANCE_DAYS):
-        # Stored history starts later than the requested window (beyond a small
-        # weekend/holiday tolerance): a prior narrow-window fetch or an explicit
-        # earlier --start-date must force a refetch rather than be skipped.
         return None
     if last_bar_date < required_through_date:
         return None
@@ -835,6 +946,10 @@ def main() -> None:
     timeout_sec = float(cfg_get(config, "yahoo_price_ingestion.timeout_sec", 30.0))
     max_retries = int(cfg_get(config, "yahoo_price_ingestion.max_retries", 3))
     parallel_workers = max(1, int(cfg_get(config, "yahoo_price_ingestion.parallel_workers", 4)))
+    incremental_overlap_days = max(
+        1,
+        int(cfg_get(config, "yahoo_price_ingestion.incremental_overlap_calendar_days", 14)),
+    )
     retry_status_codes = int_set(cfg_get(config, "yahoo_price_ingestion.retry_status_codes"), {429, 500, 502, 503, 504})
     model_family = str(args.model_family or cfg_get(config, "industrials_universe.initial_subsector", "defense") or "defense").strip()
     if not model_family:
@@ -863,8 +978,35 @@ def main() -> None:
         jobs = append_benchmarks(jobs, benchmark_tickers, skip_benchmarks=bool(args.skip_benchmarks))
         if not jobs:
             raise ValueError("No industrials tickers found to fetch.")
-        job_start_dates = {
+        configured_start_dates = {
             job.ticker: max(start, ticker_start_overrides.get(job.ticker, start), ticker_start_overrides.get(job.fetch_ticker, start))
+            for job in jobs
+        }
+        coverage_by_ticker = {
+            job.ticker: existing_price_coverage(
+                conn,
+                job,
+                source_id=source_id,
+                required_through_date=required_through_date,
+            )
+            for job in jobs
+        }
+        job_start_dates: dict[str, date] = {}
+        for job in jobs:
+            coverage = coverage_by_ticker[job.ticker]
+            existing_last_bar = cast(date, coverage["last_bar_date"]) if coverage is not None else None
+            adjustment_coverage_complete = (
+                bool(coverage["adjustment_coverage_complete"]) if coverage is not None else False
+            )
+            job_start_dates[job.ticker] = incremental_fetch_start(
+                configured_start=configured_start_dates[job.ticker],
+                existing_last_bar=existing_last_bar,
+                overlap_calendar_days=incremental_overlap_days,
+                full_history=bool(args.full_history),
+                adjustment_coverage_complete=adjustment_coverage_complete,
+            )
+        known_actions_by_ticker = {
+            job.ticker: existing_action_signatures(conn, ticker=job.ticker, source_id=source_id)
             for job in jobs
         }
         skipped_report_rows: list[dict[str, Any]] = []
@@ -877,6 +1019,7 @@ def main() -> None:
                     source_id=source_id,
                     required_start_date=job_start_dates[job.ticker],
                     required_through_date=required_through_date,
+                    coverage=coverage_by_ticker[job.ticker],
                 )
                 if coverage_row is None:
                     jobs_to_fetch.append(job)
@@ -928,6 +1071,41 @@ def main() -> None:
                     results.append(result)
                     status = "ok" if result.bars and not result.error else f"error={result.error}"
                     LOGGER.info("[%d/%d] %s fetch=%s bars=%d actions=%d %s", idx, len(jobs), result.job.ticker, result.job.fetch_ticker, len(result.bars), len(result.actions), status)
+
+            refreshed_results: list[FetchResult] = []
+            for result in results:
+                ticker = result.job.ticker
+                new_or_revised_action = bool(
+                    result_action_signatures(result) - known_actions_by_ticker.get(ticker, set())
+                )
+                configured_start = configured_start_dates[ticker]
+                if new_or_revised_action and job_start_dates[ticker] > configured_start:
+                    # Yahoo adjusted-close history changes retroactively after a
+                    # dividend or split. Refresh only the affected ticker's full
+                    # series, once, instead of redownloading every ticker daily.
+                    LOGGER.info(
+                        "%s has a new/revised corporate action; refreshing adjusted history from %s.",
+                        ticker,
+                        configured_start,
+                    )
+                    result = fetch_job(
+                        result.job,
+                        chart_url_template=chart_url_template,
+                        start_date=configured_start,
+                        end_date=end,
+                        source_id=source_id,
+                        cache_dir=cache_dir,
+                        force_refresh=True,
+                        user_agent=user_agent,
+                        timeout_sec=timeout_sec,
+                        max_retries=max_retries,
+                        retry_status_codes=retry_status_codes,
+                        interval=str(cfg_get(config, "yahoo_price_ingestion.interval", "1d") or "1d"),
+                        events=str(cfg_get(config, "yahoo_price_ingestion.events", "div,splits") or "div,splits"),
+                        include_adjusted_close=str(cfg_get(config, "yahoo_price_ingestion.include_adjusted_close", True)).lower() in {"1", "true", "yes", "y"},
+                    )
+                refreshed_results.append(result)
+            results = refreshed_results
 
         with closing(connect(db_path, timeout_sec=sqlite_timeout_sec)) as conn:
             init_db(conn)

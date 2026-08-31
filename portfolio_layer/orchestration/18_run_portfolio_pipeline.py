@@ -55,10 +55,11 @@ is disabled; only in that configuration does Stage 4's explicit spread fallback 
 panel.
 
 Every run writes runs/<as_of>/orchestration_meta.json with per-step durations, exit codes, and the
-acceptance read from each stage manifest. A narrowly scoped recovery run may select a different
-basename so it cannot overwrite the original full-run provenance. Forecast and hedging stay out of
-the DAG until Stage 11 promotes them; payout/final composition are implemented as shadow-aware
-Stage 12 groups.
+acceptance read from each stage manifest. Before a retry replaces that canonical file, its exact
+prior bytes are retained under orchestration_history/ using a content-addressed name. A narrowly
+scoped recovery run may select a different basename so it cannot overwrite the original full-run
+provenance. Forecast and hedging stay out of the DAG until Stage 11 promotes them; payout/final
+composition are implemented as shadow-aware Stage 12 groups.
 """
 from __future__ import annotations
 
@@ -79,11 +80,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.artifacts import final_report_is_stale  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     manifest_acceptance_value,
     read_manifest,
     sha256_file,
     write_manifest,
+    write_via_temp,
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -104,6 +107,36 @@ _TERMINAL_FAIL_PERSIST: Callable[[str], None] | None = None
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 GLOBAL_ORCHESTRATION_LOCK = PROJECT_ROOT / "orchestration" / ".orchestrator.lock"
 MASTER_PID_ENV = "STAGING_ORCHESTRATOR_PID"
+
+
+def archive_existing_orchestration_meta(path: Path) -> Path | None:
+    """Retain the exact prior attempt before replacing its canonical manifest."""
+    if not path.is_file():
+        return None
+    raw = path.read_bytes()
+    digest = sha256_file(path)
+    try:
+        acceptance = manifest_acceptance_value(read_manifest(path)) or "UNKNOWN"
+    except ValueError:
+        acceptance = "UNREADABLE"
+    safe_acceptance = "".join(
+        char if char.isalnum() else "_" for char in acceptance.upper()
+    ).strip("_") or "UNKNOWN"
+    archive = (
+        path.parent
+        / "orchestration_history"
+        / f"{path.stem}_{safe_acceptance}_{digest}.json"
+    )
+    if archive.is_file():
+        if archive.read_bytes() != raw:
+            raise RuntimeError(f"orchestration history hash collision: {archive}")
+        return archive
+
+    def _write(temp_path: Path) -> None:
+        temp_path.write_bytes(raw)
+
+    write_via_temp(archive, _write)
+    return archive
 
 
 class GlobalOrchestrationCoordination:
@@ -476,6 +509,28 @@ def step_resume_skip(run_dir: Path, step: dict[str, Any], *, operator_force: boo
     return manifest_acceptance(run_dir, str(gate_rel)).startswith("PASS")
 
 
+def group_recovery_force_required(
+    run_dir: Path,
+    pass_steps: list[dict[str, Any]],
+    *,
+    operator_force: bool,
+) -> bool:
+    """Enter force-aware recovery before launching an already-stale group."""
+    if operator_force:
+        return False
+    for step in pass_steps:
+        gate_rel = step.get("gate_rel")
+        if not gate_rel:
+            continue
+        gate_path = run_dir / str(gate_rel)
+        if gate_path.is_file() and not manifest_acceptance(
+            run_dir,
+            str(gate_rel),
+        ).startswith("PASS"):
+            return True
+    return False
+
+
 def _previous_nyse_trading_day(today: date) -> date:
     """Latest plausible NYSE session on or before `today`.
 
@@ -752,8 +807,18 @@ def script_args(
         flags.append("--reuse-sealed-run-raw")
     if args.reuse_risk_price_data and script == "05_build_return_panel.py":
         flags.extend(("--reuse-existing-panel", "--reuse-price-cache"))
+    if (
+        script == "05c_collect_ib_historical_spread_samples.py"
+        and (
+            getattr(args, "historical_catchup", False)
+            or getattr(args, "reuse_risk_price_data", False)
+        )
+    ):
+        flags.append("--prefer-bounded-db-samples")
     if script == "20_run_macro_serving.py":
         flags.append("--refresh-industry-stock-foreign")
+        if getattr(args, "historical_catchup", False):
+            flags.append("--historical-catchup")
     if (
         script == "37_sync_earnings_dates.py"
         and getattr(args, "historical_catchup", False)
@@ -763,7 +828,7 @@ def script_args(
         script == "50_run_expectations_monitor_daily.py"
         and getattr(args, "historical_catchup", False)
     ):
-        flags.append("--skip-event-cycle")
+        flags.extend(("--skip-event-cycle", "--historical-catchup"))
     if (
         script == "50_run_expectations_monitor_daily.py"
         and getattr(args, "late_holding_supplement", False)
@@ -784,7 +849,65 @@ def script_args(
     return flags
 
 
+def _manifest_input_issue(manifest: dict[str, Any], manifest_path: Path) -> str:
+    inputs = manifest.get("inputs_sha256")
+    if inputs is None:
+        inputs = {}
+    elif not isinstance(inputs, dict):
+        return "INPUT_SEAL_INVALID"
+    for raw_path, raw_expected in sorted(inputs.items()):
+        expected = str(raw_expected or "").strip()
+        input_path = Path(str(raw_path))
+        if not input_path.is_absolute():
+            relative_candidate = manifest_path.parent / input_path
+            if not relative_candidate.is_file():
+                # Several legacy manifests use semantic digest labels (for
+                # example "book" or "database.sqlite:content"), not paths.
+                # Those remain stage-owned; only path-addressable inputs can
+                # be independently re-hashed by the orchestrator.
+                continue
+            input_path = relative_candidate
+        if not expected:
+            return f"INPUT_SEAL_INVALID:{input_path.name}"
+        if not input_path.is_file():
+            return f"MISSING_INPUT:{input_path.name}"
+        if sha256_file(input_path) != expected:
+            return f"STALE_INPUT:{input_path.name}"
+
+    provenance = manifest.get("provenance")
+    if provenance is not None and not isinstance(provenance, dict):
+        return "PROVENANCE_SEAL_INVALID"
+    for label, raw_seal in sorted((provenance or {}).items()):
+        if not isinstance(raw_seal, dict) or "sha256" not in raw_seal:
+            continue
+        expected = str(raw_seal.get("sha256", "") or "").strip()
+        raw_path = str(raw_seal.get("path", "") or "").strip()
+        exists = raw_seal.get("exists")
+        if exists is False and not expected:
+            continue
+        if not raw_path or not expected:
+            return f"PROVENANCE_SEAL_INVALID:{label}"
+        input_path = Path(raw_path)
+        if not input_path.is_absolute():
+            candidates = (
+                manifest_path.parent / input_path,
+                PACKAGE_ROOT / input_path,
+                PROJECT_ROOT / input_path,
+            )
+            input_path = next(
+                (candidate for candidate in candidates if candidate.is_file()),
+                candidates[0],
+            )
+        if not input_path.is_file():
+            return f"PROVENANCE_MISSING_INPUT:{label}"
+        if sha256_file(input_path) != expected:
+            return f"PROVENANCE_STALE_INPUT:{label}"
+    return ""
+
+
 def manifest_acceptance(run_dir: Path, rel: str) -> str:
+    if rel == "final/final_manifest.json" and final_report_is_stale(run_dir):
+        return "STALE_DEPENDENCY"
     path = run_dir / rel
     if not path.exists():
         return "MISSING"
@@ -801,6 +924,9 @@ def manifest_acceptance(run_dir: Path, rel: str) -> str:
         ).strip()
         if manifest_as_of and manifest_as_of != run_dir.name:
             return f"DATE_MISMATCH:{manifest_as_of}"
+        input_issue = _manifest_input_issue(manifest, path)
+        if input_issue:
+            return input_issue
         parent_path = str(manifest.get("parent_manifest_path", "")).strip()
         parent_sha = str(manifest.get("parent_manifest_sha256", "")).strip()
         if parent_path or parent_sha:
@@ -815,6 +941,9 @@ def manifest_acceptance(run_dir: Path, rel: str) -> str:
                 parent_manifest = read_manifest(parent)
             except ValueError:
                 return "UNREADABLE_PARENT"
+            parent_input_issue = _manifest_input_issue(parent_manifest, parent)
+            if parent_input_issue:
+                return f"PARENT_{parent_input_issue}"
             if manifest_acceptance_value(parent_manifest) != manifest_acceptance_value(manifest):
                 return "PARENT_ACCEPTANCE_MISMATCH"
             parent_as_of = str(
@@ -844,6 +973,19 @@ def manifest_acceptance(run_dir: Path, rel: str) -> str:
                     return "PARENT_CHILD_MISSING"
                 if sha256_file(child_path) != expected:
                     return f"STALE_PARENT_CHILD:{child_path.name}"
+                try:
+                    child_manifest = read_manifest(child_path)
+                except ValueError:
+                    return f"UNREADABLE_PARENT_CHILD:{child_path.name}"
+                child_input_issue = _manifest_input_issue(
+                    child_manifest,
+                    child_path,
+                )
+                if child_input_issue:
+                    return (
+                        f"PARENT_CHILD_{child_input_issue}:"
+                        f"{child_path.name}"
+                    )
         return manifest_acceptance_value(manifest) or "UNKNOWN"
     except ValueError:
         return "UNREADABLE"
@@ -1188,6 +1330,11 @@ def run_pipeline() -> int:  # noqa: C901
         # Same predicate functions as execution (skip_liquidity_audit,
         # step_resume_skip, script_args) so the plan cannot drift from it.
         for pass_steps in step_plan:
+            recovery_force = group_recovery_force_required(
+                run_dir,
+                pass_steps,
+                operator_force=args.force,
+            )
             for step in pass_steps:
                 subdir, script = step["subdir"], step["script"]
                 if script == "05d_audit_liquidity_panel.py" and skip_liquidity_audit(config, run_dir):
@@ -1202,9 +1349,20 @@ def run_pipeline() -> int:  # noqa: C901
                         subdir, script, step["gate_rel"],
                     )
                     continue
-                flags = script_args(args, script, group=step["group"], self_force=step["self_force"])
+                flags = script_args(
+                    args,
+                    script,
+                    group=step["group"],
+                    self_force=bool(step["self_force"]) or recovery_force,
+                )
                 suffix = f" {' '.join(flags)}" if flags else ""
-                marker = " [RE_PASS]" if step["self_force"] else ""
+                marker = (
+                    " [RECOVERY_FORCE]"
+                    if recovery_force
+                    else " [RE_PASS]"
+                    if step["self_force"]
+                    else ""
+                )
                 LOGGER.info("  would run %s/%s --as-of %s%s%s", subdir, script, run_as_of, suffix, marker)
         return 0
 
@@ -1253,6 +1411,9 @@ def run_pipeline() -> int:  # noqa: C901
     global _TERMINAL_FAIL_PERSIST
     _TERMINAL_FAIL_PERSIST = _persist_terminal_fail
 
+    archived_prior = archive_existing_orchestration_meta(orchestration_meta_path)
+    if archived_prior is not None:
+        LOGGER.info("Archived prior orchestration attempt: %s", archived_prior)
     persist("RUNNING")
     for pass_steps in step_plan:
         if not pass_steps:
@@ -1260,6 +1421,17 @@ def run_pipeline() -> int:  # noqa: C901
         group = str(pass_steps[0]["group"])
         group_failed = False
         failed_script = ""
+        recovery_force = group_recovery_force_required(
+            run_dir,
+            pass_steps,
+            operator_force=args.force,
+        )
+        if recovery_force:
+            LOGGER.info(
+                "Group %s has an existing stale/failed gate; applying recovery "
+                "force before launch to avoid a duplicate failed pass",
+                group,
+            )
         for step in pass_steps:
             subdir = str(step["subdir"])
             script = str(step["script"])
@@ -1303,7 +1475,14 @@ def run_pipeline() -> int:  # noqa: C901
                 continue
             cmd = [sys.executable, str(PACKAGE_ROOT / subdir / script), "--as-of", run_as_of,
                    "--config", str(config_path)]
-            cmd.extend(script_args(args, script, group=group, self_force=bool(step["self_force"])))
+            cmd.extend(
+                script_args(
+                    args,
+                    script,
+                    group=group,
+                    self_force=bool(step["self_force"]) or recovery_force,
+                )
+            )
             # Persist the step's group before launch. Long-running refreshes (notably
             # MacroLayer raw/serving) must not leave active_group pointing at the prior
             # completed group for their entire runtime.
@@ -1352,6 +1531,7 @@ def run_pipeline() -> int:  # noqa: C901
                           "status": status,
                           "acceptance": acceptance, "manifest": manifest_rel or "",
                           "manifest_sha256": stage_manifest_sha, "command": cmd,
+                          "preemptive_recovery_force": recovery_force,
                           "recovered_with_force": recovered_with_force,
                           "tail": " | ".join(tail) if rc != 0 else ""})
             persist("RUNNING", active_group=group)

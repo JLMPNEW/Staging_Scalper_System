@@ -998,7 +998,7 @@ def load_ic_tilted_composite_policy(config: dict[str, Any], *, base_dir: Path) -
         "locked_scoring_model_version": str(
             raw_policy.get(
                 "locked_scoring_model_version",
-                "med_device_score_v24_2026_07_hospital_supplies_promotion_shadow_lock_v2_20260727",
+                "med_device_score_v25_2026_08_taxonomy_rebuild",
             )
             or ""
         ).strip(),
@@ -2229,8 +2229,9 @@ DEFAULT_COHORT_PROFILE_ALIASES = {
     "healthcare_services_cro_lab_services": "healthcare_services_cro_other",
     "hospital_supplies_consumables_dme": "hospital_supplies_surgical_consumables_oem",
     "hospital_supplies_surgical_consumables_oem": "hospital_supplies_consumables_dme",
-    "implantable_interventional_devices_other": "emerging_single_product_therapeutic_platforms",
-    "emerging_single_product_therapeutic_platforms": "implantable_interventional_devices_other",
+    "implantable_interventional_devices_other": "emerging_single_product_medtech_platforms",
+    "emerging_single_product_therapeutic_platforms": "emerging_single_product_medtech_platforms",
+    "emerging_single_product_medtech_platforms": "implantable_interventional_devices_other",
     "orthopedics_spine_dental": "orthopedics_spine_sports_implants",
     "orthopedics_spine_sports_implants": "orthopedics_spine_dental",
     "surgical_robotics_platforms": "capital_equipment_procedure_platforms",

@@ -57,3 +57,25 @@ def test_6k_period_resolution_fails_closed_without_two_core_metrics() -> None:
     )
 
     assert period_end is None
+
+
+def test_financial_feature_defers_after_close_acceptance() -> None:
+    availability = MODULE.filing_availability_date(
+        {
+            "accepted_at": "2026-08-26T22:54:46.000Z",
+            "filing_date": "2026-08-27",
+        }
+    )
+
+    assert availability == date(2026, 8, 27)
+
+
+def test_financial_feature_uses_preclose_acceptance_same_day() -> None:
+    availability = MODULE.filing_availability_date(
+        {
+            "accepted_at": "2026-08-26T19:30:00.000Z",
+            "filing_date": "2026-08-26",
+        }
+    )
+
+    assert availability == date(2026, 8, 26)

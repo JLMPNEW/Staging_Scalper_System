@@ -364,6 +364,25 @@ def import_sec_insider_transactions(
                 accession_number,owner_name,owner_relationship,security_title,
                 accepted_at,availability_date,is_current_truth,source_observation_id
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(transaction_id) DO UPDATE SET
+                ticker=excluded.ticker,
+                owner_cik=excluded.owner_cik,
+                transaction_date=excluded.transaction_date,
+                filed_at=excluded.filed_at,
+                transaction_code=excluded.transaction_code,
+                shares=excluded.shares,
+                price=excluded.price,
+                acquired_disposed=excluded.acquired_disposed,
+                source_id=excluded.source_id,
+                created_at=excluded.created_at,
+                accession_number=excluded.accession_number,
+                owner_name=excluded.owner_name,
+                owner_relationship=excluded.owner_relationship,
+                security_title=excluded.security_title,
+                accepted_at=excluded.accepted_at,
+                availability_date=excluded.availability_date,
+                is_current_truth=excluded.is_current_truth,
+                source_observation_id=excluded.source_observation_id
             """,
             records,
         )

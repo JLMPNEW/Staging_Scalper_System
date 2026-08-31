@@ -4,7 +4,7 @@ import argparse
 import csv
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,8 @@ from technology.core.text_norm import normalize_ticker
 LOGGER = logging.getLogger("technology_calibrated_scoring")
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+
+SCORING_SCHEDULE_VERSION = "technology_scoring_schedule_v1"
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,47 @@ def parse_date(raw: object) -> date | None:
         return datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def scoring_settings_for_asof(
+    config: dict[str, Any], settings: CalibratedScoringSettings, asof: str
+) -> CalibratedScoringSettings:
+    """Select the immutable weight contract active on an as-of date."""
+    schedule = cfg_get(config, f"{settings.config_key}.model_schedule", [])
+    if not schedule:
+        return settings
+    if not isinstance(schedule, list):
+        raise ValueError(f"{settings.config_key}.model_schedule must be a list")
+    asof_date = parse_date(asof)
+    if asof_date is None:
+        raise ValueError(f"Invalid scoring as-of date: {asof!r}")
+    matches: list[dict[str, Any]] = []
+    for index, entry in enumerate(schedule):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{settings.config_key}.model_schedule[{index}] must be an object")
+        start = parse_date(entry.get("start_date"))
+        end_raw = str(entry.get("end_date") or "").strip()
+        end = parse_date(end_raw) if end_raw else None
+        if start is None or (end_raw and end is None) or (end is not None and end < start):
+            raise ValueError(f"{settings.config_key}.model_schedule[{index}] has invalid dates")
+        if start <= asof_date and (end is None or asof_date <= end):
+            matches.append(entry)
+    if len(matches) != 1:
+        raise ValueError(
+            f"{settings.config_key}.model_schedule matched {len(matches)} entries for asof={asof}; expected 1"
+        )
+    entry = matches[0]
+    selected_key = str(entry.get("weights_config_key") or "").strip()
+    selected = cfg_get(config, selected_key, None) if selected_key else None
+    if not isinstance(selected, dict):
+        raise ValueError(f"Scheduled weights_config_key is missing or invalid: {selected_key!r}")
+    expected_version = str(entry.get("model_version") or "").strip()
+    configured_version = str(selected.get("model_version") or "").strip()
+    if expected_version and configured_version != expected_version:
+        raise ValueError(
+            f"Scheduled model_version mismatch: schedule={expected_version!r} config={configured_version!r}"
+        )
+    return replace(settings, config_key=selected_key)
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -503,21 +546,8 @@ def build_calibrated_scores(settings: CalibratedScoringSettings) -> None:
         cfg_get(config, f"{settings.config_key}.baseline_source_id", settings.default_baseline_source_id)
         or settings.default_baseline_source_id
     )
-    model_version = str(
-        cfg_get(config, f"{settings.config_key}.model_version", settings.default_model_version)
-        or settings.default_model_version
-    )
     model_family = resolve_model_family(config, settings)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, f"{settings.config_key}.output_csv"), base_dir=base_dir)
-    neutral_score = float(cfg_get(config, f"{settings.config_key}.neutral_score", 50.0))
-    overlay_weight = float(cfg_get(config, f"{settings.config_key}.overlay_weight", 0.0))
-    min_core_confidence = float(cfg_get(config, f"{settings.config_key}.min_core_data_quality_confidence", 0.50))
-    max_missing_weight = float(cfg_get(config, f"{settings.config_key}.max_missing_positive_component_weight", 0.35))
-    rank_ready_exempt = cfg_ticker_set(cfg_get(config, f"{settings.config_key}.rank_ready_exempt_tickers", []))
-    component_weights = component_weight_specs(config, settings)
-    subfeature_specs = subfeature_weight_specs(config, settings)
-    overlay_names = configured_overlay_names(config, settings)
-    component_defs = CORE_COMPONENT_DEFS + overlay_component_defs(overlay_names)
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db(conn)
@@ -527,6 +557,37 @@ def build_calibrated_scores(settings: CalibratedScoringSettings) -> None:
             asof_text = args.asof or latest_baseline_asof(conn, baseline_source_id, model_family)
             if not parse_date(asof_text):
                 raise ValueError(f"No baseline scoring rows found for source_id={baseline_source_id} model_family={model_family}")
+            scoring_settings = scoring_settings_for_asof(config, settings, asof_text)
+            selected_family = resolve_model_family(config, scoring_settings)
+            if selected_family != model_family:
+                raise ValueError(
+                    f"Scheduled scoring family mismatch: canonical={model_family} selected={selected_family}"
+                )
+            model_version = str(
+                cfg_get(config, f"{scoring_settings.config_key}.model_version", scoring_settings.default_model_version)
+                or scoring_settings.default_model_version
+            )
+            neutral_score = float(cfg_get(config, f"{scoring_settings.config_key}.neutral_score", 50.0))
+            overlay_weight = float(cfg_get(config, f"{scoring_settings.config_key}.overlay_weight", 0.0))
+            min_core_confidence = float(
+                cfg_get(config, f"{scoring_settings.config_key}.min_core_data_quality_confidence", 0.50)
+            )
+            max_missing_weight = float(
+                cfg_get(config, f"{scoring_settings.config_key}.max_missing_positive_component_weight", 0.35)
+            )
+            rank_ready_exempt = cfg_ticker_set(
+                cfg_get(config, f"{scoring_settings.config_key}.rank_ready_exempt_tickers", [])
+            )
+            component_weights = component_weight_specs(config, scoring_settings)
+            subfeature_specs = subfeature_weight_specs(config, scoring_settings)
+            overlay_names = configured_overlay_names(config, scoring_settings)
+            component_defs = CORE_COMPONENT_DEFS + overlay_component_defs(overlay_names)
+            LOGGER.info(
+                "Resolved scoring contract: asof=%s config_key=%s model_version=%s",
+                asof_text,
+                scoring_settings.config_key,
+                model_version,
+            )
             rows = load_baseline_rows(conn, baseline_source_id, model_family, asof_text)
             if not rows:
                 raise ValueError(f"No baseline scoring rows found for asof={asof_text}")
@@ -646,10 +707,6 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
     )
     model_family = resolve_model_family(config, settings)
     output_csv = args.output_csv.expanduser().resolve() if args.output_csv else resolve_path(cfg_get(config, f"{settings.config_key}.validation_output_csv"), base_dir=base_dir)
-    rank_ready_exempt = cfg_ticker_set(cfg_get(config, f"{settings.config_key}.rank_ready_exempt_tickers", []))
-    component_weights = component_weight_specs(config, settings)
-    positive_components = [name for name, weight in component_weights.items() if weight > 0]
-    require_zero_growth = bool(cfg_get(config, f"{settings.config_key}.require_zero_growth_weight", False))
     errors: list[str] = []
     report_rows: list[dict[str, Any]] = []
 
@@ -667,6 +724,19 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
         if not parse_date(asof_text):
             errors.append(f"No calibrated model output rows found for source_id={source_id}")
             asof_text = date.today().isoformat()
+        scoring_settings = scoring_settings_for_asof(config, settings, asof_text)
+        expected_model_version = str(
+            cfg_get(config, f"{scoring_settings.config_key}.model_version", scoring_settings.default_model_version)
+            or scoring_settings.default_model_version
+        )
+        rank_ready_exempt = cfg_ticker_set(
+            cfg_get(config, f"{scoring_settings.config_key}.rank_ready_exempt_tickers", [])
+        )
+        component_weights = component_weight_specs(config, scoring_settings)
+        positive_components = [name for name, weight in component_weights.items() if weight > 0]
+        require_zero_growth = bool(
+            cfg_get(config, f"{scoring_settings.config_key}.require_zero_growth_weight", False)
+        )
         universe = load_universe_tickers(conn, model_family)
         if not universe:
             errors.append(f"No active universe rows found for model_family={model_family}.")
@@ -690,6 +760,22 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
             """,
             (source_id, model_family, asof_text, *universe),
         )
+        stored_model_versions = {
+            str(row["model_version"])
+            for row in conn.execute(
+                f"""
+                SELECT DISTINCT model_version
+                FROM feature_scoring_model_output
+                WHERE source_id = ? AND model_family = ? AND asof_date = ? AND ticker IN ({ph})
+                """,
+                (source_id, model_family, asof_text, *universe),
+            ).fetchall()
+        }
+        if stored_model_versions != {expected_model_version}:
+            errors.append(
+                f"Calibrated model version mismatch: expected={expected_model_version!r} "
+                f"stored={sorted(stored_model_versions)}"
+            )
         if feature_rows != len(universe):
             errors.append(f"Calibrated feature rows mismatch: {feature_rows}/{len(universe)}")
         if output_rows != len(universe):
@@ -773,7 +859,9 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
             (source_id, model_family, asof_text, *universe),
         ).fetchall()
         component_by_name = {str(row["component_name"]): dict(row) for row in component_rows}
-        max_dead_pct = float(cfg_get(config, f"{settings.config_key}.max_dead_core_component_pct", 0.20))
+        max_dead_pct = float(
+            cfg_get(config, f"{scoring_settings.config_key}.max_dead_core_component_pct", 0.20)
+        )
         for component in positive_components:
             row = component_by_name.get(component)
             if row is None or int(row["tickers"] or 0) != len(universe):
@@ -794,6 +882,8 @@ def validate_calibrated_scores(settings: CalibratedScoringSettings) -> int:
         report_rows.append(
             {
                 "asof_date": asof_text,
+                "scoring_config_key": scoring_settings.config_key,
+                "model_version": expected_model_version,
                 "universe": len(universe),
                 "feature_rows": feature_rows,
                 "output_rows": output_rows,

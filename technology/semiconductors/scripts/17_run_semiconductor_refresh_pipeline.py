@@ -206,11 +206,13 @@ def build_steps(
         Step("11_run_optuna", "stage_8", "Run constrained Optuna calibration", py_script("technology/semiconductors/scripts/11_run_semiconductor_optuna_calibration.py"), optuna=True),
         Step("11_validate_optuna", "stage_8", "Validate Optuna calibration output", py_script("technology/semiconductors/scripts/11_validate_semiconductor_optuna_calibration.py"), optuna=True),
         Step("13_walk_forward_calibration", "stage_8", "Run walk-forward calibration research", py_script("technology/semiconductors/scripts/13_run_semiconductor_walk_forward_calibration.py"), optuna=True),
+        Step("13_validate_walk_forward", "stage_8", "Validate sealed walk-forward calibration", py_script("technology/semiconductors/scripts/13_validate_semiconductor_walk_forward_calibration.py"), optuna=True, pass_db=False),
         Step("15_norgate_backfill", "stage_15", "Import Norgate delisted prices", py_script("technology/semiconductors/scripts/15_import_semiconductor_norgate_delisted_prices.py"), norgate_backfill=True),
         Step("10b_publish_dashboard", "stage_10", "Publish dashboard/static reports", py_script("technology/semiconductors/scripts/10b_publish_semiconductor_dashboard_reports.py")),
         Step("10c_financial_lineage_shadow", "stage_10_lineage", "Build blocking production financial-lineage sidecar", py_script("technology/scripts/10c_build_technology_financial_lineage_shadow.py"), ["--family", "semiconductors", "--policy-context", "production", *asof_args]),
         Step("10b_validate_dashboard", "stage_10", "Validate dashboard/static reports", py_script("technology/semiconductors/scripts/10b_validate_semiconductor_dashboard_reports.py"), pass_db=False),
         Step("16_publish_governance", "stage_10b", "Publish lockbox ledger and signal registry", py_script("technology/semiconductors/scripts/16_publish_semiconductor_lockbox_ledger.py")),
+        Step("16_validate_governance", "stage_10b", "Validate lockbox ledger and signal registry", py_script("technology/semiconductors/scripts/16_validate_semiconductor_lockbox_ledger.py"), pass_db=False),
         Step("08_audit_pipeline", "audit", "Run full semiconductor pipeline audit", py_script("technology/semiconductors/scripts/08_audit_semiconductor_pipeline_state.py")),
     ]
 

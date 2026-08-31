@@ -4,6 +4,7 @@ import copy
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -60,7 +61,7 @@ def _epoch(raw: str) -> int:
 
 def _fx_payload(
     dates: list[str], closes: list[object], *, symbol: str = 'CLPUSD=X',
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {'chart': {'result': [{
         'meta': {'symbol': symbol},
         'timestamp': [_epoch(raw) for raw in dates],
@@ -367,7 +368,12 @@ def test_fx_sync_quarantines_spike_ignores_physical_units_and_preserves_unknowns
 
     with connect(tmp_path / "fx.sqlite") as conn:
         bootstrap_stage4(conn, bundle)
-        for position, unit in enumerate(("CLP", "GAL", "XYZ"), start=1):
+        for concept, unit in (
+            ("Revenue", "CLP"),
+            ("InventoryNet", "GAL"),
+            ("CostOfRevenue", "XYZ"),
+            ("UnmappedDisclosureAmount", "CLF"),
+        ):
             conn.execute(
                 """INSERT INTO fact_sec_xbrl_fact_raw(
                        ticker,cik,accession_number,taxonomy,concept,value_text,numeric_value,unit,
@@ -378,7 +384,7 @@ def test_fx_sync_quarantines_spike_ignores_physical_units_and_preserves_unknowns
                        '2024-01-01T00:00:00Z','10-K',NULL,'{}','sec_companyfacts','unit-test',
                        '2024-01-01T00:00:00Z'
                    )""",
-                (f"Concept{position}", unit),
+                (concept, unit),
             )
 
         result = sync_fx_rates(
@@ -391,6 +397,7 @@ def test_fx_sync_quarantines_spike_ignores_physical_units_and_preserves_unknowns
         assert calls == 1
         assert result["currencies"] == ["CLP"]
         assert result["ignored_non_monetary_units"] == ["GAL"]
+        assert result["unmapped_supported_currency_units"] == ["CLF"]
         assert result["unknown_three_letter_units"] == ["XYZ"]
         assert result["rows_written"] == 7
         assert result["quarantined_rows"] == 1

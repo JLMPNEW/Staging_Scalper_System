@@ -49,7 +49,7 @@ def main() -> int:
     expected_active = int(cfg_get(bundle.payload, "universe.expected_current_rows"))
     with connect(db_path, timeout_sec=timeout) as conn:
         bootstrap_stage3(conn, bundle)
-        readiness = assert_stage2_ready(conn, bundle)
+        readiness = assert_stage2_ready(conn, bundle, as_of=args.as_of)
         run_id = start_run(conn, run_type="consumer_defensive_stage3_validation", input_path=args.market_policy)
         try:
             result = validate_stage3_market_data(conn, policy, as_of=args.as_of, expected_active=expected_active, terminal_policy=terminal_policy)

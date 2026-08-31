@@ -114,6 +114,18 @@ def load_candidates(config: dict[str, Any], base_dir: Path) -> list[dict[str, An
                 "candidate": candidate_from_config_section(config, challenger_key),
             }
         )
+    rollback_key = str(cfg_get(config, f"{CONFIG_KEY}.rollback_shadow_config_key", ""))
+    if rollback_key:
+        out.append(
+            {
+                "model_name": str(
+                    cfg_get(config, f"{CONFIG_KEY}.rollback_shadow_model_name", "stage8_production_v1_rollback_shadow")
+                ),
+                "model_type": "rollback_shadow",
+                "promotion_candidate": 0,
+                "candidate": candidate_from_config_section(config, rollback_key),
+            }
+        )
     stage8_path = resolve_path(
         cfg_get(config, f"{CONFIG_KEY}.stage8_weights_json", "../output/technology_reports/software_infrastructure/optuna_calibration/stage8_best_weights.json"),
         base_dir=base_dir,

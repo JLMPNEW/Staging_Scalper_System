@@ -24,6 +24,9 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.capital_reservation import (  # noqa: E402
+    consumer_defensive_reserved_cash_fraction,
+)
 from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file, write_csv  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
@@ -172,6 +175,8 @@ def main() -> int:  # noqa: C901
                               name="transaction_costs.no_trade_buffer_drag")
         cash_target_fraction = finite_float(cfg_get(config, "transaction_costs.cash_target_fraction", 0.0),
                                             name="transaction_costs.cash_target_fraction")
+        consumer_reserved_cash_fraction = consumer_defensive_reserved_cash_fraction(config)
+        effective_cash_target_fraction = cash_target_fraction + consumer_reserved_cash_fraction
         enable_mu_gate = bool(cfg_get(config, "transaction_costs.enable_provisional_mu_no_trade", False))
         comm_dec = decision_commission(config)
         prior = load_prior(prior_path)
@@ -183,6 +188,14 @@ def main() -> int:  # noqa: C901
         return 1
     if not 0.0 <= cash_target_fraction < 1.0:
         LOGGER.error("transaction_costs.cash_target_fraction must be in [0,1), got %s", cash_target_fraction)
+        return 1
+    if not 0.0 <= effective_cash_target_fraction < 1.0:
+        LOGGER.error(
+            "Base plus Consumer-reserved cash must be in [0,1), got base=%s reserve=%s total=%s",
+            cash_target_fraction,
+            consumer_reserved_cash_fraction,
+            effective_cash_target_fraction,
+        )
         return 1
     k = horizon / 252.0
     is_first_build = not prior
@@ -327,18 +340,22 @@ def main() -> int:  # noqa: C901
         asset_sum = sum(final.values())
         cash_weight = gross - asset_sum
 
-    # deployable-book cash policy 2026-07-20: hold a fixed CASH buffer. Scale the whole asset block by
-    # (1 - cash_target_fraction) and route the freed weight (the target buffer plus rounding dust) to
-    # CASH. The scale is folded into budget_scale so the Stage-4 decision gate
+    # Deployable-book cash policy: hold the configured CASH buffer plus any Consumer Defensive
+    # sector slot withheld from a non-promoted cohort. Scale the whole asset block by the combined
+    # target and route the freed weight (plus rounding dust) to CASH. The scale is folded into
+    # budget_scale so the Stage-4 decision gate
     # (applied_weight == pre_scale * budget_scale) and the assets+cash == gross conservation gate both
-    # still hold exactly. Optimizer gross stays 1.0; only the deployable book carries the buffer.
-    if cash_target_fraction > 0.0:
-        keep = 1.0 - cash_target_fraction
+    # still hold exactly. Optimizer gross stays 1.0; only the deployable book carries the reservation.
+    if effective_cash_target_fraction > 0.0:
+        keep = 1.0 - effective_cash_target_fraction
         final = {t: w * keep for t, w in final.items()}
         budget_scale *= keep
         for d in decisions:
             if final.get(str(d["ticker"]), 0.0) > 0.0:
-                d["reason"] = f"{d['reason']};cash_buffer={cash_target_fraction:.8f}"
+                d["reason"] = (
+                    f"{d['reason']};cash_buffer={cash_target_fraction:.8f};"
+                    f"consumer_reserved_cash={consumer_reserved_cash_fraction:.8f}"
+                )
         asset_sum = sum(final.values())
         cash_weight = gross - asset_sum
     if abs(cash_weight) <= 1e-10:

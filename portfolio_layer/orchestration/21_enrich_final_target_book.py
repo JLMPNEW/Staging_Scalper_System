@@ -9,7 +9,10 @@ import io
 import json
 import logging
 import math
+import os
+import shutil
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from portfolio_layer.core.config import cfg_get, load_yaml  # noqa: E402
+from portfolio_layer.core.artifacts import (  # noqa: E402
+    clear_final_report_stale,
+    final_report_is_stale,
+    mark_final_report_stale,
+)
 from portfolio_layer.core.contracts import (  # noqa: E402
     fail_if_exists,
     manifest_acceptance_value,
@@ -158,6 +166,52 @@ def write_final_report(
     for row in rows:
         writer.writerow([row.get(field, "") for field in BOOK_FIELDS])
     write_text_atomic(path, buffer.getvalue())
+
+
+def _backup_file(path: Path) -> Path | None:
+    if not path.is_file():
+        return None
+    fd, name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".backup"
+    )
+    os.close(fd)
+    backup = Path(name)
+    shutil.copyfile(path, backup)
+    return backup
+
+
+def publish_final_report_pair(
+    *,
+    staged_report: Path,
+    staged_manifest: Path,
+    output_path: Path,
+    manifest_path: Path,
+) -> None:
+    """Replace the accepted report pair and restore it on a partial swap."""
+    output_backup = _backup_file(output_path)
+    manifest_backup = _backup_file(manifest_path)
+    try:
+        os.replace(staged_report, output_path)
+        os.replace(staged_manifest, manifest_path)
+    except OSError:
+        if output_backup is None:
+            output_path.unlink(missing_ok=True)
+        else:
+            os.replace(output_backup, output_path)
+            output_backup = None
+        if manifest_backup is None:
+            manifest_path.unlink(missing_ok=True)
+        else:
+            os.replace(manifest_backup, manifest_path)
+            manifest_backup = None
+        raise
+    finally:
+        staged_report.unlink(missing_ok=True)
+        staged_manifest.unlink(missing_ok=True)
+        if output_backup is not None:
+            output_backup.unlink(missing_ok=True)
+        if manifest_backup is not None:
+            manifest_backup.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -944,7 +998,10 @@ def main() -> int:  # noqa: C901
     out_dir = run_dir / "final"
     output_path = out_dir / "final_target_book.csv"
     manifest_path = out_dir / "final_manifest.json"
-    fail_if_exists([output_path, manifest_path], force=args.force)
+    stale_report = final_report_is_stale(run_dir)
+    fail_if_exists([output_path, manifest_path], force=args.force or stale_report)
+    if args.force:
+        mark_final_report_stale(run_dir, "final_report_force_rebuild")
 
     input_paths: list[Path] = [config_path, Path(__file__).resolve()]
     weight_rows, weights_manifest = _sealed_csv(
@@ -1364,13 +1421,19 @@ def main() -> int:  # noqa: C901
     ]
     failures = [check for check in checks if check["status"] == "FAIL"]
     acceptance = "FAIL" if failures else "PASS"
-    if manifest_path.exists():
-        # --force republish: retract the previous seal BEFORE publishing the new CSV
-        # so a crash between the two writes leaves a missing manifest (fail closed
-        # downstream) instead of a stale PASS manifest fronting a different book.
-        manifest_path.unlink()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_fd, report_name = tempfile.mkstemp(
+        dir=str(out_dir), prefix=".final_target_book.", suffix=".staged.csv"
+    )
+    os.close(report_fd)
+    staged_report = Path(report_name)
+    manifest_fd, staged_manifest_name = tempfile.mkstemp(
+        dir=str(out_dir), prefix=".final_manifest.", suffix=".staged.json"
+    )
+    os.close(manifest_fd)
+    staged_manifest = Path(staged_manifest_name)
     write_final_report(
-        output_path,
+        staged_report,
         ib_performance=ib_performance,
         macro=macro,
         rows=rows,
@@ -1459,12 +1522,26 @@ def main() -> int:  # noqa: C901
         },
         "files": {
             "final_target_book.csv": {
-                "sha256": sha256_file(output_path),
+                "sha256": sha256_file(staged_report),
                 "rows": len(rows),
             }
         },
     }
-    write_manifest(manifest_path, manifest)
+    failed_attempt_path = out_dir / "final_report_failed_attempt.json"
+    if failures:
+        write_manifest(failed_attempt_path, manifest)
+        staged_report.unlink(missing_ok=True)
+        staged_manifest.unlink(missing_ok=True)
+    else:
+        write_manifest(staged_manifest, manifest)
+        publish_final_report_pair(
+            staged_report=staged_report,
+            staged_manifest=staged_manifest,
+            output_path=output_path,
+            manifest_path=manifest_path,
+        )
+        clear_final_report_stale(run_dir)
+        failed_attempt_path.unlink(missing_ok=True)
     for check in checks:
         LOGGER.info("[%s] %s -- %s", check["status"], check["check"], check["detail"])
     LOGGER.info(

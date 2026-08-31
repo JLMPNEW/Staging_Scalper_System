@@ -1,0 +1,21 @@
+schema_version: consumer_defensive_stage10b_governance_policy_v1
+stage10b_governance:
+  mode: immutable_evidence_governance
+  model_family: consumer_defensive
+  default_promotion_state: shadow_monitor
+  automatic_promotion_enabled: false
+  production_promotion_enabled: false
+  portfolio_write_enabled: false
+  portfolio_cap: 0.0
+  required_upstream_stages: [factor_validation, stage8, stage9, stage10]
+  promotion_requirements:
+    strict_contemporaneous_oos: true
+    survivorship_corrected_evidence: true
+    absolute_baseline_gate: true
+    portfolio_gate: true
+    approved_nonzero_portfolio_cap: true
+    stage11_stage12_operational_acceptance: true
+    independent_reviewer: true
+    independent_reference: true
+    explicit_authorization: true
+    upstream_validations_pass: true

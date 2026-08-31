@@ -3,11 +3,10 @@
 
 Known replay limitations
 ------------------------
-- Cohort taxonomy semantics: static_current_state. The taxonomy setup stage
-  (22_build_med_device_calibration_cohorts.py) rebuilds dim_company_model_taxonomy from
-  current-state data, and every historical as-of date replays that single unversioned
-  table. Historical scores therefore reflect today's cohort assignments rather than
-  point-in-time cohorts; versioning the taxonomy table is out of scope for this script.
+- Cohort taxonomy semantics: effective_dated_per_asof. Script 22 runs before
+  every historical feature stage, materializes the active-plus-historical panel for that
+  as-of, and stores the exact snapshot in dim_company_model_taxonomy_history. Structural
+  corrections may be backdated through valid_from, while reviewed_at remains provenance.
 - FDA alias entity linking (09_link_med_device_fda_to_companies.py) is not replayed per
   as-of date unless historical_backfill.relink_fda_per_asof is enabled (default off), so
   alias PIT stamps reflect the most recent linking run rather than each historical as-of.
@@ -74,6 +73,7 @@ WEEKDAY_INDEX = {
     "sunday": 6,
 }
 DEFAULT_STAGES = (
+    "taxonomy",
     "financial",
     "fda",
     "fda_product_family_shadow",
@@ -88,9 +88,9 @@ DEFAULT_STAGES = (
 DEFAULT_SETUP_STAGES = (
     "init_db",
     "historical_membership",
-    "taxonomy",
 )
 STAGE_SCRIPTS = {
+    "taxonomy": "22_build_med_device_calibration_cohorts.py",
     "financial": "06_build_med_device_financial_features.py",
     "fda": "10_build_med_device_fda_features.py",
     "fda_product_family_shadow": "78_build_med_device_fda_product_family_review.py",
@@ -110,7 +110,6 @@ RANGE_STAGES = ("oos_promotion",)
 SETUP_STAGE_SCRIPTS = {
     "init_db": "00_init_med_devices_db.py",
     "historical_membership": "01b_load_med_device_historical_membership.py",
-    "taxonomy": "22_build_med_device_calibration_cohorts.py",
 }
 
 
@@ -572,6 +571,8 @@ def run_stage(
     command = [sys.executable, str(script), "--config", str(config_path), "--asof", asof.isoformat()]
     if db_path is not None:
         command.extend(["--db", str(db_path)])
+    if stage == "taxonomy":
+        command.append("--historical-panel")
     if include_historical_members and stage in {"financial", "fda", "reimbursement", "technical", "scores"}:
         command.append("--include-historical-members")
     elif include_historical_members and stage in {"borrow", "short_interest", "institutional_flow", "insider_activity"}:
@@ -702,8 +703,8 @@ def load_manifest_statuses(path: Path) -> dict[date, str]:
 def manifest_meta_rows(policy: BackfillPolicy) -> list[dict[str, Any]]:
     noted_at = utc_now()
     notes = [
-        "cohort_taxonomy_semantics=static_current_state "
-        "(dim_company_model_taxonomy is rebuilt from current-state data and replayed unversioned into history)",
+        "cohort_taxonomy_semantics=effective_dated_per_asof "
+        "(script 22 materializes and archives an active-plus-PIT-membership taxonomy snapshot before each as-of)",
         f"relink_fda_per_asof={1 if policy.relink_fda_per_asof else 0} "
         "(when off, FDA alias entity linking is not replayed per as-of; alias PIT stamps reflect the most recent linking run)",
         f"interpreter={sys.executable}",
@@ -768,7 +769,9 @@ def run_oos_validation(
     if allow_missing_static_pit_metadata:
         command.append("--allow-missing-static-pit-metadata")
     try:
-        run_command(command)
+        # Validation failures are deterministic; retrying a full-range scan cannot
+        # repair artifacts and can waste tens of minutes on a large history.
+        run_command(command, max_attempts=1)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
             "OOS validation failed before backtest/calibration. "

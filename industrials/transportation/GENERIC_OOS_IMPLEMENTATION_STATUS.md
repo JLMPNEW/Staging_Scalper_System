@@ -1,5 +1,13 @@
 # Transportation Generic OOS and Production-Parity Status
 
+> **Superseding correction (2026-08-25):** This July status is historical. The
+> shared production-lock mechanics described below are no longer a promotion
+> authority for Transportation. Corrected calibration execution is `PASS`,
+> predictive acceptance is `FAIL`, and the family remains disabled and zero-cap.
+> Only the canonical three-authority future-only route can create new admissible
+> evidence. See
+> [TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md](TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md).
+
 As of 2026-07-31, transportation now has the historical and governance
 structure needed to perform the same class of point-in-time generic-score
 evaluation used by the defense and machinery industrial subsectors. No

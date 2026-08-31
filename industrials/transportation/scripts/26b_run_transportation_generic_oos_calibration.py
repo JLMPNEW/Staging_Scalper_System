@@ -36,6 +36,9 @@ from industrials.transportation.contracts import (  # noqa: E402
 from industrials.transportation.prebuild_contract import (  # noqa: E402
     load_prebuild_contract,
 )
+from industrials.transportation.walk_forward_calibration import (  # noqa: E402
+    purged_expanding_walk_forward_blocks,
+)
 from industrials.transportation.scripts._shared import (  # noqa: E402
     DEFAULT_CONFIG,
 )
@@ -413,37 +416,24 @@ def main() -> int:
             for row in holdout_metrics["period_rows"]
         ],
     )
-    dates = sorted(
-        {
-            row["asof_date"]
-            for row in rows
-            if row.get("horizon_sessions") == "63"
-            and row.get("calibration_eligible_flag") == "1"
-            and row.get("outcome_available_flag") == "1"
-        }
+    walk_forward_blocks = purged_expanding_walk_forward_blocks(
+        rows,
+        horizon_sessions=63,
+        block_count=4,
+        minimum_initial_dates=52,
     )
-    initial = max(52, int(len(dates) * 0.50))
-    remaining = dates[initial:]
-    block_size = max(1, len(remaining) // 4)
     walk_rows: list[dict[str, str]] = []
-    for block in range(4):
-        start_index = initial + block * block_size
-        end_index = (
-            len(dates)
-            if block == 3
-            else min(len(dates), start_index + block_size)
-        )
-        evaluation_dates = set(dates[start_index:end_index])
-        training_dates = set(dates[:start_index])
-        if not evaluation_dates or not training_dates:
-            continue
+    for block_spec in walk_forward_blocks:
+        block = int(block_spec["block"])
+        training_dates = set(block_spec["training_dates"])
+        evaluation_dates = set(block_spec["evaluation_dates"])
         research_rows: list[dict[str, str]] = []
         for row in rows:
             cloned = dict(row)
             if row["asof_date"] in training_dates:
-                cloned["split"] = f"wf_train_{block + 1}"
+                cloned["split"] = f"wf_train_{block}"
             elif row["asof_date"] in evaluation_dates:
-                cloned["split"] = f"wf_test_{block + 1}"
+                cloned["split"] = f"wf_test_{block}"
             else:
                 cloned["split"] = "excluded"
             research_rows.append(cloned)
@@ -451,7 +441,7 @@ def main() -> int:
             candidate_id: evaluate(
                 research_rows,
                 weights=weights,
-                split=f"wf_train_{block + 1}",
+                split=f"wf_train_{block}",
                 standards=standards,
             )
             for candidate_id, weights in candidates.items()
@@ -471,7 +461,7 @@ def main() -> int:
         test_metrics = evaluate(
             research_rows,
             weights=candidates[block_candidate],
-            split=f"wf_test_{block + 1}",
+            split=f"wf_test_{block}",
             standards=standards,
         )
         block_pass = (
@@ -483,11 +473,11 @@ def main() -> int:
         )
         walk_rows.append(
             {
-                "block": str(block + 1),
-                "train_start": min(training_dates),
-                "train_end": max(training_dates),
-                "test_start": min(evaluation_dates),
-                "test_end": max(evaluation_dates),
+                "block": str(block),
+                "train_start": str(block_spec["train_start"]),
+                "train_end": str(block_spec["train_end"]),
+                "test_start": str(block_spec["test_start"]),
+                "test_end": str(block_spec["test_end"]),
                 "selected_candidate_id": block_candidate,
                 "test_snapshot_count": str(
                     test_metrics["snapshot_count"]
@@ -613,6 +603,9 @@ def main() -> int:
         "holdout_failed_gates": holdout_failures,
         "walk_forward_pass_rate": walk_forward_pass_rate,
         "minimum_walk_forward_pass_rate": 0.50,
+        "walk_forward_boundary_policy": (
+            "purged_actual_benchmark_exit_strictly_before_test_start"
+        ),
         "return_basis": "next_session_open_execution_excess",
         "horizon_sessions": 63,
         "production_universe_policy": "frozen_24_surface_freight_only",

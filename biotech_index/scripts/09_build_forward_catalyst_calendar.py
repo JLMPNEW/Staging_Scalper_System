@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
+import os
 import re
 import sys
 from collections import Counter
@@ -21,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from biotech_index.core.config import cfg_get, load_yaml, resolve_optional_path, resolve_path  # noqa: E402
 from biotech_index.core.db import connect, init_db  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.report_inputs import dated_output_dir  # noqa: E402
 
 
 LOGGER = logging.getLogger("build_forward_catalyst_calendar")
@@ -565,15 +568,72 @@ def load_ctgov_forward_events(
 
 def write_calendar(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, lineterminator="\n", extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, lineterminator="\n", extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def publish_calendar_outputs(
+    output_path: Path,
+    rows: list[dict[str, Any]],
+    manifest_payload: dict[str, Any],
+    *,
+    asof_date: date,
+    publish_dated_snapshot: bool,
+) -> list[tuple[Path, Path]]:
+    """Atomically publish root and optional same-day PIT calendar copies."""
+
+    paths = [output_path]
+    if publish_dated_snapshot:
+        dated_path = dated_output_dir(output_path.parent, asof_date.isoformat()) / output_path.name
+        if dated_path != output_path:
+            paths.append(dated_path)
+
+    published: list[tuple[Path, Path]] = []
+    for csv_path in paths:
+        write_calendar(csv_path, rows)
+        manifest_path = csv_path.with_name(f"{csv_path.stem}_manifest.json")
+        write_manifest(
+            manifest_path,
+            {
+                **manifest_payload,
+                "schema_version": 2,
+                "output_csv": str(csv_path),
+                "output_sha256": file_sha256(csv_path),
+            },
+        )
+        published.append((csv_path, manifest_path))
+    return published
 
 
 def main() -> None:
@@ -644,14 +704,12 @@ def main() -> None:
             str(item.get("accession_nodash") or item.get("nct_id") or ""),
         )
     )
-    write_calendar(output_path, rows)
-    manifest_path = output_path.with_name(f"{output_path.stem}_manifest.json")
-    write_manifest(
-        manifest_path,
+    published = publish_calendar_outputs(
+        output_path,
+        rows,
         {
             "asof_date": asof_date.isoformat(),
             "lookahead_days": lookahead_days,
-            "output_csv": str(output_path),
             "event_count": len(rows),
             "ticker_count": len({str(row["ticker"]) for row in rows}),
             "source_event_counts": {
@@ -661,7 +719,10 @@ def main() -> None:
             },
             "dropped_event_counts": dict(sorted(diagnostics.items())),
         },
+        asof_date=asof_date,
+        publish_dated_snapshot=args.output_csv is None,
     )
+    manifest_path = published[0][1]
     ticker_count = len({str(row["ticker"]) for row in rows})
     if diagnostics:
         LOGGER.warning("Forward catalyst dropped-event diagnostics: %s", dict(sorted(diagnostics.items())))
@@ -677,6 +738,8 @@ def main() -> None:
         len(ctgov_rows),
         manifest_path,
     )
+    if len(published) > 1:
+        LOGGER.info("Published same-day PIT catalyst snapshot to %s", published[1][0])
 
 
 if __name__ == "__main__":

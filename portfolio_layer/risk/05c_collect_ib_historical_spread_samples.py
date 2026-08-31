@@ -97,6 +97,15 @@ def parse_args() -> argparse.Namespace:
             "portfolio-owned SQLite database. Fails if no exact-date rows exist."
         ),
     )
+    replay.add_argument(
+        "--prefer-bounded-db-samples",
+        action="store_true",
+        help=(
+            "For historical catch-up, first try the newest SQLite partition within the configured "
+            "staleness window. Reuse it only when the current universe still passes the configured "
+            "fallback-coverage gate; otherwise collect from IB."
+        ),
+    )
     p.add_argument(
         "--universe-source",
         choices=["risk_eligible_scores", "investable_scores", "target_weights", "trade_list", "auto"],
@@ -443,6 +452,33 @@ def _load_latest_bounded_db_samples(
     return normalized, source_as_of
 
 
+def _bounded_reuse_rejection_reason(
+    snapshot_rows: Sequence[dict[str, Any]],
+    *,
+    max_fallback_fraction: float,
+) -> str:
+    """Return why a bounded replay cannot replace a live historical capture."""
+    if not snapshot_rows:
+        return "empty_snapshot"
+    fallback = sum(
+        str(row.get("spread_status") or "").strip().lower() == "fallback"
+        for row in snapshot_rows
+    )
+    failed = sum(
+        str(row.get("spread_status") or "").strip().lower() == "failed"
+        for row in snapshot_rows
+    )
+    fallback_fraction = fallback / len(snapshot_rows)
+    if failed:
+        return f"failed_tickers={failed}"
+    if fallback_fraction > max_fallback_fraction + 1e-12:
+        return (
+            f"fallback_fraction={fallback_fraction:.6f}>"
+            f"max={max_fallback_fraction:.6f}"
+        )
+    return ""
+
+
 def _collect_from_ib(
     *,
     config: dict[str, Any],
@@ -562,7 +598,12 @@ def main() -> int:  # noqa: C901
     if not run_as_of:
         LOGGER.error("No run found under %s", runs_root)
         return 1
-    if not liquidity_panel_active(config) and args.input_samples is None and not args.reuse_db_samples:
+    if (
+        not liquidity_panel_active(config)
+        and args.input_samples is None
+        and not args.reuse_db_samples
+        and not args.prefer_bounded_db_samples
+    ):
         LOGGER.info("Enhanced intraday liquidity panel inactive; Stage 4 will use config/default spread.")
         return 0
 
@@ -584,6 +625,13 @@ def main() -> int:  # noqa: C901
         max_stale_days = int(cfg_get(config, "liquidity_panel.max_stale_liquidity_days", 5))
         max_half_spread = liquidity_half_spread_fail_bps(config)
         allow_fallback = bool(cfg_get(config, "liquidity_panel.allow_fallback_to_default", True))
+        max_fallback_fraction = float(
+            cfg_get(config, "liquidity_panel.max_universe_fallback_fraction", 0.10)
+        )
+        if not 0.0 <= max_fallback_fraction <= 1.0:
+            raise ValueError(
+                "liquidity_panel.max_universe_fallback_fraction must be in [0,1]"
+            )
         tickers, universe_source = _load_universe(run_dir, config, args.universe_source)
     except (ValueError, FileNotFoundError) as exc:
         LOGGER.error("%s", exc)
@@ -594,6 +642,8 @@ def main() -> int:  # noqa: C901
 
     collection_error = ""
     reused_db_source_as_of = ""
+    bounded_reuse_attempted_as_of = ""
+    bounded_reuse_rejection_reason = ""
     connection_failure_policy = str(
         cfg_get(config, "liquidity_panel.connection_failure_policy", "fail")
     ).strip()
@@ -605,6 +655,89 @@ def main() -> int:  # noqa: C901
         elif args.reuse_db_samples:
             sample_rows = _load_db_samples(db_path, as_of=run_as_of, tickers=tickers)
             provider = f"portfolio_sqlite_replay:{db_path}"
+        elif args.prefer_bounded_db_samples:
+            candidate_rows: list[dict[str, Any]] = []
+            try:
+                candidate_rows, bounded_reuse_attempted_as_of = (
+                    _load_latest_bounded_db_samples(
+                        db_path,
+                        as_of=run_as_of,
+                        tickers=tickers,
+                        max_partition_age_days=max_stale_days,
+                    )
+                )
+                candidate_snapshot = summarize_spread_samples(
+                    candidate_rows,
+                    as_of=run_as_of,
+                    tickers=tickers,
+                    sample_times=sample_times,
+                    min_valid_samples=min_samples,
+                    max_stale_days=max_stale_days,
+                    max_half_spread_bps=max_half_spread,
+                    fallback_half_spread_bps=fallback_bps,
+                    allow_fallback=allow_fallback,
+                )
+                bounded_reuse_rejection_reason = _bounded_reuse_rejection_reason(
+                    candidate_snapshot,
+                    max_fallback_fraction=max_fallback_fraction,
+                )
+            except ValueError as exc:
+                bounded_reuse_rejection_reason = f"unavailable:{exc}"
+
+            if candidate_rows and not bounded_reuse_rejection_reason:
+                sample_rows = candidate_rows
+                reused_db_source_as_of = bounded_reuse_attempted_as_of
+                provider = (
+                    f"portfolio_sqlite_bounded_replay:{db_path};"
+                    f"source_as_of={reused_db_source_as_of}"
+                )
+                LOGGER.info(
+                    "Historical liquidity catch-up reused bounded SQLite partition %s for %s",
+                    reused_db_source_as_of,
+                    run_as_of,
+                )
+            else:
+                LOGGER.info(
+                    "Bounded liquidity replay not sufficient for %s (%s); collecting from IB",
+                    run_as_of,
+                    bounded_reuse_rejection_reason or "no_candidate_rows",
+                )
+                try:
+                    sample_rows = _collect_from_ib(
+                        config=config,
+                        as_of=run_as_of,
+                        tickers=tickers,
+                        sample_times=sample_times,
+                        ib_client_id=args.ib_client_id,
+                    )
+                    provider = str(
+                        cfg_get(
+                            config,
+                            "liquidity_panel.provider",
+                            "ibkr_historical_bid_ask",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - IB client errors vary.
+                    if (
+                        connection_failure_policy != DB_CONNECTION_FALLBACK_POLICY
+                        or not candidate_rows
+                    ):
+                        raise
+                    sample_rows = candidate_rows
+                    reused_db_source_as_of = bounded_reuse_attempted_as_of
+                    collection_error = f"{type(exc).__name__}:{exc}"
+                    provider = (
+                        f"portfolio_sqlite_connection_fallback:{db_path};"
+                        f"source_as_of={reused_db_source_as_of}"
+                    )
+                    LOGGER.warning(
+                        "IB liquidity connection failed (%s); using the bounded partition %s. "
+                        "The authoritative downstream coverage gate will retain the prior "
+                        "rejection reason: %s",
+                        collection_error,
+                        reused_db_source_as_of,
+                        bounded_reuse_rejection_reason,
+                    )
         else:
             try:
                 sample_rows = _collect_from_ib(
@@ -689,6 +822,8 @@ def main() -> int:  # noqa: C901
         "connection_failure_policy": connection_failure_policy,
         "ib_collection_error": collection_error,
         "reused_db_source_as_of": reused_db_source_as_of,
+        "bounded_reuse_attempted_as_of": bounded_reuse_attempted_as_of,
+        "bounded_reuse_rejection_reason": bounded_reuse_rejection_reason,
         "generated_at": _timestamp(),
         "enabled": True,
         "panel_active": True,

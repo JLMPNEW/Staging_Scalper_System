@@ -78,3 +78,22 @@ def test_dedicated_parser_dependency_probe_fails_closed(
     with pytest.raises(RuntimeError, match="missing parser package"):
         module.validate_dedicated_parser_python(executable)
 
+
+def test_overwrite_outputs_does_not_force_provider_history() -> None:
+    module = _module()
+
+    steps = module.build_steps(
+        "2026-08-28",
+        force=False,
+        overwrite_outputs=True,
+        include_norgate_backfill=False,
+    )
+    by_name = {step.step_id: step for step in steps}
+
+    assert "--incremental" in by_name["07_sync_sec"].args
+    assert "--force" not in by_name["07_sync_sec"].args
+    assert "--force-refresh" not in by_name["03_sync_prices"].args
+    assert "--force" not in by_name["07b_sync_issuer_ir"].args
+    assert "--force" in by_name["06a_build_scoring"].args
+    assert "--force" in by_name["10_build_scores"].args
+    assert "--allow-overwrite" in by_name["10b_publish"].args

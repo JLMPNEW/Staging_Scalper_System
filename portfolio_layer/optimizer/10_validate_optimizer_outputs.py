@@ -34,6 +34,10 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 )
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
+from portfolio_layer.optimizer.optimizer_core import (  # noqa: E402
+    constraint_aware_invested_gross,
+    maximum_investable_gross,
+)
 from portfolio_layer.risk.liquidity import load_spread_snapshot  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 
@@ -74,6 +78,18 @@ def manifest_hash(manifest: dict, rel_path: str) -> str | None:
     return ((manifest.get("files") or {}).get(rel_path) or {}).get("sha256")
 
 
+def stage1_config_binding(
+    stage1_manifest: dict[str, Any], config_path: Path
+) -> tuple[bool, str]:
+    expected = str(
+        (((stage1_manifest.get("provenance") or {}).get("config_yaml") or {}).get("sha256"))
+        or ""
+    ).strip()
+    actual = sha256_file(config_path) if config_path.is_file() else ""
+    valid = bool(expected) and actual == expected
+    return valid, f"expected={expected or '<missing>'}; actual={actual or '<missing>'}"
+
+
 def median_half_spread_bps(row: dict[str, str] | None) -> float | None:
     """Parse median_half_spread_bps from a spread_snapshot row; None when absent/blank/non-finite.
 
@@ -89,6 +105,52 @@ def median_half_spread_bps(row: dict[str, str] | None) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if np.isfinite(parsed) else None
+
+
+def evaluate_scope_weight_caps(
+    rows: list[dict[str, str]],
+    scores: dict[str, dict[str, str]],
+    scope_caps: dict[str, dict[str, float]],
+    *,
+    gross: float,
+    tolerance: float,
+) -> tuple[list[str], list[str]]:
+    """Independently reproduce per-pipeline/per-scope live-book caps.
+
+    Membership comes from the sealed Stage 1 score contract, not mutable output labels. Once a
+    pipeline declares scope caps, every optimizer row in that pipeline must map to exactly one
+    configured scope; an unknown/blank scope is a fail-closed coverage error.
+    """
+    details: list[str] = []
+    violations: list[str] = []
+    for pipeline, raw_scopes in sorted(scope_caps.items()):
+        scopes = {str(scope): float(cap) for scope, cap in raw_scopes.items()}
+        realized = {scope: 0.0 for scope in scopes}
+        unknown: list[str] = []
+        for row in rows:
+            ticker = str(row.get("ticker", "")).strip()
+            contract = scores.get(ticker, row)
+            if str(contract.get("source_pipeline", "")).strip() != pipeline:
+                continue
+            scope = str(contract.get("model_scope_id", "")).strip()
+            if scope not in scopes:
+                unknown.append(f"{ticker}:{scope or '<blank>'}")
+                continue
+            weight = finite_float(row.get("weight"))
+            realized[scope] += weight if weight is not None else 0.0
+        if unknown:
+            violations.append(f"{pipeline}:unconfigured_scopes={unknown[:10]}")
+        for scope, cap in sorted(scopes.items()):
+            limit = cap * float(gross)
+            value = realized[scope]
+            details.append(f"{pipeline}::{scope}={value:.6f}<=cap {limit:.6f}")
+            if not np.isfinite(cap) or cap < 0.0:
+                violations.append(f"{pipeline}::{scope}:invalid_cap={cap!r}")
+            elif value > limit + tolerance:
+                violations.append(
+                    f"{pipeline}::{scope}:weight={value:.6f}>cap={limit:.6f}"
+                )
+    return details, violations
 
 
 def main() -> int:  # noqa: C901
@@ -135,6 +197,7 @@ def main() -> int:  # noqa: C901
 
     oc = cfg_get(config, "optimizer", {})
     gross = float(oc.get("gross_exposure", 1.0))
+    allow_constraint_cash = oc.get("allow_constraint_cash") is True
     max_weight = float(oc.get("max_weight_per_name", 0.05))
     min_hold = float(oc.get("min_weight_to_hold", 0.0005))
     # Reproduce the pre-solve liquidity floor so universe/exclusion checks stay exact (fail-open).
@@ -212,6 +275,13 @@ def main() -> int:  # noqa: C901
 
     def rec(name: str, status: str, detail: str) -> None:
         checks.append({"check": name, "status": status, "detail": detail})
+
+    config_bound, config_detail = stage1_config_binding(stage1_manifest, config_path)
+    rec(
+        "config_hash_matches_stage1_manifest",
+        "PASS" if config_bound else "FAIL",
+        config_detail,
+    )
 
     rec(
         "monitor_policy_mode_sealed",
@@ -386,7 +456,111 @@ def main() -> int:  # noqa: C901
         "all optimizer numeric fields are finite" if not bad_numeric else f"non-finite: {bad_numeric[:10]}",
     )
 
-    # 4. weights valid: long-only, capped, no dust holdings, and sum to gross with strict tolerance.
+    # Recompute hard-cap capacity independently from the producer. Caps remain
+    # absolute NAV fractions even when an unavailable sector forces residual cash.
+    solver_universe = sorted(expected_universe)
+    solver_index = {ticker: index for index, ticker in enumerate(solver_universe)}
+    capacity_group_caps: list[tuple[list[int], float]] = []
+    for pipeline, cap in sorted(
+        {str(k): float(v) for k, v in (oc.get("sector_weight_caps") or {}).items()}.items()
+    ):
+        indices = [
+            solver_index[ticker]
+            for ticker in solver_universe
+            if str(scores[ticker].get("source_pipeline", "")).strip() == pipeline
+        ]
+        if indices:
+            capacity_group_caps.append((indices, cap))
+    for pipeline, raw_scopes in sorted(
+        dict(oc.get("scope_weight_caps") or {}).items()
+    ):
+        for scope, raw_cap in sorted(dict(raw_scopes or {}).items()):
+            indices = [
+                solver_index[ticker]
+                for ticker in solver_universe
+                if str(scores[ticker].get("source_pipeline", "")).strip() == str(pipeline)
+                and str(scores[ticker].get("model_scope_id", "")).strip() == str(scope)
+            ]
+            if indices:
+                capacity_group_caps.append((indices, float(raw_cap)))
+    fixed_equal_sleeves = {
+        str(value).strip()
+        for value in (oc.get("fixed_equal_weight_sleeves") or [])
+        if str(value).strip()
+    }
+    capacity_equal_groups = [
+        [
+            solver_index[ticker]
+            for ticker in solver_universe
+            if str(scores[ticker].get("source_pipeline", "")).strip() == pipeline
+        ]
+        for pipeline in sorted(fixed_equal_sleeves)
+    ]
+    capacity_equal_groups = [indices for indices in capacity_equal_groups if indices]
+    capacity_errors: list[str] = []
+    maximum_gross = float("nan")
+    expected_invested_gross = gross
+    expected_constraint_cash = False
+    capacity_attempts: list[str] = []
+    try:
+        maximum_gross, capacity_attempts = maximum_investable_gross(
+            len(solver_universe),
+            group_caps=capacity_group_caps or None,
+            cap_base_gross=gross,
+            max_weight=max_weight,
+            equal_weight_groups=capacity_equal_groups or None,
+        )
+        expected_invested_gross, expected_constraint_cash = (
+            constraint_aware_invested_gross(
+                requested_gross=gross,
+                capacity=maximum_gross,
+                allow_constraint_cash=allow_constraint_cash,
+            )
+        )
+    except ValueError as exc:
+        capacity_errors.append(str(exc))
+
+    policy_meta = (
+        meta.get("constraint_cash_policy", {})
+        if isinstance(meta.get("constraint_cash_policy"), dict)
+        else {}
+    )
+    if policy_meta.get("enabled") is not allow_constraint_cash:
+        capacity_errors.append(
+            f"policy_enabled={policy_meta.get('enabled')!r}!={allow_constraint_cash!r}"
+        )
+    if policy_meta.get("triggered") is not expected_constraint_cash:
+        capacity_errors.append(
+            f"policy_triggered={policy_meta.get('triggered')!r}!={expected_constraint_cash!r}"
+        )
+    for field, expected in (
+        ("requested_gross", gross),
+        ("maximum_investable_gross", maximum_gross),
+        ("invested_gross", expected_invested_gross),
+        ("cash_weight_before_cost_overlay", gross - expected_invested_gross),
+    ):
+        actual = finite_float(policy_meta.get(field))
+        if actual is None or not np.isfinite(expected) or abs(actual - expected) > 5e-6:
+            capacity_errors.append(f"{field}={actual!r}!={expected!r}")
+    if list(policy_meta.get("capacity_solver_attempts") or []) != capacity_attempts:
+        capacity_errors.append("capacity_solver_attempts_mismatch")
+    if str(policy_meta.get("cap_reference", "")) != "configured_gross_nav_fraction":
+        capacity_errors.append("cap_reference_not_absolute_nav")
+    rec(
+        "constraint_cash_policy_valid",
+        "PASS" if not capacity_errors else "FAIL",
+        (
+            f"requested={gross:.6f}; capacity={maximum_gross:.6f}; "
+            f"invested={expected_invested_gross:.6f}; "
+            f"cash={gross - expected_invested_gross:.6f}; "
+            f"triggered={expected_constraint_cash}"
+            if not capacity_errors
+            else str(capacity_errors[:20])
+        ),
+    )
+
+    # 4. weights valid: long-only, capped, no dust holdings, and sum to the independently
+    # recomputed feasible invested gross with strict tolerance.
     w = np.array([finite_float(r.get("weight")) if finite_float(r.get("weight")) is not None else np.nan for r in rows])
     bad_w = []
     if len(w) == 0:
@@ -400,13 +574,16 @@ def main() -> int:  # noqa: C901
             bad_w.append(f"cap_breach>{max_weight}")
         if min_hold > 0 and ((w > cap_tol) & (w < min_hold - cap_tol)).any():
             bad_w.append(f"dust_weight_below_min_hold>{min_hold}")
-        if abs(float(w.sum()) - gross) > weight_tol:
-            bad_w.append(f"sum={float(w.sum()):.10f}!={gross}")
+        if abs(float(w.sum()) - expected_invested_gross) > weight_tol:
+            bad_w.append(
+                f"sum={float(w.sum()):.10f}!={expected_invested_gross}"
+            )
     rec(
         "weights_valid",
         "PASS" if not bad_w else "FAIL",
         (
-            f"long-only, <= {max_weight}, no dust, sum={float(np.nansum(w)):.10f}"
+            f"long-only, <= {max_weight}, no dust, "
+            f"sum={float(np.nansum(w)):.10f}, requested_gross={gross:.10f}"
             if not bad_w else f"{bad_w}"
         ),
     )
@@ -414,21 +591,47 @@ def main() -> int:  # noqa: C901
     # 4b. explicit sleeve budget caps respected in the LIVE book (optimizer.sector_weight_caps).
     sector_caps = {str(k): float(v) for k, v in (oc.get("sector_weight_caps") or {}).items()}
     if sector_caps:
-        cap_bad = []
-        cap_detail = []
+        cap_bad: list[str] = []
+        cap_detail: list[str] = []
         for pipeline, cap in sorted(sector_caps.items()):
             realized = 0.0
             for r in rows:
-                if str(r.get("source_pipeline", "")).strip() == pipeline:
+                ticker = str(r.get("ticker", "")).strip()
+                contract = scores.get(ticker, r)
+                if str(contract.get("source_pipeline", "")).strip() == pipeline:
                     wt = finite_float(r.get("weight"))
                     realized += wt if wt is not None else 0.0
             cap_detail.append(f"{pipeline}={realized:.6f}<=cap {cap * gross:.6f}")
-            if realized > cap * gross + weight_tol:
+            if not np.isfinite(cap) or cap < 0.0:
+                cap_bad.append(f"{pipeline}:invalid_cap={cap!r}")
+            elif realized > cap * gross + weight_tol:
                 cap_bad.append(f"{pipeline}:weight={realized:.6f}>cap={cap * gross:.6f}")
         rec(
             "sector_weight_caps_respected",
             "PASS" if not cap_bad else "FAIL",
             "; ".join(cap_detail) if not cap_bad else f"violations: {cap_bad}",
+        )
+
+    # 4c. cohort/model-scope caps are independent constraints, not implied by the sector cap.
+    scope_caps = {
+        str(pipeline): {
+            str(scope): float(cap)
+            for scope, cap in dict(raw_scopes or {}).items()
+        }
+        for pipeline, raw_scopes in dict(oc.get("scope_weight_caps") or {}).items()
+    }
+    if scope_caps:
+        scope_detail, scope_bad = evaluate_scope_weight_caps(
+            rows,
+            scores,
+            scope_caps,
+            gross=gross,
+            tolerance=weight_tol,
+        )
+        rec(
+            "scope_weight_caps_respected",
+            "PASS" if not scope_bad else "FAIL",
+            "; ".join(scope_detail) if not scope_bad else f"violations: {scope_bad}",
         )
 
     # 5. sensitivity bands are post-finalization bands, so the published weight must be contained.
@@ -476,6 +679,19 @@ def main() -> int:  # noqa: C901
         meta_bad.append(f"n_held={meta.get('n_held')}!={len(held)}")
     if int(meta.get("n_excluded_candidates", -1)) != len(excluded):
         meta_bad.append(f"n_excluded_candidates={meta.get('n_excluded_candidates')}!={len(excluded)}")
+    if finite_float(meta.get("gross_exposure")) != gross:
+        meta_bad.append(f"gross_exposure={meta.get('gross_exposure')}!={gross}")
+    meta_invested_gross = finite_float(meta.get("invested_gross"))
+    if meta_invested_gross is None or abs(meta_invested_gross - expected_invested_gross) > 5e-6:
+        meta_bad.append(
+            f"invested_gross={meta.get('invested_gross')}!={expected_invested_gross}"
+        )
+    meta_constraint_cash = finite_float(meta.get("constraint_cash_weight"))
+    expected_cash = gross - expected_invested_gross
+    if meta_constraint_cash is None or abs(meta_constraint_cash - expected_cash) > 5e-6:
+        meta_bad.append(
+            f"constraint_cash_weight={meta.get('constraint_cash_weight')}!={expected_cash}"
+        )
     if np.isfinite(w).all() and abs(float(meta.get("sum_weights", np.nan)) - float(w.sum())) > 5e-6:
         meta_bad.append(f"sum_weights_meta={meta.get('sum_weights')} csv={float(w.sum()):.10f}")
     if np.isfinite(w).all() and abs(float(meta.get("max_weight_actual", np.nan)) - float(w.max(initial=0.0))) > 5e-6:

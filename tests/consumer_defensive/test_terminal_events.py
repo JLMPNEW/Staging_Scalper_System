@@ -297,7 +297,7 @@ def test_reconciliation_ignores_superseded_identity_corrections() -> None:
             """INSERT INTO dim_company(
                    primary_ticker, company_name, universe_status, is_active,
                    data_quality_status, first_seen_at, updated_at
-               ) VALUES ('DMC', 'Legacy Fresh Del Monte identity',
+               ) VALUES ('FDP', 'Legacy Fresh Del Monte identity',
                    'superseded_identity', 0, 'reviewed', ?, ?)""",
             (now, now),
         ).lastrowid
@@ -306,14 +306,14 @@ def test_reconciliation_ignores_superseded_identity_corrections() -> None:
                    company_id, ticker, provider_price_symbol, exchange,
                    listing_country, security_type, listing_status,
                    is_primary_listing, currency, created_at, updated_at
-               ) VALUES (?, 'DMC', 'DMC', 'NYSE', 'United States',
+               ) VALUES (?, 'FDP', 'DMC', 'NYSE', 'United States',
                    'Common Stock', 'superseded', 0, 'USD', ?, ?)""",
             (company_id, now, now),
         )
         result = reconcile_terminal_events(conn, policy)
         assert result["events_loaded"] == 11
         assert conn.execute(
-            "SELECT COUNT(*) FROM fact_terminal_event_reconciliation WHERE ticker='DMC'"
+            "SELECT COUNT(*) FROM fact_terminal_event_reconciliation WHERE ticker='FDP'"
         ).fetchone()[0] == 0
     finally:
         conn.close()

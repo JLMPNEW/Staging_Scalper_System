@@ -28,7 +28,10 @@ from industrials.transportation.classification import (
     load_classification_overlays,
     resolve_classification,
 )
-from industrials.transportation.financial_contract import MetricDefinition
+from industrials.transportation.financial_contract import (
+    MetricDefinition,
+    is_rankable_metric_value,
+)
 from industrials.transportation.surface_freight_score_engine import (
     build_cohort_component_scores,
     cohort_score_eligible,
@@ -367,21 +370,33 @@ def metric_percentiles(
             if str(row.get("availability_status") or "") not in OBSERVED_STATUSES:
                 continue
             value = _number(row.get("metric_value"))
-            if value is not None:
+            if value is not None and is_rankable_metric_value(
+                definition.metric_id,
+                value,
+            ):
                 by_cohort[str(member["calibration_cohort_id"])].append((ticker, value))
         for cohort_rows in by_cohort.values():
             raw = sorted(value for _, value in cohort_rows)
             low = _quantile(raw, definition.winsor_lower)
             high = _quantile(raw, definition.winsor_upper)
             clipped = [(ticker, min(high, max(low, value))) for ticker, value in cohort_rows]
-            unique_values = sorted({value for _, value in clipped})
-            for ticker, value in clipped:
-                if len(unique_values) == 1:
-                    percentile = 50.0
-                else:
-                    equal_positions = [idx for idx, item in enumerate(unique_values) if item == value]
-                    mean_position = sum(equal_positions) / len(equal_positions)
-                    percentile = 100.0 * mean_position / (len(unique_values) - 1)
+            ordered = sorted(clipped, key=lambda item: (item[1], item[0]))
+            rank_by_ticker: dict[str, float] = {}
+            cursor = 0
+            while cursor < len(ordered):
+                end = cursor + 1
+                while end < len(ordered) and ordered[end][1] == ordered[cursor][1]:
+                    end += 1
+                average_rank = (cursor + end - 1) / 2.0
+                for ticker, _value in ordered[cursor:end]:
+                    rank_by_ticker[ticker] = average_rank
+                cursor = end
+            for ticker, _value in clipped:
+                percentile = (
+                    50.0
+                    if len(ordered) == 1
+                    else 100.0 * rank_by_ticker[ticker] / (len(ordered) - 1)
+                )
                 scores[ticker][definition.metric_id] = (
                     percentile if definition.direction == 1 else 100.0 - percentile
                 )

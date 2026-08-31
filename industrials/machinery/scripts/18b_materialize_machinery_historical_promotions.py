@@ -58,6 +58,9 @@ from industrials.machinery.scoring import (  # noqa: E402
     survivorship_sidecar,
     write_json_atomic,
 )
+from industrials.machinery.stage12_activation import (  # noqa: E402
+    apply_active_production_policy,
+)
 from portfolio_layer.scores.adapters import run_adapter  # noqa: E402
 
 
@@ -292,6 +295,7 @@ def _metadata_matches(
     output_dir: Path,
     *,
     fingerprint: str,
+    build_signature: str,
 ) -> bool:
     path = output_dir / HISTORICAL_BUILD_METADATA_FILENAME
     if not path.exists():
@@ -300,6 +304,7 @@ def _metadata_matches(
     return (
         metadata.get("acceptance") == "PASS"
         and metadata.get("promotion_preflight_fingerprint") == fingerprint
+        and metadata.get("historical_build_signature") == build_signature
     )
 
 
@@ -402,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     build_metadata = historical_build_metadata(
         config,
+        config_path=config_path,
         policy_lock_date=policy_lock_date,
         required_metrics=required_metric_names(),
     )
@@ -422,6 +428,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.resume and _metadata_matches(
                 output_dir,
                 fingerprint=fingerprint,
+                build_signature=str(
+                    build_metadata["historical_build_signature"]
+                ),
             ):
                 adapter_count = _validate_portfolio(
                     sector_output_root,
@@ -558,6 +567,30 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 )
                 historical_rows = survivorship_sidecar(rank_rows)
+                stage12_output = str(
+                    cfg_get(config, "machinery_stage12.output_root", "") or ""
+                ).strip()
+                if stage12_output:
+                    historical_rows, production_metadata = (
+                        apply_active_production_policy(
+                            config,
+                            config_path=config_path,
+                            governance_root=resolve_path(
+                                stage12_output,
+                                base_dir=config_path.parent,
+                            ),
+                            asof=asof_date,
+                            shadow_rows=historical_rows,
+                        )
+                    )
+                else:
+                    production_metadata = {
+                        "production_policy_active": False,
+                        "production_policy_status": "SHADOW_NO_STAGE12_CONFIG",
+                    }
+                production_policy_active = bool(
+                    production_metadata["production_policy_active"]
+                )
                 with connect(db_path) as conn:
                     lineage = build_financial_filing_lineage(
                         conn,
@@ -571,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
                     rows=historical_rows,
                     asof=asof_date,
                     allow_overwrite=True,
+                    production_policy_active=production_policy_active,
+                    activation_metadata=production_metadata,
                 )
                 if dashboard_manifest.get("acceptance") != "PASS":
                     raise ValueError(
@@ -592,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
                             "selected_promotion_ids"
                         ],
                         "promotion_affected_tickers": list(tickers),
+                        "production_policy": production_metadata,
                     },
                 )
             finally:

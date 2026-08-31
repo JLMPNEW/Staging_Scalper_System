@@ -74,6 +74,7 @@ from portfolio_layer.provider_ingestion.store import (
     reject_historical_current_capture,
     require_scheduled_dispatch,
     verify_store,
+    verify_store_head,
     writer_lock,
 )
 
@@ -151,6 +152,38 @@ def test_writer_lock_recovers_after_process_crash(tmp_path: Path) -> None:
     released = json.loads(lock_path.read_text(encoding="utf-8"))
     assert released["state"] == "released"
     assert released["pid"] == os.getpid()
+
+
+def test_store_head_validation_checks_latest_dispatch_artifact(tmp_path: Path) -> None:
+    store_path = tmp_path / "provider.sqlite"
+    artifact_path = (tmp_path / "scheduler_attempt.json").resolve()
+    artifact_path.write_text("{}\n", encoding="utf-8")
+    cycle_id = "scheduled-20260828-postclose-a01"
+    conn = connect_store(store_path)
+    try:
+        record_dispatch_started(
+            conn,
+            cycle_id=cycle_id,
+            actual_capture_date="2026-08-28",
+            capture_phase="postclose",
+            started_at_utc="2026-08-28T22:00:00+00:00",
+            parent_pid=123,
+        )
+        finalize_dispatch_attempt(
+            conn,
+            cycle_id=cycle_id,
+            completed_at_utc="2026-08-28T22:01:00+00:00",
+            state="PASS",
+            return_code=0,
+            artifact_path=str(artifact_path),
+            artifact_sha256=hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+            detail="test pass",
+        )
+        assert verify_store_head(conn) == []
+        artifact_path.write_text("{\"tampered\":true}\n", encoding="utf-8")
+        assert verify_store_head(conn) == [f"dispatch_artifact_hash_mismatch:{cycle_id}"]
+    finally:
+        conn.close()
 
 
 def test_failed_scheduler_attempt_is_durable_and_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,6 +352,26 @@ def _setup_run_due_env(tmp_path: Path) -> Path:
                 actual_capture_date="2026-08-03",
                 status="PASS",
                 run_row=dict(run_row),
+            )
+            record_dispatch_started(
+                conn,
+                cycle_id=cycle_id,
+                actual_capture_date="2026-08-03",
+                capture_phase=phase,
+                started_at_utc=completed,
+                parent_pid=123,
+            )
+            attempt_path = output_root / cycle_id / "scheduler_attempt.json"
+            attempt_path.write_text("{}\n", encoding="utf-8")
+            finalize_dispatch_attempt(
+                conn,
+                cycle_id=cycle_id,
+                completed_at_utc=completed,
+                state="PASS",
+                return_code=0,
+                artifact_path=str(attempt_path.resolve()),
+                artifact_sha256=hashlib.sha256(attempt_path.read_bytes()).hexdigest(),
+                detail="test pass",
             )
     finally:
         conn.close()
@@ -1227,6 +1280,61 @@ def test_stale_started_dispatch_is_interrupted_and_retry_number_is_monotone(
                 artifact_sha256="",
                 detail="must not rewrite terminal evidence",
             )
+    finally:
+        conn.close()
+
+
+def test_scheduled_capture_requires_terminal_dispatch_pass(tmp_path: Path) -> None:
+    conn = connect_store(tmp_path / "provider.sqlite")
+    try:
+        universe_id = freeze_universe(
+            conn,
+            source_run_as_of="2026-08-13",
+            capture_phase="premarket",
+            members=[{"ticker": "AAA", "tier": "tier0", "sector": "", "source_pipeline": "test"}],
+            providers=["fmp"],
+            created_at_utc="2026-08-13T11:30:00+00:00",
+        )
+        cycle_id = "scheduled-20260813-premarket-a01"
+        record_dispatch_started(
+            conn,
+            cycle_id=cycle_id,
+            actual_capture_date="2026-08-13",
+            capture_phase="premarket",
+            started_at_utc="2026-08-13T11:30:00+00:00",
+            parent_pid=123,
+        )
+        persist_capture(
+            conn,
+            cycle_id=cycle_id,
+            capture_phase="premarket",
+            requested_portfolio_as_of="2026-08-13",
+            actual_capture_date="2026-08-13",
+            universe_id=universe_id,
+            started_at_utc="2026-08-13T11:30:00+00:00",
+            completed_at_utc="2026-08-13T11:31:00+00:00",
+            request_records=[_request(received="2026-08-13T11:30:30+00:00", average=2.0)],
+            source_code_digest="b" * 64,
+            config_digest="c" * 64,
+            timezone_name="America/New_York",
+            calendar_name="XNYS",
+            decision_cutoff_local="09:25",
+            status="PASS",
+        )
+        finalize_dispatch_attempt(
+            conn,
+            cycle_id=cycle_id,
+            completed_at_utc="2026-08-13T11:32:00+00:00",
+            state="FAIL",
+            return_code=7,
+            artifact_path="",
+            artifact_sha256="",
+            detail="post-persist validation failed",
+        )
+        slot = [{"capture_date": "2026-08-13", "capture_phase": "premarket", "due_at_utc": "2026-08-13T11:30:00+00:00"}]
+        row = capture_continuity_rows(conn, slots=slot)[0]
+        assert row["status"] == "FAILED"
+        assert row["accepted_attempt_count"] == 0
     finally:
         conn.close()
     assert (

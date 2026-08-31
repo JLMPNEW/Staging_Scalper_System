@@ -1228,17 +1228,15 @@ def test_stage6b_event_exhibit_seal_adds_results_document_and_rebinds_exactly(
             if url.endswith('/index.json'):
                 return json.dumps({'directory': {'item': [
                     {'name': f'{event_accession}-index.html', 'type': 'text.gif'},
-                    {'name': primary, 'type': 'text.gif'},
-                    {'name': exhibit, 'type': 'text.gif'},
                     {'name': 'contract.htm', 'type': 'text.gif'},
                 ]}}).encode()
             if url.endswith(f'/{event_accession}-index.html'):
                 return f'''<html><body><table class="tableFile">
                   <tr><th>Seq</th><th>Description</th><th>Document</th>
                       <th>Type</th><th>Size</th></tr>
-                  <tr><td>1</td><td>Current report</td><td>{primary}</td>
+                  <tr><td>1</td><td>Current report</td><td><a href="/ix?doc=/Archives/edgar/data/{int(CIKS['KO'])}/{event_accession.replace('-', '')}/{primary}">{primary}</a></td>
                       <td>8-K</td><td>100</td></tr>
-                  <tr><td>2</td><td>Earnings release</td><td>{exhibit}</td>
+                  <tr><td>2</td><td>Earnings release</td><td><a href="/Archives/edgar/data/{int(CIKS['KO'])}/{event_accession.replace('-', '')}/{exhibit}">{exhibit}</a></td>
                       <td>EX-99.1</td><td>200</td></tr>
                   <tr><td>3</td><td>Material contract</td><td>contract.htm</td>
                       <td>EX-10.1</td><td>300</td></tr>
@@ -1289,6 +1287,7 @@ def test_stage6b_event_exhibit_seal_adds_results_document_and_rebinds_exactly(
         )
         assert snapshot['indexed_filing_count'] == 1
         assert snapshot['document_count'] == 2
+        assert snapshot['directory_index_discrepancy_documents'] == 2
         roles = [tuple(row) for row in conn.execute(
             '''SELECT document_name,document_role
                FROM stage6b_event_document_snapshot

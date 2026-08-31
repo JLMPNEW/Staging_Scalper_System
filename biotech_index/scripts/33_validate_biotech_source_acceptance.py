@@ -684,7 +684,8 @@ def validate_form4_source(
     max_raw_lag = int(cfg_get(config, "biotech_refresh.form4_preflight.max_raw_filing_lag_days", 5))
     raw_lag = business_day_age(latest_raw, asof) if latest_raw is not None else None
     expected_date = expected_snapshot_date or asof
-    passed = snapshot_date == expected_date and raw_lag is not None and 0 <= raw_lag <= max_raw_lag
+    snapshot_aligned = snapshot_date is not None and expected_date <= snapshot_date <= asof
+    passed = snapshot_aligned and raw_lag is not None and 0 <= raw_lag <= max_raw_lag
     add_check(
         checks,
         name="form4_source_freshness",
@@ -692,7 +693,10 @@ def validate_form4_source(
         role="primary",
         required=True,
         passed=passed,
-        detail="Form 4 snapshot is as-of aligned and raw filing ingestion is within its business-day lag policy",
+        detail=(
+            "Form 4 snapshot is between the minimum expected market date and requested as-of, "
+            "and raw filing ingestion is within its business-day lag policy"
+        ),
         evidence={
             "database_path": str(db_path),
             "expected_snapshot_date": expected_date.isoformat(),

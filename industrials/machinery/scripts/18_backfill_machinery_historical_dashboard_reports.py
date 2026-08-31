@@ -52,6 +52,9 @@ from industrials.machinery.scoring import (  # noqa: E402
     survivorship_sidecar,
     write_json_atomic,
 )
+from industrials.machinery.stage12_activation import (  # noqa: E402
+    apply_active_production_policy,
+)
 from portfolio_layer.scores.adapters import run_adapter  # noqa: E402
 
 
@@ -688,10 +691,13 @@ def existing_output_rows(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if str(manifest.get("acceptance") or "") != "PASS":
         raise ValueError(f"Existing machinery dashboard manifest did not pass: {manifest_path}")
+    rank_rows = read_rows(output_dir / "machinery_final_rank_table.csv")
     rows = load_validated_sidecar(output_dir, asof=asof)
     adapter_count = validate_portfolio_handoff(
         sector_output_root=sector_output_root,
         asof=asof,
+        rank_rows=rank_rows,
+        production_policy_active=manifest.get("production_policy_active") is True,
     )
     if adapter_count != len(rows):
         raise ValueError(
@@ -741,7 +747,13 @@ def checkpoint_report(
     return summary
 
 
-def validate_portfolio_handoff(*, sector_output_root: Path, asof: str) -> int:
+def validate_portfolio_handoff(
+    *,
+    sector_output_root: Path,
+    asof: str,
+    rank_rows: list[dict[str, str]],
+    production_policy_active: bool,
+) -> int:
     result = run_adapter(
         {
             "model_family": "machinery",
@@ -762,10 +774,66 @@ def validate_portfolio_handoff(*, sector_output_root: Path, asof: str) -> int:
         raise ValueError(
             f"Portfolio adapter source_asof_date={result.source_asof_date} expected={asof}"
         )
-    if any(row.investable_eligible for row in result.rows):
-        raise ValueError("Shadow machinery rows must not be investable")
-    if any(row.oos_score_valid_flag for row in result.rows):
-        raise ValueError("Shadow machinery rows must not be OOS-valid")
+    investable = {row.ticker for row in result.rows if row.investable_eligible}
+    if production_policy_active:
+        selected = {
+            str(row.get("ticker") or "").strip().upper()
+            for row in rank_rows
+            if str(row.get("portfolio_sleeve_selected_flag") or "") == "1"
+        }
+        if not selected:
+            raise ValueError("Production machinery sleeve is empty")
+        if investable != selected:
+            raise ValueError(
+                "Production machinery adapter membership does not match the "
+                f"selected sleeve: missing={sorted(selected - investable)} "
+                f"unexpected={sorted(investable - selected)}"
+            )
+        selected_oos = {
+            row.ticker
+            for row in result.rows
+            if row.ticker in selected and row.oos_score_valid_flag
+        }
+        if selected_oos != selected:
+            raise ValueError(
+                "Production machinery selected sleeve contains non-OOS rows: "
+                f"{sorted(selected - selected_oos)}"
+            )
+        expected_research = {
+            str(row.get("ticker") or "").strip().upper()
+            for row in rank_rows
+            if str(row.get("stage11_calibration_input_eligible_flag") or "") == "1"
+        }
+        actual_research = {
+            row.ticker
+            for row in result.rows
+            if row.calibration_research_eligible
+        }
+        if actual_research != expected_research:
+            raise ValueError(
+                "Production machinery research population mismatch: "
+                f"missing={sorted(expected_research - actual_research)} "
+                f"unexpected={sorted(actual_research - expected_research)}"
+            )
+        try:
+            target_weights = [
+                float(str(row.get("portfolio_sleeve_target_weight") or "0"))
+                for row in rank_rows
+                if str(row.get("portfolio_sleeve_selected_flag") or "") == "1"
+            ]
+        except ValueError as exc:
+            raise ValueError(
+                "Production machinery sleeve contains an invalid target weight"
+            ) from exc
+        if abs(sum(target_weights) - 1.0) > 1e-8:
+            raise ValueError("Production machinery sleeve target weights do not sum to 1")
+        if max(target_weights) - min(target_weights) > 1e-10:
+            raise ValueError("Production machinery sleeve is not equal weighted")
+    else:
+        if investable:
+            raise ValueError("Shadow machinery rows must not be investable")
+        if any(row.oos_score_valid_flag for row in result.rows):
+            raise ValueError("Shadow machinery rows must not be OOS-valid")
     return len(result.rows)
 
 
@@ -873,6 +941,7 @@ def main() -> int:
         )
     build_metadata = historical_build_metadata(
         config,
+        config_path=config_path,
         policy_lock_date=policy_lock_date,
         required_metrics=required_metric_names(),
     )
@@ -988,6 +1057,30 @@ def main() -> int:
                     scoring_contract_version=str(cfg_get(config, "machinery_scoring.contract_version")),
                 )
                 historical_rows = survivorship_sidecar(rank_rows)
+                stage12_output = str(
+                    cfg_get(config, "machinery_stage12.output_root", "") or ""
+                ).strip()
+                if stage12_output:
+                    historical_rows, production_metadata = (
+                        apply_active_production_policy(
+                            config,
+                            config_path=config_path,
+                            governance_root=resolve_path(
+                                stage12_output,
+                                base_dir=base_dir,
+                            ),
+                            asof=asof,
+                            shadow_rows=historical_rows,
+                        )
+                    )
+                else:
+                    production_metadata = {
+                        "production_policy_active": False,
+                        "production_policy_status": "SHADOW_NO_STAGE12_CONFIG",
+                    }
+                production_policy_active = bool(
+                    production_metadata["production_policy_active"]
+                )
                 rank_ready_count = sum(row["rank_ready_flag"] == "1" for row in historical_rows)
                 with connect(db_path, timeout_sec=timeout) as conn:
                     lineage = build_financial_filing_lineage(
@@ -1007,6 +1100,8 @@ def main() -> int:
                         args.force
                         or (args.resume_existing and output_dir.exists())
                     ),
+                    production_policy_active=production_policy_active,
+                    activation_metadata=production_metadata,
                 )
                 if dashboard_manifest.get("acceptance") != "PASS":
                     raise ValueError(
@@ -1016,6 +1111,8 @@ def main() -> int:
                 portfolio_adapter_row_count = validate_portfolio_handoff(
                     sector_output_root=sector_output_root,
                     asof=asof,
+                    rank_rows=historical_rows,
+                    production_policy_active=production_policy_active,
                 )
                 write_json_atomic(
                     output_dir / HISTORICAL_BUILD_METADATA_FILENAME,
@@ -1023,6 +1120,7 @@ def main() -> int:
                         **build_metadata,
                         "acceptance": "PASS",
                         "asof_date": asof,
+                        "production_policy": production_metadata,
                     },
                 )
             rank_ready_count = sum(row["rank_ready_flag"] == "1" for row in historical_rows)

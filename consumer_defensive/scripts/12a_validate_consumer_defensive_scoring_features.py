@@ -41,12 +41,15 @@ def main() -> int:
     args = parse_args()
     bundle = load_config(args.config)
     db_path = database_path(bundle, args.db)
+    definition_version = str(
+        cfg_get(bundle.payload, 'scoring_features.definition_version')
+    )
     output_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir
         else resolve_path(
             cfg_get(bundle.payload, 'paths.output_dir'), base_dir=bundle.base_dir
-        ) / 'stage6a' / args.as_of
+        ) / 'stage6a' / definition_version / args.as_of
     )
     with connect(
         db_path,

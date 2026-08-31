@@ -1,0 +1,72 @@
+schema_version: consumer_defensive_shared_service_contract_v1
+model_family: consumer_defensive
+status: frozen
+
+ownership:
+  sector_database_owner: consumer_defensive
+  sector_code_owner: consumer_defensive
+  cross_sector_code_imports_allowed: false
+
+code_services:
+  dedicated_parser:
+    access_mode: approved_package_api_and_sector_adapter
+    adapter: consumer_defensive.adapters.dedicated_parser_adapter
+    allowed_import_modules:
+      - dedicated_parser.adapters
+      - dedicated_parser.adjudication
+      - dedicated_parser.atomic_io
+      - dedicated_parser.catalog
+      - dedicated_parser.cli
+      - dedicated_parser.contracts
+      - dedicated_parser.path_io
+      - dedicated_parser.review_replay
+      - dedicated_parser.schema
+      - dedicated_parser.sec_paths
+      - dedicated_parser.semantic
+      - dedicated_parser.storage
+  factor_validation:
+    access_mode: approved_package_api_and_sector_adapter
+    adapter: consumer_defensive.adapters.factor_validation
+    allowed_import_modules:
+      - factor_validation
+      - factor_validation.artifacts
+
+platform_services:
+  global_orchestrator:
+    access_mode: command_execution_and_calendar_api
+    registry: orchestration/registry.yaml
+    calendar_api: orchestration.run_all.is_trading_day
+  portfolio_layer:
+    access_mode: immutable_file_handoff
+    adapter: consumer_defensive
+
+read_only_data_services:
+  sec_insider:
+    access_mode: sqlite_read_only
+    config_key: positioning.form4_upstream_db
+  market_positioning:
+    access_mode: sqlite_read_only
+    config_key: positioning.market_positioning_upstream_db
+
+reference_data_services:
+  ticker_mapping:
+    access_mode: immutable_csv_read
+    path: ticker_mapping/consumer_defensive.csv
+
+external_providers:
+  sec_edgar:
+    access_mode: public_api_and_filing_archive
+  yahoo_finance:
+    access_mode: adjusted_price_and_fx_fallback
+  norgate:
+    access_mode: point_in_time_membership_and_market_data
+
+downstream_portfolio_services:
+  access_via: portfolio_layer_only
+  services:
+    - black_litterman
+    - execution
+    - macro_layer
+    - optimizer
+    - risk
+    - valuation

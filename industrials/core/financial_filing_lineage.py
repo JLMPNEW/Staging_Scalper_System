@@ -6,9 +6,10 @@ import html
 import json
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from industrials.core.reports import write_csv_atomic
 from industrials.core.text_norm import normalize_ticker
@@ -77,10 +78,55 @@ FUTURE_RESULTS_ANNOUNCEMENT_PATTERN = re.compile(
     r"(?:announce|report|release)\b.{0,160}?\bfinancial results\b",
     re.IGNORECASE | re.DOTALL,
 )
+NEW_YORK = ZoneInfo("America/New_York")
+MARKET_CLOSE = time(16, 0)
+
+
+def _next_weekday(value: date) -> date:
+    candidate = value + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def filing_market_availability_date(row: Mapping[str, Any]) -> str:
+    """Return the first daily US-market session that may use an SEC filing."""
+    candidates: list[date] = []
+    filing_text = str(row.get("filing_date") or "").strip()[:10]
+    try:
+        candidates.append(date.fromisoformat(filing_text))
+    except ValueError:
+        pass
+
+    accepted_text = str(
+        row.get("accepted_at") or row.get("acceptance_datetime") or ""
+    ).strip()
+    if accepted_text:
+        try:
+            normalized = (
+                accepted_text[:-1] + "+00:00"
+                if accepted_text.endswith(("Z", "z"))
+                else accepted_text
+            )
+            accepted = datetime.fromisoformat(normalized)
+            if accepted.tzinfo is None:
+                accepted = accepted.replace(tzinfo=NEW_YORK)
+            else:
+                accepted = accepted.astimezone(NEW_YORK)
+            effective = accepted.date()
+            if effective.weekday() >= 5 or accepted.timetz().replace(tzinfo=None) >= MARKET_CLOSE:
+                effective = _next_weekday(effective)
+            candidates.append(effective)
+        except ValueError:
+            try:
+                candidates.append(date.fromisoformat(accepted_text[:10]))
+            except ValueError:
+                pass
+    return max(candidates).isoformat() if candidates else ""
 
 
 def _availability_date(row: Mapping[str, Any]) -> str:
-    return str(row.get("accepted_at") or row.get("filing_date") or "").strip()[:10]
+    return filing_market_availability_date(row)
 
 
 def _valid_asof(raw: str, asof: str) -> bool:
@@ -237,12 +283,20 @@ def _score_financial_sources(
     return output
 
 
-def _live_source_discovery_time(
+def _normalized_cik(raw: object) -> str:
+    digits = re.sub(r"\D", "", str(raw or ""))
+    return digits.zfill(10) if digits else ""
+
+
+def _live_source_discoveries(
     conn: sqlite3.Connection,
     *,
-    cik: object,
+    ciks: Iterable[object],
     asof: str,
-) -> datetime | None:
+    retrospective_max_days: int = 0,
+) -> dict[str, tuple[datetime, str]]:
+    if retrospective_max_days < 0:
+        raise ValueError("retrospective_max_days must be non-negative")
     required = {
         "endpoint",
         "query_params_json",
@@ -252,23 +306,32 @@ def _live_source_discovery_time(
     }
     columns = _table_columns(conn, "raw_api_responses")
     if not required.issubset(columns):
-        return None
-    cik_digits = re.sub(r"\D", "", str(cik or ""))
-    if not cik_digits:
-        return None
-    endpoint_suffix = f"%/CIK{cik_digits.zfill(10)}.json"
+        return {}
+    normalized_ciks = {_normalized_cik(cik) for cik in ciks}
+    normalized_ciks.discard("")
+    if not normalized_ciks:
+        return {}
+    try:
+        start_date = date.fromisoformat(asof)
+    except ValueError:
+        return {}
+    end_date = start_date + timedelta(days=retrospective_max_days)
     rows = conn.execute(
         """
-        SELECT query_params_json, request_time_utc
+        SELECT endpoint, asof_date, query_params_json, request_time_utc
         FROM raw_api_responses
-        WHERE asof_date = ?
+        WHERE asof_date BETWEEN ? AND ?
           AND response_status = 200
-          AND endpoint LIKE ?
-        ORDER BY request_time_utc DESC
+          AND endpoint LIKE '%/CIK%.json'
+        ORDER BY asof_date ASC, request_time_utc DESC
         """,
-        (asof, endpoint_suffix),
+        (asof, end_date.isoformat()),
     ).fetchall()
+    discoveries: dict[str, tuple[datetime, str]] = {}
     for row in rows:
+        match = re.search(r"/CIK(\d{10})[.]json$", str(row["endpoint"] or ""))
+        if match is None or match.group(1) not in normalized_ciks:
+            continue
         try:
             metadata = json.loads(str(row["query_params_json"] or "{}"))
         except json.JSONDecodeError:
@@ -279,8 +342,11 @@ def _live_source_discovery_time(
         response_kind = str(metadata.get("response_kind") or "").strip().lower()
         request_time = _timestamp(row["request_time_utc"])
         if request_time is not None and payload_source.startswith("live") and response_kind == "root_submissions":
-            return request_time
-    return None
+            discoveries.setdefault(
+                match.group(1),
+                (request_time, str(row["asof_date"] or "").strip()),
+            )
+    return discoveries
 
 
 def _canonical_core_metrics(
@@ -407,6 +473,7 @@ def build_financial_filing_lineage(
     model_family: str,
     asof: str,
     tickers: Iterable[str],
+    retrospective_source_discovery_max_days: int = 0,
 ) -> dict[str, dict[str, str]]:
     """Reconcile each ticker's latest material filing to canonical financial facts.
 
@@ -428,6 +495,16 @@ def build_financial_filing_lineage(
     score_sources = (
         _score_financial_sources(conn, model_family=model_family, asof=asof)
         if policy.require_score_incorporation
+        else {}
+    )
+    source_discoveries = (
+        _live_source_discoveries(
+            conn,
+            ciks=(filing.get("cik") for filing in filings),
+            asof=asof,
+            retrospective_max_days=retrospective_source_discovery_max_days,
+        )
+        if policy.require_live_source_discovery
         else {}
     )
     by_ticker: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in normalized}
@@ -562,9 +639,12 @@ def build_financial_filing_lineage(
             elif matched is None:
                 incorporated = None
                 lineage_reason = f"score_input_financial_source_not_latest_material_event:{source_accession}"
-            elif source_feature_asof != str(matched.get("filing_date") or "").strip()[:10]:
+            elif source_feature_asof != _availability_date(matched):
                 incorporated = None
-                lineage_reason = f"score_input_financial_feature_date_not_source_filing_date:{source_feature_asof}"
+                lineage_reason = (
+                    "score_input_financial_feature_date_not_source_availability_date:"
+                    f"{source_feature_asof}"
+                )
             elif source_feature_updated is None or scoring_updated is None:
                 incorporated = None
                 lineage_reason = "score_input_financial_source_timestamp_missing"
@@ -575,18 +655,28 @@ def build_financial_filing_lineage(
                 incorporated = matched
                 lineage_reason = f"score_input_traced_to_latest_material_financial_event:{source_accession}"
         if incorporated is not None and policy.require_live_source_discovery:
-            discovery_time = _live_source_discovery_time(
-                conn,
-                cik=latest.get("cik"),
-                asof=asof,
+            discovery_time, discovery_asof = source_discoveries.get(
+                _normalized_cik(latest.get("cik")),
+                (None, ""),
             )
             scoring_updated = _timestamp((score_sources.get(ticker) or {}).get("updated_at"))
             if discovery_time is None:
                 incorporated = None
-                lineage_reason = "live_sec_submissions_discovery_missing_for_asof"
-            elif scoring_updated is None or discovery_time > scoring_updated:
+                lineage_reason = (
+                    "live_sec_submissions_discovery_missing_for_asof"
+                    if retrospective_source_discovery_max_days == 0
+                    else "live_sec_submissions_discovery_missing_for_bounded_replay"
+                )
+            elif discovery_asof == asof and (
+                scoring_updated is None or discovery_time > scoring_updated
+            ):
                 incorporated = None
                 lineage_reason = "score_input_precedes_live_sec_submissions_discovery"
+            elif discovery_asof != asof:
+                lineage_reason = (
+                    f"{lineage_reason};retrospective_sec_submissions_discovery_confirmed:"
+                    f"capture_asof={discovery_asof}"
+                )
             else:
                 lineage_reason = f"{lineage_reason};live_sec_submissions_discovery_confirmed"
         status = "INCORPORATED" if incorporated is not None else "REVIEW_REQUIRED"

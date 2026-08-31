@@ -4,3 +4,7 @@ extend-exclude = ["portfolio_layer/MacroLayer"]
 
 [tool.ruff.lint.per-file-ignores]
 "biotech_index/scripts/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["archive", "artifacts", "output", "tmp", ".git", ".venv"]

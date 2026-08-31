@@ -20,6 +20,7 @@ from industrials.core.db import connect, init_db  # noqa: E402
 from industrials.core.logging_utils import configure_utc_logging  # noqa: E402
 from industrials.core.reports import write_csv_atomic  # noqa: E402
 from industrials.core.text_norm import normalize_ticker  # noqa: E402
+from industrials.core.ticker_continuity import ticker_continuity_chain  # noqa: E402
 
 
 LOGGER = logging.getLogger("validate_industrials_sec_positioning_stages")
@@ -275,25 +276,41 @@ def load_inactive_universe(conn: Any, model_family: str) -> list[str]:
     return [normalize_ticker(row["ticker"]) for row in rows if normalize_ticker(row["ticker"])]
 
 
-def count_by_ticker(conn: Any, table: str, tickers: list[str], source_id: str) -> dict[str, int]:
+def count_by_ticker(
+    conn: Any,
+    table: str,
+    tickers: list[str],
+    source_id: str,
+    *,
+    asof: date,
+) -> dict[str, int]:
     if not tickers:
         return {}
+    lookup_by_ticker = {
+        ticker: ticker_continuity_chain(conn, ticker, asof=asof) or (ticker,)
+        for ticker in tickers
+    }
+    physical_tickers = sorted(
+        {physical for chain in lookup_by_ticker.values() for physical in chain}
+    )
     rows = conn.execute(
         f"""
         SELECT ticker, COUNT(*) AS row_count
         FROM {table}
         WHERE source_id = ?
-          AND ticker IN ({placeholders(tickers)})
+          AND ticker IN ({placeholders(physical_tickers)})
         GROUP BY ticker
         """,
-        (source_id, *tickers),
+        (source_id, *physical_tickers),
     ).fetchall()
-    counts = {ticker: 0 for ticker in tickers}
+    physical_counts: dict[str, int] = {}
     for row in rows:
         ticker = normalize_ticker(row["ticker"])
-        if ticker in counts:
-            counts[ticker] = int(row["row_count"] or 0)
-    return counts
+        physical_counts[ticker] = int(row["row_count"] or 0)
+    return {
+        ticker: sum(physical_counts.get(physical, 0) for physical in chain)
+        for ticker, chain in lookup_by_ticker.items()
+    }
 
 
 def latest_features(conn: Any, tickers: list[str], source_id: str, model_family: str, asof: str) -> dict[str, dict[str, str]]:
@@ -485,11 +502,21 @@ def validate() -> int:
             if status != "active":
                 errors.append(f"Source {source_id} is not active in source_registry: {status!r}")
 
-        form4_counts = count_by_ticker(conn, "fact_sec_form4_transaction", all_tickers, form4_source)
-        direct_counts = count_by_ticker(conn, "fact_sec_form4_transaction", all_tickers, direct_ownership_source)
-        inst_counts = count_by_ticker(conn, "fact_13f_positioning", all_tickers, mp_source)
-        short_counts = count_by_ticker(conn, "fact_short_interest", all_tickers, mp_source)
-        borrow_counts = count_by_ticker(conn, "fact_ibkr_borrow_snapshot", all_tickers, mp_source)
+        form4_counts = count_by_ticker(
+            conn, "fact_sec_form4_transaction", all_tickers, form4_source, asof=evaluation_asof
+        )
+        direct_counts = count_by_ticker(
+            conn, "fact_sec_form4_transaction", all_tickers, direct_ownership_source, asof=evaluation_asof
+        )
+        inst_counts = count_by_ticker(
+            conn, "fact_13f_positioning", all_tickers, mp_source, asof=evaluation_asof
+        )
+        short_counts = count_by_ticker(
+            conn, "fact_short_interest", all_tickers, mp_source, asof=evaluation_asof
+        )
+        borrow_counts = count_by_ticker(
+            conn, "fact_ibkr_borrow_snapshot", all_tickers, mp_source, asof=evaluation_asof
+        )
         feature_map = latest_features(conn, active, positioning_source, model_family, feature_asof)
 
         active_set = set(active)

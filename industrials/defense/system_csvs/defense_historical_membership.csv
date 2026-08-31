@@ -1,1 +1,2 @@
-ticker,company_name,membership_start_date,membership_end_date,successor_ticker,source_membership,point_in_time_flag,notes
+ticker,company_name,membership_start_date,membership_end_date,successor_ticker,source_membership,point_in_time_flag,notes,calibration_cohort_id,cik,confidence
+ISSC,"Innovative Aerosystems, Inc.",2010-01-04,2026-08-17,IA,nasdaq_ticker_symbol_change,1,Ticker changed from ISSC to IA at the 2026-08-18 market open.,aerospace_components_materials_and_mro,836690,high

@@ -75,10 +75,15 @@ def expected_row_count(conn: sqlite3.Connection, *, asof: str, membership_mode: 
     return int(
         conn.execute(
             """
-            SELECT COUNT(DISTINCT c.ticker)
-            FROM dim_company c
-            JOIN dim_industrials_taxonomy t ON t.company_id = c.company_id
-            WHERE c.is_active = 1 AND t.model_family = ?
+            SELECT COUNT(DISTINCT m.ticker)
+            FROM dim_universe_membership m
+            JOIN dim_company c ON c.company_id = m.company_id
+            JOIN dim_industrials_taxonomy t
+              ON t.company_id = m.company_id AND t.model_family = m.model_family
+            WHERE m.model_family = ?
+              AND m.membership_basis = 'current_source_of_truth'
+              AND m.is_current_member = 1
+              AND c.is_active = 1
             """,
             (MODEL_FAMILY,),
         ).fetchone()[0]

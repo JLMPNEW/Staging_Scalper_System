@@ -178,3 +178,25 @@ def test_transportation_interest_coverage_marks_explicit_zero_debt_na() -> None:
     assert resolved({"total_debt_usd": 0.0, "interest_expense_ttm_usd": None})
     assert not resolved({"total_debt_usd": None, "interest_expense_ttm_usd": None})
     assert not resolved({"total_debt_usd": 10.0, "interest_expense_ttm_usd": 1.0})
+
+
+def test_transportation_validator_accepts_explicit_zero_debt_interest_na() -> None:
+    namespace = runpy.run_path(
+        str(
+            PROJECT_ROOT
+            / "industrials"
+            / "transportation"
+            / "scripts"
+            / "08a_validate_transportation_specialized_metrics.py"
+        )
+    )
+    resolved = namespace["metric_is_conditionally_inapplicable"]
+    financial = {
+        "total_debt_usd": 0.0,
+        "interest_expense_ttm_usd": None,
+        "cash_burn_ttm_usd": None,
+        "net_income_ttm_usd": 1.0,
+    }
+    assert resolved("interest_coverage", financial, reviewed_inapplicable=False)
+    financial["total_debt_usd"] = 1.0
+    assert not resolved("interest_coverage", financial, reviewed_inapplicable=False)

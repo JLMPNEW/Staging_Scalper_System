@@ -16,7 +16,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from orchestration_contracts.financial_lineage import (
     LINEAGE_FIELDS as FINANCIAL_LINEAGE_FIELDS,
@@ -36,6 +36,13 @@ COLLECTED_FIELDS = [
     "sector",
     "industry",
     "industry_aggregate",
+    "model_scope_id",       # independently calibrated/promotion-governed cohort
+    "production_policy_id", # immutable activation-lock identity when promoted
+    "production_policy_sha256",
+    "selection_reliability_class",
+    "active_sleeve_weight",
+    "benchmark_residual_weight",
+    "benchmark_residual_ticker",
     "native_score",          # the sector's own headline score (0-100 composite)
     "investable_eligible",   # 0/1 hard gate carried from the sector's native gate
     "eligibility_reason",
@@ -59,6 +66,13 @@ CONTRACT_FIELDS = [
     "sector",
     "industry",
     "industry_aggregate",
+    "model_scope_id",
+    "production_policy_id",
+    "production_policy_sha256",
+    "selection_reliability_class",
+    "active_sleeve_weight",
+    "benchmark_residual_weight",
+    "benchmark_residual_ticker",
     "final_score",               # calibrated expected forward alpha (annualized fraction)
     "rating",
     "within_sector_percentile",  # legacy name; percentile is computed within source_pipeline/sleeve
@@ -109,6 +123,13 @@ class CanonicalScore:
     survivorship_corrected_panel_flag: int
     score_confidence: float
     source_asof_date: str
+    model_scope_id: str = ""
+    production_policy_id: str = ""
+    production_policy_sha256: str = ""
+    selection_reliability_class: str = ""
+    active_sleeve_weight: float | None = None
+    benchmark_residual_weight: float | None = None
+    benchmark_residual_ticker: str = ""
     financial_lineage_checked_asof_date: str = ""
     financial_lineage_status: str = ""
     financial_lineage_gate: int = 0
@@ -359,6 +380,13 @@ def expected_alpha(native_score: float, *, neutral: float, scale: float, expecte
     return expected_alpha_at_full * (native_score - neutral) / scale
 
 
+def calibration_scope_key(row: Mapping[str, object]) -> tuple[str, str]:
+    """Return the canonical population key for independently calibrated score rows."""
+    pipeline = str(row.get("source_pipeline") or "").strip()
+    scope = str(row.get("model_scope_id") or "").strip() or pipeline
+    return pipeline, scope
+
+
 def rating_for_percentile(pct: float, bands: dict[str, float]) -> str:
     for label in ("strong_buy", "buy", "hold", "reduce", "avoid"):
         threshold = _f(bands[label]) if label in bands else None
@@ -423,6 +451,13 @@ CREATE TABLE IF NOT EXISTS stocks_scores (
     sector TEXT,
     industry TEXT,
     industry_aggregate TEXT,
+    model_scope_id TEXT,
+    production_policy_id TEXT,
+    production_policy_sha256 TEXT,
+    selection_reliability_class TEXT,
+    active_sleeve_weight REAL,
+    benchmark_residual_weight REAL,
+    benchmark_residual_ticker TEXT,
     final_score REAL,
     rating TEXT,
     within_sector_percentile REAL,
@@ -502,6 +537,18 @@ def _ensure_stocks_scores_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE stocks_scores ADD COLUMN missing_score_flag INTEGER NOT NULL DEFAULT 0")
     if "survivorship_corrected_panel_flag" not in existing:
         conn.execute("ALTER TABLE stocks_scores ADD COLUMN survivorship_corrected_panel_flag INTEGER NOT NULL DEFAULT 0")
+    for column in (
+        "model_scope_id",
+        "production_policy_id",
+        "production_policy_sha256",
+    "selection_reliability_class",
+    "benchmark_residual_ticker",
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE stocks_scores ADD COLUMN {column} TEXT")
+    for column in ("active_sleeve_weight", "benchmark_residual_weight"):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE stocks_scores ADD COLUMN {column} REAL")
     for column in FINANCIAL_LINEAGE_FIELDS:
         if column in existing:
             continue
@@ -519,7 +566,10 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
     payload = [
         (
             run_as_of, r["ticker"], r["source_pipeline"], r["as_of_date"], r["sector"], r["industry"],
-            r["industry_aggregate"], _f(r.get("final_score")), r.get("rating"),
+            r["industry_aggregate"], r.get("model_scope_id"), r.get("production_policy_id"),
+            r.get("production_policy_sha256"), r.get("selection_reliability_class"),
+            _f(r.get("active_sleeve_weight")), _f(r.get("benchmark_residual_weight")),
+            r.get("benchmark_residual_ticker"), _f(r.get("final_score")), r.get("rating"),
             _f(r.get("within_sector_percentile")), _f(r.get("score_confidence")),
             int(r.get("investable_eligible") or 0), r.get("eligibility_reason"), _f(r.get("native_score")),
             int(r.get("calibration_research_eligible") or 0), r.get("calibration_research_reason"),
@@ -544,7 +594,10 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
             """
             INSERT INTO stocks_scores(
                 run_as_of_date, ticker, source_pipeline, as_of_date, sector, industry, industry_aggregate,
-                final_score, rating, within_sector_percentile, score_confidence, investable_eligible,
+                model_scope_id, production_policy_id, production_policy_sha256,
+                selection_reliability_class, active_sleeve_weight, benchmark_residual_weight,
+                benchmark_residual_ticker, final_score, rating, within_sector_percentile,
+                score_confidence, investable_eligible,
                 eligibility_reason, native_score, calibration_research_eligible, calibration_research_reason,
                 calibration_sample_role, stage1_sample_role, oos_score_valid_flag, missing_score_flag,
                 survivorship_corrected_panel_flag, source_asof_date, staleness_days, score_version, created_at,
@@ -553,7 +606,7 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
                 latest_material_financial_form, latest_material_financial_accession,
                 latest_material_financial_report_date, incorporated_financial_filing_date, incorporated_financial_accession,
                 incorporated_financial_report_date, incorporated_financial_core_metric_count, financial_lineage_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             payload,
         )

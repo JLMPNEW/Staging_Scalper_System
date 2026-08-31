@@ -24,6 +24,9 @@ from technology.core.config import cfg_get, load_yaml, resolve_path  # noqa: E40
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.text_norm import normalize_ticker  # noqa: E402
+from industrials.core.financial_filing_lineage import (  # noqa: E402
+    filing_market_availability_date,
+)
 
 
 LOGGER = logging.getLogger("build_technology_financial_features")
@@ -148,6 +151,11 @@ def parse_date(raw: object) -> date | None:
         return None
 
 
+def filing_availability_date(filing: dict[str, Any]) -> date | None:
+    """Return the first market session allowed to consume the filing."""
+    return parse_date(filing_market_availability_date(filing))
+
+
 def safe_float(raw: Any) -> float | None:
     try:
         value = float(raw)
@@ -217,6 +225,37 @@ def apply_sign_policy(value: float, sign_policy: str) -> float:
     return value
 
 
+def load_filing_acceptance_by_accession(
+    conn: Any,
+    *,
+    ticker: str,
+) -> dict[str, str]:
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(fact_sec_filing)")
+    }
+    if "accepted_at" in columns:
+        acceptance_expression = "accepted_at"
+    elif "acceptance_datetime" in columns:
+        acceptance_expression = "acceptance_datetime"
+    else:
+        acceptance_expression = "filing_date"
+    rows = conn.execute(
+        f"""
+        SELECT accession_number,
+               MIN(COALESCE(NULLIF({acceptance_expression}, ''), filing_date)) AS accepted_at
+        FROM fact_sec_filing
+        WHERE ticker = ?
+          AND COALESCE(accession_number, '') <> ''
+        GROUP BY accession_number
+        """,
+        (ticker,),
+    ).fetchall()
+    return {
+        str(row["accession_number"] or ""): str(row["accepted_at"] or "")
+        for row in rows
+    }
+
+
 def reported_currency(unit: str, unit_type: str) -> str:
     unit = str(unit or "").strip().upper()
     if unit_type != "currency":
@@ -253,6 +292,10 @@ def load_concept_map(conn: Any) -> dict[tuple[str, str], list[dict[str, Any]]]:
 
 def rebuild_canonical_for_ticker(conn: Any, ticker: str, source_id: str) -> int:
     concept_map = load_concept_map(conn)
+    acceptance_by_accession = load_filing_acceptance_by_accession(
+        conn,
+        ticker=ticker,
+    )
     raw_rows = conn.execute(
         """
         SELECT *
@@ -300,14 +343,16 @@ def rebuild_canonical_for_ticker(conn: Any, ticker: str, source_id: str) -> int:
                 INSERT INTO fact_financial_statement_canonical(
                     canonical_fact_key, ticker, cik, source_id, period_end_date,
                     period_start_date, fiscal_year, fiscal_period, form_type,
-                    filing_date, accession_number, canonical_metric,
+                    filing_date, accepted_at, accession_number, canonical_metric,
                     value_reported_currency, reported_currency, value_usd,
                     source_taxonomy, source_concept, source_unit, source_priority,
                     source_quality, is_direct_reported, is_derived, is_annual_only,
                     source_detail, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
                 ON CONFLICT(canonical_fact_key) DO UPDATE SET
+                    filing_date = excluded.filing_date,
+                    accepted_at = excluded.accepted_at,
                     value_reported_currency = excluded.value_reported_currency,
                     reported_currency = excluded.reported_currency,
                     source_priority = excluded.source_priority,
@@ -326,6 +371,10 @@ def rebuild_canonical_for_ticker(conn: Any, ticker: str, source_id: str) -> int:
                     str(row["fiscal_period"] or ""),
                     str(row["form_type"] or ""),
                     str(row["filing_date"] or ""),
+                    acceptance_by_accession.get(
+                        str(row["accession_number"] or ""),
+                        str(row["filing_date"] or ""),
+                    ),
                     str(row["accession_number"] or ""),
                     metric,
                     value,
@@ -379,15 +428,17 @@ def insert_derived_liabilities(conn: Any, ticker: str, source_id: str) -> int:
             INSERT INTO fact_financial_statement_canonical(
                 canonical_fact_key, ticker, cik, source_id, period_end_date,
                 period_start_date, fiscal_year, fiscal_period, form_type,
-                filing_date, accession_number, canonical_metric,
+                filing_date, accepted_at, accession_number, canonical_metric,
                 value_reported_currency, reported_currency, value_usd,
                 source_taxonomy, source_concept, source_unit, source_priority,
                 source_quality, is_direct_reported, is_derived, is_annual_only,
                 source_detail, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'liabilities', ?, ?, NULL,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'liabilities', ?, ?, NULL,
                     'derived', 'assets_minus_equity', ?, 90, ?, 0, 1, ?, ?, ?, ?)
             ON CONFLICT(canonical_fact_key) DO UPDATE SET
+                filing_date = excluded.filing_date,
+                accepted_at = excluded.accepted_at,
                 value_reported_currency = excluded.value_reported_currency,
                 reported_currency = excluded.reported_currency,
                 source_quality = excluded.source_quality,
@@ -405,6 +456,7 @@ def insert_derived_liabilities(conn: Any, ticker: str, source_id: str) -> int:
                 str(template["fiscal_period"] or ""),
                 str(template["form_type"] or ""),
                 str(template["filing_date"] or ""),
+                str(template["accepted_at"] or ""),
                 accession,
                 value,
                 currency,
@@ -459,9 +511,20 @@ def load_canonical_facts(conn: Any, ticker: str, source_id: str) -> list[Canonic
 
 
 def load_filings(conn: Any, ticker: str, source_id: str) -> list[dict[str, Any]]:
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(fact_sec_filing)")
+    }
+    if "accepted_at" in columns:
+        acceptance_expression = "accepted_at"
+    elif "acceptance_datetime" in columns:
+        acceptance_expression = "acceptance_datetime"
+    else:
+        acceptance_expression = "filing_date"
     rows = conn.execute(
-        """
-        SELECT accession_number, form_type, filing_date, report_date, fiscal_year, fiscal_period
+        f"""
+        SELECT accession_number, form_type, filing_date,
+               {acceptance_expression} AS accepted_at,
+               report_date, fiscal_year, fiscal_period
         FROM fact_sec_filing
         WHERE ticker = ? AND source_id = ?
           AND (
@@ -1008,7 +1071,14 @@ def build_ticker_features(
         filing_facts = by_accession.get(accession, [])
         metadata_report_date = parse_date(filing.get("report_date"))
         filing_date = parse_date(filing.get("filing_date"))
-        if not accession or not filing_facts or metadata_report_date is None or filing_date is None:
+        availability_date = filing_availability_date(filing)
+        if (
+            not accession
+            or not filing_facts
+            or metadata_report_date is None
+            or filing_date is None
+            or availability_date is None
+        ):
             continue
         form_type = str(filing.get("form_type") or "")
         report_date = filing_financial_period_end(
@@ -1075,7 +1145,7 @@ def build_ticker_features(
             canonical_quality = "mixed_or_derived"
         feature = {
             "ticker": ticker,
-            "asof_date": filing_date.isoformat(),
+            "asof_date": availability_date.isoformat(),
             "source_id": facts_source,
             "model_family": model_family,
             "accession_number": accession,

@@ -198,7 +198,7 @@ def _guidance_items(
             all_rows.extend(dict(row) for row in rows)
     finally:
         conn.close()
-    prior: dict[tuple[str, str], float] = {}
+    prior: dict[tuple[str, str], dict[str, Any]] = {}
     output: list[dict[str, Any]] = []
     for row in all_rows:
         ticker = str(row["ticker"]).upper()
@@ -208,21 +208,42 @@ def _guidance_items(
             continue
         midpoint = float(midpoint_raw)
         key = (ticker, metric)
-        previous = prior.get(key)
-        prior[key] = midpoint
+        previous_row = prior.get(key)
+        prior[key] = row
         event_date = str(row["filing_date"])
-        if event_date < floor or previous is None:
+        if event_date < floor or previous_row is None:
             continue
+        previous = float(previous_row["midpoint_value"])
         scale = max(abs(previous), abs(midpoint), 1e-9)
         change = (midpoint - previous) / scale
         if abs(change) < 0.005:
             direction = 0.2
         else:
             direction = 1.0 if change > 0 else -1.0
+        guidance_identity = {
+            "identity_version": "guidance_change_v2",
+            "current": {
+                "guidance_unique_key": str(row["guidance_unique_key"]),
+                "filing_date": event_date,
+                "metric": metric,
+                "midpoint_value": midpoint,
+                "confidence": float(row["confidence"] or 0.0),
+                "accession_nodash": str(row["accession_nodash"] or ""),
+                "created_at": str(row["created_at"] or ""),
+            },
+            "predecessor": {
+                "guidance_unique_key": str(previous_row["guidance_unique_key"]),
+                "filing_date": str(previous_row["filing_date"]),
+                "midpoint_value": previous,
+            },
+        }
         output.append(
             {
                 "source": "biotech_guidance",
-                "source_uid": str(row["guidance_unique_key"]),
+                # A guidance-change event is derived from two source records. Seal
+                # both inputs into its identity so a corrected predecessor appends
+                # a new revision instead of mutating an immutable raw item.
+                "source_uid": f"guidance_change_v2:{digest(guidance_identity)}",
                 "ticker_hint": ticker,
                 "published_at_utc": _iso_timestamp(row["created_at"], fallback_date=event_date),
                 "fetched_at_utc": fetched_at,
@@ -234,6 +255,10 @@ def _guidance_items(
                     "event_date": event_date,
                     "direction": direction,
                     "metric": metric,
+                    "guidance_unique_key": str(row["guidance_unique_key"]),
+                    "predecessor_guidance_unique_key": str(
+                        previous_row["guidance_unique_key"]
+                    ),
                     "prior_midpoint": previous,
                     "current_midpoint": midpoint,
                     "relative_change": change,

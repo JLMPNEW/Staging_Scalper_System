@@ -31,9 +31,10 @@ from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E4
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
 from portfolio_layer.sleeves.risk_model import (  # noqa: E402
+    ENB_MATERIAL_REL_TOL,
     build_sleeve_risk_proposal,
     effective_number_of_bets,
-    enforce_rc_cap_to_cash,
+    enforce_rc_cap_with_enb_guard,
     factor_decomposition,
     information_ratios,
     risk_contributions,
@@ -49,7 +50,44 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 # to improve to machine precision makes the gate reject economically immaterial trade-offs. A
 # decline greater than 1% of the Stage 7 baseline remains a hard failure; any smaller decline is
 # surfaced separately as WARN. Stage 8 is shadow-only, so this cannot authorize production risk.
-DIVERSIFICATION_MATERIAL_REL_TOL = 0.01
+DIVERSIFICATION_MATERIAL_REL_TOL = ENB_MATERIAL_REL_TOL
+
+
+def diversification_failures(
+    *,
+    allocation_mode: str,
+    enb_before: float,
+    enb_after: float,
+    total_variance_before: float,
+    total_variance_after: float,
+    systematic_variance_before: float,
+    systematic_variance_after: float,
+    relative_tolerance: float = DIVERSIFICATION_MATERIAL_REL_TOL,
+) -> list[str]:
+    """Return hard Stage-8 diversification failures.
+
+    The documented Phase-1 contract hard-gates ENB and factor-share caps. The
+    idiosyncratic-share floor is diagnostic/WARN-only because a valid sleeve
+    rebudget can improve ENB while moving that ratio slightly. In the one-sleeve
+    RC-cap-only mode, also require absolute total and systematic variance not to
+    increase because the only supported operation is de-risking to cash.
+    """
+    failures: list[str] = []
+    enb_floor = float(enb_before) * (1.0 - float(relative_tolerance))
+    if float(enb_after) + 1e-6 < enb_floor:
+        failures.append(f"enb {enb_after:.3f}<{enb_before:.3f}")
+    if allocation_mode.endswith("_rc_cap_only"):
+        variance_tol = max(1e-12, float(total_variance_before) * 1e-8)
+        if float(total_variance_after) > float(total_variance_before) + variance_tol:
+            failures.append(
+                f"total_var {total_variance_after:.8f}>{total_variance_before:.8f}"
+            )
+        if float(systematic_variance_after) > float(systematic_variance_before) + variance_tol:
+            failures.append(
+                "systematic_var "
+                f"{systematic_variance_after:.8f}>{systematic_variance_before:.8f}"
+            )
+    return failures
 SOURCE_FILES = ["risk_model.py", "27_build_sleeve_framework.py", "28_apply_risk_budgets.py", "29_validate_sleeves.py"]
 
 
@@ -336,27 +374,22 @@ def main() -> int:  # noqa: C901
     # solve: 28 preserves Stage 7 and only trims hard RC-cap breaches to CASH. In that cap-only
     # mode the safety invariant is no increase in total/systematic variance; a ratio can move
     # slightly even while both absolute risks fall.
-    div_bad = []
-    enb_material_floor = enb_before * (1.0 - DIVERSIFICATION_MATERIAL_REL_TOL)
     idio_before = factor_before["idiosyncratic_share"]
     idio_after = factor_after["idiosyncratic_share"]
-    idio_material_floor = idio_before * (1.0 - DIVERSIFICATION_MATERIAL_REL_TOL)
-    if enb_after + 1e-6 < enb_material_floor:
-        div_bad.append(f"enb {enb_after:.3f}<{enb_before:.3f}")
     allocation_mode = str(meta28.get("allocation_mode", "")).strip()
-    rc_cap_only = allocation_mode == "single_sleeve_rc_cap_only"
-    if rc_cap_only:
-        total_before = float(factor_before["total_variance"])
-        total_after = float(factor_after["total_variance"])
-        systematic_before = total_before * float(factor_before["systematic_share"])
-        systematic_after = total_after * float(factor_after["systematic_share"])
-        variance_tol = max(1e-12, total_before * 1e-8)
-        if total_after > total_before + variance_tol:
-            div_bad.append(f"total_var {total_after:.8f}>{total_before:.8f}")
-        if systematic_after > systematic_before + variance_tol:
-            div_bad.append(f"systematic_var {systematic_after:.8f}>{systematic_before:.8f}")
-    elif idio_after + 1e-6 < idio_material_floor:
-        div_bad.append(f"idio {idio_after:.4f}<{idio_before:.4f}")
+    total_before = float(factor_before["total_variance"])
+    total_after = float(factor_after["total_variance"])
+    systematic_before = total_before * float(factor_before["systematic_share"])
+    systematic_after = total_after * float(factor_after["systematic_share"])
+    div_bad = diversification_failures(
+        allocation_mode=allocation_mode,
+        enb_before=enb_before,
+        enb_after=enb_after,
+        total_variance_before=total_before,
+        total_variance_after=total_after,
+        systematic_variance_before=systematic_before,
+        systematic_variance_after=systematic_after,
+    )
     rec("diversification_not_worsened", "PASS" if not div_bad else "FAIL",
         f"mode={allocation_mode}; ENB {enb_before:.2f}->{enb_after:.2f}; "
         f"idio {idio_before:.3f}->{idio_after:.3f}; materiality={DIVERSIFICATION_MATERIAL_REL_TOL:.1%}"
@@ -369,7 +402,7 @@ def main() -> int:  # noqa: C901
     rec(
         "diversification_tradeoff_review",
         "WARN" if minor_tradeoffs else "PASS",
-        f"sub-material trade-offs: {minor_tradeoffs}" if minor_tradeoffs
+        f"WARN-only relative diagnostics declined: {minor_tradeoffs}" if minor_tradeoffs
         else "no diversification metric declined",
     )
 
@@ -434,7 +467,7 @@ def main() -> int:  # noqa: C901
             tilt=tilt,
             rc_cap=rc_cap,
         )
-        replay, replay_mode, replay_active_sleeves = build_sleeve_risk_proposal(
+        replay, proposed_replay_mode, replay_active_sleeves = build_sleeve_risk_proposal(
             cov,
             replay_budget,
             prior_weights=prior,
@@ -443,19 +476,40 @@ def main() -> int:  # noqa: C901
             max_weight=max_weight,
             max_iter=max_iter,
         )
-        if replay_mode != allocation_mode:
-            det_bad.append(f"allocation_mode:{allocation_mode}!={replay_mode}")
+        stored_proposed_mode = str(meta28.get("proposed_allocation_mode", "")).strip()
+        if proposed_replay_mode != stored_proposed_mode:
+            det_bad.append(
+                f"proposed_allocation_mode:{stored_proposed_mode}!={proposed_replay_mode}"
+            )
         stored_active_sleeves = tuple(str(value) for value in (meta28.get("active_sleeves") or []))
         if stored_active_sleeves != replay_active_sleeves:
             det_bad.append(
                 f"active_sleeves:{stored_active_sleeves}!={replay_active_sleeves}"
             )
-        replay_enforcement = enforce_rc_cap_to_cash(
+        replay_guard = enforce_rc_cap_with_enb_guard(
             replay,
+            prior,
             cov,
             rc_cap=rc_cap,
+            allocation_mode=proposed_replay_mode,
             max_iter=max_iter,
         )
+        replay_enforcement = replay_guard.enforcement
+        replay_mode = replay_guard.allocation_mode
+        if replay_mode != allocation_mode:
+            det_bad.append(f"allocation_mode:{allocation_mode}!={replay_mode}")
+        stored_guard = meta28.get("enb_guard") or {}
+        if bool(stored_guard.get("fallback_applied")) != replay_guard.fallback_applied:
+            det_bad.append("enb_guard_fallback_mismatch")
+        for key, value in (
+            ("baseline_enb", replay_guard.baseline_enb),
+            ("proposal_enb", replay_guard.proposal_enb),
+            ("required_enb", replay_guard.required_enb),
+            ("final_enb", replay_guard.final_enb),
+        ):
+            stored_value = _f(stored_guard.get(key))
+            if stored_value is None or abs(stored_value - value) > 1e-8:
+                det_bad.append(f"enb_guard_{key}_mismatch")
         replay = replay_enforcement.weights
         throttle_meta = meta28.get("drawdown_throttle_simulation") or {}
         applied_scale = _f(throttle_meta.get("applied_scale"))

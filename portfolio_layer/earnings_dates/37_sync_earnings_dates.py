@@ -12,6 +12,7 @@ Provider waterfall (adapted from PROD earnings_release_lookup.py):
 Outputs: `runs/<as_of>/earnings_dates/earnings_calendar.csv` + manifest, and an
 append-only PIT history at `output/earnings_dates/earnings_calendar_history.csv`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -54,6 +55,7 @@ from portfolio_layer.earnings_dates.earnings_common import (  # noqa: E402
     latest_accepted_stock_ledger,
     latest_run_with_artifact,
     load_history,
+    pipeline_coverage_summary,
     source_hashes,
     symbol_variants,
 )
@@ -363,9 +365,7 @@ def history_rows_available_asof(
         fetched_at = str(row.get("fetched_at_utc", "")).strip()
         try:
             row_date = date.fromisoformat(row_as_of)
-            fetched_date = datetime.fromisoformat(
-                fetched_at.replace("Z", "+00:00")
-            ).date()
+            fetched_date = datetime.fromisoformat(fetched_at.replace("Z", "+00:00")).date()
         except ValueError:
             continue
         if row_date <= cutoff and fetched_date <= cutoff:
@@ -526,9 +526,7 @@ def main() -> int:
     history_path = paths.output_dir / HISTORY_RELATIVE_PATH
     history_rows = load_history(history_path)
     prior_source_rows = (
-        history_rows_available_asof(history_rows, as_of=run_as_of)
-        if roll_forward_only
-        else history_rows
+        history_rows_available_asof(history_rows, as_of=run_as_of) if roll_forward_only else history_rows
     )
     prior_dates = latest_prior_dates(prior_source_rows)
 
@@ -640,7 +638,9 @@ def main() -> int:
             }
         )
 
-    rows.sort(key=lambda r: (r["investable_eligible"] != "1", str(r["next_earnings_date"]) or "9999-99-99", r["ticker"]))
+    rows.sort(
+        key=lambda r: (r["investable_eligible"] != "1", str(r["next_earnings_date"]) or "9999-99-99", r["ticker"])
+    )
     write_csv(artifact_path, EARNINGS_CALENDAR_FIELDS, rows)
     appended = append_history(history_path, history_rows, rows)
 
@@ -650,6 +650,7 @@ def main() -> int:
     for row in rows:
         source_counts[str(row["source"])] = source_counts.get(str(row["source"]), 0) + 1
     changed = sum(1 for r in rows if r["date_changed_flag"] == "1")
+    pipeline_coverage = pipeline_coverage_summary(rows)
 
     meta = {
         "stage": "earnings_dates_sync",
@@ -657,13 +658,18 @@ def main() -> int:
         "generated_at": fetched_at,
         "acceptance": "PASS",
         "advisory_only": True,
+        "allocation_input": False,
+        "required_for_final_reporting": True,
         "historical_catchup": bool(args.historical_catchup),
         "roll_forward_only": roll_forward_only,
         "provider_network_calls_allowed": provider_network_calls_allowed,
         "universe_size": len(rows),
         "investable_count": len(investable_rows),
         "investable_with_date": len(dated_investable),
-        "investable_coverage_fraction": round(len(dated_investable) / len(investable_rows), 4) if investable_rows else 0.0,
+        "investable_coverage_fraction": round(len(dated_investable) / len(investable_rows), 4)
+        if investable_rows
+        else 0.0,
+        "pipeline_coverage": pipeline_coverage,
         "source_counts": dict(sorted(source_counts.items())),
         "dates_changed_vs_prior": changed,
         "yahoo_calls": yahoo_calls,

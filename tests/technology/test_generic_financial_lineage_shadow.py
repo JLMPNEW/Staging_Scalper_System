@@ -48,14 +48,14 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
     conn.execute(
         "INSERT INTO fact_sec_filing VALUES (?,?,?,?,?,?,?,?)",
         (
-            "SAFE", "1", "safe-2026", "10-Q", "2026-08-01",
-            "2026-08-01T09:30:00", "2026-06-30", "safe.htm",
+            "SAFE", "1", "safe-2026", "10-Q", "2026-08-03",
+            "2026-08-03T09:30:00", "2026-06-30", "safe.htm",
         ),
     )
     conn.executemany(
         "INSERT INTO fact_financial_statement_canonical VALUES (?,?,?,?)",
         [
-            ("SAFE", metric, "safe-2026", "2026-08-01")
+            ("SAFE", metric, "safe-2026", "2026-08-03")
             for metric in ("revenue", "assets", "operating_income")
         ],
     )
@@ -69,7 +69,7 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
             "SAFE",
             "software_infrastructure",
             ASOF,
-            "2026-08-01",
+            "2026-08-03",
             "safe-2026",
             "2026-06-30",
             "2026-08-14T12:01:00Z",
@@ -129,3 +129,43 @@ def test_software_shadow_uses_family_policy_and_artifact_names(tmp_path: Path) -
     assert manifest["model_family"] == "software_infrastructure"
     assert (output_dir / "software_infrastructure_financial_lineage_shadow.csv").is_file()
     assert (output_dir / "software_infrastructure_financial_lineage_shadow.json").is_file()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE raw_api_responses
+            SET asof_date = '2026-08-15',
+                request_time_utc = '2026-08-15T12:00:00Z'
+            """
+        )
+
+    strict_manifest = build_financial_lineage_shadow(
+        db_path=db_path,
+        rank_table_path=rank_path,
+        output_dir=tmp_path / "strict_replay",
+        model_family="software_infrastructure",
+        expected_asof=ASOF,
+        policy_context="production",
+    )
+    assert strict_manifest["acceptance"] == "FAIL"
+
+    replay_dir = tmp_path / "bounded_replay"
+    replay_manifest = build_financial_lineage_shadow(
+        db_path=db_path,
+        rank_table_path=rank_path,
+        output_dir=replay_dir,
+        model_family="software_infrastructure",
+        expected_asof=ASOF,
+        policy_context="production",
+        retrospective_source_discovery_max_days=1,
+    )
+    assert replay_manifest["acceptance"] == "PASS"
+    assert replay_manifest["retrospective_source_discovery_count"] == 1
+    with (
+        replay_dir / "software_infrastructure_financial_lineage_shadow.csv"
+    ).open(encoding="utf-8", newline="") as handle:
+        replay_row = next(csv.DictReader(handle))
+    assert (
+        "retrospective_sec_submissions_discovery_confirmed:capture_asof=2026-08-15"
+        in replay_row["financial_lineage_reason"]
+    )

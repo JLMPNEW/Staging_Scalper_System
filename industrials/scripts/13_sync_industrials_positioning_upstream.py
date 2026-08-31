@@ -637,7 +637,9 @@ def execute_daily_ibkr_borrow_sweep(
     """Run the incremental IBKR borrow fee-rate sweep for the daily path.
 
     Always passes shortable_snapshot=False: a daily run must never backdate a
-    current shortableShares observation. By default a failure (IB Gateway
+    current shortableShares observation. It also disables left-edge history
+    repair; daily mode only extends the latest fee-rate tail, while explicit
+    full mode retains the historical backfill contract. By default a failure (IB Gateway
     unreachable, empty active universe, ...) degrades gracefully: an ERROR
     names the staleness consequence and the daily sync continues, because the
     fail-closed authority is 14_validate's staleness gate. With
@@ -655,6 +657,7 @@ def execute_daily_ibkr_borrow_sweep(
             history_start_date=history_start,
             end_date=end_date,
             shortable_snapshot=False,
+            backfill_fee_history_left_edge=False,
             **sweep_kwargs,
         )
     except Exception as exc:  # noqa: BLE001 - degraded mode must survive any sweep failure
@@ -804,18 +807,9 @@ def execute_daily_finra_short_interest_sweep(
                 "message": f"no FINRA cycle publishable on or before {end_date.isoformat()}; no network request made",
             }
         loaded = family_max_finra_settlement(conn, tickers)
-        if loaded is not None and loaded >= expected:
-            return {
-                "feed": feed,
-                "status": "no_new_data",
-                "rows": 0,
-                "message": (
-                    f"newest publishable cycle settlement={expected.isoformat()} already loaded "
-                    f"(family max settlement={loaded.isoformat()}); no network request made"
-                ),
-            }
+        cycle_was_current = loaded is not None and loaded >= expected
         catchup_start = (
-            max(history_start, loaded + timedelta(days=1)) if loaded is not None else history_start
+            max(history_start, loaded) if loaded is not None else history_start
         )
         result = sweep_fn(
             conn,
@@ -855,6 +849,17 @@ def execute_daily_finra_short_interest_sweep(
                 f"expected cycle settlement={expected.isoformat()} still absent after sweeping "
                 f"{catchup_start.isoformat()}..{end_date.isoformat()} (file not yet published or "
                 f"no family symbols in file; nightly retry is cache-friendly): {result.message}"
+            ),
+        }
+    if cycle_was_current:
+        return {
+            "feed": feed,
+            "status": "no_new_data",
+            "rows": 0,
+            "message": (
+                f"newest publishable cycle settlement={expected.isoformat()} was already loaded; "
+                "replayed that cycle inclusively to repair partial-family coverage: "
+                f"{result.message}"
             ),
         }
     return {
@@ -1972,6 +1977,9 @@ def run_selftest() -> int:
     assert recorded["sweep"]["shortable_snapshot"] is False, (
         "daily sweep must never sample the shortable snapshot"
     )
+    assert recorded["sweep"]["backfill_fee_history_left_edge"] is False, (
+        "daily sweep must not repeat full-history left-edge repair"
+    )
     assert recorded["sweep"]["fee_rate_incremental_duration"] == "45 D"
     assert recorded["universe"][1].name == "positioning_universe_ibkr_active.csv"
 
@@ -2120,8 +2128,8 @@ def run_selftest() -> int:
         assert pending_cycle["status"] == "no_new_data" and pending_cycle["rows"] == 0, pending_cycle
         assert "settlement=2026-07-15 still absent" in pending_cycle["message"], pending_cycle
         assert "files_found=0" in pending_cycle["message"], pending_cycle
-        assert finra_calls["kwargs"]["history_start_date"] == date(2026, 6, 16), (
-            "catch-up sweep must start at the day after the last loaded settlement"
+        assert finra_calls["kwargs"]["history_start_date"] == date(2026, 6, 15), (
+            "catch-up sweep must replay the last loaded settlement for partial-family repair"
         )
 
         def fake_finra_sweep(conn: Any, **kwargs: Any) -> SyncResult:
@@ -2144,8 +2152,8 @@ def run_selftest() -> int:
             sweep_fn=fake_finra_sweep,
         )
         assert ran["status"] == "ran" and ran["rows"] == 42, ran
-        assert finra_calls["kwargs"]["history_start_date"] == date(2026, 6, 16), (
-            "catch-up sweep must start at the day after the last loaded settlement"
+        assert finra_calls["kwargs"]["history_start_date"] == date(2026, 6, 15), (
+            "catch-up sweep must replay the last loaded settlement for partial-family repair"
         )
         finra_calls.clear()
         current = execute_daily_finra_short_interest_sweep(
@@ -2160,8 +2168,10 @@ def run_selftest() -> int:
             sweep_fn=fake_finra_sweep,
         )
         assert current["status"] == "no_new_data", current
-        assert "no network request made" in current["message"], current
-        assert not finra_calls, "no_new_data path must not invoke the FINRA sweep"
+        assert "replayed that cycle inclusively" in current["message"], current
+        assert finra_calls["kwargs"]["history_start_date"] == date(2026, 7, 15), (
+            "a current cycle must still be replayed to repair missing family symbols"
+        )
 
         def failing_finra_sweep(conn: Any, **kwargs: Any) -> SyncResult:
             raise TimeoutError("FINRA CDN unreachable")

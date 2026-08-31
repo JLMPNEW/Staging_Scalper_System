@@ -30,6 +30,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from biotech_index.core.calibration_provenance import observation_scoring_config_hash  # noqa: E402
 from biotech_index.core.commercial_risk import commercial_risk_overlay_fields  # noqa: E402
 from biotech_index.core.config import cfg_get, load_yaml, normalize_string_list, resolve_path  # noqa: E402
 from biotech_index.core.constants import (  # noqa: E402
@@ -2134,8 +2135,30 @@ def generate_selection_policies(config: dict[str, Any]) -> list[SelectionPolicy]
                 policy = policy_from_dict(raw, fallback_name=f"custom_policy_{idx}")
                 if policy.policy_name != raw_baseline.policy_name:
                     policies.append(policy)
-        if policies:
-            return policies
+        production_policy_name = str(
+            cfg_get(config, "biotech_scoring.production_baseline.selection_policy", "core_structural_veto")
+            or "core_structural_veto"
+        ).strip()
+        configured_names = {policy.policy_name for policy in policies}
+        if production_policy_name not in configured_names:
+            if production_policy_name == "core_structural_veto":
+                policies.append(
+                    SelectionPolicy(
+                        policy_name="core_structural_veto",
+                        description=(
+                            "Production incumbent: exclude only core structural hard weakness; "
+                            "allow event/dilution risk as diagnostic exposure."
+                        ),
+                        hard_veto=True,
+                        hard_veto_reasons=tuple(sorted(CORE_HARD_WEAKNESS_REASONS)),
+                    )
+                )
+            else:
+                raise ValueError(
+                    "calibration.tier1.selection_policies omits the configured production incumbent "
+                    f"{production_policy_name!r}; add its complete policy definition"
+                )
+        return policies
 
     prod_event_penalty = production_policy_float(config, "event_hard_penalty", 10.0)
     prod_soft_penalty = production_policy_float(config, "soft_weakness_penalty", 8.0)
@@ -8095,49 +8118,7 @@ def main() -> None:
         observation_cache_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns.csv")
         observation_cache_manifest_path = progress_csv_path(output_dir, "tier1_observations_with_forward_returns_manifest.json")
         terminal_events_by_ticker = load_terminal_events()
-        calibration_cohort_settings = cfg_get(config, "biotech_scoring.calibration_cohorts", {}) or {}
-        calibration_cohorts_csv = resolve_path(
-            calibration_cohort_settings.get("csv", "data/biotech_calibration_cohorts.csv"),
-            base_dir=base_dir,
-        )
-        # Scoring-relevant config subtrees that shape observation content but
-        # are not captured by the explicit signature fields below.  Hashing
-        # them ensures a config change invalidates --resume observation caches.
-        scoring_config_subtrees = {
-            "sec_event_weights": cfg_get(config, "biotech_features.sec_event_weights", {}) or {},
-            "sec_event_recency_decay": cfg_get(config, "biotech_features.sec_event_recency_decay", {}) or {},
-            "sec_event_parser_lookback_days": cfg_get(config, "sec_event_parser.lookback_days", 730),
-            "commercial_stage_revenue_min": cfg_get(config, "commercial_value.commercial_stage_revenue_min", 50_000_000.0),
-            "data_quality_adjustment": cfg_get(config, "biotech_scoring.data_quality_adjustment", {}) or {},
-            "quality_adjusted_valuation": cfg_get(config, "commercial_value.quality_adjusted_valuation", {}) or {},
-            "quality_adjusted_guidance": cfg_get(config, "forward_guidance.quality_adjusted_guidance", {}) or {},
-            "use_quality_adjusted_valuation_component": cfg_get(
-                config,
-                "biotech_scoring.use_quality_adjusted_valuation_component",
-                True,
-            ),
-            "use_quality_adjusted_guidance_component": cfg_get(
-                config,
-                "biotech_scoring.use_quality_adjusted_guidance_component",
-                True,
-            ),
-            "borrow_availability_validation": cfg_get(config, "biotech_reports.borrow_availability_validation", {}) or {},
-            "borrow_overlay_thresholds": cfg_get(config, "calibration.tier1.borrow_overlay_thresholds", {}) or {},
-            "commercial_risk_overlay": cfg_get(config, "biotech_scoring.commercial_risk_overlay", {}) or {},
-            "production_policy": cfg_get(config, "biotech_scoring.production_policy", {}) or {},
-            "commercial_value": cfg_get(config, "commercial_value", {}) or {},
-            "financial_survival": cfg_get(config, "financial_survival", {}) or {},
-            "governance_event_features": cfg_get(config, "governance_event_features", {}) or {},
-            "rank_quality_caps": cfg_get(config, "biotech_scoring.rank_quality_caps", {}) or {},
-            "missing_score_defaults": cfg_get(config, "biotech_scoring.missing_score_defaults", {}) or {},
-            "calibration_cohorts": calibration_cohort_settings,
-            "calibration_cohorts_csv_path": str(calibration_cohorts_csv),
-            "calibration_cohorts_csv_sha256": file_sha256(calibration_cohorts_csv),
-            "calibration_cohorts_csv_mtime_ns": file_mtime_ns(calibration_cohorts_csv),
-        }
-        scoring_config_hash = hashlib.sha256(
-            json.dumps(scoring_config_subtrees, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
+        scoring_config_hash = observation_scoring_config_hash(config, base_dir=base_dir)
         observation_cache_signature = {
             "forward_return_engine_version": "delisted_alias_overlay_v2",
             "scoring_config_hash": scoring_config_hash,

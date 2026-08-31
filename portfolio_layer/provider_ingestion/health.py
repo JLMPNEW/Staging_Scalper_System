@@ -406,12 +406,29 @@ def capture_continuity_rows(
         for row in captures:
             cycle_id = str(row["cycle_id"])
             status = str(row["status"])
+            dispatch = by_cycle.get(cycle_id)
+            dispatch_state = "" if dispatch is None else str(dispatch["state"])
+            dispatch_passed = not has_dispatches or dispatch_state == "PASS"
             by_cycle[cycle_id] = {
                 "cycle_id": cycle_id,
-                "state": status,
-                "started_at_utc": str(row["started_at_utc"]),
-                "completed_at_utc": str(row["completed_at_utc"]),
-                "accepted": status in ACCEPTED_CAPTURE_STATUSES,
+                "state": (
+                    status
+                    if dispatch_passed
+                    else dispatch_state
+                    if dispatch_state
+                    else "CAPTURE_WITHOUT_DISPATCH"
+                ),
+                "started_at_utc": (
+                    str(row["started_at_utc"])
+                    if dispatch is None
+                    else str(dispatch["started_at_utc"])
+                ),
+                "completed_at_utc": (
+                    str(row["completed_at_utc"])
+                    if dispatch is None or not str(dispatch["completed_at_utc"])
+                    else str(dispatch["completed_at_utc"])
+                ),
+                "accepted": status in ACCEPTED_CAPTURE_STATUSES and dispatch_passed,
             }
         attempts = sorted(
             by_cycle.values(),

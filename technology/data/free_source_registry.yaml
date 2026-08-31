@@ -605,6 +605,30 @@ sources:
     status: active
     notes: Stage 7 challenger software-infrastructure ranking layer retained for production-vs-challenger comparison after Stage 8 promotion.
 
+  - source_id: software_infrastructure_stage8_v1_rollback_shadow_score
+    stage: calibrated_scoring
+    source_name: Software infrastructure Stage 8 v1 rollback shadow
+    source_owner: local_technology
+    source_type: derived_feature
+    base_url: technology.sqlite
+    authentication_required: false
+    free_key_required: false
+    refresh_frequency: daily
+    data_owner: local
+    raw_schema: software_infrastructure_scoring_contract_features
+    canonical_tables:
+      - feature_scoring_input
+      - feature_scoring_component
+      - feature_scoring_model_output
+    feature_stages:
+      - calibrated_scoring
+      - ranking
+      - rollback_validation
+    subsector_scope: software_infrastructure
+    priority: 81
+    status: active
+    notes: Exact frozen v1 production weights, recomputed daily only as the rollback comparator during v2 probation.
+
   - source_id: technology_hardware_calibrated_score_v1
     stage: calibrated_scoring
     source_name: Technology hardware calibrated scoring model v1

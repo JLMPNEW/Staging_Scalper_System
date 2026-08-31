@@ -67,6 +67,7 @@ positioning:
   feature_source_id: 'consumer_defensive_positioning_composite'
   form4_upstream_db: '${SEC_INSIDER_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/sec_insider.sqlite}'
   market_positioning_upstream_db: '${MARKET_POSITIONING_DB_PATH:-C:/Users/josel/Documents/STAGING/DB/market_positioning.sqlite}'
+  market_positioning_cache_root: '../output/market_positioning_cache'
   upstream_universe_csv: '../output/consumer_defensive/cache/positioning/consumer_defensive_positioning_universe.csv'
   source_identifier_map: 'data/consumer_defensive_positioning_source_identifiers.csv'
   start_date: '2019-01-02'
@@ -93,7 +94,7 @@ positioning:
 
 scoring_features:
   source_id: 'consumer_defensive_scoring_contract'
-  definition_version: 'consumer_defensive_scoring_features_v2'
+  definition_version: 'consumer_defensive_scoring_features_v3'
   minimum_normalization_peer_count: 5
   normalize_within_cohort: true
   minimum_rank_ready_fraction: 0.85
@@ -103,17 +104,116 @@ scoring_features:
   specialized_default_availability: 'not_loaded'
   component_weight_default: 0.0
 
+stage7_scoring:
+  # v4 is a new immutable identity because the reviewed ticker scope is now
+  # applied before cross-sectional normalization. Historical v3 evidence stays
+  # sealed under its original contract.
+  source_id: 'consumer_defensive_stage7_baseline_v4'
+  baseline_source_id: 'consumer_defensive_scoring_contract'
+  model_version: 'consumer_defensive_stage7_baseline_v4'
+  promotion_state: 'shadow_monitor'
+  portfolio_candidate_gate: 0
+  oos_score_valid_flag: 0
+  neutral_score: 50.0
+  minimum_data_quality_confidence: 0.65
+  maximum_missing_component_weight: 0.35
+  minimum_rank_ready_fraction: 0.85
+  require_stage6b_measurement_overlay: true
+  specialized_weight_default: 0.0
+  specialized_weight_policy: 'shared_factor_validation_acceptance_required'
+  factor_validation_campaign_id: 'cdfv_20260814_d2c7155be91c_2498172c7161_a6495192b5'
+  factor_validation_verdict: 'corrected_campaign_zero_accepted_8_metrics_testable_1_fdr_wrong_direction'
+  component_weights:
+    residual_momentum_63d: 0.10
+    residual_momentum_126d: 0.10
+    realized_volatility_63d: 0.04
+    downside_volatility_63d: 0.04
+    max_drawdown_252d: 0.04
+    avg_dollar_volume_63d: 0.03
+    gross_margin: 0.08
+    operating_margin: 0.08
+    free_cash_flow_margin: 0.08
+    return_on_invested_capital: 0.08
+    net_debt_to_ebitda: 0.07
+    inventory_turnover: 0.06
+    insider_net_buying: 0.02
+    institutional_flow: 0.08
+    short_float_pct: 0.04
+    short_days_to_cover: 0.03
+    borrow_fee: 0.03
+
+stage8_calibration:
+  mode: 'report_only'
+  production_promotion_enabled: false
+  portfolio_write_enabled: false
+  candidate_seed: 20260824
+  candidate_count_per_scope: 64
+  candidate_perturbation_scale: 0.35
+  component_weight_cap: 0.15
+  weight_l1_turnover_cap: 0.30
+  minimum_factor_breadth: 12
+  maximum_factor_breadth: 17
+  maximum_specialized_weight: 0.05
+  cohort_shrinkage_strength: 20.0
+  maximum_cohort_deviation_fraction: 0.65
+  minimum_train_dates: 30
+  validation_dates: 6
+  holdout_dates: 6
+  embargo_panel_dates: 7
+  walk_forward_initial_train_dates: 24
+  walk_forward_test_dates: 6
+  minimum_sector_cross_section: 30
+  minimum_cohort_cross_section: 8
+  top_quantile: 0.20
+  minimum_top_positions: 3
+  maximum_top_turnover: 0.60
+  maximum_top_cohort_share: 0.45
+  transaction_cost_bps: 20.0
+  horizon_weights:
+    '21': 0.20
+    '63': 0.50
+    '126': 0.30
+  minimum_validation_objective_improvement: 0.002
+  minimum_holdout_objective_improvement: 0.002
+  minimum_holdout_mean_ic:
+    '63': 0.005
+    '126': 0.005
+  minimum_walk_forward_win_fraction: 0.60
+
+calibration_scope:
+  mode: 'explicit_ticker_exclusions'
+  enforcement_stage: 'before_cross_section_normalization'
+  selection_basis: 'user_directed_after_review_of_realized_ticker_performance'
+  evidence_classification: 'performance_informed_model_selection'
+  strict_oos_eligible: false
+  preserve_source_history: true
+  production_promotion_requires_fresh_post_scope_evidence: true
+  reviewed_as_of: '2026-08-27'
+  expected_excluded_ticker_count: 31
+  expected_remaining_current_ticker_count: 79
+  expected_remaining_current_tickers_sha256: "1959c086edbd65db8acbc87fc96490585db1d532502c1ff050e49907c17d2f32"
+  expected_remaining_current_by_cohort:
+    beverages: 12
+    consumer_staples_distribution_retail: 23
+    household_personal_tobacco: 20
+    packaged_foods_agricultural_products: 24
+  excluded_tickers_by_cohort:
+    beverages: [BF-B, CCU, DEO, FIZZ, KDP, MGPI, PEP, SAM, STZ, WEST]
+    consumer_staples_distribution_retail: []
+    household_personal_tobacco: [CHD, CLX, ENR, KMB, ODD, WDFC]
+    packaged_foods_agricultural_products: [AVO, CAG, CENTA, DOLE, FRPT, GIS, HLF, HSY, INGR, JBSS, MDLZ, MKC, NOMD, SMPL, VITL]
+
 specialized_disclosure_census:
   applicability_csv: "data/consumer_defensive_metric_applicability.csv"
   terms_path: "data/consumer_defensive_specialized_disclosure_terms.yaml"
-  expected_applicability_rows: 119
+  expected_applicability_rows: 121
   parser_version: "consumer_defensive_disclosure_census_v3"
   discovery_only: true
   production_weight: 0.0
 
 universe:
   policy_path: "data/consumer_defensive_universe_policy.yaml"
-  expected_current_rows: 108
+  expected_current_rows: 110
   authoritative_source: "ticker_mapping/consumer_defensive.csv"
   minimum_price: 3.0
   core_minimum_median_dollar_volume_63d: 5000000
@@ -225,6 +325,7 @@ factor_validation:
   sector_minimum_cross_section: 30
   cohort_target_cross_section: 20
   cohort_exploratory_minimum_cross_section: 12
+  subtype_exploratory_minimum_cross_section: 3
 
 portfolio_layer:
   adapter: "consumer_defensive"
@@ -233,7 +334,39 @@ portfolio_layer:
   file_mode: "dated"
   final_rank_path: "consumer_defensive/dashboard/{yyyy-mm-dd}/consumer_defensive_final_rank_table.csv"
   require_oos_score_valid: true
-  enabled: false
-  required: false
-  sector_weight_cap: 0.0
-  promotion_state: "deferred"
+  enabled: true
+  required: true
+  sector_weight_cap: 0.125
+  promotion_state: "active"
+promotion_framework_v2:
+  framework_path: "data/consumer_defensive_promotion_framework_v2.yaml"
+  shared_service_contract_path: "data/consumer_defensive_shared_service_contract_v1.yaml"
+  status: "recalibration_required"
+  legacy_protocol_status: "retired_archived"
+promotion_framework_v3:
+  framework_path: "data/consumer_defensive_promotion_framework_v3.yaml"
+  engine_module: "consumer_defensive.core.promotion_engine_v3"
+  status: "active_standard_allocation_pinned_registry"
+  portfolio_activation_requires_pinned_registry: true
+production_score_publisher_v3:
+  schema_version: "consumer_defensive_production_score_publisher_v3"
+  source_database_path: "${CONSUMER_DEFENSIVE_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/consumer_defensive.sqlite"
+  output_root: "../output"
+  activation_registry_path: "../output/consumer_defensive/framework_v3/production/2026-08-28/475fe462877c7522/consumer_defensive_activation_registry_v3.json"
+  activation_registry_file_sha256: "32e8d616595e23e05badceb592678cfe7c9eaa4d46944021c5618af06fd2c76c"
+  activation_registry_payload_sha256: "1722d00239df6625045197f3e95752fa6911f0d80910c3cd40ecabf07073e0e1"
+  candidate_registry_path: "../output/consumer_defensive/framework_v2/preregistration/2026-08-27/ecc4258886f78933/consumer_defensive_calibration_candidate_registry_v2.json"
+  candidate_registry_file_sha256: "79e18b555b7530c01be1e1bbc30adba8c2da0736a504a88657be7973ebb77f6b"
+  candidate_registry_payload_sha256: "e909988ee7163a5eee620f2d61aaececa0261411a02cbdb3cf034c471863be68"
+  scoring_contract_version: "60e62330b4fbae51e6c5151d25f92c5ba752860f80ef0b0bf4767ba3f350a861"
+  entry_lag_trading_sessions: 1
+  selected_candidate_id_by_cohort:
+    beverages: "cdv2_5772a469074caa13fd749837"
+    consumer_staples_distribution_retail: "cdv2_11cb30c0f434dedf54abfe5f"
+    household_personal_tobacco: "cdv2_136abf15b3f4558cb6ef2cd7"
+    packaged_foods_agricultural_products: "cdv2_78117b7de15515ef1c5965a1"
+  model_contract_sha256_by_cohort:
+    beverages: "83bd0b3eb22c2fc853ee85808dc6d5682d309bb8ed1e9027bfb0e4f2763edef4"
+    consumer_staples_distribution_retail: "5060666e093a2c9ad3813a61909742cee83964bba209b9020c0ee3412f3ae896"
+    household_personal_tobacco: "fd0768876baee8131ae24f7885947da6494e09adbc4b6e10e81db0b03c49279f"
+    packaged_foods_agricultural_products: "10c095cffd107e0ef91e06005b3b2b314cd6972e85ea9002b9aa157321daeac6"

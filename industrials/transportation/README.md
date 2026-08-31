@@ -1,5 +1,12 @@
 # Industrials Transportation
 
+> **Authoritative capital status (2026-08-25):** Transportation calibration
+> execution passes, predictive acceptance fails, production eligibility is
+> false, and the Portfolio Layer remains disabled and zero-cap. This notice
+> supersedes older production-readiness wording. See
+> [TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md](TRANSPORTATION_V8_CORRECTNESS_AUDIT_2026-08-25.md)
+> and [PRODUCTION_PROMOTION_AUDIT_2026-08-25.md](../../PRODUCTION_PROMOTION_AUDIT_2026-08-25.md).
+
 The 2026-08-01 outcome-blind surface-freight cohort and metric-level score
 redesign are documented in
 `SURFACE_FREIGHT_SCORE_REDESIGN_2026-08-01.md`. The redesign remains research

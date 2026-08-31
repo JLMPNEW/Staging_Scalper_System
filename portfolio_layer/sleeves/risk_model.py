@@ -14,6 +14,9 @@ import numpy as np
 import pandas as pd
 
 
+ENB_MATERIAL_REL_TOL = 0.01
+
+
 @dataclass(frozen=True)
 class RiskContribs:
     total_variance: float
@@ -30,6 +33,17 @@ class RcCapEnforcement:
     cash_added: float
     max_rc: float
     trimmed: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class EnbGuardResult:
+    enforcement: RcCapEnforcement
+    allocation_mode: str
+    fallback_applied: bool
+    baseline_enb: float
+    proposal_enb: float
+    final_enb: float
+    required_enb: float
 
 
 def aligned_cov(cov: pd.DataFrame, tickers: list[str]) -> np.ndarray:
@@ -454,6 +468,74 @@ def enforce_rc_cap_to_cash(
         cash_added=max(0.0, initial_gross - final_gross),
         max_rc=float(max_rc),
         trimmed=tuple(records),
+    )
+
+
+def enforce_rc_cap_with_enb_guard(
+    proposal_weights: dict[str, float],
+    prior_weights: dict[str, float],
+    cov: pd.DataFrame,
+    *,
+    rc_cap: float,
+    allocation_mode: str,
+    max_iter: int = 64,
+    relative_tolerance: float = ENB_MATERIAL_REL_TOL,
+) -> EnbGuardResult:
+    """Apply the hard RC cap and reject a harmful multi-sleeve rewrite.
+
+    The least-invasive compliant fallback is the sealed Stage 7 book with only
+    realized RC-cap breaches trimmed to CASH. A blend is intentionally not used:
+    interpolating two cap-compliant books can itself breach the nonlinear RC cap.
+    """
+    tolerance = float(relative_tolerance)
+    if not math.isfinite(tolerance) or not 0.0 <= tolerance < 1.0:
+        raise ValueError(
+            f"relative_tolerance must be finite and in [0,1), got {relative_tolerance}"
+        )
+    baseline_enb = float(effective_number_of_bets(prior_weights, cov)["enb"])
+    required_enb = baseline_enb * (1.0 - tolerance)
+    candidate = enforce_rc_cap_to_cash(
+        proposal_weights,
+        cov,
+        rc_cap=rc_cap,
+        max_iter=max_iter,
+    )
+    proposal_enb = float(effective_number_of_bets(candidate.weights, cov)["enb"])
+    if proposal_enb + 1e-6 >= required_enb:
+        return EnbGuardResult(
+            enforcement=candidate,
+            allocation_mode=allocation_mode,
+            fallback_applied=False,
+            baseline_enb=baseline_enb,
+            proposal_enb=proposal_enb,
+            final_enb=proposal_enb,
+            required_enb=required_enb,
+        )
+    if allocation_mode != "multi_sleeve_risk_budget":
+        raise ValueError(
+            f"{allocation_mode} produced ENB {proposal_enb:.6f} below "
+            f"required {required_enb:.6f} with no supported fallback"
+        )
+    fallback = enforce_rc_cap_to_cash(
+        prior_weights,
+        cov,
+        rc_cap=rc_cap,
+        max_iter=max_iter,
+    )
+    fallback_enb = float(effective_number_of_bets(fallback.weights, cov)["enb"])
+    if fallback_enb + 1e-6 < required_enb:
+        raise ValueError(
+            f"RC-cap-only fallback ENB {fallback_enb:.6f} is below "
+            f"required {required_enb:.6f}"
+        )
+    return EnbGuardResult(
+        enforcement=fallback,
+        allocation_mode="multi_sleeve_enb_fallback_rc_cap_only",
+        fallback_applied=True,
+        baseline_enb=baseline_enb,
+        proposal_enb=proposal_enb,
+        final_enb=fallback_enb,
+        required_enb=required_enb,
     )
 
 

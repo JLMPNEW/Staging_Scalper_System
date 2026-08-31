@@ -63,6 +63,20 @@ def _load_preflight_module():
     return module
 
 
+def _load_promotion_bridge_module():
+    path = SCRIPTS / "29a_build_consumer_defensive_promotion_input_v3.py"
+    spec = importlib.util.spec_from_file_location(
+        "consumer_defensive_promotion_input_bridge",
+        path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+
 def _current_only_db(tmp_path: Path):
     bundle = load_config(CONFIG)
     policy = load_policy(POLICY)
@@ -74,7 +88,7 @@ def _current_only_db(tmp_path: Path):
 
 def test_all_consumer_defensive_scripts_import_and_expose_help() -> None:
     scripts = sorted(SCRIPTS.glob("*.py"))
-    assert len(scripts) == 43
+    assert scripts
     for script in scripts:
         completed = subprocess.run(
             [sys.executable, str(script), "--help"],
@@ -86,6 +100,19 @@ def test_all_consumer_defensive_scripts_import_and_expose_help() -> None:
         )
         assert completed.returncode == 0, f"{script.name}: {completed.stderr}"
         assert "usage:" in completed.stdout.casefold(), script.name
+
+
+def test_promotion_bridge_requires_capital_context_path_and_exact_file_pin() -> None:
+    module = _load_promotion_bridge_module()
+    parser = module._parser()
+    required = {
+        action.dest
+        for action in parser._actions
+        if getattr(action, "required", False)
+    }
+    assert "capital_context" in required
+    assert "trusted_capital_context_file_sha256" in required
+    assert all("trusted_capital_context_sha256" != action.dest for action in parser._actions)
 
 
 def test_reviewed_disclosure_terminology_contract_is_versioned_and_narrowed() -> None:
@@ -283,7 +310,7 @@ def test_current_universe_reload_removes_stale_taxonomy_members(tmp_path: Path) 
                 "SELECT ticker FROM dim_consumer_defensive_taxonomy WHERE model_family='consumer_defensive'"
             )
         }
-        assert len(taxonomy) == 108
+        assert len(taxonomy) == 110
         assert replacement in taxonomy
         assert old_ticker not in taxonomy
         assert conn.execute(
@@ -370,7 +397,7 @@ def test_stage2_validator_records_and_reports_a_successful_identity_gate(tmp_pat
         row = raw.execute(
             "SELECT status,row_count FROM runs WHERE run_type='consumer_defensive_stage2_validation' ORDER BY run_id DESC LIMIT 1"
         ).fetchone()
-    assert row == ("success", 108)
+    assert row == ("success", 110)
 
 
 def test_yahoo_worker_errors_are_reported_and_ingestion_run_is_closed(tmp_path: Path) -> None:

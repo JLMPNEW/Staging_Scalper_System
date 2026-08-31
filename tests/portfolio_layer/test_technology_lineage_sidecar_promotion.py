@@ -82,6 +82,15 @@ def _lineage_path(root: Path, asof: str) -> Path:
     )
 
 
+def _stage11_sidecar_path(root: Path, asof: str) -> Path:
+    return (
+        root
+        / "scores"
+        / asof
+        / "semiconductor_stage11_survivorship_calibration_panel.csv"
+    )
+
+
 def test_current_production_joins_exact_dated_lineage_sidecar(
     tmp_path: Path,
 ) -> None:
@@ -136,3 +145,38 @@ def test_lineage_sidecar_must_match_rank_candidate_contract(
 
     with pytest.raises(ValueError, match="lineage/rank mismatch"):
         run_adapter(_config(), tmp_path, asof)
+
+
+def test_stage11_sidecar_only_row_is_research_only_not_production(
+    tmp_path: Path,
+) -> None:
+    asof = "2026-08-14"
+    rank_path = _rank_path(tmp_path, asof)
+    lineage_path = _lineage_path(tmp_path, asof)
+    sidecar_path = _stage11_sidecar_path(tmp_path, asof)
+    _write_csv(rank_path, _rank_row(asof))
+    _write_csv(lineage_path, _lineage_row(asof))
+    sidecar_row = {
+        **_rank_row(asof),
+        "ticker": "RESEARCH",
+        "stage11_calibration_input_eligible_flag": "1",
+        "stage11_calibration_input_reason": "ok",
+        "survivorship_corrected_panel_flag": "1",
+        "calibration_sample_role": "strict_oos",
+    }
+    _write_csv(sidecar_path, sidecar_row)
+
+    result = run_adapter(_config(), tmp_path, asof)
+
+    by_ticker = {row.ticker: row for row in result.rows}
+    assert by_ticker["SAFE"].investable_eligible == 1
+    assert by_ticker["RESEARCH"].investable_eligible == 0
+    assert by_ticker["RESEARCH"].eligibility_reason == "stage11_sidecar_calibration_only"
+    assert by_ticker["RESEARCH"].calibration_research_eligible == 1
+    assert by_ticker["RESEARCH"].calibration_sample_role == "strict_oos"
+    assert by_ticker["RESEARCH"].financial_lineage_status == ""
+    assert result.source_files == (
+        rank_path.resolve(),
+        lineage_path.resolve(),
+        sidecar_path.resolve(),
+    )

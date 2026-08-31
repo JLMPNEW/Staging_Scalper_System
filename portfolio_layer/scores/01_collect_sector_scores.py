@@ -20,7 +20,12 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
+from portfolio_layer.core.config import (  # noqa: E402
+    active_score_sectors,
+    cfg_get,
+    load_yaml,
+    resolve_path,
+)
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
     COLLECTED_FIELDS,
@@ -35,7 +40,12 @@ from portfolio_layer.core.contracts import (  # noqa: E402
 from portfolio_layer.core.db import add_issue, connect, finish_run, start_run  # noqa: E402
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_database_path, resolve_runtime_paths  # noqa: E402
-from portfolio_layer.scores.adapters import dated_candidates, run_adapter  # noqa: E402
+from portfolio_layer.scores.adapters import (  # noqa: E402
+    dated_candidates,
+    run_adapter,
+    validate_consumer_v3_optimizer_cap_binding,
+    validate_consumer_v3_runtime_authority,
+)
 
 
 LOGGER = logging.getLogger("collect_sector_scores")
@@ -214,11 +224,26 @@ def main() -> int:
         LOGGER.error("%s", exc)
         return 1
 
-    sectors = [s for s in cfg_get(config, "score_contract.sectors", []) if bool(s.get("enabled", True))]
-    if not sectors:
-        LOGGER.error("No enabled sectors in score_contract.sectors")
+    try:
+        all_enabled_sectors = active_score_sectors(config, None)
+        sectors = active_score_sectors(config, args.as_of)
+    except ValueError as exc:
+        LOGGER.error("Invalid score-sector activation contract: %s", exc)
         return 1
-    min_successful = int(cfg_get(config, "score_contract.min_successful_sectors", len(sectors)))
+    if not sectors:
+        LOGGER.error("No score sectors are active for as_of=%s", args.as_of or "latest")
+        return 1
+    configured_min_successful = int(
+        cfg_get(config, "score_contract.min_successful_sectors", len(all_enabled_sectors))
+    )
+    if not 1 <= configured_min_successful <= len(all_enabled_sectors):
+        LOGGER.error(
+            "score_contract.min_successful_sectors=%d is outside [1,%d]",
+            configured_min_successful,
+            len(all_enabled_sectors),
+        )
+        return 1
+    min_successful = min(configured_min_successful, len(sectors))
     fallback_pipelines = {
         str(value).strip()
         for value in cfg_get(
@@ -227,7 +252,8 @@ def main() -> int:
         if str(value).strip()
     }
     configured_pipelines = {
-        str(sector.get("model_family", "unknown")) for sector in sectors
+        str(sector.get("model_family", "unknown"))
+        for sector in all_enabled_sectors
     }
     unknown_fallbacks = sorted(fallback_pipelines - configured_pipelines)
     if unknown_fallbacks:
@@ -241,6 +267,24 @@ def main() -> int:
         for s in sectors
         if bool(s.get("required", True))
     }
+
+    consumer_cfg = next(
+        (
+            sector
+            for sector in sectors
+            if str(sector.get("model_family") or "").strip()
+            == "consumer_defensive"
+        ),
+        None,
+    )
+    if consumer_cfg is not None:
+        try:
+            validate_consumer_v3_optimizer_cap_binding(
+                consumer_cfg, cfg_get(config, "optimizer", {})
+            )
+        except ValueError as exc:
+            LOGGER.error("Consumer Defensive capital-control binding failed: %s", exc)
+            return 1
 
     results = []
     raw_results = []
@@ -355,6 +399,25 @@ def main() -> int:
     except ValueError as exc:
         LOGGER.error("%s", exc)
         return 1
+    consumer_result = next(
+        (
+            result
+            for result in results
+            if result.source_pipeline == "consumer_defensive"
+        ),
+        None,
+    )
+    if consumer_cfg is not None and consumer_result is not None:
+        try:
+            validate_consumer_v3_runtime_authority(
+                dict(consumer_cfg),
+                sector_root,
+                source_asof=consumer_result.source_asof_date,
+                portfolio_asof=run_as_of,
+            )
+        except ValueError as exc:
+            LOGGER.error("Consumer Defensive runtime authority failed: %s", exc)
+            return 1
     future_sources: set[str] = set()
     for result in results:
         for row in result.rows:
@@ -440,6 +503,13 @@ def main() -> int:
             collected.append({
                 "as_of_date": run_as_of, "ticker": row.ticker, "source_pipeline": row.source_pipeline,
                 "sector": row.sector, "industry": row.industry, "industry_aggregate": row.industry_aggregate,
+                "model_scope_id": row.model_scope_id,
+                "production_policy_id": row.production_policy_id,
+                "production_policy_sha256": row.production_policy_sha256,
+                "selection_reliability_class": row.selection_reliability_class,
+                "active_sleeve_weight": row.active_sleeve_weight,
+                "benchmark_residual_weight": row.benchmark_residual_weight,
+                "benchmark_residual_ticker": row.benchmark_residual_ticker,
                 "native_score": row.native_score, "investable_eligible": row.investable_eligible,
                 "eligibility_reason": row.eligibility_reason, "score_confidence": row.score_confidence,
                 "calibration_research_eligible": row.calibration_research_eligible,

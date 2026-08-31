@@ -2401,6 +2401,37 @@ def test_measurement_overlay_preserves_zero_weight_and_null_score(
                     component['production_status'],
                 ),
             )
+            canary = {
+                **component,
+                'component_name': 'zz_lineage_sort_canary',
+                'component_group': 'market',
+                'source_table': 'fixture',
+                'source_field': 'fixture',
+                'component_observation_id': '0' * 64,
+            }
+            conn.execute(
+                '''INSERT INTO feature_scoring_component(
+                       ticker,asof_date,component_name,raw_value,normalized_value,
+                       component_score,component_weight,availability_status,
+                       source_asof_date,quality_status,created_at,component_group,
+                       direction,rank_requirement,unit,definition_version,
+                       contract_sha256,source_id,source_table,source_field,
+                       exclusion_reason,lineage_json,component_observation_id,
+                       production_status
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (
+                    canary['ticker'], canary['asof_date'],
+                    canary['component_name'], None, None, None, 0.0,
+                    canary['availability_status'], None,
+                    canary['quality_status'], now, canary['component_group'],
+                    canary['direction'], canary['rank_requirement'],
+                    canary['unit'], canary['definition_version'],
+                    canary['contract_sha256'], None, canary['source_table'],
+                    canary['source_field'], canary['exclusion_reason'],
+                    canary['lineage_json'], canary['component_observation_id'],
+                    canary['production_status'],
+                ),
+            )
             input_row = {
                 'ticker': 'TEST',
                 'asof_date': '2024-12-31',
@@ -2418,7 +2449,8 @@ def test_measurement_overlay_preserves_zero_weight_and_null_score(
                 'contract_sha256': 'c' * 64,
                 'lineage_json': json.dumps({
                     'component_observation_ids': [
-                        component['component_observation_id']
+                        component['component_observation_id'],
+                        canary['component_observation_id'],
                     ]
                 }),
             }
@@ -2464,8 +2496,27 @@ def test_measurement_overlay_preserves_zero_weight_and_null_score(
         observation['observation_sha256'] = specialized_observation_sha256(
             observation
         )
+        future_observation = {
+            **observation,
+            'period_end': '2025-01-31',
+            'accepted_at': '2024-12-30T12:00:00Z',
+            'numeric_value': 88.0,
+            'evidence_key': 'f' * 64,
+        }
+        future_observation['observation_sha256'] = (
+            specialized_observation_sha256(future_observation)
+        )
+        unsealed_observation = {
+            **observation,
+            'accepted_at': '2024-12-31T23:00:00Z',
+            'numeric_value': 99.0,
+            'evidence_key': 'd' * 64,
+        }
+        unsealed_observation['observation_sha256'] = (
+            specialized_observation_sha256(unsealed_observation)
+        )
         with conn:
-            conn.execute(
+            conn.executemany(
                 '''INSERT INTO fact_specialized_metric_observation(
                        ticker,metric_id,period_start,period_end,accepted_at,
                        numeric_value,unit,definition_version,applicability_status,
@@ -2473,22 +2524,50 @@ def test_measurement_overlay_preserves_zero_weight_and_null_score(
                        created_at,confidence,extraction_method,scope,lineage_json,
                        observation_sha256,production_status,parser_run_id
                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                [
+                    (
+                        item['ticker'], item['metric_id'], '', item['period_end'],
+                        item['accepted_at'], item['numeric_value'], 'percent',
+                        DEFINITION_VERSION, 'applicable',
+                        'accepted_measurement_only', item['evidence_key'],
+                        SOURCE_ID, 'filing.htm', now, 0.91, 'test',
+                        'reported_scope', '{}', item['observation_sha256'],
+                        'measurement_only', None,
+                    )
+                    for item in (
+                        observation, future_observation, unsealed_observation
+                    )
+                ],
+            )
+            conn.execute(
+                '''INSERT INTO stage6b_specialized_run(
+                       asof_date,parser_run_id,adapter_version,policy_sha256,
+                       source_manifest_sha256,seal_manifest_sha256,
+                       ingestion_config_sha256,issuer_scope_sha256,started_at,
+                       completed_at,status,inventory_document_count,
+                       accepted_observation_count,metadata_json
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (
-                    observation['ticker'], observation['metric_id'], '',
-                    observation['period_end'], observation['accepted_at'], 4.2,
-                    'percent', DEFINITION_VERSION, 'applicable',
-                    'accepted_measurement_only', observation['evidence_key'],
-                    SOURCE_ID, 'filing.htm', now, 0.91, 'test',
-                    'reported_scope', '{}', observation['observation_sha256'],
-                    'measurement_only', None,
+                    '2024-12-31', None, 'test', 'a' * 64, 'b' * 64,
+                    'c' * 64, 'd' * 64, 'e' * 64, now, now,
+                    'measurement_only_complete', 1, 2,
+                    json.dumps({
+                        'observation_sha256s': sorted([
+                            observation['observation_sha256'],
+                            future_observation['observation_sha256'],
+                        ])
+                    }),
                 ),
             )
         result = apply_stage6b_measurement_overlays(
             conn, as_of='2024-12-31'
         )
+        assert result['stage6b_run_id'] == 1
         assert result['updated_component_count'] == 1
         row = conn.execute(
-            'SELECT * FROM feature_scoring_component WHERE ticker=\'TEST\''
+            '''SELECT * FROM feature_scoring_component
+               WHERE ticker='TEST'
+                 AND component_name='specialized:comparable_sales_growth_pct' '''
         ).fetchone()
         assert row['raw_value'] == pytest.approx(4.2)
         assert row['normalized_value'] is None
@@ -2496,17 +2575,31 @@ def test_measurement_overlay_preserves_zero_weight_and_null_score(
         assert row['component_weight'] == 0.0
         assert row['availability_status'] == 'measurement_only'
         assert row['production_status'] == 'measurement_only'
+        component_lineage = json.loads(row['lineage_json'])
+        assert component_lineage['stage6b_overlay']['stage6b_run_id'] == 1
+        assert component_lineage['stage6b_overlay']['observation_sha256'] == (
+            observation['observation_sha256']
+        )
         input_after = conn.execute(
             'SELECT * FROM feature_scoring_input WHERE ticker=\'TEST\''
         ).fetchone()
         assert input_after['full_data_quality_confidence'] == pytest.approx(1 / 18)
         input_lineage = json.loads(input_after['lineage_json'])
+        expected_component_ids = sorted(
+            str(row[0])
+            for row in conn.execute(
+                '''SELECT component_observation_id
+                   FROM feature_scoring_component WHERE ticker='TEST' '''
+            )
+        )
+        assert input_lineage['component_observation_ids'] == expected_component_ids
         assert input_lineage['specialized_applicable_count'] == 1
         assert input_lineage['specialized_available_count'] == 1
         assert input_lineage['specialized_missing_count'] == 0
         assert input_lineage['specialized_missing_value_policy'] == (
             'neutral_zero_contribution_no_weight_redistribution'
         )
+        assert input_lineage['stage6b_run_id'] == 1
         assert input_lineage['specialized_nonapplicable_policy'] == (
             'excluded_from_denominator'
         )

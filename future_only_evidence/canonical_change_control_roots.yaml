@@ -1,0 +1,14 @@
+{
+  "schema_version": "future_evidence_production_change_registry_v1",
+  "status": "unconfigured_fail_closed",
+  "registry_revision": 0,
+  "families": {
+    "transportation": {
+      "authority_id": "",
+      "algorithm": "Ed25519",
+      "public_key_sha256": "",
+      "purpose": "manual_production_change_control"
+    }
+  },
+  "governance_note": "This authority is independent from evidence, timestamp, market-data, and evidence-review authorities. It may sign a bounded production change receipt but never edits configuration automatically."
+}

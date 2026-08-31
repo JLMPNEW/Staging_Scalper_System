@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import sqlite3
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,10 @@ def study_signature(study: dict[str, Any]) -> str:
     return json.dumps(study, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+def study_digest(study: dict[str, Any]) -> str:
+    return hashlib.sha256(study_signature(study).encode("utf-8")).hexdigest()
+
+
 def merge_unique_studies(results: Iterable[SyncResult]) -> dict[str, dict[str, Any]]:
     unique_studies: dict[str, dict[str, Any]] = {}
     signatures: dict[str, str] = {}
@@ -52,7 +57,7 @@ def merge_unique_studies(results: Iterable[SyncResult]) -> dict[str, dict[str, A
     # shared-NCT collision resolution is stable run-to-run.
     for result in sorted(results, key=lambda result: result.ticker):
         for nct_id, study in result.studies.items():
-            signature = study_signature(study)
+            signature = study_digest(study)
             if nct_id not in unique_studies:
                 unique_studies[nct_id] = study
                 signatures[nct_id] = signature
@@ -441,6 +446,67 @@ def sync_one_company(
         )
 
 
+def iter_bounded_ordered_results(
+    jobs: list[CompanyJob],
+    *,
+    max_workers: int,
+    sync_kwargs: dict[str, Any],
+    sync_fn: Callable[..., SyncResult] = sync_one_company,
+) -> Iterator[tuple[int, CompanyJob, SyncResult]]:
+    """Yield ticker-ordered results while retaining at most one task per worker.
+
+    CTGov results contain complete study JSON payloads. Submitting the full
+    universe at once causes completed futures to retain several gigabytes of
+    payloads until the executor exits. Keeping a bounded ordered window both
+    caps memory and preserves the existing lowest-ticker-wins collision rule.
+    """
+    worker_count = max(1, int(max_workers))
+    if worker_count == 1:
+        for idx, job in enumerate(jobs, start=1):
+            yield idx, job, sync_fn(job, **sync_kwargs)
+        return
+
+    next_submit = 0
+    next_yield = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        pending: dict[int, tuple[Future[SyncResult], CompanyJob]] = {}
+
+        def submit_next() -> bool:
+            nonlocal next_submit
+            if next_submit >= len(jobs):
+                return False
+            job = jobs[next_submit]
+            pending[next_submit] = (executor.submit(sync_fn, job, **sync_kwargs), job)
+            next_submit += 1
+            return True
+
+        for _ in range(worker_count):
+            if not submit_next():
+                break
+
+        while pending:
+            future, job = pending.pop(next_yield)
+            try:
+                result = future.result()
+            except BaseException as exc:
+                if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
+                    raise
+                LOGGER.exception("Unexpected CTGov worker failure for %s: %s", job.ticker, exc)
+                result = SyncResult(
+                    company_id=job.company_id,
+                    ticker=job.ticker,
+                    alias_count=len(job.aliases),
+                    search_count=len(job.searches),
+                    study_count=0,
+                    studies={},
+                    query_hits=(),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            yield next_yield + 1, job, result
+            next_yield += 1
+            submit_next()
+
+
 def dedupe_sponsors(sponsors: Iterable[Any]) -> list[Any]:
     seen: set[tuple[str, str, str]] = set()
     out: list[Any] = []
@@ -644,7 +710,7 @@ def main() -> None:
             max_companies=int(args.max_companies),
         )
         throttle = HostThrottle()
-        results: list[SyncResult] = []
+        compact_results: list[SyncResult] = []
         try:
             run_id = start_run(conn, run_type="sync_ctgov_trials", input_path=db_path)
             LOGGER.info("Loaded %d active company job(s) from %s", len(jobs), db_path)
@@ -658,93 +724,76 @@ def main() -> None:
                 loaded_tickers=[job.ticker for job in jobs],
                 context="CTGov sync",
             )
-            if max_workers <= 1:
-                for idx, job in enumerate(jobs, start=1):
-                    LOGGER.info("[%d/%d] CTGov %s aliases=%d searches=%d", idx, len(jobs), job.ticker, len(job.aliases), len(job.searches))
-                    result = sync_one_company(
-                        job,
-                        cache_dir=cache_dir,
-                        studies_url=studies_url,
-                        query_fields=query_fields,
-                        page_size=page_size,
-                        max_pages=max_pages,
-                        ttl_hours=ttl_hours,
-                        sleep_sec=sleep_sec,
-                        timeout_sec=timeout_sec,
-                        max_retries=max_retries,
-                        throttle=throttle,
+            sync_kwargs = {
+                "cache_dir": cache_dir,
+                "studies_url": studies_url,
+                "query_fields": query_fields,
+                "page_size": page_size,
+                "max_pages": max_pages,
+                "ttl_hours": ttl_hours,
+                "sleep_sec": sleep_sec,
+                "timeout_sec": timeout_sec,
+                "max_retries": max_retries,
+                "throttle": throttle,
+            }
+            signatures: dict[str, str] = {}
+            owners: dict[str, str] = {}
+            collision_count = 0
+            written = 0
+            query_hit_count = 0
+            with conn:
+                for idx, job, result in iter_bounded_ordered_results(
+                    jobs,
+                    max_workers=max_workers,
+                    sync_kwargs=sync_kwargs,
+                ):
+                    compact_results.append(
+                        SyncResult(
+                            company_id=result.company_id,
+                            ticker=result.ticker,
+                            alias_count=result.alias_count,
+                            search_count=result.search_count,
+                            study_count=result.study_count,
+                            studies={},
+                            query_hits=result.query_hits,
+                            error=result.error,
+                        )
                     )
-                    results.append(result)
+                    for nct_id, study in sorted(result.studies.items()):
+                        signature = study_digest(study)
+                        old_signature = signatures.get(nct_id)
+                        if old_signature is None:
+                            signatures[nct_id] = signature
+                            owners[nct_id] = result.ticker
+                            if upsert_trial(conn, study, asof_date=asof_date):
+                                written += 1
+                        elif old_signature != signature:
+                            collision_count += 1
+                            LOGGER.warning(
+                                "CTGov shared NCT collision kept first payload nct_id=%s "
+                                "first_ticker=%s conflicting_ticker=%s",
+                                nct_id,
+                                owners.get(nct_id, ""),
+                                result.ticker,
+                            )
                     LOGGER.info(
                         "[%d/%d] CTGov complete %s aliases=%d searches=%d studies=%d query_hits=%d error=%s",
                         idx,
                         len(jobs),
-                        result.ticker,
+                        job.ticker,
                         result.alias_count,
                         result.search_count,
                         result.study_count,
                         len(result.query_hits),
                         result.error,
                     )
-            else:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(
-                            sync_one_company,
-                            job,
-                            cache_dir=cache_dir,
-                            studies_url=studies_url,
-                            query_fields=query_fields,
-                            page_size=page_size,
-                            max_pages=max_pages,
-                            ttl_hours=ttl_hours,
-                            sleep_sec=sleep_sec,
-                            timeout_sec=timeout_sec,
-                            max_retries=max_retries,
-                            throttle=throttle,
-                        ): job
-                        for job in jobs
-                    }
-                    for idx, future in enumerate(as_completed(futures), start=1):
-                        job = futures[future]
-                        try:
-                            result = future.result()
-                        except BaseException as exc:
-                            if isinstance(exc, (SystemExit, KeyboardInterrupt, GeneratorExit)):
-                                raise
-                            LOGGER.exception("Unexpected CTGov worker failure for %s: %s", job.ticker, exc)
-                            result = SyncResult(
-                                company_id=job.company_id,
-                                ticker=job.ticker,
-                                alias_count=len(job.aliases),
-                                search_count=len(job.searches),
-                                study_count=0,
-                                studies={},
-                                query_hits=(),
-                                error=f"{type(exc).__name__}: {exc}",
-                            )
-                        results.append(result)
-                        LOGGER.info(
-                            "[%d/%d] CTGov complete %s aliases=%d searches=%d studies=%d query_hits=%d error=%s",
-                            idx,
-                            len(jobs),
-                            result.ticker,
-                            result.alias_count,
-                            result.search_count,
-                            result.study_count,
-                            len(result.query_hits),
-                            result.error,
-                        )
-
-            error_count = sum(1 for result in results if result.error)
-            unique_studies = merge_unique_studies(results)
-            written = 0
-            query_hit_count = 0
-            with conn:
-                for study in unique_studies.values():
-                    if upsert_trial(conn, study, asof_date=asof_date):
-                        written += 1
-                query_hit_count = replace_query_hits(conn, results)
+                query_hit_count = replace_query_hits(conn, compact_results)
+            if collision_count:
+                LOGGER.warning(
+                    "CTGov shared NCT payload collision count=%d; first payload kept deterministically",
+                    collision_count,
+                )
+            error_count = sum(1 for result in compact_results if result.error)
             sponsor_row = conn.execute("SELECT COUNT(*) FROM trial_sponsors").fetchone()
             sponsor_count = int(sponsor_row[0]) if sponsor_row else 0
             snapshot_row = conn.execute(

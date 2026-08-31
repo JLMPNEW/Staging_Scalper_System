@@ -297,7 +297,7 @@ def test_portfolio_layer_keeps_transportation_isolated_until_activation() -> Non
     config = load_yaml(PROJECT_ROOT / "portfolio_layer" / "config.yaml")
     sources = config["score_contract"]["sectors"]
     source = next(row for row in sources if row["model_family"] == "transportation")
-    assert source["adapter"] == "industrial_family"
+    assert source["adapter"] == "transportation_subgroup"
     assert source["enabled"] is False
     assert source["required"] is False
     assert source["require_oos_score_valid"] is True

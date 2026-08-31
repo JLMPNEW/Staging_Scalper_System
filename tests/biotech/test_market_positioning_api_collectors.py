@@ -303,6 +303,74 @@ def test_ibkr_historical_catchup_can_skip_current_shortable_snapshot(monkeypatch
     assert shortable_count == 0
 
 
+def test_ibkr_daily_tail_skips_repeated_left_edge_backfill(monkeypatch, tmp_path) -> None:
+    capture_date = date.today()
+
+    class FakeContract:
+        conId = 123
+
+    class FakeIB:
+        instances: list["FakeIB"] = []
+
+        def __init__(self) -> None:
+            self.connected = False
+            self.historical_requests = 0
+            self.__class__.instances.append(self)
+
+        def connect(self, *_args, **_kwargs) -> None:
+            self.connected = True
+
+        def disconnect(self) -> None:
+            self.connected = False
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return self.connected
+
+        def reqMarketDataType(self, _market_data_type: int) -> None:  # noqa: N802
+            return None
+
+        def qualifyContracts(self, _contract) -> list[FakeContract]:  # noqa: N802
+            return [FakeContract()]
+
+        def reqHistoricalData(self, *_args, **_kwargs) -> list[object]:  # noqa: N802
+            self.historical_requests += 1
+            raise AssertionError("daily tail refresh repeated a full-history request")
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+    class FakeStock:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "ib_insync", types.SimpleNamespace(IB=FakeIB, Stock=FakeStock))
+
+    universe = tmp_path / "tickers.csv"
+    universe.write_text("ticker,exchange\nTEST,NASDAQ\n", encoding="utf-8")
+    with connect(tmp_path / "market_positioning.sqlite") as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO ibkr_borrow_fee_rate_daily(
+                ticker, asof_date, con_id, borrow_fee_rate, source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("TEST", capture_date.isoformat(), 123, 0.01, "interactive_brokers", "now", "now"),
+        )
+        conn.commit()
+        sync_ibkr_borrow_availability(
+            conn,
+            tickers_csv=universe,
+            history_start_date=date(2018, 1, 1),
+            end_date=capture_date,
+            shortable_snapshot=False,
+            backfill_fee_history_left_edge=False,
+            sleep_sec=0.0,
+        )
+
+    assert FakeIB.instances[-1].historical_requests == 0
+
+
 def test_ibkr_membership_filter_and_prune_recycled_symbol_rows(tmp_path) -> None:
     universe = tmp_path / "tickers.csv"
     universe.write_text(

@@ -270,11 +270,71 @@ sources:
     base_url: 'consumer_defensive://stage6a/scoring-features'
     refresh_frequency: on_feature_refresh
     data_owner: consumer_defensive
-    raw_schema: consumer_defensive_scoring_features_v2
+    raw_schema: consumer_defensive_scoring_features_v3
     canonical_tables: [feature_scoring_input, feature_scoring_component]
     feature_stages: [scoring_features, factor_validation]
     subsector_scope: consumer_defensive
     priority: 72
+    status: active
+
+  - source_id: consumer_defensive_stage7_baseline_v1
+    stage: calibrated_scoring
+    source_name: Consumer Defensive Stage 7 shadow baseline scoring
+    source_owner: consumer_defensive
+    source_type: normalized_internal_score
+    base_url: 'consumer_defensive://stage7/shadow-baseline-v1'
+    refresh_frequency: on_feature_refresh
+    data_owner: consumer_defensive
+    raw_schema: consumer_defensive_stage7_baseline_v1
+    canonical_tables: [feature_scoring_model_output]
+    feature_stages: [stage7_scoring]
+    subsector_scope: consumer_defensive
+    priority: 73
+    status: active
+
+  - source_id: consumer_defensive_stage7_baseline_v2
+    stage: calibrated_scoring
+    source_name: Consumer Defensive Stage 7 corrected shadow baseline scoring
+    source_owner: consumer_defensive
+    source_type: normalized_internal_score
+    base_url: 'consumer_defensive://stage7/shadow-baseline-v2'
+    refresh_frequency: on_feature_refresh
+    data_owner: consumer_defensive
+    raw_schema: consumer_defensive_stage7_baseline_v2
+    canonical_tables: [feature_scoring_model_output]
+    feature_stages: [stage7_scoring]
+    subsector_scope: consumer_defensive
+    priority: 74
+    status: active
+
+  - source_id: consumer_defensive_stage7_baseline_v3
+    stage: calibrated_scoring
+    source_name: Consumer Defensive Stage 7 semantic-contract shadow baseline
+    source_owner: consumer_defensive
+    source_type: normalized_internal_score
+    base_url: 'consumer_defensive://stage7/shadow-baseline-v3'
+    refresh_frequency: on_feature_refresh
+    data_owner: consumer_defensive
+    raw_schema: consumer_defensive_stage7_baseline_v3
+    canonical_tables: [feature_scoring_model_output]
+    feature_stages: [stage7_scoring]
+    subsector_scope: consumer_defensive
+    priority: 75
+    status: active
+
+  - source_id: consumer_defensive_stage7_baseline_v4
+    stage: calibrated_scoring
+    source_name: Consumer Defensive reviewed-scope shadow baseline scoring
+    source_owner: consumer_defensive
+    source_type: normalized_internal_score
+    base_url: 'consumer_defensive://stage7/reviewed-scope-baseline-v4'
+    refresh_frequency: on_feature_refresh
+    data_owner: consumer_defensive
+    raw_schema: consumer_defensive_stage7_baseline_v4
+    canonical_tables: [feature_scoring_model_output]
+    feature_stages: [stage7_scoring]
+    subsector_scope: consumer_defensive
+    priority: 76
     status: active
 
   - source_id: recognized_etf_index_membership_history

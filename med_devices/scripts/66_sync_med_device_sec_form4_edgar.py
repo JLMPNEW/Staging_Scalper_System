@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_SUBMISSIONS_ARCHIVE_URL = "https://data.sec.gov/submissions/{file_name}"
 SEC_ARCHIVE_URL = "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{primary_doc}"
+XSL_PRIMARY_DOCUMENT_PREFIX = re.compile(r"^xslf345x\d+/", flags=re.IGNORECASE)
 FIELDNAMES = [
     "accession_nodash",
     "transaction_id",
@@ -153,6 +155,8 @@ def text_path(element: ET.Element | None, *names: str) -> str:
         cur = first_child(cur, name)
         if cur is None:
             return ""
+    if cur is None:
+        return ""
     return str(cur.text or "").strip()
 
 
@@ -328,6 +332,17 @@ def selected_filings(
     return out
 
 
+def raw_primary_document_name(primary_document: str) -> str:
+    normalized = str(primary_document or "").strip().replace("\\", "/").lstrip("/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = XSL_PRIMARY_DOCUMENT_PREFIX.sub("", normalized, count=1)
+    parts = [part for part in normalized.split("/") if part not in {"", ".", ".."}]
+    if not parts:
+        raise ValueError(f"Invalid SEC primary document path: {primary_document!r}")
+    return parts[-1]
+
+
 def parse_ownership_xml(text: str) -> ET.Element:
     try:
         return ET.fromstring(text)
@@ -430,6 +445,7 @@ def transaction_rows_from_xml(
                         "filing_date": filing.filing_date,
                         "form": filing.form,
                         "primary_document": filing.primary_document,
+                        "raw_primary_document": raw_primary_document_name(filing.primary_document),
                         "acquired_disposed": text_path(
                             tx,
                             "transactionAmounts",
@@ -447,7 +463,8 @@ def transaction_rows_from_xml(
 
 
 def cache_path(cache_dir: Path, filing: Filing) -> Path:
-    return cache_dir / filing.company.ticker / f"{filing.accession_nodash}_{filing.primary_document}"
+    raw_document = raw_primary_document_name(filing.primary_document)
+    return cache_dir / filing.company.ticker / f"{filing.accession_nodash}_{raw_document}"
 
 
 def load_filing_text(
@@ -465,7 +482,7 @@ def load_filing_text(
     url = SEC_ARCHIVE_URL.format(
         cik_int=int(filing.company.cik),
         accession_nodash=filing.accession_nodash,
-        primary_doc=filing.primary_document,
+        primary_doc=raw_primary_document_name(filing.primary_document),
     )
     text = fetch_text(url, user_agent=user_agent, timeout_sec=timeout_sec, retries=retries, sleep_sec=sleep_sec)
     path.parent.mkdir(parents=True, exist_ok=True)

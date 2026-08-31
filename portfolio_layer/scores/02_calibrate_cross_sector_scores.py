@@ -24,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from portfolio_layer.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from portfolio_layer.core.artifacts import invalidate_dependents  # noqa: E402
 from portfolio_layer.core.contracts import (  # noqa: E402
-    CONTRACT_FIELDS, DEFAULT_RATING_BANDS, contract_version, expected_alpha, fail_if_exists,
+    CONTRACT_FIELDS, DEFAULT_RATING_BANDS, calibration_scope_key, contract_version, expected_alpha, fail_if_exists,
     FINANCIAL_LINEAGE_FIELDS,
     percentiles_within, rating_for_percentile, read_csv, upsert_stocks_scores, validate_rating_bands, write_csv,
 )
@@ -102,10 +102,10 @@ def resolve_calibration_anchor(value: object, label: str, rows: list[dict[str, s
 
 
 def assign_percentiles_and_ratings(rows: list[dict], bands: dict[str, float]) -> None:
-    """Assign within-sector percentiles after duplicate resolution."""
-    by_pipeline: dict[str, list[dict]] = {}
+    """Assign percentiles within each independently calibrated model scope."""
+    by_pipeline: dict[tuple[str, str], list[dict]] = {}
     for row in rows:
-        by_pipeline.setdefault(str(row["source_pipeline"]), []).append(row)
+        by_pipeline.setdefault(calibration_scope_key(row), []).append(row)
     for sector_rows in by_pipeline.values():
         ranked_rows = [row for row in sector_rows if not row_flag(row, "missing_score_flag")]
         natives = [float(row["native_score"]) for row in ranked_rows]
@@ -163,6 +163,13 @@ def main() -> int:
         str(s["model_family"]): dict(s.get("calibration", {}))
         for s in cfg_get(config, "score_contract.sectors", [])
     }
+    scope_calib_by_family = {
+        str(s["model_family"]): {
+            str(scope): dict(scope_cfg)
+            for scope, scope_cfg in dict(s.get("calibration_by_scope", {}) or {}).items()
+        }
+        for s in cfg_get(config, "score_contract.sectors", [])
+    }
     global_native_range = dict(cfg_get(config, "score_contract.native_score_range", {}) or {})
     native_range_by_family = {
         str(s["model_family"]): {**global_native_range, **dict(s.get("native_score_range", {}) or {})}
@@ -208,17 +215,23 @@ def main() -> int:
 
     # Calibrate native scores. Percentile/rating must wait until after duplicate resolution so each
     # name is ranked against the final sleeve population, not the pre-dedup collected population.
-    by_pipeline: dict[str, list[dict]] = {}
+    by_pipeline: dict[tuple[str, str], list[dict]] = {}
     for row in collected:
-        by_pipeline.setdefault(row["source_pipeline"], []).append(row)
-    unknown_pipelines = sorted(set(by_pipeline) - set(calib_by_family))
+        pipeline = str(row["source_pipeline"])
+        scope = str(row.get("model_scope_id") or pipeline)
+        by_pipeline.setdefault((pipeline, scope), []).append(row)
+    unknown_pipelines = sorted(
+        {pipeline for pipeline, _scope in by_pipeline} - set(calib_by_family)
+    )
     if unknown_pipelines:
         LOGGER.error("Unknown source_pipeline values in collected_scores.csv: %s", unknown_pipelines)
         return 1
 
     contract_rows: list[dict] = []
-    for pipeline, rows in by_pipeline.items():
-        calib = calib_by_family.get(pipeline, {})
+    for (pipeline, scope), rows in by_pipeline.items():
+        calib = scope_calib_by_family.get(pipeline, {}).get(
+            scope, calib_by_family.get(pipeline, {})
+        )
         try:
             neutral = resolve_calibration_anchor(calib.get("neutral", 50.0), f"{pipeline}:calibration.neutral", rows)
             scale = parse_finite(calib.get("scale", 50.0), f"{pipeline}:calibration.scale")
@@ -279,6 +292,13 @@ def main() -> int:
             contract_rows.append({
                 "as_of_date": run_as_of, "ticker": r["ticker"], "source_pipeline": pipeline,
                 "sector": r["sector"], "industry": r["industry"], "industry_aggregate": r["industry_aggregate"],
+                "model_scope_id": str(r.get("model_scope_id") or ""),
+                "production_policy_id": str(r.get("production_policy_id") or ""),
+                "production_policy_sha256": str(r.get("production_policy_sha256") or ""),
+                "selection_reliability_class": str(r.get("selection_reliability_class") or ""),
+                "active_sleeve_weight": r.get("active_sleeve_weight", ""),
+                "benchmark_residual_weight": r.get("benchmark_residual_weight", ""),
+                "benchmark_residual_ticker": str(r.get("benchmark_residual_ticker") or ""),
                 "final_score": round(0.0 if missing_score_flag else final_score, 6),
                 "rating": "", "within_sector_percentile": "",
                 "score_confidence": round(score_confidence, 4),
@@ -355,11 +375,13 @@ def main() -> int:
         })
 
     final_rows = list(best.values())
-    final_by_pipeline: dict[str, list[dict]] = {}
+    final_by_pipeline: dict[tuple[str, str], list[dict]] = {}
     for row in final_rows:
-        final_by_pipeline.setdefault(str(row["source_pipeline"]), []).append(row)
-    for pipeline, rows in final_by_pipeline.items():
-        calib = calib_by_family.get(pipeline, {})
+        final_by_pipeline.setdefault(calibration_scope_key(row), []).append(row)
+    for (pipeline, scope), rows in final_by_pipeline.items():
+        calib = scope_calib_by_family.get(pipeline, {}).get(
+            scope, calib_by_family.get(pipeline, {})
+        )
         try:
             neutral = resolve_calibration_anchor(calib.get("neutral", 50.0), f"{pipeline}:calibration.neutral", rows)
             scale = parse_finite(calib.get("scale", 50.0), f"{pipeline}:calibration.scale")
@@ -391,7 +413,14 @@ def main() -> int:
                 return 1
             row["final_score"] = round(final_score, 6)
     assign_percentiles_and_ratings(final_rows, bands)
-    final_rows = sorted(final_rows, key=lambda r: (r["source_pipeline"], -float(r["final_score"])))
+    final_rows = sorted(
+        final_rows,
+        key=lambda r: (
+            r["source_pipeline"],
+            str(r.get("model_scope_id") or ""),
+            -float(r["final_score"]),
+        ),
+    )
     out_path = run_dir / "stocks_scores.csv"
     duplicate_path = run_dir / "validation" / "duplicate_resolution.csv"
     if args.force:

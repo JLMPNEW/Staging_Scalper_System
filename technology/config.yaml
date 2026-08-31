@@ -1,4 +1,4 @@
-﻿paths:
+paths:
   database_path: "${TECHNOLOGY_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/technology.sqlite"
   output_dir: "../output/technology_reports"
   cache_dir: "../output/technology_cache"
@@ -118,13 +118,33 @@ oos_calibration_standards:
       calibration_lock_date: "2026-06-15"
       calibration_production_start_date: "2026-06-15"
       calibration_validation_method: "stage7_static_weights_with_stage8_walk_forward_challenger_review"
+      production_model_version: "semiconductor_stage7_production_v1"
+      production_model_effective_date: "2026-06-15"
     software_infrastructure:
       calibration_provenance_version: "technology_oos_provenance_v1"
       calibration_train_start_date: "2011-01-01"
       calibration_train_end_date: "2026-06-14"
-      calibration_lock_date: "2026-06-15"
-      calibration_production_start_date: "2026-06-15"
-      calibration_validation_method: "stage8_constrained_optuna_with_walk_forward_validation"
+      calibration_lock_date: "2026-08-29"
+      calibration_production_start_date: "2026-08-31"
+      calibration_validation_method: "manual_economic_override_with_21_session_rollback_probation"
+      production_model_version: "software_infrastructure_stage8_production_v2"
+      production_model_effective_date: "2026-08-31"
+      model_schedule:
+        - calibration_train_start_date: "2011-01-01"
+          calibration_train_end_date: "2026-06-14"
+          calibration_lock_date: "2026-06-15"
+          calibration_production_start_date: "2026-06-15"
+          production_model_effective_date: "2026-06-15"
+          production_model_version: "software_infrastructure_stage8_production_v1"
+          calibration_validation_method: "stage8_constrained_optuna_with_walk_forward_validation"
+          end_date: "2026-08-30"
+        - calibration_train_start_date: "2011-01-01"
+          calibration_train_end_date: "2026-06-14"
+          calibration_lock_date: "2026-08-29"
+          calibration_production_start_date: "2026-08-31"
+          production_model_effective_date: "2026-08-31"
+          production_model_version: "software_infrastructure_stage8_production_v2"
+          calibration_validation_method: "manual_economic_override_with_21_session_rollback_probation"
     technology_hardware:
       calibration_provenance_version: "technology_oos_provenance_v1"
       calibration_train_start_date: "2011-01-01"
@@ -132,6 +152,8 @@ oos_calibration_standards:
       calibration_lock_date: "2026-06-15"
       calibration_production_start_date: "2026-06-15"
       calibration_validation_method: "stage7_static_weights_with_stage8_report_only_challenger"
+      production_model_version: "technology_hardware_stage7_production_v1"
+      production_model_effective_date: "2026-06-15"
 
 semiconductor_research:
   price_source_ids:
@@ -175,9 +197,11 @@ semiconductor_portfolio_backtest:
 software_infrastructure_portfolio_backtest:
   output_dir: "../output/technology_reports/software_infrastructure/backtests"
   stage8_weights_json: "../output/technology_reports/software_infrastructure/optuna_calibration/stage8_best_weights.json"
-  production_model_name: "stage8_promoted_production_v1"
+  production_model_name: "stage8_promoted_production_v2"
   production_model_type: "production"
-  include_stage8_report_only_candidate: true
+  include_stage8_report_only_candidate: false
+  rollback_shadow_config_key: "software_infrastructure_stage8_v1_rollback_shadow_scoring"
+  rollback_shadow_model_name: "stage8_production_v1_rollback_shadow"
   stage7_challenger_config_key: "software_infrastructure_stage7_challenger_scoring"
   stage7_challenger_model_name: "stage7_challenger_v1"
   transaction_cost_bps: 20.0
@@ -261,11 +285,14 @@ software_infrastructure_governance_reports:
   signal_registry_path: "software_infrastructure/data/software_infrastructure_signal_registry.yaml"
   production_model_status: "stage8_active"
   stage7_challenger_status: "active_challenger"
-  stage8_candidate_status: "promoted_to_production"
+  stage8_candidate_status: "manual_economic_override_promoted"
   manual_promotion_approved: true
-  promotion_effective_date: "2026-06-15"
+  promotion_effective_date: "2026-08-31"
+  legacy_pre_receipt_model_version: "software_infrastructure_stage8_production_v1"
+  active_promotion_receipt_path: "../output/technology_reports/software_infrastructure/governance/promotion_receipts/software_infrastructure_stage8_production_v2_2026-08-31.json"
+  active_promotion_receipt_sha256: "e93d6f2fb6059c2dc2c383fce288405dad487f24c2a7dcd076366ccd54ca6b74"
   recommended_stage8_use_case: "score_weighted_long_only"
-  promotion_confidence: "moderate"
+  promotion_confidence: "manual_override_probation"
   required_outputs:
     - "software_infrastructure_signal_registry.csv"
     - "software_infrastructure_signal_registry.json"
@@ -332,6 +359,23 @@ software_infrastructure_refresh_pipeline:
   default_include_optuna: false
   default_include_norgate_backfill: false
 
+software_infrastructure_promotion_probation:
+  enabled: true
+  effective_date: "2026-08-31"
+  required_trading_sessions: 21
+  production_source_id: "software_infrastructure_calibrated_score_v1"
+  production_model_version: "software_infrastructure_stage8_production_v2"
+  rollback_source_id: "software_infrastructure_stage8_v1_rollback_shadow_score"
+  rollback_model_version: "software_infrastructure_stage8_production_v1"
+  benchmark_ticker: "QQQ"
+  portfolio_quantile: 0.20
+  min_positions: 5
+  transaction_cost_bps_per_side: 20.0
+  minimum_price_coverage: 0.90
+  decision_rule: "keep_if_promoted_net_return_gte_rollback_else_revert_recommended"
+  automatic_reversion: false
+  output_dir: "../output/technology_reports/software_infrastructure/promotion_probation"
+
 technology_hardware_refresh_pipeline:
   output_dir: "../output/technology_reports/technology_hardware/orchestration"
   financial_feature_batch_size: 8
@@ -355,6 +399,14 @@ sec_fundamentals:
     - "40-F"
   start_date: "2010-01-01"
   include_historical_members: true
+  # Corporate reincorporations can assign a new CIK without changing the
+  # exchange ticker. Legacy CIKs are ingested first and the current CIK last so
+  # all PIT facts share the ticker while current issuer metadata stays primary.
+  legacy_cik_aliases:
+    DMRC:
+      - cik: "0001438231"
+        end_date: "2026-05-20"
+        reason: "Digimarc reincorporation; historical SEC issuer lineage"
   refresh_if_stale_hours: 24.0
   report_output_csv: "../output/technology_reports/sec_fundamentals/sec_fundamentals_sync_coverage.csv"
   feature_output_csv: "../output/technology_reports/sec_fundamentals/sec_financial_feature_coverage.csv"
@@ -408,6 +460,43 @@ positioning_import:
     ibkr_borrow: 45
     sec_float_denominator: 550
   include_historical_members: true
+  # Exact SEC 13F identifiers supplement issuer-name matching. These are
+  # reviewed common-equity CUSIPs for newly admitted technology members;
+  # multiple values preserve lineages across corporate actions.
+  sec_13f_cusip_aliases:
+    AIP:
+      - "04302A104"
+    AEVA:
+      - "00835Q103"
+      - "00835Q202"
+    ALRM:
+      - "011642105"
+    AMPL:
+      - "03213A104"
+    CRM:
+      - "79466L302"
+    DMRC:
+      - "25381B101"
+    FRSH:
+      - "358054104"
+    MITK:
+      - "606710200"
+    OOMA:
+      - "683416101"
+    PEGA:
+      - "705573103"
+    RDVT:
+      - "75704L104"
+    RNG:
+      - "76680R206"
+    SOUN:
+      - "836100107"
+    ZM:
+      - "98980L101"
+  # Form 13F is normally due 45 days after quarter-end. A 75-day ceiling
+  # admits ordinary late filings but prevents years-late amendments from
+  # shifting an old quarter's point-in-time availability into the future.
+  sec_13f_snapshot_max_filing_lag_days: 75
   positioning_universe_csv: "../output/technology_cache/positioning/semiconductor_positioning_universe.csv"
   output_csv: "../output/technology_reports/positioning/positioning_import_coverage.csv"
   feature_output_csv: "../output/technology_reports/positioning/positioning_feature_coverage.csv"
@@ -729,9 +818,14 @@ software_infrastructure_optuna_calibration:
   top_quantile: 0.20
   min_positions: 5
   max_turnover: 0.60
-  max_top_cohort_share: 0.55
+  # Two-cohort software history has a naturally dominant cohort (~57% of the
+  # PIT universe), while the incumbent averages ~68% in its top quintile.
+  # A 70% cap remains binding without making every candidate infeasible.
+  max_top_cohort_share: 0.70
   min_holdout_mean_ic_21: 0.005
   min_holdout_mean_ic_63: 0.005
+  min_holdout_newey_west_t_stat_21: 2.0
+  min_holdout_newey_west_t_stat_63: 2.0
   min_holdout_mean_spread_net_21: 0.000
   min_holdout_mean_spread_net_63: 0.000
   min_holdout_hit_rate: 0.50
@@ -748,6 +842,12 @@ software_infrastructure_optuna_calibration:
     test_block_dates: 12
     n_trials_per_refit: 60
     min_test_blocks: 3
+    min_paired_t: 2.0
+    min_gate_pass_rate: 0.50
+    # Early PIT samples are more cohort-concentrated than the full history.
+    # A refit may exceed the absolute cap only up to incumbent + 2 percentage points.
+    max_top_cohort_share_incumbent_tolerance: 0.02
+    require_for_promotion: true
   component_bounds:
     quality: [0.15, 0.40]
     valuation: [0.05, 0.30]
@@ -805,6 +905,8 @@ technology_hardware_optuna_calibration:
   max_top_cohort_share: 0.55
   min_holdout_mean_ic_21: 0.005
   min_holdout_mean_ic_63: 0.005
+  min_holdout_newey_west_t_stat_21: 2.0
+  min_holdout_newey_west_t_stat_63: 2.0
   min_holdout_mean_spread_net_21: 0.000
   min_holdout_mean_spread_net_63: 0.000
   min_holdout_hit_rate: 0.50
@@ -821,6 +923,9 @@ technology_hardware_optuna_calibration:
     test_block_dates: 12
     n_trials_per_refit: 60
     min_test_blocks: 3
+    min_paired_t: 2.0
+    min_gate_pass_rate: 0.50
+    require_for_promotion: true
   component_bounds:
     quality: [0.15, 0.40]
     valuation: [0.05, 0.30]
@@ -929,9 +1034,68 @@ software_infrastructure_calibrated_scoring:
   source_id: "software_infrastructure_calibrated_score_v1"
   baseline_source_id: "software_infrastructure_scoring_contract"
   model_family: "software_infrastructure"
-  model_version: "software_infrastructure_stage8_promoted_v1"
+  model_version: "software_infrastructure_stage8_production_v2"
   output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_production_calibrated_scores.csv"
   validation_output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_production_validation.csv"
+  neutral_score: 50.0
+  overlay_weight: 0.00
+  min_core_data_quality_confidence: 0.50
+  max_missing_positive_component_weight: 0.35
+  max_dead_core_component_pct: 0.20
+  require_zero_growth_weight: false
+  rank_ready_exempt_tickers: []
+  sector_overlay_components: []
+  model_schedule:
+    - start_date: "2010-01-01"
+      end_date: "2026-08-30"
+      weights_config_key: "software_infrastructure_stage8_v1_rollback_shadow_scoring"
+      model_version: "software_infrastructure_stage8_production_v1"
+    - start_date: "2026-08-31"
+      weights_config_key: "software_infrastructure_calibrated_scoring"
+      model_version: "software_infrastructure_stage8_production_v2"
+  component_weights:
+    growth: 0.05821469408051366
+    market_behavior: 0.1766629798165181
+    positioning: 0.11865581700699161
+    quality: 0.18358250957556177
+    risk_control: 0.28736698096964924
+    valuation: 0.17551701855076574
+  subfeature_weights:
+    quality:
+      fcf_margin_score: 0.022601509139986656
+      gross_margin_score: 0.4833601307752096
+      operating_margin_score: 0.45272972038845166
+      sbc_pct_revenue_score: 0.041308639696352026
+    growth:
+      revenue_acceleration_score: 0.3994740163220739
+      revenue_yoy_growth_score: 0.3998049529609931
+      rpo_to_revenue_score: 0.2007210307169329
+    valuation:
+      ev_gross_profit_score: 0.729052803276091
+      ev_operating_income_score: 0.14124329227580548
+      fcf_yield_score: 0.12970390444810345
+    market_behavior:
+      distance_from_52w_high_score: 0.498194199584327
+      max_drawdown_12m_score: 0.03518625407039015
+      rel_strength_bench_3m_score: 0.3530691507363957
+      ret_12m_ex_1m_score: 0.11355039560888719
+    positioning:
+      institutional_ownership_delta_pct_score: 0.5427210599870018
+      latest_borrow_fee_rate_score: 0.4463364362104932
+      latest_days_to_cover_score: 0.01094250380250503
+    risk_control:
+      avg_dollar_volume_60d_score: 0.0003721385105682983
+      max_drawdown_12m_score: 0.001057258005152232
+      realized_vol_60d_score: 0.4724142847743111
+      share_count_yoy_growth_score: 0.5261563187099685
+
+software_infrastructure_stage8_v1_rollback_shadow_scoring:
+  source_id: "software_infrastructure_stage8_v1_rollback_shadow_score"
+  baseline_source_id: "software_infrastructure_scoring_contract"
+  model_family: "software_infrastructure"
+  model_version: "software_infrastructure_stage8_production_v1"
+  output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_stage8_v1_rollback_shadow_scores.csv"
+  validation_output_csv: "../output/technology_reports/software_infrastructure/scoring/software_infrastructure_stage8_v1_rollback_shadow_validation.csv"
   neutral_score: 50.0
   overlay_weight: 0.00
   min_core_data_quality_confidence: 0.50
@@ -1166,6 +1330,10 @@ semiconductor_optuna_calibration:
   max_top_cohort_share: 0.45
   min_holdout_mean_ic_21: 0.01
   min_holdout_mean_ic_63: 0.01
+  min_holdout_newey_west_t_stat_21: 2.0
+  min_holdout_newey_west_t_stat_63: 2.0
+  min_holdout_mean_spread_net_21: 0.000
+  min_holdout_mean_spread_net_63: 0.000
   min_holdout_hit_rate: 0.50
   promotion_min_objective_improvement: 0.002
   include_inactive_tickers: true
@@ -1187,6 +1355,9 @@ semiconductor_optuna_calibration:
     test_block_dates: 12
     n_trials_per_refit: 60
     min_test_blocks: 3
+    min_paired_t: 2.0
+    min_gate_pass_rate: 0.50
+    require_for_promotion: true
   component_bounds:
     valuation: [0.20, 0.45]
     quality: [0.15, 0.40]

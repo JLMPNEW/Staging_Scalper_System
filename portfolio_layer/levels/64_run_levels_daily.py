@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market-data-dir", type=Path)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--late-holding-supplement", action="store_true")
+    parser.add_argument("--historical-catchup", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     return parser.parse_args()
@@ -117,7 +118,9 @@ def main() -> int:
                     command.extend(["--market-data-dir", str(args.market_data_dir.resolve())])
             if args.force and step != "level_outcomes":
                 command.append("--force")
-            if args.late_holding_supplement and step == "level_outcomes":
+            if (
+                args.late_holding_supplement or args.historical_catchup
+            ) and step == "level_outcomes":
                 command.append("--preserve-first-write-drifts-as-deferred")
             expected_manifest = _child_manifest_path(
                 output_root=paths.output_dir,
@@ -151,7 +154,9 @@ def main() -> int:
                 command.extend(["--market-data-dir", str(args.market_data_dir.resolve())])
         if args.force and step != "level_outcomes":
             command.append("--force")
-        if args.late_holding_supplement and step == "level_outcomes":
+        if (
+            args.late_holding_supplement or args.historical_catchup
+        ) and step == "level_outcomes":
             command.append("--preserve-first-write-drifts-as-deferred")
         return_code, detail = _run(command)
         child_manifest = _child_manifest_path(
@@ -202,6 +207,7 @@ def main() -> int:
             "shadow_only": True,
             "broker_execution_prohibited": True,
             "late_holding_supplement": bool(args.late_holding_supplement),
+            "historical_catchup": bool(args.historical_catchup),
             "child_manifests": children,
             "inputs_sha256": {str(path): sha256_file(path) for path in source_paths},
             "outputs_sha256": {steps_path.name: sha256_file(steps_path)},

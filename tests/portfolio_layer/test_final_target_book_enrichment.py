@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import io
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -207,6 +208,70 @@ def test_final_report_uses_macro_preamble_not_repeated_columns(tmp_path: Path) -
     assert parsed[8] == []
     assert parsed[9] == enricher.BOOK_FIELDS
     assert not set(enricher.MACRO_FIELDS) & set(parsed[9])
+
+
+def test_final_report_pair_publish_replaces_both_files(tmp_path: Path) -> None:
+    enricher = _load_enricher()
+    output = tmp_path / "final_target_book.csv"
+    manifest = tmp_path / "final_manifest.json"
+    staged_output = tmp_path / ".report.staged"
+    staged_manifest = tmp_path / ".manifest.staged"
+    output.write_text("old report", encoding="utf-8")
+    manifest.write_text(
+        '{"acceptance":"PASS","version":"old"}', encoding="utf-8"
+    )
+    staged_output.write_text("new report", encoding="utf-8")
+    staged_manifest.write_text(
+        '{"acceptance":"PASS","version":"new"}', encoding="utf-8"
+    )
+
+    enricher.publish_final_report_pair(
+        staged_report=staged_output,
+        staged_manifest=staged_manifest,
+        output_path=output,
+        manifest_path=manifest,
+    )
+
+    assert output.read_text(encoding="utf-8") == "new report"
+    assert json.loads(manifest.read_text(encoding="utf-8"))["version"] == "new"
+    assert not staged_output.exists()
+    assert not staged_manifest.exists()
+
+
+def test_final_report_pair_publish_restores_old_pair_on_second_replace_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enricher = _load_enricher()
+    output = tmp_path / "final_target_book.csv"
+    manifest = tmp_path / "final_manifest.json"
+    staged_output = tmp_path / ".report.staged"
+    staged_manifest = tmp_path / ".manifest.staged"
+    output.write_bytes(b"old report")
+    manifest.write_bytes(b"old manifest")
+    staged_output.write_bytes(b"new report")
+    staged_manifest.write_bytes(b"new manifest")
+    real_replace = enricher.os.replace
+    calls = 0
+
+    def fail_second_replace(source: object, destination: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated manifest swap failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(enricher.os, "replace", fail_second_replace)
+    with pytest.raises(OSError, match="simulated manifest swap failure"):
+        enricher.publish_final_report_pair(
+            staged_report=staged_output,
+            staged_manifest=staged_manifest,
+            output_path=output,
+            manifest_path=manifest,
+        )
+
+    assert output.read_bytes() == b"old report"
+    assert manifest.read_bytes() == b"old manifest"
 
 
 def test_ib_performance_reconciles_realized_income_and_consistent_total(

@@ -413,7 +413,9 @@ def build_sidecar_index(config: dict[str, Any], config_path: Path,
                     (recent/live dates) plus stage11_combined/<prefix>_..._panel_<start>_<end>.csv
                     historical range chunks
     All sources are indexed; later sources override earlier per (as_of, ticker):
-    range chunks (ascending range) -> root panel -> per-date sidecars (authoritative for their date).
+    root panel -> legacy per-date sidecars -> range chunks (ascending range). Certified range
+    chunks are authoritative for covered dates because they are the survivorship-correct
+    calibration contract and may intentionally remediate stale legacy sidecars.
     Every file consumed is sha256-recorded into `used`.
     """
     sector_root = resolve_path(
@@ -443,14 +445,21 @@ def build_sidecar_index(config: dict[str, Any], config_path: Path,
                 if only_asof is not None and asof != only_asof:
                     continue
                 per_pipe.setdefault(asof, {})[ticker] = _sidecar_fields(r)
-            used[f"{pipe}:{path.name}"] = sha256_file(path)
+            relative_path = path.relative_to(dashboard_root).as_posix()
+            used[f"{pipe}:{relative_path}"] = sha256_file(path)
 
-        # Precedence (later ingests override earlier per (as_of, ticker)): root panel first, then
-        # range chunks ascending — a regenerated chunk supersedes both the stale root panel and any
-        # older, narrower chunk covering the same dates. Legacy per-date sidecars stay authoritative.
+        # Precedence (later ingests override earlier per (as_of, ticker)): the root panel is
+        # fallback state, legacy per-date sidecars fill uncovered dates, and certified range chunks
+        # are authoritative for overlaps. This lets a survivorship remediation replace stale sidecars
+        # without rewriting thousands of dated dashboard files.
         root_panel = dashboard_root / f"{prefix}{SIDECAR_SUFFIX}"
         if root_panel.exists():
             ingest(root_panel)
+        for compact, rank_path in candidates:
+            sidecar = sidecar_path_for(rank_path)
+            if sidecar.exists():
+                iso = f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
+                ingest(sidecar, only_asof=iso)
         chunk_dir = dashboard_root / "stage11_combined"
         if chunk_dir.exists():
             range_re = re.compile(r"_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.csv$")
@@ -461,11 +470,6 @@ def build_sidecar_index(config: dict[str, Any], config_path: Path,
                     chunks.append(((m.group(2), m.group(1)), path))  # sort by (end, start), not name
             for _key, path in sorted(chunks):
                 ingest(path)
-        for compact, rank_path in candidates:
-            sidecar = sidecar_path_for(rank_path)
-            if sidecar.exists():
-                iso = f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
-                ingest(sidecar, only_asof=iso)
     return index
 
 

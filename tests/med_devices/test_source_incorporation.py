@@ -12,6 +12,7 @@ from med_devices.core.source_incorporation import (
 from orchestration_contracts.financial_lineage import (
     POLICY_CANDIDATE_ONLY,
     POLICY_DISABLED,
+    evaluate_financial_lineage_rows,
     policy_for_model_family,
 )
 
@@ -122,6 +123,7 @@ def test_source_incorporation_proves_latest_inputs_and_fails_closed() -> None:
     assert evidence[0]["incorporated_financial_accession"] == "000012345624000001"
     assert evidence[0]["fda_source_status"] == "SEALED_SUCCESS"
     assert gated[0]["portfolio_candidate_gate"] == "1"
+    assert evidence[0]["portfolio_candidate_gate_before_lineage"] == "1"
 
     conn.execute(
         "UPDATE feature_financial_valuation SET payload_json = ?",
@@ -137,6 +139,28 @@ def test_source_incorporation_proves_latest_inputs_and_fails_closed() -> None:
     assert "latest_financial_accession_not_selected" in evidence[0]["financial_lineage_reason"]
     assert gated[0]["portfolio_candidate_gate"] == "0"
     assert gated[0]["portfolio_candidate_status"] == "data_review_required"
+    assert evidence[0]["portfolio_candidate_gate"] == "0"
+    assert evidence[0]["portfolio_candidate_gate_before_lineage"] == "1"
+
+    # A same-date retry reads the already-demoted CSV. It must preserve the
+    # original candidate intent, otherwise candidate-only lineage validation
+    # would incorrectly reclassify the unresolved row as a harmless noncandidate.
+    rerun_gated, rerun_evidence = build_med_device_source_incorporation(
+        conn,
+        asof=ASOF,
+        score_rows=gated,
+    )
+    assert rerun_gated[0]["portfolio_candidate_gate"] == "0"
+    assert rerun_evidence[0]["portfolio_candidate_gate_before_lineage"] == "1"
+    evaluation = evaluate_financial_lineage_rows(
+        rerun_evidence,
+        policy_mode=POLICY_CANDIDATE_ONLY,
+        expected_asof=ASOF,
+    )
+    assert any(
+        issue.code == "candidate_has_unresolved_financial_lineage"
+        for issue in evaluation.blocking_issues
+    )
 
 
 def test_daily_runner_refreshes_sec_live_then_enforces_source_gate() -> None:

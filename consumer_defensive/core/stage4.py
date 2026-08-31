@@ -2055,7 +2055,7 @@ def _validated_mutable_json(
     url: str,
     path: Path,
     *,
-    validate: Callable[[object], None],
+    validate: Callable[[object], object],
     cache_root: Path | None = None,
     sealed_lookup: dict[str, Path] | None = None,
     force: bool = False,
@@ -2222,7 +2222,10 @@ def _seal_cache_manifest(
                     descriptor, 'wb'
                 ) as sealed_handle:
                     descriptor = -1
-                    shutil.copyfileobj(source_handle, sealed_handle)
+                    shutil.copyfileobj(
+                        source_handle,
+                        sealed_handle,  # pyright: ignore[reportArgumentType]
+                    )
                     sealed_handle.flush()
                     os.fsync(sealed_handle.fileno())
                 global_payload = read_bytes(global_temporary)
@@ -2269,7 +2272,10 @@ def _seal_cache_manifest(
                         descriptor, 'wb'
                     ) as sealed_handle:
                         descriptor = -1
-                        shutil.copyfileobj(source_handle, sealed_handle)
+                        shutil.copyfileobj(
+                            source_handle,
+                            sealed_handle,  # pyright: ignore[reportArgumentType]
+                        )
                         sealed_handle.flush()
                         os.fsync(sealed_handle.fileno())
                     copied = read_bytes(temporary)
@@ -2554,9 +2560,12 @@ def _validate_submissions_payload(
         'accessionNumber','filingDate','acceptanceDateTime',
         'reportDate','form','primaryDocument',
     )
-    values = [recent.get(key) for key in keys]
-    if any(not isinstance(value, list) for value in values):
-        raise ValueError('SEC submissions required recent fields must be arrays')
+    values: list[list[Any]] = []
+    for key in keys:
+        value = recent.get(key)
+        if not isinstance(value, list):
+            raise ValueError('SEC submissions required recent fields must be arrays')
+        values.append(value)
     lengths = {len(value) for value in values}
     if len(lengths) != 1:
         raise ValueError('SEC submissions required recent arrays have unequal lengths')
@@ -3169,7 +3178,7 @@ def _association_manifest(
     conn: sqlite3.Connection, *, cutoff: str, tickers: list[str]
 ) -> dict[str, Any]:
     if not tickers:
-        payload: list[list[Any]] = []
+        payload: Iterable[Iterable[Any]] = []
     else:
         placeholders = ','.join('?' for _ in tickers)
         payload = conn.execute(
@@ -4399,21 +4408,36 @@ def sync_fx_rates(conn: sqlite3.Connection, bundle: ConfigBundle, *, start: str 
         )
     supported = {str(value).upper() for value in settings.get("supported_currencies", [])}
     non_monetary = {str(value).upper() for value in settings.get("non_monetary_three_letter_units", [])}
-    units = {
-        str(row[0]).upper() for row in conn.execute(
-            'SELECT DISTINCT unit FROM fact_sec_xbrl_fact_raw '
-            'WHERE unit IS NOT NULL AND accepted_at<=?',
+    concept_map = _read_yaml(
+        resolve_path(
+            cfg_get(bundle.payload, "financial_features.concept_map"),
+            base_dir=bundle.base_dir,
+        )
+    )
+    mapped_concepts = set(_concept_index(concept_map))
+    concept_units = [
+        (str(row[0]), str(row[1]).upper())
+        for row in conn.execute(
+            'SELECT DISTINCT concept, unit FROM fact_sec_xbrl_fact_raw '
+            'WHERE concept IS NOT NULL AND unit IS NOT NULL AND accepted_at<=?',
             (end_date.isoformat() + 'T23:59:59Z',),
         )
+    ]
+    units = {unit for _concept, unit in concept_units}
+    mapped_units = {
+        unit for concept, unit in concept_units if concept in mapped_concepts
     }
     overlap = sorted(supported & non_monetary)
     if overlap:
         raise ValueError(f"FX currencies and non-monetary units overlap: {overlap}")
-    currencies = sorted((units & supported) - {"USD"})
+    currencies = sorted((mapped_units & supported) - {"USD"})
     ignored_non_monetary_units = sorted(units & non_monetary)
+    unmapped_supported_currency_units = sorted(
+        ((units - mapped_units) & supported) - {"USD"}
+    )
     unknown_three_letter_units = sorted(
         unit
-        for unit in units
+        for unit in mapped_units
         if MONETARY_UNITS.fullmatch(unit)
         and unit not in supported
         and unit not in non_monetary
@@ -4539,6 +4563,7 @@ def sync_fx_rates(conn: sqlite3.Connection, bundle: ConfigBundle, *, start: str 
     return {
         "currencies": currencies,
         "ignored_non_monetary_units": ignored_non_monetary_units,
+        "unmapped_supported_currency_units": unmapped_supported_currency_units,
         "unknown_three_letter_units": unknown_three_letter_units,
         "rows_written": rows_written,
         "quarantined_rows": quarantined_rows,
@@ -4593,7 +4618,8 @@ def build_financial_features(conn: sqlite3.Connection, bundle: ConfigBundle, *, 
     raw = conn.execute(
         """SELECT r.raw_fact_id,r.source_observation_id,r.ticker,
                   r.accession_number,r.taxonomy,r.concept,
-                  r.numeric_value,r.unit,r.period_start,r.period_end,r.accepted_at
+                  r.numeric_value,r.unit,r.period_start,r.period_end,r.accepted_at,
+                  r.dimensions_json
            FROM fact_sec_xbrl_fact_raw r
            JOIN bridge_sec_filing_company b
              ON b.accession_number=r.accession_number

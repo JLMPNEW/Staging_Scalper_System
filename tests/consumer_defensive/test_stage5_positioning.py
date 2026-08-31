@@ -226,10 +226,23 @@ def test_stage5_imports_are_pit_read_only_and_build_complete_features(tmp_path: 
         before_form4 = (tmp_path / "form4.sqlite").stat().st_size
         before_positioning = (tmp_path / "positioning.sqlite").stat().st_size
         ownership = import_sec_insider_transactions(conn, bundle, as_of="2024-12-31")
+        conn.execute(
+            "UPDATE fact_sec_ownership_transaction SET ticker='OLD' WHERE ticker='KO'"
+        )
+        ownership_retry = import_sec_insider_transactions(
+            conn, bundle, as_of="2024-12-31"
+        )
         imported = import_market_positioning(conn, bundle, as_of="2024-12-31")
         features = build_positioning_features(conn, bundle, as_of="2024-12-31")
 
         assert ownership["rows"] == 1
+        assert ownership_retry["rows"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM fact_sec_ownership_transaction WHERE ticker='KO'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM fact_sec_ownership_transaction WHERE ticker='OLD'"
+        ).fetchone()[0] == 0
         assert imported["institutional_rows"] == 1
         assert imported["short_interest_rows"] == 1
         assert imported["borrow_rows"] == 1
@@ -436,6 +449,26 @@ def test_positioning_handoff_uses_only_reviewed_source_identifiers(
         assert row["ticker"] == "KO"
         assert row["cusip"] == "191216100"
         assert row["finra_symbol"] == "KO"
+    finally:
+        conn.close()
+
+
+def test_positioning_handoff_expands_reviewed_finra_ticker_lineage(
+    tmp_path: Path,
+) -> None:
+    bundle, conn = _prepared(tmp_path)
+    identifier_map = Path(bundle.payload["positioning"]["source_identifier_map"])
+    identifier_map.write_text(
+        "ticker,cusip,finra_symbol,review_status,review_reason\n"
+        "KO,191216100,KO;OLD,reviewed,test ticker lineage\n",
+        encoding="utf-8",
+    )
+    try:
+        rows = build_positioning_universe_rows(conn, bundle)
+        assert len(rows) == 2
+        assert {row["ticker"] for row in rows} == {"KO"}
+        assert {row["finra_symbol"] for row in rows} == {"KO", "OLD"}
+        assert {row["cusip"] for row in rows} == {"191216100"}
     finally:
         conn.close()
 

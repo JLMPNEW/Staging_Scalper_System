@@ -6,7 +6,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -20,6 +20,10 @@ from industrials.transportation.contracts import write_manifest  # noqa: E402
 from industrials.transportation.financial_contract import (  # noqa: E402
     VALID_STATUSES,
     load_metric_registry,
+)
+from industrials.transportation.metric_applicability import (  # noqa: E402
+    explicit_zero_debt_interest_na,
+    finite_number,
 )
 from industrials.transportation.scripts._shared import DEFAULT_CONFIG, MODEL_FAMILY  # noqa: E402
 
@@ -54,6 +58,35 @@ def coverage_summary(bucket: dict[str, int]) -> dict[str, int]:
         "not_meaningful": int(bucket.get("not_meaningful", 0)),
         "coverage_bps": round(10000 * observed / applicable) if applicable else 10000,
     }
+
+
+def metric_is_conditionally_inapplicable(
+    metric_name: str,
+    financial: Mapping[str, object],
+    *,
+    reviewed_inapplicable: bool,
+) -> bool:
+    cash_burn = finite_number(financial.get("cash_burn_ttm_usd"))
+    net_income = finite_number(financial.get("net_income_ttm_usd"))
+    if net_income is None:
+        net_income = finite_number(financial.get("net_income_usd"))
+    return (
+        (
+            metric_name == "cash_runway_years"
+            and cash_burn is not None
+            and cash_burn <= 0
+        )
+        or (
+            metric_name == "fcf_conversion"
+            and net_income is not None
+            and net_income <= 0
+        )
+        or (
+            metric_name == "interest_coverage"
+            and explicit_zero_debt_interest_na(financial)
+        )
+        or reviewed_inapplicable
+    )
 
 
 def main() -> int:
@@ -131,26 +164,19 @@ def main() -> int:
         ]
         financial_rows = conn.execute(
             """
-            SELECT ticker, cash_burn_ttm_usd, net_income_ttm_usd, net_income_usd
+            SELECT ticker, cash_burn_ttm_usd, net_income_ttm_usd, net_income_usd,
+                   total_debt_usd, interest_expense_ttm_usd
             FROM feature_financial_statement
             WHERE model_family=? AND asof_date<=?
             ORDER BY ticker, asof_date DESC, source_id ASC
             """,
             (MODEL_FAMILY, args.asof),
         ).fetchall()
-        cash_burn_by_ticker: dict[str, float | None] = {}
-        net_income_by_ticker: dict[str, float | None] = {}
+        financial_by_ticker: dict[str, dict[str, Any]] = {}
         for financial_row in financial_rows:
             ticker = str(financial_row["ticker"])
-            if ticker not in cash_burn_by_ticker:
-                value = financial_row["cash_burn_ttm_usd"]
-                cash_burn_by_ticker[ticker] = float(value) if finite(value) else None
-                net_income = financial_row["net_income_ttm_usd"]
-                if not finite(net_income):
-                    net_income = financial_row["net_income_usd"]
-                net_income_by_ticker[ticker] = (
-                    float(net_income) if finite(net_income) else None
-                )
+            if ticker not in financial_by_ticker:
+                financial_by_ticker[ticker] = dict(financial_row)
     expected = {(str(member["ticker"]), metric.metric_id) for member in members for metric in definitions}
     actual = {(str(row["ticker"]), str(row["metric_name"])) for row in rows}
     if len(actual) != len(rows):
@@ -178,8 +204,6 @@ def main() -> int:
         registry_applies = definition.applies_to(
             cohort=str(member["calibration_cohort_id"]), industry=str(member["industry"])
         ) and (not definition.birthdate or args.asof >= definition.birthdate)
-        cash_burn = cash_burn_by_ticker.get(ticker)
-        net_income = net_income_by_ticker.get(ticker)
         extraction_method = str(row.get("extraction_method") or "")
         reviewed_inapplicable = (
             status == "NOT_APPLICABLE"
@@ -189,15 +213,11 @@ def main() -> int:
                 "reviewed_aligned_annual_formula",
             }
         )
-        conditionally_inapplicable = (
-            metric_name == "cash_runway_years"
-            and cash_burn is not None
-            and cash_burn <= 0
-        ) or (
-            metric_name == "fcf_conversion"
-            and net_income is not None
-            and net_income <= 0
-        ) or reviewed_inapplicable
+        conditionally_inapplicable = metric_is_conditionally_inapplicable(
+            metric_name,
+            financial_by_ticker.get(ticker, {}),
+            reviewed_inapplicable=reviewed_inapplicable,
+        )
         applies = registry_applies and not conditionally_inapplicable
         if not applies and status != "NOT_APPLICABLE":
             errors.append(f"{ticker}:{metric_name}: non-applicable metric status={status}")

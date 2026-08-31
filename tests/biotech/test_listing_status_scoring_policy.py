@@ -302,3 +302,12 @@ def test_five_ticker_curated_repairs_are_complete() -> None:
     }
     assert ("WVE", "Wave Life Sciences USA, Inc.") in aliases
 
+
+def test_august_2026_scoring_additions_have_governed_cohorts() -> None:
+    cohorts = {
+        row["ticker"]: row["biotech_calibration_cohort"]
+        for row in read_rows("biotech_calibration_cohorts.csv")
+    }
+    assert cohorts["BDTX"] == "platform_partnered_modality_pipeline"
+    assert cohorts["TNYA"] == "platform_partnered_modality_pipeline"
+

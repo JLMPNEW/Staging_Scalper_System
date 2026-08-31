@@ -521,7 +521,7 @@ sec_filings:
   max_workers: 4
 
 fda_adcom_calendar:
-  # FDA Advisory Committee calendar sync (shadow-only — not a pipeline blocker).
+  # FDA Advisory Committee calendar sync (shadow-only â€” not a pipeline blocker).
   # Fetches from FDA.gov and stores to fda_adcom_events table.
   calendar_url: "https://www.fda.gov/datatables-json/advisory-committee-calendar-json"
   fallback_calendar_urls:
@@ -742,7 +742,7 @@ biotech_scoring:
     scoring_contract_version: "biotech_daily_scores_contract_v1"
   calibration_cohorts:
     enabled: true
-    version: "calibration_cohort_v1_robust_5bucket_20260606"
+    version: "calibration_cohort_v2_reorganized_20260831"
     csv: "data/biotech_calibration_cohorts.csv"
     fallback_to_primary: false
     require_all_tickers: true
@@ -1010,6 +1010,12 @@ biotech_scoring:
       test_xbi_alpha_lcb_return_pct: 3.903587
       test_selection_date_coverage_pct: 85.882353
       test_avg_selected_names_per_active_date: 3.164384
+  adaptive_promotion_contract:
+    # Fail closed. Activate only after script 60 authorizes a contract, the
+    # promoted score/policy is versioned in this config, and its SHA is pinned.
+    enabled: false
+    path: "../output/biotech_index_reports/calibration_walk_forward/production_policy_contract_profitability_candidate.json"
+    sha256: ""
   convex_risk_penalty_enabled: true
   risk_penalty_convexity: 0.35
   risk_penalty_inflection: 50.0
@@ -1347,11 +1353,13 @@ biotech_refresh:
   # still rejecting genuinely stale market-feature panels.
   max_market_snapshot_lag_calendar_days: 4
   ibkr_preflight:
-    # Catch stale/missing IB market and borrow data before the long refresh run.
-    # This mirrors the Form 4 preflight: daily production runs should not
-    # silently continue when TWS/IBGateway is unavailable.
+    # Probe TWS once before the long refresh. An unavailable socket routes the
+    # IB price step to sealed local bars; Yahoo remains the scoring-primary
+    # source and the existing market/borrow freshness gates remain authoritative.
+    # This keeps unattended runs bounded without treating stale data as fresh.
     enabled: true
-    required: true
+    required: false
+    fallback_to_existing_bars: true
     timeout_sec: 5.0
   company_master:
     # The full screen is a slow universe-rebuild input, not a required daily
@@ -1535,7 +1543,47 @@ yahoo_reverse_split:
   use_stale_cache_on_error: true
 
 calibration:
-  exclude_tickers: []
+  # Non-temporal methodology exclusions. These names remain in raw/PIT history
+  # for audit, but must not contribute to historical calibration after the
+  # 2026-08-31 economic-cohort reorganization.
+  exclude_tickers:
+    - GKOS
+    - CERS
+    - TCMD
+    - RCEL
+    - BBNX
+    - CBLL
+    - PSNL
+    - MYGN
+    - CDNA
+    - NEO
+    - VCYT
+    - BSX
+    - BVS
+    - CNMD
+    - EW
+    - IART
+    - MDT
+    - PODD
+    - PRCT
+    - STE
+    - TMDX
+    - ZBH
+    - IQV
+    - TMO
+    - MDXG
+    - ORGO
+    - CAI
+    - LNTH
+    - ANIK
+    - TECH
+    - TIL
+    - AKTS
+    - APTX
+    - CBIO
+    - HGEN
+    - PULM
+    - AVNS
   phase1:
     output_dir: "../output/biotech_index_reports/calibration_phase1"
     exclude_current_removals: false
@@ -1576,7 +1624,7 @@ calibration:
     max_workers: 8
     candidate_grid_executor: "process"
     selection_policies:
-      # ── Cohort-specific policies ───────────────────────────────────────────────
+      # â”€â”€ Cohort-specific policies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       # These replace the global guardrail approach with per-cohort tuning derived
       # from the IC monitor findings (borrow IC=0.096, institutional crowding
       # IC=-0.245 for commercial_profitable at 120d).
@@ -1745,6 +1793,198 @@ calibration:
       max_top3_gain_contribution_pct: 55.0
       max_large_loss_20_rate_pct: 30.0
       max_large_loss_40_rate_pct: 12.5
+  walk_forward:
+    framework_version: "biotech_nested_walk_forward_v2"
+    output_dir: "../output/biotech_index_reports/calibration_walk_forward"
+    cohort_calibration:
+      enabled: true
+      output_dir: "../output/biotech_index_reports/calibration_walk_forward_by_cohort"
+      # These are independent calibration and promotion sleeves. Fundamental
+      # weights, threshold, breadth, reliability, challenger, and decision are
+      # selected within each cohort; only the final portfolio controls are global.
+      cohorts:
+        - commercial_profitable_quality_or_mature
+        - commercial_turnaround_or_unprofitable_growth
+        - late_clinical_pivotal_or_registrational
+        - platform_partnered_modality_pipeline
+        - early_clinical_speculative_or_single_asset_pipeline
+      no_survivor_fallback: "production_incumbent"
+      portfolio_budget_weights:
+        commercial_profitable_quality_or_mature: 0.20
+        commercial_turnaround_or_unprofitable_growth: 0.20
+        late_clinical_pivotal_or_registrational: 0.20
+        platform_partnered_modality_pipeline: 0.20
+        early_clinical_speculative_or_single_asset_pipeline: 0.20
+    # Must point to a cache produced by script 28 with the current code/config.
+    # Keeping this explicit prevents accidental use of a stale resume cache.
+    observations_csv: ""
+    primary_horizon: 120
+    min_training_years: 3
+    top_n:
+      - 10
+      - 20
+    validation_shortlist_size: 25
+    max_workers: 8
+    candidate_grid_executor: "process"
+    windows:
+      "20":
+        validation_months: 6
+        test_months: 6
+        step_months: 6
+        embargo_days: 40
+        min_train_dates: 24
+        min_validation_dates: 6
+        min_test_dates: 6
+      "60":
+        validation_months: 12
+        test_months: 12
+        step_months: 12
+        embargo_days: 100
+        min_train_dates: 24
+        min_validation_dates: 8
+        min_test_dates: 8
+      "120":
+        # Annual non-overlapping validation/test windows produce three outer
+        # folds on the current 2019+ PIT panel. The prior 18-month windows
+        # produced only one fold, so a challenger could never earn more than
+        # provisional evidence at the primary horizon.
+        validation_months: 12
+        test_months: 12
+        step_months: 12
+        embargo_days: 185
+        min_train_dates: 24
+        min_validation_dates: 8
+        min_test_dates: 8
+    metrics:
+      lcb_z: 1.0
+      cvar_q: 0.05
+      profit_factor_cap: 10.0
+      min_profit_factor_wins: 3
+      min_profit_factor_losses: 3
+      bootstrap_iterations: 500
+      bootstrap_seed: 1729
+      bootstrap_block_dates: 4
+    adaptive_selection:
+      min_score_pct_of_top_candidates:
+        - 70
+        - 75
+        - 80
+        - 85
+        - 90
+        - 95
+      max_name_candidates:
+        - 4
+        - 6
+        - 8
+        - 10
+        - 12
+      active_weight_by_reliability:
+        high: 0.90
+        medium: 0.55
+        low: 0.20
+    promotion:
+      min_outer_folds: 2
+      min_fold_win_rate: 0.60
+      require_positive_paired_delta_lcb: false
+      prefer_profit_factor_at_least: 1.0
+      min_profit_factor_improvement: 0.0
+      min_paired_delta_profit_factor: 1.0
+      max_loss20_deterioration_pct: 2.0
+      max_loss40_deterioration_pct: 1.0
+      max_cvar_deterioration_pct: 5.0
+      max_drawdown_deterioration_pct: 5.0
+      max_top3_contribution_pct: 55.0
+      min_paired_dates: 20
+      min_active_date_coverage_pct: 25.0
+      max_calibration_fallback_frequency_pct: 40.0
+      min_robust_profit_factor: 1.0
+      require_robust_profit_factor_support: true
+      require_secondary_horizon_no_harm: true
+      max_secondary_horizon_lcb_underperformance_pct: 3.0
+      required_secondary_horizons:
+        - 20
+        - 60
+      require_cohort_no_harm: true
+      max_cohort_lcb_underperformance_pct: 5.0
+      min_cohort_paired_dates: 8
+      provisional_active_weight_cap: 0.25
+      required_no_harm_cohorts:
+        - commercial_profitable_quality_or_mature
+        - commercial_turnaround_or_unprofitable_growth
+        - late_clinical_pivotal_or_registrational
+        - platform_partnered_modality_pipeline
+        - early_clinical_speculative_or_single_asset_pipeline
+    monitoring:
+      review_windows_days:
+        - 30
+        - 60
+        - 90
+      rollback_triggers:
+        min_live_paired_dates: 20
+        max_loss20_deterioration_pct: 2.0
+        max_loss40_deterioration_pct: 1.0
+        max_policy_fallback_frequency_pct: 25.0
+        max_drawdown_deterioration_pct: 5.0
+        max_daily_cvar_deterioration_pct: 0.5
+        require_policy_hash_consistency: true
+      rollback_action: "xbi_residual_only"
+    profitability_replay:
+      enabled: true
+      benchmark_ticker: "XBI"
+      execution:
+        initial_capital: 1000000
+        # Conservative one-way implementation costs; dynamic impact is added
+        # from the requested trade's participation in historical ADV.
+        base_one_way_cost_bps: 20.0
+        benchmark_one_way_cost_bps: 2.0
+        market_impact_coefficient_bps: 25.0
+        max_market_impact_bps: 75.0
+        max_adv_participation_pct: 2.0
+        min_trade_notional: 25.0
+        execution_lag_bars: 1
+        periods_per_year: 252
+        liquidate_at_fold_end: true
+      bootstrap:
+        iterations: 1000
+        block_days: 20
+        seed: 1729
+      promotion:
+        enabled: true
+        min_paired_daily_count: 252
+        min_fold_count: 2
+        min_fold_win_rate: 0.50
+        min_candidate_profit_factor: 1.0
+        max_drawdown_deterioration_pct: 5.0
+        max_daily_cvar_deterioration_pct: 0.5
+        min_provisional_composite_score: 0.0
+        min_full_composite_score: 0.10
+        min_full_deflated_sharpe_probability: 0.90
+        require_positive_bootstrap_lcb_for_full: true
+        provisional_active_weight_cap: 0.25
+        full_active_weight_cap: 1.0
+        cagr_weight: 0.35
+        calmar_weight: 0.20
+        profit_factor_weight: 0.15
+        drawdown_weight: 0.15
+        cvar_weight: 0.10
+        turnover_weight: 0.05
+        cagr_scale_pct: 5.0
+        calmar_scale: 0.50
+        profit_factor_scale: 0.25
+        drawdown_scale_pct: 5.0
+        cvar_scale_pct: 0.50
+        turnover_scale: 0.50
+      multiple_testing:
+        use_effective_trial_count: true
+        require_deflated_sharpe_for_full_promotion: true
+      verification:
+        require_independent_normalized_input_replay: true
+    optuna:
+      # Enable per run with script 60 --run-optuna. The objective can access
+      # train/validation rows only; outer-test rows are evaluated afterward.
+      enabled: false
+      n_trials: 200
+      seed: 7331
   phase2:
     output_dir: "../output/biotech_index_reports/calibration_phase2_speculative_alpha"
     exclude_current_removals: false

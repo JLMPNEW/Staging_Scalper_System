@@ -368,6 +368,9 @@ yahoo_price_ingestion:
   timeout_sec: 30.0
   max_retries: 3
   parallel_workers: 4
+  # Daily refreshes overlap the stored tail. A new/revised dividend or split
+  # automatically triggers a full adjusted-history refresh for that ticker only.
+  incremental_overlap_calendar_days: 14
   cache_dir: "../output/industrials_cache/yahoo_adjusted"
   # DR-5: defense-instance path. Script in-code default output paths template
   # {model_family}; a non-defense family run must not reuse this literal defense path.

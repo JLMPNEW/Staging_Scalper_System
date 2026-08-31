@@ -23,6 +23,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from technology.core.config import cfg_get, expand_env_vars, load_yaml, resolve_path  # noqa: E402
+from technology.core.cik_lineage import (  # noqa: E402
+    expand_company_cik_lineage,
+    upsert_configured_cik_identifiers,
+)
 from technology.core.db import connect, finish_run, init_db, start_run, utc_now  # noqa: E402
 from technology.core.logging_utils import configure_utc_logging  # noqa: E402
 from technology.core.source_registry import load_source_registry, upsert_source_registry  # noqa: E402
@@ -103,6 +107,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", default="")
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--force-refresh", action="store_true")
+    parser.add_argument(
+        "--reparse-history",
+        action="store_true",
+        help=(
+            "Reparse every discovered historical ownership document. Daily refreshes "
+            "normally ingest only unseen or previously failed accessions."
+        ),
+    )
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -314,6 +326,39 @@ def ownership_filings(rows: list[dict[str, Any]], *, start: date, forms: set[str
         )
     out.sort(key=lambda item: (str(item["filing_date"]), str(item["accession_number"])))
     return out
+
+
+def successfully_parsed_accessions(conn: Any, *, ticker: str, source_id: str) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT accession_number
+        FROM fact_sec_ownership_filing
+        WHERE ticker = ? AND source_id = ?
+        GROUP BY accession_number
+        HAVING MAX(parsed_successfully) = 1
+        """,
+        (ticker, source_id),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def pending_ownership_filings(
+    conn: Any,
+    *,
+    ticker: str,
+    source_id: str,
+    filings: list[dict[str, Any]],
+    reparse_history: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    if reparse_history:
+        return filings, 0
+    completed = successfully_parsed_accessions(conn, ticker=ticker, source_id=source_id)
+    pending = [
+        filing
+        for filing in filings
+        if str(filing["accession_number"]) not in completed
+    ]
+    return pending, len(filings) - len(pending)
 
 
 def ownership_xml_root(text: str) -> ET.Element:
@@ -823,6 +868,10 @@ def upsert_reporting_profile(conn: Any, company: dict[str, Any], *, source_id: s
         "SELECT COUNT(*) FROM fact_sec_ownership_derivative_transaction WHERE ticker = ? AND source_id = ?",
         (ticker, source_id),
     ).fetchone()[0]
+    compat_count = conn.execute(
+        "SELECT COUNT(*) FROM fact_sec_form4_transaction WHERE ticker = ? AND source_id = ?",
+        (ticker, source_id),
+    ).fetchone()[0]
     trans_count = int(nonderiv_count or 0) + int(deriv_count or 0)
     parse_failures = conn.execute(
         "SELECT COUNT(*) FROM fact_sec_ownership_filing WHERE ticker = ? AND source_id = ? AND parsed_successfully = 0",
@@ -910,6 +959,9 @@ def upsert_reporting_profile(conn: Any, company: dict[str, Any], *, source_id: s
         "coverage_status": coverage_status,
         "ownership_filing_count": int(filing_count or 0),
         "ownership_transaction_count": trans_count,
+        "nonderivative_transactions": int(nonderiv_count or 0),
+        "derivative_transactions": int(deriv_count or 0),
+        "form4_compat_transactions": int(compat_count or 0),
         "latest_ownership_filing_date": str(latest["filed_date"] or "") if latest is not None else "",
         "review_reason": review_reason,
     }
@@ -942,6 +994,7 @@ def sync_company(
     retries: int,
     sleep_sec: float,
     force_refresh: bool,
+    reparse_history: bool,
 ) -> dict[str, Any]:
     ticker = str(company["ticker"])
     cik = str(company["cik"])
@@ -970,12 +1023,19 @@ def sync_company(
                 timeout_sec=timeout_sec,
                 retries=retries,
                 sleep_sec=sleep_sec,
-                force_refresh=force_refresh,
+                force_refresh=force_refresh and reparse_history,
             )
             record_raw_response(conn, source_id=source_id, endpoint=archive_url, status=archive_status, text=archive_text, asof=date.today().isoformat())
             if archive_status == 200:
                 rows.extend(filing_records({"filings": {"recent": json_payload(archive_text)}}))
-    filings = ownership_filings(rows, start=start, forms=forms)
+    discovered_filings = ownership_filings(rows, start=start, forms=forms)
+    filings, skipped_filings = pending_ownership_filings(
+        conn,
+        ticker=ticker,
+        source_id=source_id,
+        filings=discovered_filings,
+        reparse_history=reparse_history,
+    )
     raw_filings = 0
     nonderiv_rows = 0
     deriv_rows = 0
@@ -992,7 +1052,7 @@ def sync_company(
             timeout_sec=timeout_sec,
             retries=retries,
             sleep_sec=sleep_sec,
-            force_refresh=force_refresh,
+            force_refresh=force_refresh and reparse_history,
         )
         record_raw_response(conn, source_id=source_id, endpoint=url, status=doc_status, text=doc_text, asof=str(filing["filing_date"]))
         raw_hash = hashlib.sha256(doc_text.encode("utf-8", errors="replace")).hexdigest()
@@ -1046,9 +1106,12 @@ def sync_company(
     return {
         "ticker": ticker,
         "raw_filings": raw_filings,
-        "nonderivative_transactions": nonderiv_rows,
-        "derivative_transactions": deriv_rows,
-        "form4_compat_transactions": compat_rows,
+        "discovered_accessions": len(discovered_filings),
+        "pending_accessions": len(filings),
+        "skipped_completed_accessions": skipped_filings,
+        "processed_nonderivative_transactions": nonderiv_rows,
+        "processed_derivative_transactions": deriv_rows,
+        "processed_form4_compat_transactions": compat_rows,
         "parse_failures": parse_failures,
         **profile,
     }
@@ -1108,6 +1171,12 @@ def main() -> None:
             companies = companies[:max_tickers]
         if not companies:
             raise ValueError(f"No direct ownership universe tickers found for model_family={model_family}.")
+        companies = expand_company_cik_lineage(
+            companies,
+            cfg_get(config, "sec_fundamentals.legacy_cik_aliases", {}),
+        )
+        with conn:
+            upsert_configured_cik_identifiers(conn, companies)
         run_id = start_run(conn, run_type=RUN_TYPE, input_path=config_path)
         try:
             with conn:
@@ -1133,6 +1202,7 @@ def main() -> None:
                             retries=retries,
                             sleep_sec=sleep_sec,
                             force_refresh=args.force_refresh,
+                            reparse_history=args.reparse_history,
                         )
                     report_rows.append(
                         {
@@ -1149,11 +1219,16 @@ def main() -> None:
                         }
                     )
                     LOGGER.info(
-                        "[%d/%d] %s filings=%d nonderiv=%d deriv=%d compat_form4=%d status=%s",
+                        (
+                            "[%d/%d] %s filings=%d pending=%d skipped=%d "
+                            "nonderiv=%d deriv=%d compat_form4=%d status=%s"
+                        ),
                         idx,
                         len(companies),
                         company["ticker"],
                         stats["ownership_filing_count"],
+                        stats["pending_accessions"],
+                        stats["skipped_completed_accessions"],
                         stats["nonderivative_transactions"],
                         stats["derivative_transactions"],
                         stats["form4_compat_transactions"],

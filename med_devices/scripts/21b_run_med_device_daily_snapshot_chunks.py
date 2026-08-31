@@ -128,7 +128,12 @@ def make_chunks(asofs: list[str], *, chunk_size: int) -> list[Chunk]:
     return chunks
 
 
-def review_pack_csv_complete(path: Path, *, require_data_row: bool) -> bool:
+def review_pack_csv_complete(
+    path: Path,
+    *,
+    require_data_row: bool,
+    expected_score_model_version: str = "",
+) -> bool:
     # Daily composite output must contain rows. Filtered subset reports such as
     # Tier 1 can be legitimately empty for a historical as-of, so a valid header
     # is sufficient for those files.
@@ -138,30 +143,65 @@ def review_pack_csv_complete(path: Path, *, require_data_row: bool) -> bool:
             header = next(reader, None)
             if header is None:
                 return False
-            columns = {str(item or "").strip() for item in header}
+            normalized_header = [str(item or "").strip() for item in header]
+            columns = set(normalized_header)
             if not set(REVIEW_PACK_CORE_COLUMNS).issubset(columns):
                 return False
             if not require_data_row:
                 return True
-            return any(any(str(cell or "").strip() for cell in row) for row in reader)
+            model_index = -1
+            if expected_score_model_version:
+                if "score_model_version" not in columns:
+                    return False
+                model_index = normalized_header.index("score_model_version")
+            found_data_row = False
+            for row in reader:
+                if not any(str(cell or "").strip() for cell in row):
+                    continue
+                found_data_row = True
+                if model_index >= 0:
+                    if model_index >= len(row) or str(row[model_index] or "").strip() != expected_score_model_version:
+                        return False
+            return found_data_row
     except (OSError, csv.Error):
         return False
 
 
-def review_pack_complete(review_pack_base_dir: Path, asof: str) -> bool:
+def review_pack_complete(
+    review_pack_base_dir: Path,
+    asof: str,
+    *,
+    expected_score_model_version: str,
+) -> bool:
     output_dir = review_pack_base_dir / asof
     for name in DEFAULT_REQUIRED_REVIEW_PACK_FILES:
         path = output_dir / name
         if not path.exists() or path.stat().st_size == 0:
             return False
         require_data_row = name == "med_device_daily_composite_scores.csv"
-        if name.lower().endswith(".csv") and not review_pack_csv_complete(path, require_data_row=require_data_row):
+        if name.lower().endswith(".csv") and not review_pack_csv_complete(
+            path,
+            require_data_row=require_data_row,
+            expected_score_model_version=expected_score_model_version if require_data_row else "",
+        ):
             return False
     return True
 
 
-def chunk_complete(review_pack_base_dir: Path, chunk: Chunk) -> bool:
-    return all(review_pack_complete(review_pack_base_dir, asof) for asof in chunk.asofs)
+def chunk_complete(
+    review_pack_base_dir: Path,
+    chunk: Chunk,
+    *,
+    expected_score_model_version: str,
+) -> bool:
+    return all(
+        review_pack_complete(
+            review_pack_base_dir,
+            asof,
+            expected_score_model_version=expected_score_model_version,
+        )
+        for asof in chunk.asofs
+    )
 
 
 def append_manifest(path: Path, row: dict[str, Any]) -> None:
@@ -191,6 +231,7 @@ def run_chunk(
     force: bool,
     attempt: int,
 ) -> tuple[int, Path]:
+    log_dir.mkdir(parents=True, exist_ok=True)
     attempt_suffix = "" if attempt == 1 else f".attempt{attempt}"
     log_path = log_dir / f"daily_snapshot_chunk_{chunk.start_asof}_{chunk.end_asof}{attempt_suffix}.log"
     command = [
@@ -236,6 +277,9 @@ def main() -> int:
     config_path = args.config.expanduser().resolve()
     config = load_yaml(config_path)
     base_dir = config_path.parent
+    expected_score_model_version = str(cfg_get(config, "scoring.model_version", "") or "").strip()
+    if not expected_score_model_version:
+        raise ValueError("scoring.model_version is required for resume-safe chunk validation.")
     db_path = args.db.expanduser().resolve() if args.db else resolve_path(cfg_get(config, "paths.database_path"), base_dir=base_dir)
     start_asof = parse_date_text(args.start_asof or cfg_get(config, "historical_backfill.start_asof", "2019-01-04"))
     end_raw = str(args.end_asof or cfg_get(config, "historical_backfill.end_asof", "latest_market_date")).strip()
@@ -260,7 +304,11 @@ def main() -> int:
     completed_chunks = 0
     for idx, chunk in enumerate(chunks, start=1):
         started_at = utc_timestamp()
-        if args.resume and chunk_complete(review_pack_base_dir, chunk):
+        if args.resume and chunk_complete(
+            review_pack_base_dir,
+            chunk,
+            expected_score_model_version=expected_score_model_version,
+        ):
             append_manifest(
                 manifest_path,
                 {
@@ -294,7 +342,11 @@ def main() -> int:
                 force=bool(args.force),
                 attempt=attempt,
             )
-            completed = returncode == 0 and chunk_complete(review_pack_base_dir, chunk)
+            completed = returncode == 0 and chunk_complete(
+                review_pack_base_dir,
+                chunk,
+                expected_score_model_version=expected_score_model_version,
+            )
             if completed:
                 break
             if attempt < int(args.max_chunk_attempts):
