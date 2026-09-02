@@ -2056,13 +2056,14 @@ historical_backfill:
   # Re-run FDA entity linking per as-of date during backfill (script 21); default off.
   relink_fda_per_asof: false
   new_daily_columns_required_from: "2019-01-04"
-  score_provenance_columns_required_from: "2026-08-11"
+  score_provenance_columns_required_from: "2019-01-04"
   oos_validation_csv: "../output/med_devices_reports/oos_validation/med_device_historical_snapshot_oos_validation.csv"
   manifest_csv: "../output/med_devices_reports/historical_backfill/weekly_score_backfill_manifest.csv"
 
 calibration:
   dev_window_start: "2019-01-04"
   dev_window_end: "2025-12-31"
+  training_label_end_max: "2025-12-31"
   taxonomy_output_csv: "../output/med_devices_reports/calibration/med_device_calibration_cohorts.csv"
   taxonomy_override_csv: "data/calibration_cohort_overrides.csv"
   cohort_neutral_backtest_csv: "../output/med_devices_reports/calibration/med_device_cohort_neutral_backtest.csv"
@@ -2212,17 +2213,71 @@ calibration:
   recommendations_csv: "../output/med_devices_reports/calibration/med_device_calibration_recommendations_by_cohort.csv"
   recommended_config_yaml: "../output/med_devices_reports/calibration/med_device_calibration_recommended_config.yaml"
   calibrated_baseline:
-    baseline_version: "med_device_calibrated_baseline_v23_2026_06_17"
+    baseline_version: "med_device_calibrated_baseline_v25_2026_08_31_challenger_promotions"
     comparison_csv: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_comparison.csv"
     constituents_csv: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_constituents.csv"
     config_fragment_yaml: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_config_fragment.yaml"
     snapshot_csv: "../output/med_devices_reports/calibration/med_device_calibrated_baseline_snapshot.csv"
-    frozen_baseline_csv: "../output/med_devices_reports/calibration/baselines/med_device_calibrated_baseline_v23_2026_06_17.csv"
+    frozen_baseline_csv: "../output/med_devices_reports/calibration/baselines/med_device_calibrated_baseline_v25_2026_08_31_challenger_promotions.csv"
     freeze_baseline_if_missing: true
-    production_seed_cohorts: "orthopedics_spine_sports_implants,healthcare_services_cro_lab_services,life_science_tools_research_instruments,hospital_supplies_surgical_consumables_oem"
+    production_seed_cohorts: "diagnostics_clinical_tests,orthopedics_spine_sports_implants,healthcare_services_cro_lab_services,life_science_tools_research_instruments,hospital_supplies_surgical_consumables_oem"
     production_seed_effective_from:
+      diagnostics_clinical_tests: "2026-08-31"
       hospital_supplies_surgical_consumables_oem: "2026-07-17"
-    manual_production_seed_cohorts: "orthopedics_spine_sports_implants,life_science_tools_research_instruments"
+    manual_production_seed_cohorts: "diagnostics_clinical_tests,orthopedics_spine_sports_implants,healthcare_services_cro_lab_services,life_science_tools_research_instruments,hospital_supplies_surgical_consumables_oem"
+    promoted_gate_policies:
+      diagnostics_clinical_tests:
+        effective_from: "2026-08-31"
+        reviewed_at: "2026-08-31"
+        source_parameter_set_id: "9cdd911817cc"
+        gates:
+          composite_min: 65
+          cohort_percentile_min: 50
+          fundamental_quality_min: 0
+          fda_product_min: 0
+          reimbursement_min: 0
+          valuation_min: 0
+          technical_entry_min: 45
+          value_trap_max: 20
+      healthcare_services_cro_lab_services:
+        effective_from: "2026-08-31"
+        reviewed_at: "2026-08-31"
+        source_parameter_set_id: "1e0d69284aa9"
+        gates:
+          composite_min: 50
+          cohort_percentile_min: 50
+          fundamental_quality_min: 0
+          fda_product_min: 0
+          reimbursement_min: 0
+          valuation_min: 0
+          technical_entry_min: 0
+          value_trap_max: 20
+      life_science_tools_research_instruments:
+        effective_from: "2026-08-31"
+        reviewed_at: "2026-08-31"
+        source_parameter_set_id: "89c5f32a45e0"
+        gates:
+          composite_min: 50
+          cohort_percentile_min: 90
+          fundamental_quality_min: 0
+          fda_product_min: 0
+          reimbursement_min: 0
+          valuation_min: 60
+          technical_entry_min: 45
+          value_trap_max: 20
+      hospital_supplies_surgical_consumables_oem:
+        effective_from: "2026-08-31"
+        reviewed_at: "2026-08-31"
+        source_parameter_set_id: "ca934557d36b"
+        gates:
+          composite_min: 70
+          cohort_percentile_min: 50
+          fundamental_quality_min: 0
+          fda_product_min: 0
+          reimbursement_min: 0
+          valuation_min: 0
+          technical_entry_min: 0
+          value_trap_max: 20
     watchlist_seed_cohorts: "capital_equipment_procedure_platforms"
     event_driven_excluded_cohorts: "implantable_interventional_devices_direct_payment,emerging_single_product_medtech_platforms"
     min_selected_obs: 10

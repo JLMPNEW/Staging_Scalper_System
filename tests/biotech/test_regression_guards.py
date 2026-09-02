@@ -1901,3 +1901,15 @@ def test_forward_catalyst_loader_excludes_future_source_snapshot(tmp_path: Path)
 
     assert "FUTR" not in rows
     assert rows["VALID"][0]["snapshot_asof"] == "2026-08-21"
+
+def test_calibration_cli_supports_observation_only_mode() -> None:
+    module = load_script_module(
+        "28_calibrate_biotech_opportunity.py",
+        "calibration_observations_only_regression",
+    )
+    module_path = module.__file__
+    assert module_path is not None
+    source = Path(module_path).read_text(encoding="utf-8")
+    assert '"--observations-only"' in source
+    assert "if args.observations_only:" in source
+

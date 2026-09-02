@@ -1,9 +1,9 @@
 # Biotech Calibration, Validation, Promotion, and Portfolio Mandate
 
-Status: Implemented cohort framework v2; production activation requires fresh evidence and explicit approval
-Document version: 1.2
+Status: Implemented cohort framework v3; production activation requires fresh evidence and explicit approval
+Document version: 1.3
 Decision date: 2026-08-28
-Implementation date: 2026-08-28
+Implementation date: 2026-09-01
 Applies to: `biotech_index` research, calibration, production scoring, reporting, and `portfolio_layer` integration
 
 ## 1. Purpose
@@ -768,21 +768,18 @@ Unsupported research selection policies remain non-activatable until their exact
 
 Operational sequence:
 
-1. Freeze and hash the current production policy and current historical evidence.
-2. Mark the repeatedly inspected 2024-2026 holdout as validation/research data.
-3. Implement shared split, metric, score-reliability, and promotion modules.
-4. Add unit tests for leakage, pairing, PF robustness, and adaptive sleeve accounting.
-5. Refactor candidate calibration to nested purged walk-forward folds.
-6. Add score-reliability curves and adaptive threshold replay.
-7. Make Optuna fold-local and validation-only.
-8. Run baseline, challenger, blend, cohort, and benchmark candidates.
-9. Generate aggregate outer-test and robustness artifacts.
-10. Apply relative full/provisional promotion governance.
-11. Select and lock the production policy contract.
-12. Update live scoring/reporting and `portfolio_layer` sleeve integration.
-13. Set the first post-lock trading date as the new strict-OOS start.
-14. Run a full daily pipeline and portfolio-layer consistency check.
-15. Begin 30/60/90-day live monitoring without retroactively changing historical strict-OOS files.
+1. Freeze and hash the incumbent production policy, current cohort map, and effective-dated cohort migration file.
+2. Run static checks and regression tests before any expensive recomputation.
+3. Rebuild the daily PIT/survivorship-correct score panel once, using effective-dated cohorts and excluding removed names after their valid membership end dates.
+4. Regenerate every dated `biotech_daily_scores.csv` required by `portfolio_layer`, then pass historical panel QA.
+5. Build a fresh observation/forward-return cache with no resume reuse; its signature must include score config plus both cohort files.
+6. Run deterministic nested walk-forward calibration independently for each of the five cohorts. Each cohort fits its own weights, reliability threshold, adaptive breadth, name cap, active/XBI exposure, challenger, and promotion decision.
+7. Run Optuna only within deterministic cohort survivors, using train/validation data only; never expose outer-test rows to search.
+8. Retain the production incumbent independently in every non-surviving cohort. Do not substitute another cohort's winner and do not remove the biotech mandate.
+9. Combine the five frozen cohort sleeves once and apply net-of-cost profitability, covariance, concentration, and global portfolio risk controls.
+10. Produce per-cohort and combined decision artifacts. Activate only independently authorized cohorts through an explicit effective-dated, hash-pinned contract.
+11. Run the daily biotech pipeline and `portfolio_layer` consistency checks against the activated contract.
+12. Set the first post-lock trading date as strict OOS and begin 30/60/90-day monitoring without rewriting prior strict-OOS records.
 
 Historical daily CSVs do not need regeneration merely to implement the calibration harness. Regenerate research scores only when required to evaluate a changed score formula or feature definition. Never overwrite historical strict-OOS production records with a later policy.
 

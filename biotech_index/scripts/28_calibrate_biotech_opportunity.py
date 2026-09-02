@@ -547,6 +547,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--observations-only",
+        action="store_true",
+        help=(
+            "Build and validate the signed PIT observation/forward-return CSV, then stop before the "
+            "legacy candidate grid. Use this as the input stage for scripts 60/64."
+        ),
+    )
+    parser.add_argument(
         "--bootstrap-iterations",
         type=int,
         default=None,
@@ -1016,6 +1024,10 @@ def load_score_cohort_policy_rows(conn: sqlite3.Connection, asof_date: str) -> d
         "biotech_cohort_calibration_eligible_flag",
         "biotech_cohort_calibration_mode",
         "biotech_cohort_exclusion_reason",
+        "biotech_calibration_cohort_valid_from",
+        "biotech_calibration_cohort_valid_to",
+        "biotech_current_backcast_cohort",
+        "biotech_cohort_assignment_mode",
     }
     if not required.issubset(table_columns(conn, "daily_scores")):
         return {}
@@ -1024,7 +1036,9 @@ def load_score_cohort_policy_rows(conn: sqlite3.Connection, asof_date: str) -> d
         SELECT
             company_id, biotech_primary_cohort, biotech_cohort_investible_flag,
             biotech_cohort_calibration_eligible_flag, biotech_cohort_calibration_mode,
-            biotech_cohort_exclusion_reason
+            biotech_cohort_exclusion_reason, biotech_calibration_cohort_valid_from,
+            biotech_calibration_cohort_valid_to, biotech_current_backcast_cohort,
+            biotech_cohort_assignment_mode
         FROM daily_scores
         WHERE asof_date = ?
         """,
@@ -3379,15 +3393,27 @@ def load_observations(
                 continue
             ticker = normalize_ticker(row["ticker"])
             cohort_lookup_ticker = calibration_ticker_aliases.get(ticker, ticker)
-            official_cohort = (
+            registry_cohort = (
                 official_cohort_by_ticker.get(cohort_lookup_ticker)
                 or delisted_cohort_by_ticker.get(cohort_lookup_ticker)
                 or delisted_cohort_by_ticker.get(ticker)
             )
-            if require_official_cohort and official_cohort_by_ticker and not official_cohort:
+            if require_official_cohort and official_cohort_by_ticker and not registry_cohort:
                 raise ValueError(
                     f"Ticker {ticker} (cohort lookup {cohort_lookup_ticker}) is missing from the official biotech cohort map; "
                     "old taxonomy-cohort fallback is disabled."
+                )
+            historical_cohort = str(
+                score_cohort_policy.get("biotech_primary_cohort") or ""
+            ).strip()
+            assignment_mode = str(
+                score_cohort_policy.get("biotech_cohort_assignment_mode") or ""
+            ).strip()
+            if not historical_cohort or assignment_mode != "effective_dated_pit":
+                raise ValueError(
+                    "Historical calibration requires a recomputed effective-dated cohort row: "
+                    f"ticker={ticker} asof={asof_date} cohort={historical_cohort!r} "
+                    f"assignment_mode={assignment_mode!r}"
                 )
             payload = parse_json(row.get("feature_json"))
             raw_scores = payload.get("raw_scores", {}) if isinstance(payload, dict) else {}
@@ -3812,7 +3838,17 @@ def load_observations(
                 "ticker": ticker,
                 "company_name": str(row.get("company_name") or ""),
                 "profile_name": profile_name,
-                "biotech_primary_cohort": str(official_cohort or score_cohort_policy.get("biotech_primary_cohort") or ""),
+                "biotech_primary_cohort": historical_cohort,
+                "biotech_calibration_cohort_valid_from": str(
+                    score_cohort_policy.get("biotech_calibration_cohort_valid_from") or ""
+                ),
+                "biotech_calibration_cohort_valid_to": str(
+                    score_cohort_policy.get("biotech_calibration_cohort_valid_to") or ""
+                ),
+                "biotech_current_backcast_cohort": str(
+                    score_cohort_policy.get("biotech_current_backcast_cohort") or ""
+                ),
+                "biotech_cohort_assignment_mode": assignment_mode,
                 "biotech_cohort_investible_flag": to_float(
                     score_cohort_policy.get("biotech_cohort_investible_flag"),
                     1.0,
@@ -4679,6 +4715,51 @@ def return_objective_label(params: CalibrationParams) -> str:
     return "raw_net_return"
 
 
+def point_in_time_benchmark_regime(
+    benchmark_bars: list[Bar],
+    asof: date,
+) -> dict[str, object]:
+    """Classify the market using benchmark bars available on or before ``asof`` only."""
+    available = [bar for bar in benchmark_bars if bar.day <= asof and bar.close > 0.0]
+    if len(available) < 121:
+        return {
+            "xbi_regime": "insufficient_history",
+            "xbi_regime_asof_date": available[-1].day.isoformat() if available else "",
+            "xbi_regime_return_60d": "",
+            "xbi_regime_return_120d": "",
+            "xbi_regime_volatility_60d": "",
+            "xbi_regime_definition_version": "pit_xbi_regime_v1",
+        }
+    closes = [bar.close for bar in available]
+    return_60d = closes[-1] / closes[-61] - 1.0
+    return_120d = closes[-1] / closes[-121] - 1.0
+    trailing = closes[-61:]
+    daily_returns = [trailing[index] / trailing[index - 1] - 1.0 for index in range(1, len(trailing))]
+    avg_daily = sum(daily_returns) / len(daily_returns)
+    variance = (
+        sum((value - avg_daily) ** 2 for value in daily_returns) / (len(daily_returns) - 1)
+        if len(daily_returns) > 1
+        else 0.0
+    )
+    annualized_volatility = math.sqrt(max(0.0, variance)) * math.sqrt(252.0)
+    if return_60d <= -0.05 or return_120d <= -0.10:
+        regime = "risk_off"
+    elif annualized_volatility >= 0.50:
+        regime = "high_volatility"
+    elif return_60d >= 0.05 and return_120d >= 0.10:
+        regime = "risk_on"
+    else:
+        regime = "neutral"
+    return {
+        "xbi_regime": regime,
+        "xbi_regime_asof_date": available[-1].day.isoformat(),
+        "xbi_regime_return_60d": return_60d,
+        "xbi_regime_return_120d": return_120d,
+        "xbi_regime_volatility_60d": annualized_volatility,
+        "xbi_regime_definition_version": "pit_xbi_regime_v1",
+    }
+
+
 def add_forward_returns(
     rows: list[dict[str, Any]],
     bars_by_ticker: dict[str, list[Bar]],
@@ -4710,6 +4791,19 @@ def add_forward_returns(
         asof = parse_date(row.get("asof_date"))
         bars = bars_by_ticker.get(ticker) or bars_by_ticker.get(price_ticker, [])
         terminal_event = terminal_events_by_ticker.get(price_ticker) or terminal_events_by_ticker.get(ticker)
+        if asof is not None and benchmark_bars:
+            row.update(point_in_time_benchmark_regime(benchmark_bars, asof))
+        else:
+            row.update(
+                {
+                    "xbi_regime": "insufficient_history",
+                    "xbi_regime_asof_date": "",
+                    "xbi_regime_return_60d": "",
+                    "xbi_regime_return_120d": "",
+                    "xbi_regime_volatility_60d": "",
+                    "xbi_regime_definition_version": "pit_xbi_regime_v1",
+                }
+            )
         for horizon in horizons:
             prefix = f"fwd_{horizon}d"
             if asof is None:
@@ -4771,8 +4865,26 @@ def add_forward_returns(
             for asof_key, values in grouped_returns.items()
             if values
         }
+        same_cohort_grouped: defaultdict[tuple[str, str], list[float]] = defaultdict(list)
         for row in rows:
             asof_key = str(row.get("asof_date") or "")
+            cohort = str(
+                row.get("biotech_primary_cohort")
+                or row.get("biotech_calibration_cohort")
+                or "unmapped_calibration_cohort"
+            ).strip()
+            net_return = to_float(row.get(f"{prefix}_net_return"))
+            if asof_key and cohort and net_return is not None:
+                same_cohort_grouped[(asof_key, cohort)].append(net_return)
+        same_cohort_sums = {key: sum(values) for key, values in same_cohort_grouped.items()}
+        same_cohort_counts = {key: len(values) for key, values in same_cohort_grouped.items()}
+        for row in rows:
+            asof_key = str(row.get("asof_date") or "")
+            cohort = str(
+                row.get("biotech_primary_cohort")
+                or row.get("biotech_calibration_cohort")
+                or "unmapped_calibration_cohort"
+            ).strip()
             net_return = to_float(row.get(f"{prefix}_net_return"))
             equal_weight_return = equal_weight_by_asof.get(asof_key)
             row[f"{prefix}_equal_weight_net_return"] = equal_weight_return if equal_weight_return is not None else ""
@@ -4781,6 +4893,22 @@ def add_forward_returns(
                 if net_return is not None and equal_weight_return is not None
                 else ""
             )
+            cohort_key = (asof_key, cohort)
+            cohort_count = same_cohort_counts.get(cohort_key, 0)
+            same_cohort_return = (
+                (same_cohort_sums[cohort_key] - net_return) / (cohort_count - 1)
+                if net_return is not None and cohort_count >= 2
+                else None
+            )
+            row[f"{prefix}_same_cohort_equal_weight_net_return"] = (
+                same_cohort_return if same_cohort_return is not None else ""
+            )
+            row[f"{prefix}_net_same_cohort_alpha_return"] = (
+                net_return - same_cohort_return
+                if net_return is not None and same_cohort_return is not None
+                else ""
+            )
+            row[f"{prefix}_same_cohort_peer_count"] = max(0, cohort_count - 1)
     if missing_return_counts:
         summary = ", ".join(
             f"{horizon}d:{reason}={count}"
@@ -8120,7 +8248,9 @@ def main() -> None:
         terminal_events_by_ticker = load_terminal_events()
         scoring_config_hash = observation_scoring_config_hash(config, base_dir=base_dir)
         observation_cache_signature = {
-            "forward_return_engine_version": "delisted_alias_overlay_v2",
+            "forward_return_engine_version": "delisted_alias_overlay_v4_effective_cohort_pit_regime_same_cohort",
+            "market_regime_definition_version": "pit_xbi_regime_v1",
+            "same_cohort_benchmark_contract": "leave_one_out_equal_weight_v1",
             "scoring_config_hash": scoring_config_hash,
             "start_asof": start_asof.isoformat() if start_asof else "",
             "end_asof": end_asof.isoformat() if end_asof else "",
@@ -8192,7 +8322,13 @@ def main() -> None:
                     market_tickers.add(canonical_price_ticker)
             if benchmark_ticker:
                 market_tickers.add(benchmark_ticker)
-            bars_by_ticker = load_bars(conn, tickers=market_tickers, min_date=min(asof_dates), market_sources=market_sources)
+            market_history_start = min(asof_dates) - timedelta(days=260)
+            bars_by_ticker = load_bars(
+                conn,
+                tickers=market_tickers,
+                min_date=market_history_start,
+                market_sources=market_sources,
+            )
             applicable_delisted_overlay_count = count_applicable_delisted_price_overlays(
                 conn,
                 price_ticker_alias=price_ticker_alias,
@@ -8238,6 +8374,29 @@ def main() -> None:
                 len(observations),
                 observation_cache_path,
             )
+    if args.observations_only:
+        write_json(
+            output_dir / "observation_only_manifest.json",
+            {
+                "status": "success",
+                "mode": "observations_only",
+                "observation_csv": str(observation_cache_path),
+                "observation_manifest": str(observation_cache_manifest_path),
+                "observation_row_count": len(observations),
+                "snapshot_date_count": len(snapshot_dates),
+                "snapshot_start": snapshot_dates[0],
+                "snapshot_end": snapshot_dates[-1],
+                "signature": observation_cache_signature,
+                "loaded_from_cache": observations_loaded_from_cache,
+            },
+        )
+        LOGGER.info(
+            "Observation-only build complete: rows=%d dates=%d path=%s",
+            len(observations),
+            len(snapshot_dates),
+            observation_cache_path,
+        )
+        return
     candidate_rows: list[dict[str, Any]] = []
     split_manifest: dict[str, Any] = {}
     split_rows_by_key: dict[tuple[str, str, int], list[dict[str, Any]]] = {}

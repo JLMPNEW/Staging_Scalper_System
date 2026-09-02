@@ -1503,9 +1503,7 @@ def test_security_identity_contract_prevents_si_ticker_reuse(tmp_path: Path) -> 
     with connect(db_path) as conn:
         init_db(conn)
         module.upsert_universe(conn, [company], source_id=None)
-        security = conn.execute(
-            "SELECT listing_start_date FROM dim_security WHERE ticker = 'SI'"
-        ).fetchone()
+        security = conn.execute("SELECT listing_start_date FROM dim_security WHERE ticker = 'SI'").fetchone()
         cusip = conn.execute(
             """
             SELECT identifier_value
@@ -3798,6 +3796,48 @@ def test_score_backtest_exports_stage11_metadata_and_point_in_time_cohort() -> N
     assert not module.flag_is_one(None)
 
 
+def test_score_backtest_does_not_build_labels_past_training_end_cap() -> None:
+    module = load_script_module(
+        "17_backtest_med_device_scores.py",
+        "med_device_score_backtest_label_cap_test",
+    )
+    score_row = {
+        "ticker": "AAA",
+        "company_name": "AAA Medical",
+        "subsector": "medical_devices",
+        "calibration_cohort": "diagnostics_clinical_tests",
+        "composite_score": 60.0,
+        "raw_composite_score": 60.0,
+        "composite_percentile": 50.0,
+        "rank": 1,
+    }
+    price_series = {
+        "AAA": (
+            "yahoo_finance_backup",
+            [
+                (date(2025, 12, 29), 100.0),
+                (date(2025, 12, 30), 101.0),
+                (date(2025, 12, 31), 102.0),
+                (date(2026, 1, 2), 103.0),
+            ],
+        )
+    }
+
+    rows = module.build_backtest_rows(
+        [score_row],
+        price_series,
+        asof="2025-12-29",
+        horizons=[2, 3],
+        position_usd=50_000.0,
+        training_label_end_max=date(2025, 12, 31),
+    )
+
+    assert rows[0]["forward_date_2d"] == "2025-12-31"
+    assert rows[0]["forward_return_2d"] == 0.02
+    assert rows[0]["forward_date_3d"] == ""
+    assert rows[0]["forward_return_3d"] == ""
+
+
 def test_stage11_filter_can_exclude_an_all_ineligible_asof_without_dropping_valid_dates() -> None:
     module = load_script_module(
         "17_backtest_med_device_scores.py",
@@ -3820,9 +3860,7 @@ def test_cohort_neutral_backtest_prefers_saved_point_in_time_cohort() -> None:
         "med_device_cohort_neutral_pit_cohort_test",
     )
     rows = [{"asof_date": "2024-01-02", "ticker": "AAA"}]
-    taxonomy = {
-        ("2024-01-02", "AAA"): {"calibration_cohort": "historical_cohort"}
-    }
+    taxonomy = {("2024-01-02", "AAA"): {"calibration_cohort": "historical_cohort"}}
     scores = {
         ("2024-01-02", "AAA"): {
             "calibration_cohort": "historical_cohort",
@@ -3864,6 +3902,48 @@ def test_optuna_cross_horizon_hit_rate_and_sampling_tolerance() -> None:
     assert module.effective_single_ticker_share_limit(0.35, 0, 0.01) == 0.35
 
 
+def test_optuna_study_fingerprint_binds_panel_policy_and_settings(tmp_path: Path) -> None:
+    module = load_script_module(
+        "69_optimize_med_device_optuna_policies.py",
+        "med_device_optuna_fingerprint_test",
+    )
+    panel = tmp_path / "panel.csv"
+    policy = tmp_path / "policy.csv"
+    panel.write_text("asof_date,ticker\n2024-01-02,AAA\n", encoding="utf-8")
+    policy.write_text("calibration_cohort,component\ndiagnostics,x\n", encoding="utf-8")
+    kwargs = {
+        "input_csv": panel,
+        "policy_csv": policy,
+        "horizons": [60, 120],
+        "settings": {"require_positive_lcb_horizons": {60, 120}},
+        "seed": 7,
+    }
+
+    first, provenance = module.optimizer_study_provenance(**kwargs)
+    second, _ = module.optimizer_study_provenance(**kwargs)
+    panel.write_text("asof_date,ticker\n2024-01-02,BBB\n", encoding="utf-8")
+    changed, _ = module.optimizer_study_provenance(**kwargs)
+
+    assert first == second
+    assert first != changed
+    assert provenance["contract_version"] == module.OPTUNA_STUDY_CONTRACT_VERSION
+    assert provenance["settings"]["require_positive_lcb_horizons"] == [60, 120]
+
+
+def test_optuna_legacy_fold_diagnostic_uses_result_concentration_limit() -> None:
+    module = load_script_module(
+        "69_optimize_med_device_optuna_policies.py",
+        "med_device_optuna_legacy_diagnostic_test",
+    )
+
+    assert (
+        module.fold_diagnostic_concentration_limit(
+            {}, {"max_single_ticker_share_limit": 0.42}, {"max_single_ticker_share": 0.35}
+        )
+        == 0.42
+    )
+
+
 def test_hospital_baseline_promotion_is_effective_dated_and_uses_aliased_gates() -> None:
     scoring_module = load_script_module(
         "13_build_med_device_daily_scores.py",
@@ -3889,6 +3969,14 @@ def test_hospital_baseline_promotion_is_effective_dated_and_uses_aliased_gates()
                 "production_seed_cohorts": cohort,
                 "watchlist_seed_cohorts": "",
                 "production_seed_effective_from": {cohort: "2026-07-17"},
+                "promoted_gate_policies": {
+                    cohort: {
+                        "effective_from": "2026-07-18",
+                        "reviewed_at": "2026-07-18",
+                        "source_parameter_set_id": "test_policy",
+                        "gates": {"composite_min": 60.0},
+                    }
+                },
             }
         },
     }
@@ -3928,12 +4016,95 @@ def test_hospital_baseline_promotion_is_effective_dated_and_uses_aliased_gates()
         config,
     ) == ("production_baseline_candidate", "baseline_gate_pass_not_tier1")
 
+    row.asof_date = "2026-07-18"
+    assert scoring_module.calibrated_baseline_candidate_status(row, config=config, gates=gates) is None
+    row.composite_score = 65.0
+    assert scoring_module.calibrated_baseline_candidate_status(
+        row,
+        config=config,
+        gates=gates,
+    ) == ("calibrated_baseline", "baseline_gate_pass_not_tier1")
+
+    publish_row["asof_date"] = "2026-07-18"
+    assert publishing_module.calibrated_baseline_candidate_status(publish_row, config) is None
+    publish_row["raw_composite_score"] = 65.0
+    assert publishing_module.calibrated_baseline_candidate_status(
+        publish_row,
+        config,
+    ) == ("production_baseline_candidate", "baseline_gate_pass_not_tier1")
+
     row.passed_data_quality_gate = 1
     row.passed_liquidity_gate = 1
     row.hard_red_flag = 1
     scoring_module.apply_portfolio_candidate_policy(row, config=config, gates=gates)
     assert row.portfolio_candidate_gate == 0
     assert row.portfolio_candidate_reason.startswith("fda_manual_review_or_hard_red")
+
+
+def test_calibrated_baseline_manual_override_accepts_support_only_not_bad_performance() -> None:
+    module = load_script_module(
+        "52_build_med_device_calibrated_baseline.py",
+        "med_device_manual_baseline_promotion_test",
+    )
+    diagnostics = "diagnostics_clinical_tests"
+    home = "home_chronic_care_devices_dme_drug_delivery"
+    full_metrics = {
+        60: {"count": 260, "unique_tickers": 26, "median_excess": 0.02, "hit_rate": 0.60, "lcb_excess": 0.01},
+        120: {"count": 260, "unique_tickers": 26, "median_excess": 0.02, "hit_rate": 0.60, "lcb_excess": 0.01},
+    }
+    thin_positive = {
+        60: {"count": 52, "unique_tickers": 2, "median_excess": 0.02, "hit_rate": 0.67, "lcb_excess": 0.02},
+        120: {"count": 52, "unique_tickers": 2, "median_excess": 0.02, "hit_rate": 0.67, "lcb_excess": 0.02},
+    }
+    common = {
+        "reference_horizon": 120,
+        "min_selected_obs": 10,
+        "min_unique_tickers": 3,
+        "preferred_min_unique_tickers": 4,
+        "min_selected_ticker_coverage": 0.20,
+        "preferred_min_selected_ticker_coverage": 0.30,
+        "min_hit_rate": 0.50,
+        "min_lcb_excess": 0.0,
+        "require_60_120_persistence": True,
+        "watchlist_seed_cohorts": set(),
+        "event_driven_excluded_cohorts": set(),
+    }
+
+    assert module.status_for_candidate(
+        diagnostics,
+        {"production_candidate": "0", "rejection_reason": "insufficient_selected_ticker_coverage"},
+        thin_positive,
+        full_metrics,
+        production_seed_cohorts={diagnostics},
+        manual_production_seed_cohorts={diagnostics},
+        **common,
+    ) == (
+        module.PRODUCTION_BASELINE_SEED,
+        "manual_thin_support",
+        "manual_support_only_production_seed_override;insufficient_unique_tickers;insufficient_selected_ticker_coverage",
+    )
+
+    negative_home = {
+        **thin_positive,
+        120: {
+            "count": 25,
+            "unique_tickers": 2,
+            "median_excess": 0.06,
+            "hit_rate": 0.72,
+            "lcb_excess": -0.02,
+        },
+    }
+    status, _, reason = module.status_for_candidate(
+        home,
+        {"production_candidate": "0", "rejection_reason": "120d_lcb_below_min"},
+        negative_home,
+        full_metrics,
+        production_seed_cohorts={home},
+        manual_production_seed_cohorts={home},
+        **common,
+    )
+    assert status == module.DIAGNOSTIC_ONLY
+    assert reason == "120d_lcb_below_min"
 
 
 def test_daily_score_template_tier1_metadata_is_explicit() -> None:
@@ -4140,22 +4311,28 @@ def test_balanced_tier1_policy_is_pit_effective_and_never_waives_hard_risk() -> 
 
     pre_effective = module.ScoreRow(asof_date="2026-08-20", **base)
     reasons = module.tier1_safety_reasons(pre_effective, policy)
-    assert module.tier1_balanced_soft_miss_reason(
-        pre_effective,
-        policy,
-        reasons,
-        tier1_restricted=False,
-    ) == ""
+    assert (
+        module.tier1_balanced_soft_miss_reason(
+            pre_effective,
+            policy,
+            reasons,
+            tier1_restricted=False,
+        )
+        == ""
+    )
 
     hard_risk = module.ScoreRow(asof_date="2026-08-21", **{**base, "fda_event_risk_score": 90.0})
     reasons = module.tier1_safety_reasons(hard_risk, policy)
     assert "fda_event_risk_above_tier1_safety_max" in reasons
-    assert module.tier1_balanced_soft_miss_reason(
-        hard_risk,
-        policy,
-        reasons,
-        tier1_restricted=False,
-    ) == ""
+    assert (
+        module.tier1_balanced_soft_miss_reason(
+            hard_risk,
+            policy,
+            reasons,
+            tier1_restricted=False,
+        )
+        == ""
+    )
 
 
 def test_tier1_failure_alone_is_not_an_analyst_review_category() -> None:
@@ -4184,6 +4361,8 @@ def test_tier1_failure_alone_is_not_an_analyst_review_category() -> None:
         high_score_threshold=70.0,
     )
     assert high_score_categories == ["high_score_blocked"]
+
+
 def test_dxcm_rmd_review_renewals_preserve_non_overlapping_pit_windows() -> None:
     decisions, issues = load_analyst_review_decisions(
         REPO_ROOT / "med_devices" / "data" / "analyst_review_decisions.csv"
@@ -4207,18 +4386,24 @@ def test_dxcm_rmd_review_renewals_preserve_non_overlapping_pit_windows() -> None
     assert rmd_prior is not None and rmd_prior.decision == "watchlist"
     assert rmd_prior.reviewed_at == "2026-07-24"
 
-    assert effective_decision(
-        decisions,
-        ticker="DXCM",
-        cohort="home_chronic_care_devices_dme_drug_delivery",
-        asof=date(2026, 8, 21),
-    ) is None
-    assert effective_decision(
-        decisions,
-        ticker="RMD",
-        cohort="home_chronic_care_devices_dme_drug_delivery",
-        asof=date(2026, 8, 21),
-    ) is None
+    assert (
+        effective_decision(
+            decisions,
+            ticker="DXCM",
+            cohort="home_chronic_care_devices_dme_drug_delivery",
+            asof=date(2026, 8, 21),
+        )
+        is None
+    )
+    assert (
+        effective_decision(
+            decisions,
+            ticker="RMD",
+            cohort="home_chronic_care_devices_dme_drug_delivery",
+            asof=date(2026, 8, 21),
+        )
+        is None
+    )
 
     dxcm_current = effective_decision(
         decisions,

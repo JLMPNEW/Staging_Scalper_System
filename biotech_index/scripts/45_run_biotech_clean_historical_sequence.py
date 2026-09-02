@@ -65,11 +65,34 @@ def parse_args() -> argparse.Namespace:
         help="Earliest market-bar date to use/fetch. Defaults to 420 days before the first scoring date.",
     )
     parser.add_argument(
+        "--history-market-lookback-days",
+        type=int,
+        default=0,
+        help=(
+            "Rolling calendar-day market window used for each historical snapshot. Defaults to "
+            "biotech_historical_sequence.market_feature_lookback_days. Minimum 420."
+        ),
+    )
+    parser.add_argument(
+        "--core-score-history-only",
+        action="store_true",
+        help="Rebuild the PIT universe, required feature layers, and core scores without multibagger layers.",
+    )
+    parser.add_argument(
         "--no-snap-weekly-to-market-days",
         action="store_true",
         help="Keep requested weekly Friday dates exactly instead of snapping market holidays to the prior market bar date.",
     )
     parser.add_argument("--history-date-source", choices=["daily_scores", "daily_features"], default="daily_scores")
+    parser.add_argument(
+        "--history-date-frequency",
+        choices=["source", "market_daily"],
+        default="source",
+        help=(
+            "Use existing source-table snapshot dates or every XBI market session in the bounded range. "
+            "Use market_daily for a complete daily Stage 11 rebuild."
+        ),
+    )
     parser.add_argument("--history-fridays-only", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--horizons", type=str, default="20,60,120")
@@ -317,6 +340,110 @@ def load_history_bounds(db_path: Path, *, source_table: str, start_asof: str, en
         dates.append(parsed.isoformat())
     if not dates:
         raise RuntimeError(f"No historical dates found in {source_table} for requested range.")
+    return dates[0], dates[-1], dates
+
+
+def load_market_date_grid(
+    db_path: Path,
+    *,
+    start_asof: str,
+    end_asof: str,
+    benchmark_ticker: str,
+) -> list[str]:
+    start = parse_date(start_asof)
+    end = parse_date(end_asof)
+    if start is None or end is None or start > end:
+        raise ValueError(
+            f"Market-daily history requires valid ordered bounds: {start_asof!r}..{end_asof!r}"
+        )
+    ticker = str(benchmark_ticker or "XBI").strip().upper() or "XBI"
+    with closing(connect_readonly(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT bar_date
+            FROM market_bars_daily
+            WHERE ticker = ? AND bar_date BETWEEN ? AND ?
+            ORDER BY bar_date
+            """,
+            (ticker, start.isoformat(), end.isoformat()),
+        ).fetchall()
+    dates = [
+        parsed.isoformat()
+        for row in rows
+        if (parsed := parse_date(row["bar_date"])) is not None
+    ]
+    if not dates:
+        raise RuntimeError(
+            f"No {ticker} market dates found for requested daily history: "
+            f"{start.isoformat()}..{end.isoformat()}"
+        )
+    return dates
+
+
+def resolve_history_dates(
+    db_path: Path,
+    *,
+    source_table: str,
+    start_asof: str,
+    end_asof: str,
+    target_weekly_date_count: int,
+    snap_weekly_to_market_days: bool,
+    fridays_only: bool,
+    date_frequency: str = "source",
+    benchmark_ticker: str = "XBI",
+) -> tuple[str, str, list[str]]:
+    """Resolve source snapshots, market-daily sessions, or an explicit weekly grid."""
+    target_count = max(0, int(target_weekly_date_count))
+    if target_count > 0:
+        inferred_end = end_asof
+        if not inferred_end:
+            _, inferred_end, _ = load_history_bounds(
+                db_path,
+                source_table=source_table,
+                start_asof="",
+                end_asof="",
+            )
+        dates = friday_grid(
+            start_asof=start_asof,
+            end_asof=inferred_end,
+            target_count=target_count,
+        )
+        if snap_weekly_to_market_days:
+            dates = snap_to_available_market_dates(db_path, dates)
+    else:
+        if date_frequency == "market_daily" and start_asof and end_asof:
+            dates = load_market_date_grid(
+                db_path,
+                start_asof=start_asof,
+                end_asof=end_asof,
+                benchmark_ticker=benchmark_ticker,
+            )
+        else:
+            source_start, source_end, source_dates = load_history_bounds(
+                db_path,
+                source_table=source_table,
+                start_asof=start_asof,
+                end_asof=end_asof,
+            )
+            if date_frequency == "market_daily":
+                dates = load_market_date_grid(
+                    db_path,
+                    start_asof=start_asof or source_start,
+                    end_asof=end_asof or source_end,
+                    benchmark_ticker=benchmark_ticker,
+                )
+            elif date_frequency == "source":
+                dates = source_dates
+            else:
+                raise ValueError(f"Unsupported history date frequency: {date_frequency!r}")
+        if fridays_only:
+            dates = [
+                value
+                for value in dates
+                if (parsed := parse_date(value)) is not None and parsed.weekday() == 4
+            ]
+    if not dates:
+        raise RuntimeError("Historical restatement date grid is empty after frequency filtering.")
     return dates[0], dates[-1], dates
 
 
@@ -804,27 +931,24 @@ def main() -> None:
         if int(args.step_timeout_sec or 0) > 0
         else int(cfg_get(config, "biotech_historical_sequence.step_timeout_sec", 0) or 0)
     )
-    if int(args.target_weekly_date_count or 0) > 0 or args.start_asof:
-        inferred_end = args.end_asof
-        if not inferred_end:
-            _, inferred_end, _ = load_history_bounds(db_path, source_table=args.history_date_source, start_asof="", end_asof="")
-        history_dates = friday_grid(
-            start_asof=args.start_asof,
-            end_asof=inferred_end,
-            target_count=max(0, int(args.target_weekly_date_count or 0)),
-        )
-        if not args.no_snap_weekly_to_market_days:
-            history_dates = snap_to_available_market_dates(db_path, history_dates)
-        start_asof = history_dates[0]
-        end_asof = history_dates[-1]
-    else:
-        start_asof, end_asof, history_dates = load_history_bounds(
-            db_path,
-            source_table=args.history_date_source,
-            start_asof=args.start_asof,
-            end_asof=args.end_asof,
-        )
+    start_asof, end_asof, history_dates = resolve_history_dates(
+        db_path,
+        source_table=args.history_date_source,
+        start_asof=args.start_asof,
+        end_asof=args.end_asof,
+        target_weekly_date_count=int(args.target_weekly_date_count or 0),
+        snap_weekly_to_market_days=not bool(args.no_snap_weekly_to_market_days),
+        fridays_only=bool(args.history_fridays_only),
+        date_frequency=str(args.history_date_frequency),
+        benchmark_ticker=str(cfg_get(config, "yahoo_market_data.benchmark_ticker", "XBI")),
+    )
     market_history_start_asof = args.market_history_start_asof or default_market_history_start(start_asof)
+    history_market_lookback_days = int(
+        args.history_market_lookback_days
+        or cfg_get(config, "biotech_historical_sequence.market_feature_lookback_days", 550)
+    )
+    if history_market_lookback_days < 420:
+        raise ValueError("Historical market feature lookback must be at least 420 calendar days")
     output_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir
@@ -840,12 +964,15 @@ def main() -> None:
         "start_asof": start_asof,
         "end_asof": end_asof,
         "history_date_count": len(history_dates),
+        "history_date_frequency": str(args.history_date_frequency),
         "target_weekly_date_count": int(args.target_weekly_date_count or 0),
         "weekly_dates_snapped_to_market_days": (
-            bool(int(args.target_weekly_date_count or 0) > 0 or args.start_asof)
+            bool(int(args.target_weekly_date_count or 0) > 0)
             and not bool(args.no_snap_weekly_to_market_days)
         ),
         "market_history_start_asof": market_history_start_asof,
+        "history_market_lookback_days": history_market_lookback_days,
+        "core_score_history_only": bool(args.core_score_history_only),
         "expected_ticker_count": len(expected_tickers),
         "staging_paths": staging_paths,
         "point_in_time_rules": {
@@ -921,8 +1048,35 @@ def main() -> None:
             end_asof,
             "--history-market-start-asof",
             market_history_start_asof,
+            "--history-market-lookback-days",
+            str(history_market_lookback_days),
         ]
-        if int(args.target_weekly_date_count or 0) > 0 or args.start_asof:
+        if args.core_score_history_only:
+            cmd.extend(
+                [
+                    "--steps",
+                    ",".join(
+                        (
+                            "ctgov_audit",
+                            "historical_scoring_universe",
+                            "yahoo_market_adjusted",
+                            "norgate_market_features",
+                            "market_positioning_export",
+                            "forward_catalyst_calendar",
+                            "financial_survival",
+                            "commercial_value",
+                            "forward_guidance",
+                            "governance_events",
+                            "biotech_features",
+                            "biotech_scores",
+                        )
+                    ),
+                ]
+            )
+        if (
+            int(args.target_weekly_date_count or 0) > 0
+            or str(args.history_date_frequency) == "market_daily"
+        ):
             cmd.extend(["--history-dates", ",".join(history_dates)])
         if args.history_fridays_only:
             cmd.append("--history-fridays-only")

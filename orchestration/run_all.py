@@ -1826,15 +1826,20 @@ def read_manifest(sector: Sector, iso_date: str | None) -> tuple[str, str]:
     return status, _manifest_asof(data)
 
 
-def _oos_required(sector: Sector) -> bool:
-    """The registry's require_oos_valid knob is authoritative.
+def _oos_required(sector: Sector, *, policy_context: str = "production") -> bool:
+    """Return whether this artifact must contain a live-valid OOS row.
 
     A configured oos_column/gate_column merely says WHICH column carries the flag,
     never that valid rows are required: transportation's sealed zero-overlay shadow
     model declares oos_column with require_oos_valid: false (its rank tables carry
     oos_score_valid_flag=0 by design) and must not fail artifact verification.
+
+    Historical sector snapshots are research inputs, not claims that a signal was
+    available in live production. Requiring a live OOS flag on those snapshots
+    creates an impossible retry loop for pre-lock dates and can tempt a backfill to
+    fabricate live provenance. Current-date production health remains strict.
     """
-    return sector.require_oos_valid
+    return sector.require_oos_valid and policy_context == "production"
 
 
 # Recognized "as-of" date columns in a published table, most-specific first. Every
@@ -1991,7 +1996,7 @@ def verify_published_artifact_for_date(
         valid, total = _count_oos_valid(artifact, sector)
         if total <= 0:
             reasons.append(f"artifact has 0 rows: {artifact}")
-        if _oos_required(sector) and valid <= 0:
+        if _oos_required(sector, policy_context=policy_context) and valid <= 0:
             reasons.append("no oos/gate-valid rows where required")
         date_checked, date_ok, date_detail = _csv_date_column_matches(artifact, iso_date)
         if date_checked and not date_ok:
@@ -4272,6 +4277,26 @@ def run_selftest() -> int:
         blank_path.write_text("asof_date,oos_score_valid_flag,ticker\n,1,T0\n", encoding="utf-8")
         vblank = verify_published_artifact_for_date(fsec, "2026-07-12")
         ok("finding4_blank_row_date_fails", not vblank[0] and any("blank" in r for r in vblank[1]))
+        zero_oos_dir = tmp_root / "pub" / "2026-07-11"
+        zero_oos_dir.mkdir(parents=True, exist_ok=True)
+        (zero_oos_dir / "t.csv").write_text(
+            "asof_date,oos_score_valid_flag,ticker\n2026-07-11,0,T0\n",
+            encoding="utf-8",
+        )
+        ok(
+            "historical_zero_oos_snapshot_is_complete",
+            verify_published_artifact_for_date(
+                fsec,
+                "2026-07-11",
+                policy_context="historical",
+            )[0],
+        )
+        prod_zero_oos = verify_published_artifact_for_date(fsec, "2026-07-11")
+        ok(
+            "production_zero_oos_snapshot_still_fails",
+            not prod_zero_oos[0]
+            and any("no oos/gate-valid rows" in reason for reason in prod_zero_oos[1]),
+        )
         # finalize_result (daily) verifies the single target; catch-up verification is
         # inline in run_catch_up_sector (covered by the catch-up policy block below).
         res_daily_bad = RunResult("fsec", "PASS")

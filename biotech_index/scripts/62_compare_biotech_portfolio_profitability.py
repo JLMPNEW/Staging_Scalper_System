@@ -35,6 +35,7 @@ from biotech_index.core.portfolio_profitability import (  # noqa: E402
     compare_daily_replays,
     run_daily_portfolio_replay,
     summarize_daily_replay,
+    target_allocations_equal,
     targets_from_selection_rows,
 )
 from biotech_index.core.portfolio_replay_verification import (  # noqa: E402
@@ -46,7 +47,7 @@ from biotech_index.core.portfolio_replay_verification import (  # noqa: E402
 
 LOGGER = logging.getLogger("biotech_portfolio_profitability")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-FRAMEWORK_VERSION = "biotech_net_profitability_replay_v1"
+FRAMEWORK_VERSION = "biotech_net_profitability_replay_v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -142,6 +143,10 @@ def load_cost_model(config: dict[str, Any]) -> ReplayCostModel:
         execution_lag_bars=max(1, int(float_value(raw.get("execution_lag_bars"), 1.0))),
         periods_per_year=max(1, int(float_value(raw.get("periods_per_year"), 252.0))),
         liquidate_at_end=bool_value(raw.get("liquidate_at_fold_end"), True),
+        max_target_staleness_bars=max(
+            0,
+            int(float_value(raw.get("max_target_staleness_bars"), 0.0)),
+        ),
     )
 
 def cost_model_from_mapping(raw: Mapping[str, object]) -> ReplayCostModel:
@@ -156,6 +161,10 @@ def cost_model_from_mapping(raw: Mapping[str, object]) -> ReplayCostModel:
         execution_lag_bars=max(1, int(float_value(raw.get("execution_lag_bars"), 1.0))),
         periods_per_year=max(1, int(float_value(raw.get("periods_per_year"), 252.0))),
         liquidate_at_end=bool_value(raw.get("liquidate_at_end"), True),
+        max_target_staleness_bars=max(
+            0,
+            int(float_value(raw.get("max_target_staleness_bars"), 0.0)),
+        ),
     )
 
 
@@ -277,6 +286,7 @@ def chain_results(results: list[tuple[str, ReplayResult]], *, model: ReplayCostM
         "partial_fill_count",
         "missing_adv_trade_count",
         "missing_target_price_count",
+        "target_expiry_rebalance_count",
     ):
         summary[field] = sum(float_value(result.summary.get(field), 0.0) for _, result in results)
     total_cost = float_value(summary.get("total_transaction_cost"), 0.0)
@@ -299,6 +309,7 @@ def decision_markdown(decision: Mapping[str, object]) -> str:
         ("Provisional", "profitability_provisional_promotion"),
         ("Active weight cap", "profitability_active_weight_cap"),
         ("Composite score", "profitability_composite_score"),
+        ("Candidate replay type", "candidate_replay_type"),
         ("Candidate terminal wealth", "candidate_terminal_wealth"),
         ("Production terminal wealth", "incumbent_terminal_wealth"),
         ("Candidate CAGR", "candidate_cagr_pct"),
@@ -530,6 +541,8 @@ def main() -> int:
     daily_output: list[dict[str, object]] = []
     trade_output: list[dict[str, object]] = []
     fold_input_rows: list[dict[str, object]] = []
+    independent_challenger_folds: list[str] = []
+    incumbent_fallback_folds: list[str] = []
     trials = effective_trial_count(calibration_dir, config)
 
     for fold_id, fold in sorted(primary_folds.items()):
@@ -571,6 +584,13 @@ def main() -> int:
             adv_lookup=adv_lookup,
             target_weight_field=explicit_target_weight_field,
         )
+        targets_differ = not target_allocations_equal(candidate_targets, incumbent_targets)
+        if targets_differ:
+            independent_challenger_folds.append(fold_id)
+            fold_replay_type = "independent_challenger"
+        else:
+            incumbent_fallback_folds.append(fold_id)
+            fold_replay_type = "production_incumbent_fallback"
         for strategy, targets in (("challenger", candidate_targets), ("production", incumbent_targets)):
             for target in targets:
                 for ticker, weight in target.weights.items():
@@ -615,7 +635,14 @@ def main() -> int:
             bootstrap_seed=int(float_value(bootstrap_raw.get("seed"), 1729.0)),
             periods_per_year=model.periods_per_year,
         )
-        fold_comparisons.append({"fold_id": fold_id, **comparison})
+        fold_comparisons.append(
+            {
+                "fold_id": fold_id,
+                "candidate_replay_type": fold_replay_type,
+                "candidate_targets_differ_from_production_flag": int(targets_differ),
+                **comparison,
+            }
+        )
         daily_output.extend(
             {"fold_id": fold_id, "strategy": "challenger", **dict(row)}
             for row in candidate_result.daily_rows
@@ -643,6 +670,21 @@ def main() -> int:
         bootstrap_block_days=int(float_value(bootstrap_raw.get("block_days"), 20.0)),
         bootstrap_seed=int(float_value(bootstrap_raw.get("seed"), 1729.0)),
         periods_per_year=model.periods_per_year,
+    )
+    if independent_challenger_folds and incumbent_fallback_folds:
+        candidate_replay_type = "mixed_challenger_and_production_fallback"
+    elif independent_challenger_folds:
+        candidate_replay_type = "independent_challenger_all_folds"
+    else:
+        candidate_replay_type = "production_incumbent_fallback_only"
+    aggregate_comparison.update(
+        {
+            "candidate_replay_type": candidate_replay_type,
+            "independent_challenger_fold_count": len(independent_challenger_folds),
+            "production_fallback_fold_count": len(incumbent_fallback_folds),
+            "independent_challenger_folds": "|".join(independent_challenger_folds),
+            "production_fallback_folds": "|".join(incumbent_fallback_folds),
+        }
     )
     decision = decide_profitability_promotion(aggregate_comparison, fold_comparisons, rules)
     decision_payload = decision.as_dict()

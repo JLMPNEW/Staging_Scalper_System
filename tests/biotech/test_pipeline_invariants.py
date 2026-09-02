@@ -280,6 +280,79 @@ def test_historical_restatement_never_refetches_live_adcom_calendar() -> None:
     assert "biotech_features" in names
 
 
+def test_historical_sqlite_lock_retry_is_narrow_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_historical_lock_retry")
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def fake_run_step(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(1)
+        if len(calls) == 1:
+            return {"status": "failed", "stderr_tail": "sqlite3.OperationalError: database is locked"}
+        return {"status": "success", "elapsed_sec": 0.1}
+
+    monkeypatch.setattr(module, "run_step", fake_run_step)
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+    result = module.run_step_with_sqlite_lock_retry(
+        module.Step("test", "test.py"),
+        command=["python", "test.py"],
+        mode="history_restatement",
+        run_started_at="2026-09-01T00:00:00Z",
+        timeout_sec=60.0,
+        max_retries=2,
+        retry_delay_sec=3.0,
+    )
+
+    assert result["status"] == "success"
+    assert result["retry_count"] == 1
+    assert len(calls) == 2
+    assert sleeps == [3.0]
+
+    calls.clear()
+
+    def fail_non_lock(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(1)
+        return {"status": "failed", "stderr_tail": "ValueError: invalid score contract"}
+
+    monkeypatch.setattr(module, "run_step", fail_non_lock)
+    result = module.run_step_with_sqlite_lock_retry(
+        module.Step("test", "test.py"),
+        command=["python", "test.py"],
+        mode="history_restatement",
+        run_started_at="2026-09-01T00:00:00Z",
+        timeout_sec=60.0,
+        max_retries=2,
+        retry_delay_sec=3.0,
+    )
+
+    assert result["status"] == "failed"
+    assert result["retry_count"] == 0
+    assert len(calls) == 1
+
+
+def test_historical_market_steps_use_bounded_rolling_window() -> None:
+    module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_historical_market_window")
+    steps = {step.name: step for step in module.historical_restatement_steps(market_start_asof="2017-11-10")}
+
+    adjusted = module.rolling_historical_market_step(
+        steps["yahoo_market_adjusted"],
+        run_asof="2026-08-31",
+        floor_start_asof="2017-11-10",
+        lookback_days=550,
+    )
+    start_index = adjusted.args.index("--start-date")
+
+    assert adjusted.args[start_index + 1] == "2025-02-27"
+    assert "--offline-existing-bars" in adjusted.args
+    with pytest.raises(ValueError, match="at least 420"):
+        module.rolling_historical_market_step(
+            steps["yahoo_market_adjusted"],
+            run_asof="2026-08-31",
+            floor_start_asof="2017-11-10",
+            lookback_days=365,
+        )
+
+
 def test_partial_historical_feature_restatement_requires_positioning_export() -> None:
     module = load_script_module("24_run_biotech_refresh_pipeline.py", "pipeline_historical_dependencies")
 

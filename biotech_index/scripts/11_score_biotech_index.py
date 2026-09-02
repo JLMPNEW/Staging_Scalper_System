@@ -43,10 +43,21 @@ from biotech_index.core.db import (  # noqa: E402
 )
 from biotech_index.core.financial_survival import cash_runway_is_reliable  # noqa: E402
 from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
+from biotech_index.core.cohort_history import (  # noqa: E402
+    CohortHistory,
+    extend_cohort_history,
+    load_cohort_history,
+)
 from biotech_index.core.pipeline_guards import (  # noqa: E402
     read_final_scoring_tickers,
     validate_full_universe_coverage,
     validate_layer_freshness,
+)
+from biotech_index.core.portfolio_candidate_policy import (  # noqa: E402
+    candidate_score as shared_candidate_score,
+    policy_from_mapping,
+    portfolio_candidate_base_eligible,
+    select_portfolio_candidates,
 )
 from biotech_index.core.promotion_contract import (  # noqa: E402
     ActivePromotionContract,
@@ -150,6 +161,12 @@ PORTFOLIO_LAYER_CONTRACT_FIELDS = [
     "biotech_selection_reliability_class",
     "biotech_active_sleeve_weight",
     "biotech_xbi_residual_weight",
+    "biotech_max_name_weight_within_cohort",
+    "biotech_selected_name_count_within_cohort",
+    "biotech_calibration_cohort_valid_from",
+    "biotech_calibration_cohort_valid_to",
+    "biotech_current_backcast_cohort",
+    "biotech_cohort_assignment_mode",
     "biotech_promotion_contract_id",
     "biotech_promotion_contract_sha256",
 ]
@@ -514,60 +531,14 @@ def load_taxonomy_overrides(path: Path | None) -> dict[str, list[TaxonomyOverrid
     return overrides
 
 
-def load_calibration_cohort_overrides(path: Path | None) -> dict[str, dict[str, str]]:
-    if path is None:
-        return {}
-    if not path.exists():
-        raise FileNotFoundError(f"Calibration cohort CSV not found: {path}")
-    overrides: dict[str, dict[str, str]] = {}
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            raise ValueError(f"Calibration cohort CSV has no header: {path}")
-        fields = {str(field or "").strip() for field in reader.fieldnames}
-        cohort_field = (
-            "biotech_calibration_cohort"
-            if "biotech_calibration_cohort" in fields
-            else "official_cohort"
-            if "official_cohort" in fields
-            else "biotech_primary_cohort"
-            if "biotech_primary_cohort" in fields
-            else ""
-        )
-        if "ticker" not in fields or not cohort_field:
-            raise ValueError(
-                "Calibration cohort CSV must include ticker plus one of "
-                f"biotech_calibration_cohort, official_cohort, or biotech_primary_cohort: {path}"
-            )
-        for line_no, row in enumerate(reader, start=2):
-            ticker = str(row.get("ticker") or "").strip().upper()
-            cohort = str(row.get(cohort_field) or "").strip()
-            if not ticker:
-                raise ValueError(f"Calibration cohort row {line_no} missing ticker: {path}")
-            if not cohort:
-                raise ValueError(f"Calibration cohort row {line_no} missing official cohort for {ticker}: {path}")
-            if ticker in overrides:
-                previous = overrides[ticker]["biotech_calibration_cohort"]
-                raise ValueError(
-                    f"Duplicate calibration cohort assignment for {ticker}: {previous!r} and {cohort!r} in {path}"
-                )
-            overrides[ticker] = {
-                "biotech_calibration_cohort": cohort,
-                "biotech_calibration_cohort_source": str(
-                    row.get("source") or "manual_calibration_cohort_csv"
-                ).strip()
-                or "manual_calibration_cohort_csv",
-                "biotech_calibration_cohort_reason": str(row.get("reason") or "").strip(),
-            }
-    return overrides
-
-
-def load_delisted_calibration_cohort_overrides(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+def load_delisted_calibration_cohort_additions(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, str, str, str]]:
     table = conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'delisted_calibration_universe'"
     ).fetchone()
     if table is None:
-        return {}
+        return []
     rows = conn.execute(
         """
         SELECT ticker, calibration_company_ticker, cohort
@@ -575,54 +546,85 @@ def load_delisted_calibration_cohort_overrides(conn: sqlite3.Connection) -> dict
         WHERE COALESCE(cohort, '') <> ''
         """
     ).fetchall()
-    out: dict[str, dict[str, str]] = {}
+    additions: list[tuple[str, str, str, str]] = []
     for row in rows:
         cohort = str(row["cohort"] or "").strip()
         if not cohort:
             continue
-        payload = {
-            "biotech_calibration_cohort": cohort,
-            "biotech_calibration_cohort_source": "delisted_calibration_universe",
-            "biotech_calibration_cohort_reason": "calibration-only delisted universe cohort",
-        }
         for ticker in (row["ticker"], row["calibration_company_ticker"]):
             clean = str(ticker or "").strip().upper()
             if clean:
-                out[clean] = dict(payload)
-    return out
+                additions.append(
+                    (
+                        clean,
+                        cohort,
+                        "delisted_calibration_universe",
+                        "calibration-only delisted universe cohort",
+                    )
+                )
+    return additions
 
 
 def calibration_cohort_fields(
     *,
     ticker: str,
     primary_cohort: str,
-    calibration_cohorts_by_ticker: dict[str, dict[str, str]],
+    asof_date: date,
+    calibration_cohort_history: CohortHistory,
     enabled: bool,
     fallback_to_primary: bool,
     version: str,
 ) -> dict[str, str]:
     clean_ticker = str(ticker or "").strip().upper()
-    clean_primary = str(primary_cohort or "unmapped_calibration_cohort").strip() or "unmapped_calibration_cohort"
-    if enabled and clean_ticker in calibration_cohorts_by_ticker:
-        row = calibration_cohorts_by_ticker[clean_ticker]
+    clean_primary = (
+        str(primary_cohort or "unmapped_calibration_cohort").strip()
+        or "unmapped_calibration_cohort"
+    )
+    assignment = (
+        calibration_cohort_history.resolve(clean_ticker, asof_date)
+        if enabled
+        else None
+    )
+    if assignment is not None:
+        current_cohort = calibration_cohort_history.current_cohort(clean_ticker)
         return {
-            "biotech_calibration_cohort": row["biotech_calibration_cohort"],
-            "biotech_calibration_cohort_source": row["biotech_calibration_cohort_source"],
-            "biotech_calibration_cohort_reason": row["biotech_calibration_cohort_reason"],
+            "biotech_calibration_cohort": assignment.cohort,
+            "biotech_calibration_cohort_source": assignment.source,
+            "biotech_calibration_cohort_reason": assignment.reason,
             "biotech_calibration_cohort_version": version,
+            "biotech_calibration_cohort_valid_from": (
+                assignment.valid_from.isoformat() if assignment.valid_from is not None else ""
+            ),
+            "biotech_calibration_cohort_valid_to": (
+                assignment.valid_to.isoformat() if assignment.valid_to is not None else ""
+            ),
+            "biotech_current_backcast_cohort": current_cohort,
+            "biotech_cohort_assignment_mode": "effective_dated_pit",
         }
     if fallback_to_primary:
         return {
             "biotech_calibration_cohort": clean_primary,
             "biotech_calibration_cohort_source": "primary_cohort_fallback",
-            "biotech_calibration_cohort_reason": f"no calibration override; primary_cohort={clean_primary}",
+            "biotech_calibration_cohort_reason": (
+                f"no effective-dated cohort assignment; primary_cohort={clean_primary}"
+            ),
             "biotech_calibration_cohort_version": version,
+            "biotech_calibration_cohort_valid_from": "",
+            "biotech_calibration_cohort_valid_to": "",
+            "biotech_current_backcast_cohort": "",
+            "biotech_cohort_assignment_mode": "primary_cohort_fallback",
         }
     return {
         "biotech_calibration_cohort": "unmapped_calibration_cohort",
         "biotech_calibration_cohort_source": "unmapped",
-        "biotech_calibration_cohort_reason": f"no calibration override; primary_cohort={clean_primary}",
+        "biotech_calibration_cohort_reason": (
+            f"no effective-dated cohort assignment; primary_cohort={clean_primary}"
+        ),
         "biotech_calibration_cohort_version": version,
+        "biotech_calibration_cohort_valid_from": "",
+        "biotech_calibration_cohort_valid_to": "",
+        "biotech_current_backcast_cohort": "",
+        "biotech_cohort_assignment_mode": "unmapped",
     }
 
 
@@ -1403,11 +1405,10 @@ def enrich_portfolio_layer_contract_rows(rows: list[dict[str, Any]], config: dic
 
 def _candidate_policy_score(row: dict[str, Any]) -> float:
     """Return the unmodified native score used by calibration and adaptive ranking."""
-    for field in ("native_score_value", "opportunity_score", "portfolio_candidate_score"):
-        score = to_float(row.get(field), math.nan)
-        if math.isfinite(score):
-            return score
-    return 0.0
+    return shared_candidate_score(
+        row,
+        score_fields=("native_score_value", "opportunity_score", "portfolio_candidate_score"),
+    )
 
 
 def effective_promotion_contract(
@@ -1438,43 +1439,183 @@ def active_score_spec_for_cohort(
     return None
 
 
+def _promoted_policy_base_candidate(row: dict[str, Any]) -> bool:
+    """True when a row can enter the promoted live candidate selector."""
+    return portfolio_candidate_base_eligible(
+        row,
+        score_fields=("native_score_value", "opportunity_score", "portfolio_candidate_score"),
+    )
+
+
+_PORTFOLIO_DECISION_FIELDS = (
+    "portfolio_candidate_gate",
+    "portfolio_candidate_status",
+    "portfolio_candidate_reason",
+    "eligibility_reason",
+)
+
+
+def _apply_candidate_policy_settings(
+    rows: list[dict[str, Any]],
+    settings: Mapping[str, object],
+    *,
+    active_contract: ActivePromotionContract | None = None,
+) -> None:
+    policy = policy_from_mapping(settings)
+    evidence = settings.get("evidence") or {}
+    if evidence and not isinstance(evidence, Mapping):
+        raise ValueError("biotech_scoring.portfolio_candidate_policy.evidence must be a mapping")
+    if isinstance(evidence, Mapping):
+        validated_policy_name = str(evidence.get("validated_policy_name") or "").strip()
+        if validated_policy_name and validated_policy_name != policy.name:
+            raise ValueError(
+                "Promoted portfolio policy differs from its validation evidence: "
+                f"configured={policy.name!r} validated={validated_policy_name!r}"
+            )
+        validated_top_n = int(to_float(evidence.get("validated_rank_top_n"), 0.0))
+        if validated_top_n > 0 and validated_top_n != policy.rank_top_n:
+            raise ValueError(
+                "Promoted portfolio rank_top_n differs from its validation evidence: "
+                f"configured={policy.rank_top_n} validated={validated_top_n}"
+            )
+        validated_order = str(evidence.get("validated_selection_order") or "").strip().lower()
+        if validated_order and validated_order != policy.selection_order:
+            raise ValueError(
+                "Promoted portfolio selection_order differs from its validation evidence: "
+                f"configured={policy.selection_order!r} validated={validated_order!r}"
+            )
+    if (
+        policy.rank_top_n <= 0
+        and not policy.allowed_primary_cohorts
+        and policy.cohort_top_k_per_cohort <= 0
+        and policy.total_max <= 0
+        and policy.min_score_pct_of_top <= 0.0
+    ):
+        return
+
+    base_candidates = [row for row in rows if _promoted_policy_base_candidate(row)]
+    selection = select_portfolio_candidates(
+        base_candidates,
+        policy,
+        score_fields=("native_score_value", "opportunity_score", "portfolio_candidate_score"),
+    )
+    selected_ids = {id(row) for row in selection.selected_rows}
+    base_ids = {id(row) for row in base_candidates}
+    selected_counts = {
+        asof_date: len(tickers)
+        for asof_date, tickers in selection.selected_tickers_by_date.items()
+    }
+    if active_contract is not None:
+        for row in rows:
+            asof_date = str(row.get("asof_date") or "").strip()
+            selected_count = selected_counts.get(asof_date, 0)
+            active_weight = min(
+                active_contract.active_weight,
+                selected_count * active_contract.max_name_weight,
+            )
+            row.update(
+                {
+                    "biotech_selection_reliability_class": active_contract.reliability_class,
+                    "biotech_active_sleeve_weight": active_weight,
+                    "biotech_xbi_residual_weight": round(1.0 - active_weight, 10),
+                    "biotech_max_name_weight_within_cohort": active_contract.max_name_weight,
+                    "biotech_selected_name_count_within_cohort": float(selected_count),
+                    "biotech_promotion_contract_id": active_contract.contract_id,
+                    "biotech_promotion_contract_sha256": active_contract.sha256,
+                }
+            )
+    for row in rows:
+        if id(row) not in base_ids:
+            continue
+        asof_date = str(row.get("asof_date") or "").strip()
+        selected = id(row) in selected_ids
+        breadth_fallback = bool(selection.breadth_cash_fallback_by_date.get(asof_date, False))
+        reason = (
+            policy.selected_reason
+            if selected
+            else policy.below_min_selected_reason
+            if breadth_fallback
+            else policy.excluded_reason
+        )
+        row["portfolio_candidate_gate"] = 1.0 if selected else 0.0
+        row["portfolio_candidate_status"] = "eligible" if selected else "excluded"
+        row["portfolio_candidate_reason"] = reason
+        row["eligibility_reason"] = reason
+
+
 def apply_active_cohort_promotion_contract(
     rows: list[dict[str, Any]],
     active_contract: ActivePromotionContract,
 ) -> None:
-    """Apply independently promoted breadth and exposure only inside each authorized cohort."""
+    """Overlay independently promoted cohort policies on an incumbent-gated batch."""
     for cohort, promotion in active_contract.cohort_policies.items():
-        cohort_rows = [row for row in rows if str(row.get("biotech_primary_cohort") or "").strip() == cohort]
+        cohort_rows = [
+            row
+            for row in rows
+            if str(row.get("biotech_primary_cohort") or "").strip() == cohort
+        ]
         base_candidates = [row for row in cohort_rows if _promoted_policy_base_candidate(row)]
-        base_candidates.sort(key=lambda row: (-_candidate_policy_score(row), str(row.get("ticker") or "")))
-        pool = base_candidates[: promotion.candidate_pool_top_n]
-        if 0.0 < promotion.min_score_pct_of_top <= 100.0 and pool:
-            floor = _candidate_policy_score(pool[0]) * promotion.min_score_pct_of_top / 100.0
-            pool = [row for row in pool if _candidate_policy_score(row) >= floor]
-        policy = promotion.policy_payload
+        raw_policy = promotion.policy_payload
         cohort_cap = max(
             0,
             int(
                 to_float(
-                    policy.get("cohort_top_k_per_cohort")
-                    or policy.get("post_selection_cohort_top_k_per_cohort"),
+                    raw_policy.get("cohort_top_k_per_cohort")
+                    or raw_policy.get("post_selection_cohort_top_k_per_cohort"),
                     0.0,
                 )
             ),
         )
         max_names = min(promotion.max_names, cohort_cap) if cohort_cap > 0 else promotion.max_names
-        pool = pool[:max_names]
-        min_selected = max(0, int(to_float(policy.get("min_selected_names"), 0.0)))
-        breadth_cash_fallback = min_selected > 0 and len(pool) < min_selected
-        if breadth_cash_fallback:
-            pool = []
-        selected_ids = {id(row) for row in pool}
+        settings: dict[str, object] = {
+            "name": f"cohort_contract_{promotion.candidate_id}",
+            "selection_order": "cohort_then_rank",
+            "rank_top_n": promotion.candidate_pool_top_n,
+            "allowed_primary_cohorts": [cohort],
+            "cohort_top_k_per_cohort": max_names,
+            "total_max": max_names,
+            "min_selected_names": max(
+                0,
+                int(to_float(raw_policy.get("min_selected_names"), 0.0)),
+            ),
+            "below_min_selected_action": str(
+                raw_policy.get("below_min_selected_action") or "cash"
+            ),
+            "min_score_pct_of_top": promotion.min_score_pct_of_top,
+            "selected_reason": f"selected_by_cohort_contract_{promotion.candidate_id}",
+            "excluded_reason": f"excluded_by_cohort_contract_{promotion.candidate_id}",
+            "below_min_selected_reason": "cash_fallback_insufficient_cohort_breadth",
+        }
+        selection = select_portfolio_candidates(
+            base_candidates,
+            policy_from_mapping(settings),
+            score_fields=("native_score_value", "opportunity_score", "portfolio_candidate_score"),
+        )
+        selected_ids = {id(row) for row in selection.selected_rows}
         base_ids = {id(row) for row in base_candidates}
-        active_weight = 0.0 if breadth_cash_fallback else promotion.active_weight
+        selected_counts = {
+            asof_date: len(tickers)
+            for asof_date, tickers in selection.selected_tickers_by_date.items()
+        }
         for row in cohort_rows:
+            asof_date = str(row.get("asof_date") or "").strip()
+            breadth_fallback = bool(
+                selection.breadth_cash_fallback_by_date.get(asof_date, False)
+            )
+            selected_count = selected_counts.get(asof_date, 0)
+            active_weight = (
+                0.0
+                if breadth_fallback
+                else min(
+                    promotion.active_weight,
+                    selected_count * promotion.max_name_weight,
+                )
+            )
             row["biotech_selection_reliability_class"] = promotion.reliability_class
             row["biotech_active_sleeve_weight"] = active_weight
             row["biotech_xbi_residual_weight"] = round(1.0 - active_weight, 10)
+            row["biotech_max_name_weight_within_cohort"] = promotion.max_name_weight
+            row["biotech_selected_name_count_within_cohort"] = float(selected_count)
             row["biotech_promotion_contract_id"] = active_contract.contract_id
             row["biotech_promotion_contract_sha256"] = active_contract.sha256
             if id(row) not in base_ids:
@@ -1484,29 +1625,42 @@ def apply_active_cohort_promotion_contract(
                 f"selected_by_cohort_contract_{promotion.candidate_id}"
                 if selected
                 else "cash_fallback_insufficient_cohort_breadth"
-                if breadth_cash_fallback
+                if breadth_fallback
                 else f"excluded_by_cohort_contract_{promotion.candidate_id}"
             )
             row["portfolio_candidate_gate"] = 1.0 if selected else 0.0
             row["portfolio_candidate_status"] = "eligible" if selected else "excluded"
-
             row["portfolio_candidate_reason"] = reason
             row["eligibility_reason"] = reason
 
-def _promoted_policy_base_candidate(row: dict[str, Any]) -> bool:
-    """True when a row can enter the promoted live candidate selector."""
-    ticker = str(row.get("ticker") or "").strip()
-    price_data_available = bool(str(row.get("price_data_asof_date") or row.get("latest_price_date") or "").strip())
-    return (
-        bool(ticker)
-        and _candidate_policy_score(row) > 0.0
-        and to_float(row.get("score_zero_is_missing_flag"), 0.0) <= 0.0
-        and to_float(row.get("biotech_cohort_investible_flag"), 1.0) > 0.0
-        and portfolio_candidate_universe_eligible(row)
-        and to_float(row.get("core_structural_veto_flag"), 0.0) <= 0.0
-        and to_float(row.get("rank_quality_cap_vetoed"), 0.0) <= 0.0
-        and price_data_available
+
+def _global_contract_policy_settings(active_contract: ActivePromotionContract) -> dict[str, object]:
+    policy = active_contract.policy_payload
+    pre_cohorts = parse_string_list(policy.get("allowed_primary_cohorts"), [])
+    post_cohorts = parse_string_list(policy.get("post_selection_allowed_primary_cohorts"), [])
+    allowed = pre_cohorts or post_cohorts
+    cohort_top_k_raw = (
+        policy.get("cohort_top_k_per_cohort")
+        if pre_cohorts
+        else policy.get("post_selection_cohort_top_k_per_cohort")
     )
+    return {
+        "enabled": True,
+        "name": f"adaptive_contract_{active_contract.candidate_id}",
+        "selection_order": "cohort_then_rank" if pre_cohorts else "global_then_cohort",
+        "rank_top_n": active_contract.candidate_pool_top_n,
+        "allowed_primary_cohorts": allowed,
+        "cohort_top_k_per_cohort": max(0, int(to_float(cohort_top_k_raw, 0.0))),
+        "total_max": active_contract.max_names,
+        "min_selected_names": max(
+            0,
+            int(to_float(policy.get("min_selected_names"), 0.0)),
+        ),
+        "below_min_selected_action": str(policy.get("below_min_selected_action") or "cash"),
+        "min_score_pct_of_top": active_contract.min_score_pct_of_top,
+        "selected_reason": f"selected_by_adaptive_contract_{active_contract.candidate_id}",
+        "excluded_reason": f"excluded_by_adaptive_contract_{active_contract.candidate_id}",
+    }
 
 
 def apply_promoted_portfolio_candidate_policy(
@@ -1515,157 +1669,41 @@ def apply_promoted_portfolio_candidate_policy(
     *,
     active_contract: ActivePromotionContract | None = None,
 ) -> None:
-    """Apply a promoted live allocation gate without changing raw score fields."""
+    """Apply the incumbent gate first, then overlay only authorized cohorts."""
     active_contract = active_contract or effective_promotion_contract(rows, config)
-    if active_contract is not None and active_contract.cohort_policies:
-        apply_active_cohort_promotion_contract(rows, active_contract)
-        return
-    if active_contract is not None:
-        policy = active_contract.policy_payload
-        pre_cohorts = parse_string_list(policy.get("allowed_primary_cohorts"), [])
-        post_cohorts = parse_string_list(policy.get("post_selection_allowed_primary_cohorts"), [])
-        allowed = pre_cohorts or post_cohorts
-        contract_selection_order = "cohort_then_rank" if pre_cohorts else "global_then_cohort"
-        cohort_top_k_raw = (
-            policy.get("cohort_top_k_per_cohort")
-            if pre_cohorts
-            else policy.get("post_selection_cohort_top_k_per_cohort")
-        )
-        cohort_top_k = int(to_float(cohort_top_k_raw, 0.0))
-        settings: dict[str, Any] = {
-            "enabled": True,
-            "name": f"adaptive_contract_{active_contract.candidate_id}",
-            "selection_order": contract_selection_order,
-            "rank_top_n": active_contract.candidate_pool_top_n,
-            "allowed_primary_cohorts": allowed,
-            "cohort_top_k_per_cohort": max(0, cohort_top_k),
-            "total_max": active_contract.max_names,
-            "min_selected_names": max(0, int(to_float(policy.get("min_selected_names"), 0.0))),
-            "below_min_selected_action": str(policy.get("below_min_selected_action") or "cash"),
-            "min_score_pct_of_top": active_contract.min_score_pct_of_top,
-            "selected_reason": f"selected_by_adaptive_contract_{active_contract.candidate_id}",
-            "excluded_reason": f"excluded_by_adaptive_contract_{active_contract.candidate_id}",
-        }
-    else:
-        raw_settings = cfg_get(config, "biotech_scoring.portfolio_candidate_policy", {}) or {}
-        if not isinstance(raw_settings, dict) or not as_bool(raw_settings.get("enabled", False), False):
-            return
-        settings = raw_settings
-    allowed_cohorts = set(parse_string_list(settings.get("allowed_primary_cohorts"), []))
-    selection_order = str(settings.get("selection_order") or "global_then_cohort").strip().lower()
-    supported_selection_orders = {"global_then_cohort", "cohort_then_rank"}
-    if selection_order not in supported_selection_orders:
-        raise ValueError(
-            "Unsupported biotech_scoring.portfolio_candidate_policy.selection_order="
-            f"{selection_order!r}; expected one of {sorted(supported_selection_orders)}"
-        )
-    rank_top_n = max(0, int(float(settings.get("rank_top_n") or 0)))
-    cohort_top_k = max(0, int(float(settings.get("cohort_top_k_per_cohort") or 0)))
-    total_max = max(0, int(float(settings.get("total_max") or 0)))
-    min_selected_names = max(0, int(float(settings.get("min_selected_names") or 0)))
-    below_min_action = str(settings.get("below_min_selected_action") or "cash").strip().lower()
-    if min_selected_names > 0 and below_min_action != "cash":
-        raise ValueError(
-            "Unsupported biotech_scoring.portfolio_candidate_policy.below_min_selected_action="
-            f"{below_min_action!r}; expected 'cash'"
-        )
-    score_floor_pct = max(0.0, min(100.0, to_float(settings.get("min_score_pct_of_top"), 0.0)))
-    policy_name = str(settings.get("name") or settings.get("policy_name") or "promoted_portfolio_candidate_policy")
-    selected_reason = str(settings.get("selected_reason") or policy_name)
-    excluded_reason = str(settings.get("excluded_reason") or f"excluded_by_{policy_name}")
-    below_min_reason = str(
-        settings.get("below_min_selected_reason") or "cash_fallback_insufficient_promoted_policy_breadth"
+    raw_incumbent = cfg_get(config, "biotech_scoring.portfolio_candidate_policy", {}) or {}
+    incumbent_enabled = isinstance(raw_incumbent, Mapping) and as_bool(
+        raw_incumbent.get("enabled", False),
+        False,
     )
-    evidence = settings.get("evidence") or {}
-    if evidence and not isinstance(evidence, dict):
-        raise ValueError("biotech_scoring.portfolio_candidate_policy.evidence must be a mapping")
-    if isinstance(evidence, dict):
-        validated_policy_name = str(evidence.get("validated_policy_name") or "").strip()
-        if validated_policy_name and validated_policy_name != policy_name:
-            raise ValueError(
-                "Promoted portfolio policy differs from its validation evidence: "
-                f"configured={policy_name!r} validated={validated_policy_name!r}"
-            )
-        validated_top_n = int(to_float(evidence.get("validated_rank_top_n"), 0.0))
-        if validated_top_n > 0 and validated_top_n != rank_top_n:
-            raise ValueError(
-                "Promoted portfolio rank_top_n differs from its validation evidence: "
-                f"configured={rank_top_n} validated={validated_top_n}"
-            )
-        validated_order = str(evidence.get("validated_selection_order") or "").strip().lower()
-        if validated_order and validated_order != selection_order:
-            raise ValueError(
-                "Promoted portfolio selection_order differs from its validation evidence: "
-                f"configured={selection_order!r} validated={validated_order!r}"
-            )
-    if rank_top_n <= 0 and not allowed_cohorts and cohort_top_k <= 0 and total_max <= 0 and score_floor_pct <= 0.0:
-        return
+    if incumbent_enabled:
+        _apply_candidate_policy_settings(rows, raw_incumbent)
 
-    base_candidates = [row for row in rows if _promoted_policy_base_candidate(row)]
-    base_candidates.sort(key=lambda row: (-_candidate_policy_score(row), str(row.get("ticker") or "")))
-    pool = list(base_candidates)
-    if selection_order == "cohort_then_rank" and allowed_cohorts:
-        pool = [
-            row
-            for row in pool
-            if str(row.get("biotech_primary_cohort") or "").strip() in allowed_cohorts
-        ]
-    pool = pool[:rank_top_n] if rank_top_n > 0 else pool
-    if selection_order == "global_then_cohort" and allowed_cohorts:
-        pool = [
-            row
-            for row in pool
-            if str(row.get("biotech_primary_cohort") or "").strip() in allowed_cohorts
-        ]
-    if 0.0 < score_floor_pct <= 100.0 and pool:
-        top_score = _candidate_policy_score(pool[0])
-        min_score = top_score * score_floor_pct / 100.0
-        pool = [row for row in pool if _candidate_policy_score(row) >= min_score]
-    if cohort_top_k > 0:
-        counts: dict[str, int] = {}
-        capped: list[dict[str, Any]] = []
-        for row in pool:
-            cohort = str(row.get("biotech_primary_cohort") or "").strip()
-            current = counts.get(cohort, 0)
-            if current >= cohort_top_k:
-                continue
-            counts[cohort] = current + 1
-            capped.append(row)
-        pool = capped
-    if total_max > 0:
-        pool = pool[:total_max]
-    breadth_cash_fallback = min_selected_names > 0 and len(pool) < min_selected_names
-    if breadth_cash_fallback:
-        pool = []
-    base_candidate_ids = {id(row) for row in base_candidates}
-    selected_tickers = {str(row.get("ticker") or "").strip().upper() for row in pool}
-    if active_contract is not None:
+    if active_contract is not None and active_contract.cohort_policies:
+        promoted_cohorts = set(active_contract.cohort_policies)
+        incumbent_snapshot = {
+            id(row): tuple(row.get(field) for field in _PORTFOLIO_DECISION_FIELDS)
+            for row in rows
+            if str(row.get("biotech_primary_cohort") or "").strip() not in promoted_cohorts
+        }
+        apply_active_cohort_promotion_contract(rows, active_contract)
         for row in rows:
-            row.update(
-                {
-                    "biotech_selection_reliability_class": active_contract.reliability_class,
-                    "biotech_active_sleeve_weight": active_contract.active_weight,
-                    "biotech_xbi_residual_weight": active_contract.xbi_residual_weight,
-                    "biotech_promotion_contract_id": active_contract.contract_id,
-                    "biotech_promotion_contract_sha256": active_contract.sha256,
-                }
-            )
-
-    for row in rows:
-        ticker = str(row.get("ticker") or "").strip().upper()
-        if id(row) not in base_candidate_ids:
-            continue
-        if ticker in selected_tickers:
-            row["portfolio_candidate_gate"] = 1.0
-            row["portfolio_candidate_status"] = "eligible"
-            row["portfolio_candidate_reason"] = selected_reason
-            row["eligibility_reason"] = selected_reason
-        else:
-            row["portfolio_candidate_gate"] = 0.0
-            row["portfolio_candidate_status"] = "excluded"
-            reason = below_min_reason if breadth_cash_fallback else excluded_reason
-            row["portfolio_candidate_reason"] = reason
-            row["eligibility_reason"] = reason
+            expected = incumbent_snapshot.get(id(row))
+            if expected is None:
+                continue
+            observed = tuple(row.get(field) for field in _PORTFOLIO_DECISION_FIELDS)
+            if observed != expected:
+                raise ValueError(
+                    "Cohort promotion modified an unpromoted cohort incumbent decision: "
+                    f"ticker={row.get('ticker')!r} cohort={row.get('biotech_primary_cohort')!r}"
+                )
+        return
+    if active_contract is not None:
+        _apply_candidate_policy_settings(
+            rows,
+            _global_contract_policy_settings(active_contract),
+            active_contract=active_contract,
+        )
 
 
 def commercial_risk_overlay_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -2394,11 +2432,11 @@ def score_rows(
     forward_by_company: dict[int, dict[str, Any]],
     governance_by_company: dict[int, dict[str, Any]] | None = None,
     taxonomy_overrides_by_ticker: dict[str, list[TaxonomyOverride]] | None = None,
-    calibration_cohorts_by_ticker: dict[str, dict[str, str]] | None = None,
+    calibration_cohort_history: CohortHistory | None = None,
 ) -> list[dict[str, Any]]:
     governance_by_company = governance_by_company or {}
     taxonomy_overrides_by_ticker = taxonomy_overrides_by_ticker or {}
-    calibration_cohorts_by_ticker = calibration_cohorts_by_ticker or {}
+    calibration_cohort_history = calibration_cohort_history or CohortHistory({}, {})
     calibration_cohort_settings = cfg_get(config, "biotech_scoring.calibration_cohorts", {}) or {}
     if not isinstance(calibration_cohort_settings, dict):
         calibration_cohort_settings = {}
@@ -2815,7 +2853,14 @@ def score_rows(
             or biotech_taxonomy_payload.get("primary_cohort")
             or "unmapped_calibration_cohort"
         )
-        if calibration_cohorts_enabled and calibration_cohorts_require_all and ticker not in calibration_cohorts_by_ticker:
+        row_asof_date = parse_date(row.get("asof_date"))
+        if row_asof_date is None:
+            raise ValueError(f"Ticker {ticker} has invalid feature asof_date={row.get('asof_date')!r}")
+        if (
+            calibration_cohorts_enabled
+            and calibration_cohorts_require_all
+            and not calibration_cohort_history.contains_ticker(ticker)
+        ):
             raise ValueError(
                 f"Ticker {ticker} is missing from the official biotech calibration cohort map; "
                 "old taxonomy-cohort fallback is disabled."
@@ -2823,7 +2868,8 @@ def score_rows(
         biotech_taxonomy_payload |= calibration_cohort_fields(
             ticker=ticker,
             primary_cohort=primary_cohort_for_calibration,
-            calibration_cohorts_by_ticker=calibration_cohorts_by_ticker,
+            asof_date=row_asof_date,
+            calibration_cohort_history=calibration_cohort_history,
             enabled=calibration_cohorts_enabled,
             fallback_to_primary=calibration_cohorts_fallback_to_primary,
             version=calibration_cohort_version,
@@ -4087,6 +4133,10 @@ def upsert_scores(conn: sqlite3.Connection, rows: list[dict[str, Any]], asof_dat
         "forward_catalyst_event_date",
         "forward_catalyst_asof_date",
         "biotech_selection_reliability_class",
+        "biotech_calibration_cohort_valid_from",
+        "biotech_calibration_cohort_valid_to",
+        "biotech_current_backcast_cohort",
+        "biotech_cohort_assignment_mode",
         "biotech_promotion_contract_id",
         "biotech_promotion_contract_sha256",
         "tier1_production_score_model",
@@ -4458,6 +4508,13 @@ def main() -> None:
         calibration_cohort_settings.get("csv", "data/biotech_calibration_cohorts.csv"),
         base_dir=base_dir,
     )
+    calibration_cohort_migration_path = resolve_path(
+        calibration_cohort_settings.get(
+            "migration_csv",
+            "data/biotech_cohort_migration_20260831.csv",
+        ),
+        base_dir=base_dir,
+    )
     sqlite_timeout_sec = float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))
 
     with connect(db_path, timeout_sec=sqlite_timeout_sec) as conn:
@@ -4490,31 +4547,37 @@ def main() -> None:
                     + (f"...(+{len(inactive_expected_tickers) - 25})" if len(inactive_expected_tickers) > 25 else ""),
                 )
                 expected_tickers = expected_tickers - inactive_expected_tickers
-            calibration_cohorts_by_ticker = (
-                load_calibration_cohort_overrides(calibration_cohorts_path)
-                if as_bool(calibration_cohort_settings.get("enabled", False), False)
-                else {}
+            calibration_cohorts_enabled = as_bool(
+                calibration_cohort_settings.get("enabled", False),
+                False,
             )
-            if as_bool(calibration_cohort_settings.get("enabled", False), False):
-                delisted_cohorts = load_delisted_calibration_cohort_overrides(conn)
-                calibration_cohorts_by_ticker.update(delisted_cohorts)
-            if calibration_cohorts_by_ticker:
-                LOGGER.info(
-                    "Loaded biotech calibration cohort overrides: tickers=%d path=%s",
-                    len(calibration_cohorts_by_ticker),
+            calibration_cohort_history = CohortHistory({}, {})
+            if calibration_cohorts_enabled:
+                calibration_cohort_history = load_cohort_history(
                     calibration_cohorts_path,
+                    migration_path=calibration_cohort_migration_path,
+                )
+                calibration_cohort_history = extend_cohort_history(
+                    calibration_cohort_history,
+                    load_delisted_calibration_cohort_additions(conn),
+                )
+                LOGGER.info(
+                    "Loaded effective-dated biotech calibration cohorts: tickers=%d current=%s migrations=%s",
+                    len(calibration_cohort_history.assignments_by_ticker),
+                    calibration_cohorts_path,
+                    calibration_cohort_migration_path,
                 )
             run_id = start_run(conn, run_type="score_biotech_index", input_path=db_path)
             historical_feature_universe = bool(args.asof and asof_date < latest_available_feature_asof)
             features = load_feature_rows(conn, asof_date, include_inactive=historical_feature_universe)
             if not features:
                 raise ValueError(f"No features found for asof_date={asof_date}")
-            if historical_feature_universe and calibration_cohorts_by_ticker:
+            if historical_feature_universe and calibration_cohort_history.assignments_by_ticker:
                 before_count = len(features)
                 excluded_without_cohort = [
                     normalize_ticker(row["ticker"])
                     for row in features
-                    if normalize_ticker(row["ticker"]) not in calibration_cohorts_by_ticker
+                    if not calibration_cohort_history.contains_ticker(normalize_ticker(row["ticker"]))
                     and str(row.get("universe_status") or "").strip().lower() != "delisted_calibration"
                 ]
                 if excluded_without_cohort:
@@ -4621,7 +4684,7 @@ def main() -> None:
             else:
                 LOGGER.warning("Skipping optional governance freshness validation because no governance rows are available.")
             taxonomy_overrides_by_ticker: dict[str, list[TaxonomyOverride]] = {}
-            if calibration_cohorts_by_ticker:
+            if calibration_cohorts_enabled:
                 LOGGER.info(
                     "Skipping legacy biotech taxonomy overrides because official five-bucket cohorts are enabled."
                 )
@@ -4640,7 +4703,7 @@ def main() -> None:
                 forward_by_company,
                 governance_by_company,
                 taxonomy_overrides_by_ticker,
-                calibration_cohorts_by_ticker,
+                calibration_cohort_history,
             )
             validate_full_universe_coverage(
                 expected_tickers=coverage_expected_tickers,

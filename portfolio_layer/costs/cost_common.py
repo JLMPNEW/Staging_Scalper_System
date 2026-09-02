@@ -17,6 +17,9 @@ from portfolio_layer.risk.liquidity import (
 )
 
 
+PUBLISHED_WEIGHT_DECIMALS = 10
+
+
 def finite_float(value: Any, *, name: str) -> float:
     try:
         parsed = float(value)
@@ -25,6 +28,20 @@ def finite_float(value: Any, *, name: str) -> float:
     if not math.isfinite(parsed):
         raise ValueError(f"{name} must be finite, got {value!r}")
     return parsed
+
+
+def published_weight_rounding_tolerance(
+    row_count: int,
+    *,
+    decimal_places: int = PUBLISHED_WEIGHT_DECIMALS,
+) -> float:
+    """Maximum aggregate error from independently rounding published weights."""
+    if row_count < 1:
+        raise ValueError("row_count must be positive")
+    if decimal_places < 0:
+        raise ValueError("decimal_places must be non-negative")
+    half_unit = 0.5 * (10.0 ** -decimal_places)
+    return (row_count * half_unit) + 1e-12
 
 
 def resolve_aum(config: dict[str, Any], cli_aum: float | None) -> float:

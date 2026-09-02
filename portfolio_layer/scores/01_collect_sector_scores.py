@@ -508,6 +508,8 @@ def main() -> int:
                 "production_policy_sha256": row.production_policy_sha256,
                 "selection_reliability_class": row.selection_reliability_class,
                 "active_sleeve_weight": row.active_sleeve_weight,
+                "active_name_weight_cap": row.active_name_weight_cap,
+                "active_selected_name_count": row.active_selected_name_count,
                 "benchmark_residual_weight": row.benchmark_residual_weight,
                 "benchmark_residual_ticker": row.benchmark_residual_ticker,
                 "native_score": row.native_score, "investable_eligible": row.investable_eligible,

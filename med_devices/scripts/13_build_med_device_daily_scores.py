@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from med_devices.core import analyst_review as analyst_review_core  # noqa: E402
+from med_devices.core.calibrated_baseline import effective_promoted_gate_overrides  # noqa: E402
 from med_devices.core.config import DEFAULT_NEUTRAL_SCORE, cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, finish_run, init_db, quote_identifier, start_run, utc_now  # noqa: E402
 from med_devices.core.fda_states import MANUAL_FDA_REVIEW_STATES  # noqa: E402
@@ -4126,6 +4127,14 @@ def calibrated_baseline_candidate_status(
         return None
     if not row.passed_fda_manual_review_gate or row.hard_red_flag:
         return None
+    baseline_gates = dict(gates)
+    baseline_gates.update(
+        effective_promoted_gate_overrides(
+            config,
+            cohort=cohort,
+            asof_raw=row.asof_date,
+        )
+    )
     min_checks = [
         ("composite_score", "composite_min"),
         ("cohort_percentile", "cohort_percentile_min"),
@@ -4138,9 +4147,9 @@ def calibrated_baseline_candidate_status(
         ("data_completeness_score", "data_completeness_min"),
     ]
     for score_field, gate_key in min_checks:
-        if not row_passes_min_gate(row, score_field, gates.get(gate_key)):
+        if not row_passes_min_gate(row, score_field, baseline_gates.get(gate_key)):
             return None
-    if not row_passes_max_gate(row, "value_trap_score", gates.get("value_trap_max")):
+    if not row_passes_max_gate(row, "value_trap_score", baseline_gates.get("value_trap_max")):
         return None
     status = "calibrated_baseline" if production_seed_active else "calibrated_watchlist_baseline"
     reason = "final_investability_pass" if row.final_investability_gate else "baseline_gate_pass_not_tier1"

@@ -41,6 +41,8 @@ COLLECTED_FIELDS = [
     "production_policy_sha256",
     "selection_reliability_class",
     "active_sleeve_weight",
+    "active_name_weight_cap",
+    "active_selected_name_count",
     "benchmark_residual_weight",
     "benchmark_residual_ticker",
     "native_score",          # the sector's own headline score (0-100 composite)
@@ -71,6 +73,8 @@ CONTRACT_FIELDS = [
     "production_policy_sha256",
     "selection_reliability_class",
     "active_sleeve_weight",
+    "active_name_weight_cap",
+    "active_selected_name_count",
     "benchmark_residual_weight",
     "benchmark_residual_ticker",
     "final_score",               # calibrated expected forward alpha (annualized fraction)
@@ -128,6 +132,8 @@ class CanonicalScore:
     production_policy_sha256: str = ""
     selection_reliability_class: str = ""
     active_sleeve_weight: float | None = None
+    active_name_weight_cap: float | None = None
+    active_selected_name_count: float | None = None
     benchmark_residual_weight: float | None = None
     benchmark_residual_ticker: str = ""
     financial_lineage_checked_asof_date: str = ""
@@ -456,6 +462,8 @@ CREATE TABLE IF NOT EXISTS stocks_scores (
     production_policy_sha256 TEXT,
     selection_reliability_class TEXT,
     active_sleeve_weight REAL,
+    active_name_weight_cap REAL,
+    active_selected_name_count REAL,
     benchmark_residual_weight REAL,
     benchmark_residual_ticker TEXT,
     final_score REAL,
@@ -546,7 +554,12 @@ def _ensure_stocks_scores_columns(conn: sqlite3.Connection) -> None:
     ):
         if column not in existing:
             conn.execute(f"ALTER TABLE stocks_scores ADD COLUMN {column} TEXT")
-    for column in ("active_sleeve_weight", "benchmark_residual_weight"):
+    for column in (
+        "active_sleeve_weight",
+        "active_name_weight_cap",
+        "active_selected_name_count",
+        "benchmark_residual_weight",
+    ):
         if column not in existing:
             conn.execute(f"ALTER TABLE stocks_scores ADD COLUMN {column} REAL")
     for column in FINANCIAL_LINEAGE_FIELDS:
@@ -568,7 +581,8 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
             run_as_of, r["ticker"], r["source_pipeline"], r["as_of_date"], r["sector"], r["industry"],
             r["industry_aggregate"], r.get("model_scope_id"), r.get("production_policy_id"),
             r.get("production_policy_sha256"), r.get("selection_reliability_class"),
-            _f(r.get("active_sleeve_weight")), _f(r.get("benchmark_residual_weight")),
+            _f(r.get("active_sleeve_weight")), _f(r.get("active_name_weight_cap")),
+            _f(r.get("active_selected_name_count")), _f(r.get("benchmark_residual_weight")),
             r.get("benchmark_residual_ticker"), _f(r.get("final_score")), r.get("rating"),
             _f(r.get("within_sector_percentile")), _f(r.get("score_confidence")),
             int(r.get("investable_eligible") or 0), r.get("eligibility_reason"), _f(r.get("native_score")),
@@ -595,7 +609,8 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
             INSERT INTO stocks_scores(
                 run_as_of_date, ticker, source_pipeline, as_of_date, sector, industry, industry_aggregate,
                 model_scope_id, production_policy_id, production_policy_sha256,
-                selection_reliability_class, active_sleeve_weight, benchmark_residual_weight,
+                selection_reliability_class, active_sleeve_weight, active_name_weight_cap,
+                active_selected_name_count, benchmark_residual_weight,
                 benchmark_residual_ticker, final_score, rating, within_sector_percentile,
                 score_confidence, investable_eligible,
                 eligibility_reason, native_score, calibration_research_eligible, calibration_research_reason,
@@ -606,7 +621,7 @@ def upsert_stocks_scores(conn: sqlite3.Connection, run_as_of: str, rows: Sequenc
                 latest_material_financial_form, latest_material_financial_accession,
                 latest_material_financial_report_date, incorporated_financial_filing_date, incorporated_financial_accession,
                 incorporated_financial_report_date, incorporated_financial_core_metric_count, financial_lineage_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             payload,
         )

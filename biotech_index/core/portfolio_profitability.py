@@ -24,6 +24,10 @@ class ReplayCostModel:
     execution_lag_bars: int = 1
     periods_per_year: int = 252
     liquidate_at_end: bool = True
+    # Zero preserves legacy replay manifests. Production calibration config
+    # sets an explicit limit so truncated label windows cannot leave stale
+    # stock targets in place until the end of an annual fold.
+    max_target_staleness_bars: int = 0
 
     def __post_init__(self) -> None:
         if self.initial_capital <= 0.0:
@@ -42,6 +46,8 @@ class ReplayCostModel:
             raise ValueError("execution_lag_bars must be at least one")
         if self.periods_per_year <= 0:
             raise ValueError("periods_per_year must be positive")
+        if self.max_target_staleness_bars < 0:
+            raise ValueError("max_target_staleness_bars cannot be negative")
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,35 @@ def targets_from_selection_rows(
     return targets
 
 
+def target_allocations_equal(
+    left: Sequence[ReplayTarget],
+    right: Sequence[ReplayTarget],
+    *,
+    tolerance: float = 1e-12,
+) -> bool:
+    """Return whether two frozen target schedules express the same allocations."""
+    if len(left) != len(right):
+        return False
+    for left_target, right_target in zip(
+        sorted(left, key=lambda value: value.signal_date),
+        sorted(right, key=lambda value: value.signal_date),
+        strict=True,
+    ):
+        if left_target.signal_date != right_target.signal_date:
+            return False
+        tickers = set(left_target.weights).union(right_target.weights)
+        if any(
+            abs(
+                float(left_target.weights.get(ticker, 0.0))
+                - float(right_target.weights.get(ticker, 0.0))
+            )
+            > tolerance
+            for ticker in tickers
+        ):
+            return False
+    return True
+
+
 def _execution_schedule(
     targets: Sequence[ReplayTarget],
     trading_days: Sequence[date],
@@ -260,6 +295,10 @@ def run_daily_portfolio_replay(
     missing_target_price_count = 0
     partial_fill_count = 0
     processed_terminal: set[str] = set()
+    last_explicit_target_index: int | None = None
+    last_explicit_target_adv: dict[str, float] = {}
+    target_expired = False
+    target_expiry_rebalance_count = 0
     daily_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
 
@@ -300,6 +339,21 @@ def run_daily_portfolio_replay(
 
         pretrade_equity = cash + sum(shares * marks.get(ticker, 0.0) for ticker, shares in holdings.items())
         target = schedule.get(day)
+        target_expiry_rebalance = False
+        if target is not None:
+            last_explicit_target_index = day_index
+            last_explicit_target_adv = dict(target.adv_by_ticker)
+            target_expired = False
+        elif (
+            model.max_target_staleness_bars > 0
+            and last_explicit_target_index is not None
+            and day_index - last_explicit_target_index >= model.max_target_staleness_bars
+        ):
+            target = ReplayTarget(day, {benchmark: 1.0}, last_explicit_target_adv)
+            if not target_expired:
+                target_expired = True
+                target_expiry_rebalance = True
+                target_expiry_rebalance_count += 1
         day_cost = 0.0
         day_notional = 0.0
         if target is not None and pretrade_equity > 0.0:
@@ -482,6 +536,7 @@ def run_daily_portfolio_replay(
                 "gross_exposure_pct": 100.0 * gross_exposure / equity if equity > 0.0 else 0.0,
                 "holding_count": len(holdings),
                 "rebalance_flag": int(target is not None),
+                "target_expiry_rebalance_flag": int(target_expiry_rebalance),
             }
         )
         previous_equity = equity
@@ -501,6 +556,7 @@ def run_daily_portfolio_replay(
             "partial_fill_count": partial_fill_count,
             "missing_adv_trade_count": missing_adv_trade_count,
             "missing_target_price_count": missing_target_price_count,
+            "target_expiry_rebalance_count": target_expiry_rebalance_count,
             "daily_series_sha256": _series_hash(daily_rows),
             "trade_ledger_sha256": _series_hash(trade_rows),
         }
@@ -552,6 +608,19 @@ def summarize_daily_replay(
     cutoff = quantile(returns, 0.05)
     tail = [value for value in returns if cutoff is not None and value <= cutoff]
     pf = profit_factor(returns, cap=10.0, min_wins=3, min_losses=3)
+    gross_positive_return = sum(value for value in returns if value > 0.0)
+    gross_negative_return = -sum(value for value in returns if value < 0.0)
+    previous_equity = initial_capital
+    dollar_changes: list[float] = []
+    for value in equity:
+        dollar_changes.append(value - previous_equity)
+        previous_equity = value
+    gross_profit_dollars = sum(value for value in dollar_changes if value > 0.0)
+    gross_loss_dollars = -sum(value for value in dollar_changes if value < 0.0)
+    dollar_profit_factor = (
+        None if gross_loss_dollars <= 1e-12 else gross_profit_dollars / gross_loss_dollars
+    )
+    wealth_reconciliation_error = terminal_wealth - initial_capital - sum(dollar_changes)
     return {
         "daily_count": len(returns),
         "start_date": str(daily_rows[0].get("date") or ""),
@@ -567,6 +636,15 @@ def summarize_daily_replay(
         "sortino_ratio": "" if sortino is None else round(sortino, 6),
         "calmar_ratio": "" if calmar is None else round(calmar, 6),
         "profit_factor": "" if pf is None else round(pf, 6),
+        "profit_factor_basis": "daily_net_return_gain_loss_ratio",
+        "gross_positive_daily_return_sum": round(gross_positive_return, 10),
+        "gross_negative_daily_return_sum_abs": round(gross_negative_return, 10),
+        "dollar_pnl_profit_factor": (
+            "" if dollar_profit_factor is None else round(dollar_profit_factor, 6)
+        ),
+        "gross_profit_dollars": round(gross_profit_dollars, 6),
+        "gross_loss_dollars": round(gross_loss_dollars, 6),
+        "wealth_reconciliation_error": round(wealth_reconciliation_error, 10),
         "max_drawdown_pct": "" if max_drawdown is None else round(100.0 * max_drawdown, 6),
         "daily_cvar_5pct": "" if not tail else round(100.0 * mean(tail), 6),
         "positive_day_rate_pct": round(100.0 * sum(value > 0.0 for value in returns) / len(returns), 6),
@@ -691,10 +769,15 @@ def compare_daily_replays(
         "sortino_ratio",
         "calmar_ratio",
         "profit_factor",
+        "dollar_pnl_profit_factor",
+        "gross_profit_dollars",
+        "gross_loss_dollars",
+        "wealth_reconciliation_error",
         "max_drawdown_pct",
         "daily_cvar_5pct",
         "total_transaction_cost",
         "gross_turnover_multiple",
+        "target_expiry_rebalance_count",
     ):
         left = finite_float(candidate.summary.get(key))
         right = finite_float(incumbent.summary.get(key))

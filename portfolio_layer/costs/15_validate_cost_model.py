@@ -24,7 +24,12 @@ from portfolio_layer.core.contracts import fail_if_exists, read_csv, sha256_file
 from portfolio_layer.core.logging_utils import configure_utc_logging  # noqa: E402
 from portfolio_layer.core.paths import resolve_runtime_paths  # noqa: E402
 from portfolio_layer.costs.cost_common import (  # noqa: E402
-    commission, finite_float, invalidate_after_validation, require_same_aum, resolve_aum,
+    commission,
+    finite_float,
+    invalidate_after_validation,
+    published_weight_rounding_tolerance,
+    require_same_aum,
+    resolve_aum,
 )
 from portfolio_layer.risk.liquidity import effective_spread_uses_panel, load_spread_snapshot  # noqa: E402
 from portfolio_layer.risk.readiness import latest_run_with  # noqa: E402
@@ -176,13 +181,15 @@ def main() -> int:  # noqa: C901
 
     # A cohort without production authority retains its equal sector slot as CASH. This is checked
     # separately from book conservation so a configuration drift cannot silently fund other sectors.
-    cash_floor_ok = cash + 1e-10 >= effective_cash_target_fraction
+    cash_rounding_tolerance = published_weight_rounding_tolerance(len(adjusted))
+    cash_floor_ok = cash + cash_rounding_tolerance >= effective_cash_target_fraction
     rec(
         "cash_reservations_enforced",
         "PASS" if cash_floor_ok else "FAIL",
         f"cash={cash:.8f} >= base={cash_target_fraction:.8f} + "
         f"consumer_reserved={consumer_reserved_cash_fraction:.8f} = "
-        f"{effective_cash_target_fraction:.8f}",
+        f"{effective_cash_target_fraction:.8f}; "
+        f"published_rounding_tolerance={cash_rounding_tolerance:.12f}",
     )
 
     # 3. Cost report rows exactly match trade rows and formulas.

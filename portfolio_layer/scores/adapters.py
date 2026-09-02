@@ -2140,6 +2140,8 @@ def _adapt_biotech(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[Cano
                 r.get("biotech_selection_reliability_class") or ""
             ).strip().lower(),
             active_sleeve_weight=_f(r.get("biotech_active_sleeve_weight")),
+            active_name_weight_cap=_f(r.get("biotech_max_name_weight_within_cohort")),
+            active_selected_name_count=_f(r.get("biotech_selected_name_count_within_cohort")),
             benchmark_residual_weight=_f(r.get("biotech_xbi_residual_weight")),
             benchmark_residual_ticker=(
                 str(cfg.get("benchmark_residual_ticker") or "XBI").strip().upper()

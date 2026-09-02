@@ -744,11 +744,14 @@ biotech_scoring:
     enabled: true
     version: "calibration_cohort_v2_reorganized_20260831"
     csv: "data/biotech_calibration_cohorts.csv"
+    migration_csv: "data/biotech_cohort_migration_20260831.csv"
+    assignment_mode: "effective_dated_pit"
     fallback_to_primary: false
     require_all_tickers: true
     notes:
       - "The five-bucket cohort map is the official operational cohort system."
       - "biotech_primary_cohort is overwritten with the five-bucket assignment; old taxonomy cohorts must not drive scoring or reports."
+      - "Historical rows resolve cohort assignments by migration effective date; the current map is never backcast across prior dates."
   use_investment_score: true
   use_quality_adjusted_valuation_component: true
   use_quality_adjusted_guidance_component: true
@@ -1327,6 +1330,15 @@ biotech_historical_sequence:
   # Mirrors biotech_refresh.step_timeout_sec so both orchestrators share the same
   # default without requiring a CLI --step-timeout-sec override.
   step_timeout_sec: 28800
+  # Each PIT market-feature snapshot needs only enough trailing history for the
+  # longest production lookback (52 weeks / 200 trading days). Keeping a 550-day
+  # window avoids repeatedly scanning the entire market history during a daily rebuild.
+  market_feature_lookback_days: 550
+  # A scheduled live refresh can briefly own the same staging SQLite database.
+  # Historical restatement retries only the exact SQLite lock errors; all other
+  # child failures remain fail-fast.
+  sqlite_lock_retries: 20
+  sqlite_lock_retry_delay_sec: 15.0
   # Historical CSV generation is intended for Stage 11 research calibration, so
   # rows are evaluated against point-in-time membership and the delisted
   # calibration universe by default. Use --current-universe-replay only for a
@@ -1794,7 +1806,7 @@ calibration:
       max_large_loss_20_rate_pct: 30.0
       max_large_loss_40_rate_pct: 12.5
   walk_forward:
-    framework_version: "biotech_nested_walk_forward_v2"
+    framework_version: "biotech_nested_walk_forward_v3"
     output_dir: "../output/biotech_index_reports/calibration_walk_forward"
     cohort_calibration:
       enabled: true
@@ -1863,7 +1875,12 @@ calibration:
       min_profit_factor_losses: 3
       bootstrap_iterations: 500
       bootstrap_seed: 1729
+      # Date blocks approximate each horizon's overlapping-label dependence.
       bootstrap_block_dates: 4
+      bootstrap_block_dates_by_horizon:
+        "20": 5
+        "60": 13
+        "120": 25
     adaptive_selection:
       min_score_pct_of_top_candidates:
         - 70
@@ -1878,6 +1895,11 @@ calibration:
         - 8
         - 10
         - 12
+      # Caps are applied inside each cohort sleeve. Sparse selections reduce
+      # active exposure instead of concentrating the entire sleeve in one name.
+      max_name_weight_candidates:
+        - 0.20
+        - 0.25
       active_weight_by_reliability:
         high: 0.90
         medium: 0.55
@@ -1907,6 +1929,14 @@ calibration:
       require_cohort_no_harm: true
       max_cohort_lcb_underperformance_pct: 5.0
       min_cohort_paired_dates: 8
+      require_regime_no_harm: true
+      max_regime_lcb_underperformance_pct: 5.0
+      min_regime_paired_dates: 8
+      require_same_cohort_benchmark_no_harm: true
+      max_same_cohort_lcb_underperformance_pct: 3.0
+      require_ticker_jackknife: true
+      max_largest_ticker_gain_contribution_pct: 60.0
+      max_ticker_jackknife_lcb_underperformance_pct: 3.0
       provisional_active_weight_cap: 0.25
       required_no_harm_cohorts:
         - commercial_profitable_quality_or_mature
@@ -1942,6 +1972,10 @@ calibration:
         max_adv_participation_pct: 2.0
         min_trade_notional: 25.0
         execution_lag_bars: 1
+        # Primary-horizon labels end before each annual test fold. Revert to
+        # XBI when no fresh frozen target arrives within two trading weeks
+        # instead of holding the final stock target stale to fold end.
+        max_target_staleness_bars: 10
         periods_per_year: 252
         liquidate_at_fold_end: true
       bootstrap:

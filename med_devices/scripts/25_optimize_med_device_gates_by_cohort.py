@@ -154,6 +154,16 @@ def available_asof_dates(rows: list[dict[str, str]]) -> list[str]:
     return sorted(dates)
 
 
+def complete_label_asof_dates(rows: list[dict[str, str]], horizons: list[int]) -> list[str]:
+    complete_dates = {
+        str(row.get("asof_date") or "").strip()[:10]
+        for row in rows
+        if parse_date(row.get("asof_date")) is not None
+        and all(to_float(row.get(f"cohort_excess_return_{horizon}d")) is not None for horizon in horizons)
+    }
+    return sorted(complete_dates)
+
+
 def previous_asof(dates: list[str], target: str) -> str:
     prior = [item for item in dates if item < target]
     if not prior:
@@ -161,17 +171,29 @@ def previous_asof(dates: list[str], target: str) -> str:
     return prior[-1]
 
 
-def resolve_calibration_dates(config: dict[str, Any], rows: list[dict[str, str]]) -> tuple[str, str, str]:
+def resolve_calibration_dates(
+    config: dict[str, Any],
+    rows: list[dict[str, str]],
+    *,
+    horizons: list[int],
+) -> tuple[str, str, str]:
     dates = available_asof_dates(rows)
     if not dates:
         raise ValueError("Cannot resolve calibration windows: input rows have no valid asof_date values.")
+    complete_dates = complete_label_asof_dates(rows, horizons)
+    if not complete_dates:
+        raise ValueError("Cannot resolve calibration windows: no as-of date has complete configured-horizon labels.")
     train_raw = cfg_get(config, "calibration.train_end_asof", "auto")
     validation_start_raw = cfg_get(config, "calibration.validation_start_asof", "auto")
     validation_end_raw = cfg_get(config, "calibration.validation_end_asof", "auto")
     validation_window_asofs = max(1, int(cfg_get(config, "calibration.validation_window_asofs", 26)))
 
-    validation_end = dates[-1] if is_auto_date(validation_end_raw) else str(validation_end_raw).strip()[:10]
-    eligible_dates = [item for item in dates if item <= validation_end]
+    validation_end = (
+        complete_dates[-1]
+        if is_auto_date(validation_end_raw)
+        else str(validation_end_raw).strip()[:10]
+    )
+    eligible_dates = [item for item in complete_dates if item <= validation_end]
     if not eligible_dates:
         raise ValueError(f"No calibration rows on or before validation_end_asof={validation_end}")
     if is_auto_date(validation_start_raw):
@@ -851,7 +873,9 @@ def main() -> None:
             f"Gate optimization input {input_csv} is missing cohort_excess_return columns for horizons: "
             + ",".join(str(item) for item in missing_horizons)
         )
-    train_end_asof, validation_start_asof, validation_end_asof = resolve_calibration_dates(config, rows)
+    train_end_asof, validation_start_asof, validation_end_asof = resolve_calibration_dates(
+        config, rows, horizons=horizons
+    )
     embargo_days = int(cfg_get(config, "calibration.embargo_days", 120))
     effective_train_end_asof = effective_train_end(train_end_asof, validation_start_asof, embargo_days)
     min_train_obs = int(cfg_get(config, "calibration.min_train_obs", 100))

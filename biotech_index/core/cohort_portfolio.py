@@ -241,20 +241,18 @@ def combine_cohort_selection_rows(
         for key in sorted(fold_dates):
             fold_id, asof_date = key
             incumbent_rows = incumbent_by_date.get(key, [])
-            if incumbent_rows:
-                incumbent_weight = budget / len(incumbent_rows)
-                for row in incumbent_rows:
-                    combined_incumbent.append(
-                        {
-                            **row,
-                            "evaluation_split": "outer_test_incumbent",
-                            "calibration_cohort": cohort,
-                            "cohort_budget_weight": budget,
-                            "cohort_active_weight": 1.0,
-                            "portfolio_target_weight": incumbent_weight,
-                            "combined_selection_source": "production_incumbent",
-                        }
-                    )
+            for row in incumbent_rows:
+                combined_incumbent.append(
+                    {
+                        **row,
+                        "evaluation_split": "outer_test_incumbent",
+                        "calibration_cohort": cohort,
+                        "cohort_budget_weight": budget,
+                        "cohort_active_weight": 1.0,
+                        "portfolio_target_weight": 0.0,
+                        "combined_selection_source": "actual_live_global_incumbent",
+                    }
+                )
 
             comparison = comparison_by_fold.get(fold_id)
             if comparison is None:
@@ -285,6 +283,17 @@ def combine_cohort_selection_rows(
                             ),
                         }
                     )
+
+    incumbent_by_fold_date: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in combined_incumbent:
+        incumbent_by_fold_date[(str(row["fold_id"]), str(row["asof_date"]))].append(row)
+    for key, date_rows in incumbent_by_fold_date.items():
+        tickers = [str(row.get("ticker") or "") for row in date_rows]
+        if len(tickers) != len(set(tickers)):
+            raise ValueError(f"Duplicate actual-live incumbent ticker on fold/date={key}")
+        target_weight = 1.0 / len(date_rows)
+        for row in date_rows:
+            row["portfolio_target_weight"] = target_weight
 
     ticker_cohort: dict[tuple[str, str, str], str] = {}
     for row in (*combined_candidate, *combined_incumbent):

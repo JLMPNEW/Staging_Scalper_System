@@ -35,6 +35,13 @@ def observation_scoring_config_payload(
         calibration_cohorts.get("csv", "data/biotech_calibration_cohorts.csv"),
         base_dir=base_dir,
     )
+    calibration_cohort_migration_csv = resolve_path(
+        calibration_cohorts.get(
+            "migration_csv",
+            "data/biotech_cohort_migration_20260831.csv",
+        ),
+        base_dir=base_dir,
+    )
     return {
         # Hash the complete scoring and feature subtrees. Over-invalidating an
         # observation cache is safe; retaining it across a score-definition
@@ -57,6 +64,13 @@ def observation_scoring_config_payload(
         "calibration_cohorts_csv_path": str(calibration_cohorts_csv),
         "calibration_cohorts_csv_sha256": _file_sha256(calibration_cohorts_csv),
         "calibration_cohorts_csv_mtime_ns": _file_mtime_ns(calibration_cohorts_csv),
+        "calibration_cohort_migration_csv_path": str(calibration_cohort_migration_csv),
+        "calibration_cohort_migration_csv_sha256": _file_sha256(
+            calibration_cohort_migration_csv
+        ),
+        "calibration_cohort_migration_csv_mtime_ns": _file_mtime_ns(
+            calibration_cohort_migration_csv
+        ),
     }
 
 

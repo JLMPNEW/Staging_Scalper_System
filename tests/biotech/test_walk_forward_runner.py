@@ -201,6 +201,13 @@ def test_incumbent_returns_fills_no_selection_dates_with_xbi_residual() -> None:
     assert returns == {"2024-01-05": pytest.approx(0.10), "2024-01-12": 0.0}
 
 
+def test_active_date_coverage_uses_actual_selected_dates() -> None:
+    runner = load_runner()
+
+    assert runner.active_date_coverage_pct({"d1": 1, "d2": 0, "d3": 2}, 4) == 50.0
+    assert runner.active_date_coverage_pct({"d1": 1}, 0) == 0.0
+
+
 def test_cohort_comparison_aligns_dates_where_only_one_policy_is_active() -> None:
     runner = load_runner()
     rows = runner.cohort_comparisons(

@@ -62,6 +62,9 @@ def test_normalized_artifacts_replay_deterministically(tmp_path: Path) -> None:
     second = replay_normalized_artifacts(tmp_path, model=model, settings=settings)
     assert first == second
     assert float(str(first["candidate_terminal_wealth"])) > float(str(first["incumbent_terminal_wealth"]))
+    assert first["candidate_replay_type"] == "independent_challenger_all_folds"
+    assert first["independent_challenger_fold_count"] == 1
+    assert first["production_fallback_fold_count"] == 0
     assert compare_replay_payloads(first, second)["verification_status"] == "pass"
 
 

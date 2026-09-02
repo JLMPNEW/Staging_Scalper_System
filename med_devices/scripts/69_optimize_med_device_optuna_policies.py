@@ -30,6 +30,7 @@ from med_devices.core.logging_utils import configure_utc_logging  # noqa: E402
 
 
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
+OPTUNA_STUDY_CONTRACT_VERSION = "med_device_optuna_panel_fingerprint_v2_20260831"
 DEFAULT_EXCLUDED_COMPONENTS = {
     "raw_composite_score",
     "composite_score",
@@ -396,6 +397,21 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
         writer.writerows(rows)
 
 
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def lcb(values: list[float], z: float = 1.64) -> float | None:
     if not values:
         return None
@@ -413,6 +429,58 @@ def fmt(value: object) -> str:
 
 def json_dumps(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def json_compatible(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_compatible(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+    if isinstance(value, (list, tuple)):
+        return [json_compatible(item) for item in value]
+    if isinstance(value, set):
+        try:
+            ordered = sorted(value)
+        except TypeError:
+            ordered = sorted(value, key=str)
+        return [json_compatible(item) for item in ordered]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
+
+def optimizer_study_provenance(
+    *,
+    input_csv: Path,
+    policy_csv: Path,
+    horizons: list[int],
+    settings: dict[str, Any],
+    seed: int,
+) -> tuple[str, dict[str, Any]]:
+    payload = {
+        "contract_version": OPTUNA_STUDY_CONTRACT_VERSION,
+        "input_csv": str(input_csv),
+        "input_sha256": file_sha256(input_csv),
+        "policy_csv": str(policy_csv),
+        "policy_sha256": file_sha256(policy_csv),
+        "horizons": list(horizons),
+        "settings": json_compatible(settings),
+        "seed": seed,
+    }
+    fingerprint = hashlib.sha256(json_dumps(payload).encode("utf-8")).hexdigest()[:16]
+    payload["study_fingerprint"] = fingerprint
+    return fingerprint, payload
+
+
+def fold_diagnostic_concentration_limit(
+    detail: dict[str, Any],
+    result: dict[str, Any],
+    settings: dict[str, Any],
+) -> float:
+    return float(
+        to_float(detail.get("single_ticker_share_limit"))
+        or to_float(result.get("max_single_ticker_share_limit"))
+        or to_float(settings.get("max_single_ticker_share"))
+        or 0.0
+    )
 
 
 def compact_reasons(reasons: list[str], *, max_reasons: int = 24) -> str:
@@ -1903,6 +1971,14 @@ def main() -> None:
     if timeout_sec is None:
         timeout_sec = cfg_int(config, "calibration.optuna_policy_optimizer.timeout_sec_per_cohort", 0)
     seed = args.seed if args.seed is not None else cfg_int(config, "calibration.optuna_policy_optimizer.seed", 20260607)
+    study_fingerprint, study_provenance = optimizer_study_provenance(
+        input_csv=input_csv,
+        policy_csv=policy_csv,
+        horizons=horizons,
+        settings=settings,
+        seed=seed,
+    )
+    study_names: dict[str, str] = {}
 
     rows, feature_names = load_panel(input_csv)
     if not rows:
@@ -2024,14 +2100,24 @@ def main() -> None:
             if journal_backend is not None
             else optuna.storages.RDBStorage(f"sqlite:///{study_journal_path.with_suffix('.sqlite').as_posix()}")
         )
+        study_name = f"med_device_{cohort}_{study_fingerprint}"
+        study_names[cohort] = study_name
         study = optuna.create_study(
             direction="maximize",
             sampler=sampler,
             storage=storage,
-            study_name=f"med_device_{cohort}",
+            study_name=study_name,
             load_if_exists=True,
         )
-        study.optimize(objective, n_trials=n_trials, timeout=timeout_sec or None, show_progress_bar=False)
+        finished_trial_count = sum(1 for item in study.trials if item.state.is_finished())
+        remaining_trials = max(0, n_trials - finished_trial_count)
+        if remaining_trials:
+            study.optimize(
+                objective,
+                n_trials=remaining_trials,
+                timeout=timeout_sec or None,
+                show_progress_bar=False,
+            )
         cohort_trial_rows: list[dict[str, Any]] = []
         for trial in study.trials:
             result = trial.user_attrs.get("result")
@@ -2079,7 +2165,11 @@ def main() -> None:
                         "loss_rate": fmt(detail["loss_rate"]),
                         "lcb_excess": fmt(detail["lcb_excess"]),
                         "single_ticker_share": fmt(detail["single_ticker_share"]),
-                        "single_ticker_share_limit": fmt(detail["single_ticker_share_limit"]),
+                        "single_ticker_share_limit": fmt(
+                            fold_diagnostic_concentration_limit(
+                                detail, result, settings
+                            )
+                        ),
                         "fold_horizon_status": detail["fold_horizon_status"],
                         "guardrail_reason": detail["guardrail_reason"],
                         "selected_tickers": detail["selected_tickers"],
@@ -2096,10 +2186,24 @@ def main() -> None:
     write_csv(summary_csv, summary_rows, SUMMARY_FIELDS)
     write_csv(recommendation_csv, recommendation_rows, RECOMMENDATION_FIELDS)
     write_config_fragment(config_fragment_yaml, recommendation_rows)
+    study_manifest_path = output_csv.with_name(output_csv.stem + "_study_manifest.json")
+    write_json_atomic(
+        study_manifest_path,
+        {
+            **study_provenance,
+            "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "n_trials_per_cohort_target": n_trials,
+            "study_names": study_names,
+            "trial_rows_written": len(all_trial_rows),
+            "recommendation_rows_written": len(recommendation_rows),
+        },
+    )
     print(
         f"Optuna shadow optimization complete: cohorts={len(cohorts)}, trials={len(all_trial_rows)}, "
         f"recommendations={len(recommendation_rows)}"
     )
+    print(f"Study fingerprint: {study_fingerprint}")
+    print(f"Study manifest: {study_manifest_path}")
     print(f"Trials: {output_csv}")
     print(f"Summary: {summary_csv}")
     print(f"Recommendations: {recommendation_csv}")

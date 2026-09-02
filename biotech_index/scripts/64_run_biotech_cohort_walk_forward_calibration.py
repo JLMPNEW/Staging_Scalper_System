@@ -36,7 +36,7 @@ from biotech_index.core.logging_utils import configure_utc_logging  # noqa: E402
 
 LOGGER = logging.getLogger("biotech_cohort_walk_forward")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
-FRAMEWORK_VERSION = "biotech_cohort_walk_forward_v1"
+FRAMEWORK_VERSION = "biotech_cohort_walk_forward_v3"
 
 
 def parse_args() -> argparse.Namespace:

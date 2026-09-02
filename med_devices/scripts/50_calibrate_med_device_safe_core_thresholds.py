@@ -189,16 +189,39 @@ def available_asof_dates(rows: list[dict[str, str]]) -> list[str]:
     return sorted(dates)
 
 
-def resolve_validation_window(config: dict[str, Any], rows: list[dict[str, str]], *, prefix: str) -> tuple[str, str]:
+def complete_label_asof_dates(rows: list[dict[str, str]], horizons: list[int]) -> list[str]:
+    complete_dates = {
+        str(row.get("asof_date") or "").strip()[:10]
+        for row in rows
+        if parse_date(row.get("asof_date")) is not None
+        and all(to_float(row.get(f"cohort_excess_return_{horizon}d")) is not None for horizon in horizons)
+    }
+    return sorted(complete_dates)
+
+
+def resolve_validation_window(
+    config: dict[str, Any],
+    rows: list[dict[str, str]],
+    *,
+    prefix: str,
+    horizons: list[int],
+) -> tuple[str, str]:
     dates = available_asof_dates(rows)
     if not dates:
         raise ValueError("Cannot resolve safe-core validation window: input rows have no valid asof_date values.")
+    complete_dates = complete_label_asof_dates(rows, horizons)
+    if not complete_dates:
+        raise ValueError("Cannot resolve safe-core validation window: no as-of date has complete configured-horizon labels.")
     validation_start_raw = cfg_get(config, f"{prefix}.validation_start_asof", cfg_get(config, "calibration.validation_start_asof", "auto"))
     validation_end_raw = cfg_get(config, f"{prefix}.validation_end_asof", cfg_get(config, "calibration.validation_end_asof", "auto"))
     validation_window_asofs = max(1, int(cfg_get(config, f"{prefix}.validation_window_asofs", cfg_get(config, "calibration.validation_window_asofs", 26))))
 
-    validation_end = dates[-1] if is_auto_date(validation_end_raw) else str(validation_end_raw).strip()[:10]
-    eligible_dates = [item for item in dates if item <= validation_end]
+    validation_end = (
+        complete_dates[-1]
+        if is_auto_date(validation_end_raw)
+        else str(validation_end_raw).strip()[:10]
+    )
+    eligible_dates = [item for item in complete_dates if item <= validation_end]
     if not eligible_dates:
         raise ValueError(f"No safe-core calibration rows on or before validation_end_asof={validation_end}")
     validation_start = (
@@ -672,7 +695,9 @@ def main() -> None:
         horizons = available_horizons(rows)
     if not horizons:
         raise RuntimeError(f"No cohort_excess_return_<horizon>d columns found in {input_csv}")
-    validation_start, validation_end = resolve_validation_window(config, rows, prefix=prefix)
+    validation_start, validation_end = resolve_validation_window(
+        config, rows, prefix=prefix, horizons=horizons
+    )
     value_trap_hard_max = float(cfg_get(config, "scoring.gates.value_trap_hard_max", 85.0))
     params_grid = grid_params(config)
     max_grid_size = int(cfg_get(config, f"{prefix}.max_grid_size", 10000))

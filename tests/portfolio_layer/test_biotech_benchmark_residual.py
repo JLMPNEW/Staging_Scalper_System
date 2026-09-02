@@ -27,6 +27,8 @@ def score_rows() -> dict[str, dict[str, str]]:
     shared = {
         "source_pipeline": "biotech",
         "active_sleeve_weight": "0.55",
+        "active_name_weight_cap": "0.30",
+        "active_selected_name_count": "2",
         "benchmark_residual_weight": "0.45",
         "benchmark_residual_ticker": "XBI",
         "production_policy_id": "policy-v1",

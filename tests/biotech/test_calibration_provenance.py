@@ -41,3 +41,25 @@ def test_observation_scoring_hash_ignores_search_only_settings_and_tracks_live_p
     live_policy = deepcopy(config)
     live_policy["biotech_scoring"]["production_baseline"]["selection_policy"] = "raw_legacy_score"  # type: ignore[index]
     assert observation_scoring_config_hash(live_policy, base_dir=tmp_path) != initial
+
+def test_observation_scoring_hash_tracks_effective_cohort_migration_content(tmp_path: Path) -> None:
+    cohort_path = tmp_path / "cohorts.csv"
+    migration_path = tmp_path / "migration.csv"
+    cohort_path.write_text("ticker,calibration_cohort\nAAA,commercial_profitable_quality_or_mature\n", encoding="utf-8")
+    migration_path.write_text(
+        "ticker,prior_cohort,new_cohort,effective_date\n"
+        "AAA,late_clinical_pivotal_or_registrational,commercial_profitable_quality_or_mature,2026-08-31\n",
+        encoding="utf-8",
+    )
+    config = base_config()
+    config["biotech_scoring"]["calibration_cohorts"] = {  # type: ignore[index]
+        "csv": cohort_path.name,
+        "migration_csv": migration_path.name,
+    }
+    initial = observation_scoring_config_hash(config, base_dir=tmp_path)
+    migration_path.write_text(
+        "ticker,prior_cohort,new_cohort,effective_date\n"
+        "AAA,platform_partnered_modality_pipeline,commercial_profitable_quality_or_mature,2026-08-31\n",
+        encoding="utf-8",
+    )
+    assert observation_scoring_config_hash(config, base_dir=tmp_path) != initial

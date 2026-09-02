@@ -12,6 +12,7 @@ from biotech_index.core.portfolio_profitability import (
     deflated_sharpe_probability,
     normalized_target_weights,
     run_daily_portfolio_replay,
+    target_allocations_equal,
     targets_from_selection_rows,
 )
 
@@ -43,6 +44,15 @@ def test_selection_targets_keep_no_selection_dates_in_benchmark() -> None:
     assert targets[1].weights == {"XBI": pytest.approx(1.0)}
 
 
+def test_target_allocation_identity_ignores_adv_but_not_weights() -> None:
+    signal = date(2026, 1, 5)
+    left = [ReplayTarget(signal, {"AAA": 0.5, "XBI": 0.5}, {"AAA": 1_000.0})]
+    same = [ReplayTarget(signal, {"AAA": 0.5, "XBI": 0.5}, {"AAA": 2_000.0})]
+    different = [ReplayTarget(signal, {"AAA": 0.4, "XBI": 0.6}, {"AAA": 1_000.0})]
+    assert target_allocations_equal(left, same)
+    assert not target_allocations_equal(left, different)
+
+
 def test_replay_executes_after_signal_and_charges_costs() -> None:
     prices = trading_prices(aaa=[100.0, 110.0, 121.0, 121.0], xbi=[100.0] * 4)
     target = ReplayTarget(date(2026, 1, 5), {"AAA": 1.0}, {"AAA": 1_000_000_000.0})
@@ -63,6 +73,68 @@ def test_replay_executes_after_signal_and_charges_costs() -> None:
     assert first_trade["price"] == pytest.approx(110.0)
     assert float(str(result.summary["terminal_wealth"])) < 110_000.0
     assert float(str(result.summary["total_transaction_cost"])) > 0.0
+
+
+def test_replay_expires_stale_stock_target_to_benchmark() -> None:
+    prices = trading_prices(
+        aaa=[100.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+        xbi=[100.0] * 7,
+    )
+    result = run_daily_portfolio_replay(
+        prices,
+        [ReplayTarget(date(2026, 1, 5), {"AAA": 1.0}, {"AAA": 1_000_000_000.0})],
+        benchmark_ticker="XBI",
+        model=ReplayCostModel(
+            initial_capital=100_000.0,
+            base_one_way_cost_bps=0.0,
+            benchmark_one_way_cost_bps=0.0,
+            market_impact_coefficient_bps=0.0,
+            max_adv_participation_pct=100.0,
+            max_target_staleness_bars=3,
+        ),
+    )
+    expiry_day = next(
+        row for row in result.daily_rows if row["target_expiry_rebalance_flag"] == 1
+    )
+    assert expiry_day["date"] == "2026-01-09"
+    assert result.summary["target_expiry_rebalance_count"] == 1
+    assert any(
+        row["ticker"] == "AAA"
+        and row["side"] == "sell"
+        and row["trade_date"] == "2026-01-09"
+        for row in result.trade_rows
+    )
+
+
+def test_expiry_reuses_adv_and_completes_partial_liquidation() -> None:
+    prices = trading_prices(
+        aaa=[100.0, 100.0, 200.0, 200.0, 200.0, 200.0, 200.0],
+        xbi=[100.0] * 7,
+    )
+    result = run_daily_portfolio_replay(
+        prices,
+        [ReplayTarget(date(2026, 1, 5), {"AAA": 1.0}, {"AAA": 500_000.0})],
+        benchmark_ticker="XBI",
+        model=ReplayCostModel(
+            initial_capital=100_000.0,
+            base_one_way_cost_bps=0.0,
+            benchmark_one_way_cost_bps=0.0,
+            market_impact_coefficient_bps=0.0,
+            max_adv_participation_pct=10.0,
+            max_target_staleness_bars=2,
+        ),
+    )
+    expiry_sales = [
+        row
+        for row in result.trade_rows
+        if row["ticker"] == "AAA"
+        and row["side"] == "sell"
+        and str(row["trade_date"]) >= "2026-01-08"
+    ]
+    assert [row["trade_date"] for row in expiry_sales] == ["2026-01-08", "2026-01-09"]
+    assert expiry_sales[0]["partial_fill_flag"] == 1
+    assert all(row["missing_adv_flag"] == 0 for row in expiry_sales)
+    assert result.summary["target_expiry_rebalance_count"] == 1
 
 
 def test_replay_caps_stock_trade_by_adv() -> None:
@@ -117,7 +189,7 @@ def test_more_trials_reduce_deflated_sharpe_probability() -> None:
 
 
 def test_paired_replay_comparison_reports_terminal_wealth_delta() -> None:
-    prices = trading_prices(aaa=[100.0, 100.0, 110.0, 121.0, 121.0], xbi=[100.0] * 5)
+    prices = trading_prices(aaa=[100.0, 100.0, 110.0, 99.0, 121.0], xbi=[100.0] * 5)
     model = ReplayCostModel(
         initial_capital=100_000.0,
         base_one_way_cost_bps=0.0,
@@ -146,3 +218,8 @@ def test_paired_replay_comparison_reports_terminal_wealth_delta() -> None:
     )
     assert float(str(comparison["candidate_terminal_wealth"])) > float(str(comparison["incumbent_terminal_wealth"]))
     assert float(str(comparison["delta_net_profit"])) > 0.0
+    assert candidate.summary["wealth_reconciliation_error"] == pytest.approx(0.0)
+    assert float(str(candidate.summary["gross_profit_dollars"])) - float(
+        str(candidate.summary["gross_loss_dollars"])
+    ) == pytest.approx(float(str(candidate.summary["net_profit"])))
+    assert float(str(candidate.summary["dollar_pnl_profit_factor"])) > 1.0

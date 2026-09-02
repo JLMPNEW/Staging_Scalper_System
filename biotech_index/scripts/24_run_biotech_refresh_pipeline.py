@@ -84,6 +84,12 @@ BIOTECH_SCORE_CSV_PRESENT_COLUMNS = [
     "biotech_selection_reliability_class",
     "biotech_active_sleeve_weight",
     "biotech_xbi_residual_weight",
+    "biotech_max_name_weight_within_cohort",
+    "biotech_selected_name_count_within_cohort",
+    "biotech_calibration_cohort_valid_from",
+    "biotech_calibration_cohort_valid_to",
+    "biotech_current_backcast_cohort",
+    "biotech_cohort_assignment_mode",
     "biotech_promotion_contract_id",
     "biotech_promotion_contract_sha256",
 ]
@@ -183,6 +189,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Earliest market-bar date to use when building historical market feature snapshots. "
             "Use a date at least one year before --history-start-asof for 200d/52w metrics."
+        ),
+    )
+    parser.add_argument(
+        "--history-market-lookback-days",
+        type=int,
+        default=0,
+        help=(
+            "When positive, replace the fixed historical market start for each snapshot with a rolling "
+            "window ending at that snapshot. Values below 420 are rejected so 200d/52w features retain "
+            "sufficient history. Zero preserves the fixed-start behavior."
         ),
     )
     parser.add_argument(
@@ -759,6 +775,45 @@ def historical_restatement_steps(
     ]
 
 
+HISTORICAL_MARKET_STEP_NAMES = frozenset({"yahoo_market_adjusted", "norgate_market_features"})
+
+
+def rolling_historical_market_step(
+    step: Step,
+    *,
+    run_asof: str,
+    floor_start_asof: str,
+    lookback_days: int,
+) -> Step:
+    """Return a market step bounded to the PIT feature window for one snapshot."""
+    if step.name not in HISTORICAL_MARKET_STEP_NAMES or lookback_days <= 0:
+        return step
+    if lookback_days < 420:
+        raise ValueError("--history-market-lookback-days must be at least 420 when enabled")
+    run_date = parse_date(run_asof)
+    if run_date is None:
+        raise ValueError(f"Invalid historical run date: {run_asof!r}")
+    rolling_start = run_date - timedelta(days=lookback_days)
+    floor_date = parse_date(floor_start_asof)
+    effective_start = max(rolling_start, floor_date) if floor_date is not None else rolling_start
+    step_args = list(step.args)
+    try:
+        start_index = step_args.index("--start-date")
+    except ValueError:
+        step_args.extend(["--start-date", effective_start.isoformat()])
+    else:
+        if start_index + 1 >= len(step_args):
+            raise ValueError(f"Historical market step {step.name!r} has --start-date without a value")
+        step_args[start_index + 1] = effective_start.isoformat()
+    return Step(
+        name=step.name,
+        script=step.script,
+        args=tuple(step_args),
+        supports_asof=step.supports_asof,
+        always_rerun=step.always_rerun,
+    )
+
+
 def validate_historical_step_selection(selected_steps: set[str]) -> None:
     """Reject partial historical feature rebuilds that would reuse live positioning exports."""
     if "biotech_features" in selected_steps and "market_positioning_export" not in selected_steps:
@@ -846,6 +901,7 @@ def write_timing_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "elapsed_sec",
         "returncode",
         "command",
+        "retry_count",
         "stdout_tail",
         "stderr_tail",
     ]
@@ -1508,6 +1564,53 @@ def run_step(
         "stdout_tail": text_tail(stdout_text),
         "stderr_tail": text_tail(stderr_text),
     }
+
+
+def is_sqlite_lock_failure(row: dict[str, Any]) -> bool:
+    if str(row.get("status") or "").strip().lower() == "success":
+        return False
+    output = " ".join(
+        (str(row.get("stdout_tail") or ""), str(row.get("stderr_tail") or ""))
+    ).lower()
+    return "database is locked" in output or "database table is locked" in output
+
+
+def run_step_with_sqlite_lock_retry(
+    step: Step,
+    *,
+    command: list[str],
+    mode: str,
+    run_started_at: str,
+    timeout_sec: float | None,
+    max_retries: int,
+    retry_delay_sec: float,
+) -> dict[str, Any]:
+    """Retry only transient SQLite lock failures; preserve all other fail-fast behavior."""
+    started = time.monotonic()
+    result: dict[str, Any] = {}
+    retries = 0
+    for attempt in range(max(0, int(max_retries)) + 1):
+        result = run_step(
+            step,
+            command=command,
+            mode=mode,
+            run_started_at=run_started_at,
+            timeout_sec=timeout_sec,
+        )
+        if not is_sqlite_lock_failure(result) or attempt >= max(0, int(max_retries)):
+            break
+        retries += 1
+        LOGGER.warning(
+            "Transient SQLite lock in %s; retry=%d/%d after %.1fs",
+            step.name,
+            retries,
+            max_retries,
+            max(0.0, float(retry_delay_sec)),
+        )
+        time.sleep(max(0.0, float(retry_delay_sec)))
+    result["retry_count"] = retries
+    result["elapsed_sec"] = round(time.monotonic() - started, 3)
+    return result
 
 
 def maybe_load_yaml(path: Path) -> dict[str, Any]:
@@ -2354,6 +2457,8 @@ def validate_score_csv(
         "biotech_selection_reliability_class",
         "biotech_active_sleeve_weight",
         "biotech_xbi_residual_weight",
+        "biotech_max_name_weight_within_cohort",
+        "biotech_selected_name_count_within_cohort",
         "biotech_promotion_contract_id",
         "biotech_promotion_contract_sha256",
     }
@@ -2374,9 +2479,15 @@ def validate_score_csv(
                 failures.append(f"promotion_contract_id_count={len(contract_ids)}, expected 1")
             if len(contract_hashes) != 1:
                 failures.append(f"promotion_contract_sha256_count={len(contract_hashes)}, expected 1")
+            promotion_rows = [
+                row
+                for row in rows
+                if str(row.get("biotech_promotion_contract_id") or "").strip()
+                or str(row.get("biotech_promotion_contract_sha256") or "").strip()
+            ]
             incomplete_tickers = [
                 str(row.get("ticker") or "")
-                for row in rows
+                for row in promotion_rows
                 if any(is_blank(row.get(field)) for field in promotion_fields)
             ]
             if incomplete_tickers:
@@ -2384,10 +2495,23 @@ def validate_score_csv(
                     "promotion_contract_fields_incomplete for "
                     f"{len(incomplete_tickers)} row(s): {format_ticker_sample(incomplete_tickers)}"
                 )
-            for row in rows:
+            for row in promotion_rows:
                 active = to_float(row.get("biotech_active_sleeve_weight"), -1.0)
                 residual = to_float(row.get("biotech_xbi_residual_weight"), -1.0)
-                if active < 0.0 or residual < 0.0 or abs(active + residual - 1.0) > 1e-9:
+                max_name = to_float(row.get("biotech_max_name_weight_within_cohort"), -1.0)
+                selected_count = to_float(
+                    row.get("biotech_selected_name_count_within_cohort"),
+                    -1.0,
+                )
+                invalid_weights = (
+                    active < 0.0
+                    or residual < 0.0
+                    or abs(active + residual - 1.0) > 1e-9
+                    or not 0.0 < max_name <= 1.0
+                    or selected_count < 0.0
+                    or active - min(1.0, selected_count * max_name) > 1e-9
+                )
+                if invalid_weights:
                     failures.append(f"invalid_biotech_sleeve_weights:{row.get('ticker')}")
                     break
     if failures:
@@ -2881,6 +3005,14 @@ def main() -> None:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid biotech_refresh.step_timeout_sec value: {raw_timeout_value!r}") from exc
     step_timeout_sec = raw_timeout if raw_timeout > 0 else None
+    history_sqlite_lock_retries = int(
+        cfg_get(config, "biotech_historical_sequence.sqlite_lock_retries", 20) or 0
+    )
+    history_sqlite_lock_retry_delay_sec = float(
+        cfg_get(config, "biotech_historical_sequence.sqlite_lock_retry_delay_sec", 15.0) or 0.0
+    )
+    if history_sqlite_lock_retries < 0 or history_sqlite_lock_retry_delay_sec < 0.0:
+        raise ValueError("Historical SQLite lock retry count and delay must be non-negative")
     selected_steps = {step.strip() for step in args.steps.split(",") if step.strip()}
     all_steps = (
         historical_restatement_steps(
@@ -3124,10 +3256,25 @@ def main() -> None:
         for run_asof in run_dates:
             deterministic_tail_dirty = False
             for step in steps:
-                command_step = step
-                timing_step = step
+                command_step = (
+                    rolling_historical_market_step(
+                        step,
+                        run_asof=run_asof,
+                        floor_start_asof=args.history_market_start_asof,
+                        lookback_days=int(args.history_market_lookback_days or 0),
+                    )
+                    if args.history_restatement
+                    else step
+                )
+                timing_step = command_step
                 if args.history_restatement:
-                    timing_step = Step(f"{step.name}@{run_asof}", step.script, step.args, step.supports_asof)
+                    timing_step = Step(
+                        f"{step.name}@{run_asof}",
+                        command_step.script,
+                        command_step.args,
+                        command_step.supports_asof,
+                        command_step.always_rerun,
+                    )
                 ctgov_snapshot_available = bool(first_ctgov_snapshot and run_asof >= first_ctgov_snapshot)
                 if args.history_restatement and step.name == "ctgov_audit" and not ctgov_snapshot_available:
                     LOGGER.info(
@@ -3238,12 +3385,14 @@ def main() -> None:
                 }
                 timing_rows.append(row)
                 write_timing_csv(timing_csv, timing_rows)
-                timing_rows[-1] = run_step(
+                timing_rows[-1] = run_step_with_sqlite_lock_retry(
                     timing_step,
                     command=command,
                     mode=effective_mode,
                     run_started_at=run_started_at,
                     timeout_sec=step_timeout_sec,
+                    max_retries=history_sqlite_lock_retries if args.history_restatement else 0,
+                    retry_delay_sec=history_sqlite_lock_retry_delay_sec,
                 )
                 if marker_path is not None:
                     record_step_marker(

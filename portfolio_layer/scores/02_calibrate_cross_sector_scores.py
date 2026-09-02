@@ -297,6 +297,8 @@ def main() -> int:
                 "production_policy_sha256": str(r.get("production_policy_sha256") or ""),
                 "selection_reliability_class": str(r.get("selection_reliability_class") or ""),
                 "active_sleeve_weight": r.get("active_sleeve_weight", ""),
+                "active_name_weight_cap": r.get("active_name_weight_cap", ""),
+                "active_selected_name_count": r.get("active_selected_name_count", ""),
                 "benchmark_residual_weight": r.get("benchmark_residual_weight", ""),
                 "benchmark_residual_ticker": str(r.get("benchmark_residual_ticker") or ""),
                 "final_score": round(0.0 if missing_score_flag else final_score, 6),

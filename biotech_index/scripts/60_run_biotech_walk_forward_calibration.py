@@ -56,9 +56,19 @@ from biotech_index.core.promotion_policy import (  # noqa: E402
     decide_promotion,
     deployment_active_weight,
     no_harm_reason_codes,
+    robustness_reason_codes,
+)
+from biotech_index.core.portfolio_candidate_policy import (  # noqa: E402
+    policy_from_mapping,
+    portfolio_candidate_base_eligible,
+    select_portfolio_candidates,
 )
 from biotech_index.core.portfolio_validation import (  # noqa: E402
     validation_candidate_survives_multimetric,
+)
+from biotech_index.core.selection_robustness import (  # noqa: E402
+    replay_selected_policy_returns,
+    ticker_jackknife_diagnostics,
 )
 from biotech_index.core.score_reliability import (  # noqa: E402
     ReliabilityRecord,
@@ -66,6 +76,7 @@ from biotech_index.core.score_reliability import (  # noqa: E402
     active_weight_for_class,
     apply_reliability_threshold,
     blend_active_alpha_with_benchmark,
+    effective_active_weight_by_date,
     build_reliability_curve,
     records_from_rows,
     reliability_class_from_metrics,
@@ -76,7 +87,7 @@ from biotech_index.core.score_reliability import (  # noqa: E402
 LOGGER = logging.getLogger("biotech_walk_forward_calibration")
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.yaml"
 CALIBRATION_SOURCE_PATH = PACKAGE_ROOT / "scripts" / "28_calibrate_biotech_opportunity.py"
-FRAMEWORK_VERSION = "biotech_nested_walk_forward_v2"
+FRAMEWORK_VERSION = "biotech_nested_walk_forward_v3"
 PROMOTION_CONTRACT_VERSION = "biotech_promotion_contract_v1"
 
 
@@ -92,8 +103,10 @@ class FrameworkSettings:
     windows: Mapping[int, WalkForwardWindow]
     score_pct_candidates: tuple[float, ...]
     max_name_candidates: tuple[int, ...]
+    max_name_weight_candidates: tuple[float, ...]
     active_weight_by_class: Mapping[str, object]
     metric_settings: MetricSettings
+    bootstrap_block_dates_by_horizon: Mapping[int, int]
     promotion_rules: PromotionRules
     monitoring_contract: Mapping[str, object]
     optuna_enabled: bool
@@ -175,6 +188,16 @@ def _bool(raw: object, default: bool = False) -> bool:
     return default
 
 
+def active_date_coverage_pct(
+    selected_counts: Mapping[str, int],
+    evaluation_date_count: int,
+) -> float:
+    if evaluation_date_count <= 0:
+        return 0.0
+    active_dates = sum(1 for count in selected_counts.values() if count > 0)
+    return round(100.0 * active_dates / evaluation_date_count, 6)
+
+
 def load_framework_settings(config: dict[str, Any], config_path: Path, args: argparse.Namespace) -> FrameworkSettings:
     base_dir = config_path.parent
     output_dir = (
@@ -236,6 +259,41 @@ def load_framework_settings(config: dict[str, Any], config_path: Path, args: arg
         cfg_get(config, "calibration.walk_forward.adaptive_selection.max_name_candidates", [4, 6, 8, 10, 12]),
         [4, 6, 8, 10, 12],
     )
+    max_name_weights = _float_values(
+        cfg_get(
+            config,
+            "calibration.walk_forward.adaptive_selection.max_name_weight_candidates",
+            [0.20, 0.25],
+        ),
+        [0.20, 0.25],
+    )
+    if any(value <= 0.0 or value > 1.0 for value in max_name_weights):
+        raise ValueError("max_name_weight_candidates must be within (0, 1]")
+    raw_block_dates = metric_raw.get("bootstrap_block_dates_by_horizon", {}) or {}
+    if not isinstance(raw_block_dates, Mapping):
+        raise ValueError("metrics.bootstrap_block_dates_by_horizon must be a mapping")
+    default_block_dates = {20: 5, 60: 13, 120: 25}
+    block_dates_by_horizon = {
+        horizon: max(
+            1,
+            int(
+                raw_block_dates.get(
+                    str(horizon),
+                    raw_block_dates.get(horizon, default_block_dates[horizon]),
+                )
+            ),
+        )
+        for horizon in windows
+    }
+    required_secondary = tuple(
+        sorted(
+            {
+                int(value)
+                for value in promotion_raw.get("required_secondary_horizons", [])
+                if int(value) in windows
+            }
+        )
+    )
     return FrameworkSettings(
         output_dir=output_dir,
         primary_horizon=int(cfg_get(config, "calibration.walk_forward.primary_horizon", 120)),
@@ -264,6 +322,7 @@ def load_framework_settings(config: dict[str, Any], config_path: Path, args: arg
             [70, 75, 80, 85, 90, 95],
         ),
         max_name_candidates=max_names,
+        max_name_weight_candidates=max_name_weights,
         active_weight_by_class=active_weight_raw,
         metric_settings=MetricSettings(
             lcb_z=float(metric_raw.get("lcb_z", 1.0)),
@@ -275,6 +334,7 @@ def load_framework_settings(config: dict[str, Any], config_path: Path, args: arg
             bootstrap_seed=int(metric_raw.get("bootstrap_seed", 1729)),
             bootstrap_block_dates=int(metric_raw.get("bootstrap_block_dates", 4)),
         ),
+        bootstrap_block_dates_by_horizon=block_dates_by_horizon,
         promotion_rules=PromotionRules(
             min_outer_folds=int(promotion_raw.get("min_outer_folds", 2)),
             min_fold_win_rate=float(promotion_raw.get("min_fold_win_rate", 0.60)),
@@ -318,7 +378,29 @@ def load_framework_settings(config: dict[str, Any], config_path: Path, args: arg
                 promotion_raw.get("max_cohort_lcb_underperformance_pct", 5.0)
             ),
             min_cohort_paired_dates=int(promotion_raw.get("min_cohort_paired_dates", 8)),
-            required_secondary_horizons=tuple(sorted(windows)),
+            require_regime_no_harm=_bool(promotion_raw.get("require_regime_no_harm"), True),
+            max_regime_lcb_underperformance_pct=float(
+                promotion_raw.get("max_regime_lcb_underperformance_pct", 5.0)
+            ),
+            min_regime_paired_dates=int(promotion_raw.get("min_regime_paired_dates", 8)),
+            require_same_cohort_benchmark_no_harm=_bool(
+                promotion_raw.get("require_same_cohort_benchmark_no_harm"),
+                True,
+            ),
+            max_same_cohort_lcb_underperformance_pct=float(
+                promotion_raw.get("max_same_cohort_lcb_underperformance_pct", 3.0)
+            ),
+            require_ticker_jackknife=_bool(
+                promotion_raw.get("require_ticker_jackknife"),
+                True,
+            ),
+            max_largest_ticker_gain_contribution_pct=float(
+                promotion_raw.get("max_largest_ticker_gain_contribution_pct", 60.0)
+            ),
+            max_ticker_jackknife_lcb_underperformance_pct=float(
+                promotion_raw.get("max_ticker_jackknife_lcb_underperformance_pct", 3.0)
+            ),
+            required_secondary_horizons=required_secondary,
             required_no_harm_cohorts=tuple(
                 str(value).strip()
                 for value in promotion_raw.get("required_no_harm_cohorts", [])
@@ -332,6 +414,19 @@ def load_framework_settings(config: dict[str, Any], config_path: Path, args: arg
         optuna_enabled=run_optuna,
         optuna_trials=max(1, int(optuna_raw.get("n_trials", 200))),
         optuna_seed=int(optuna_raw.get("seed", 7331)),
+    )
+
+
+def metric_settings_for_horizon(settings: FrameworkSettings, horizon: int) -> MetricSettings:
+    """Use a horizon-scaled date block so overlapping labels are not treated as IID."""
+    raw_by_horizon = getattr(settings, "bootstrap_block_dates_by_horizon", {})
+    by_horizon = raw_by_horizon if isinstance(raw_by_horizon, Mapping) else {}
+    return replace(
+        settings.metric_settings,
+        bootstrap_block_dates=max(
+            1,
+            int(by_horizon.get(horizon, settings.metric_settings.bootstrap_block_dates)),
+        ),
     )
 
 
@@ -457,11 +552,46 @@ def validate_observation_contract(
     if not rows:
         raise ValueError(f"Observation cache is empty: {path}")
     horizons = sorted({int(value) for value in required_horizons})
-    required = {"ticker", "asof_date", "biotech_primary_cohort"}
+    required = {
+        "ticker",
+        "asof_date",
+        "biotech_primary_cohort",
+        "biotech_cohort_assignment_mode",
+        "xbi_regime",
+        "xbi_regime_asof_date",
+        "xbi_regime_definition_version",
+    }
     required.update(f"fwd_{horizon}d_target_date" for horizon in horizons)
     missing = sorted(required - set(rows[0]))
     if missing:
         raise ValueError(f"Observation cache lacks required fields: {missing}")
+    invalid_assignment_modes: set[str] = set()
+    invalid_regime_rows: list[str] = []
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        asof_date = str(row.get("asof_date") or "").strip()
+        assignment_mode = str(row.get("biotech_cohort_assignment_mode") or "").strip()
+        if assignment_mode != "effective_dated_pit":
+            invalid_assignment_modes.add(assignment_mode or "<blank>")
+        regime_asof = str(row.get("xbi_regime_asof_date") or "").strip()
+        regime_version = str(row.get("xbi_regime_definition_version") or "").strip()
+        if (
+            not asof_date
+            or not regime_asof
+            or regime_asof > asof_date
+            or regime_version != "pit_xbi_regime_v1"
+        ):
+            invalid_regime_rows.append(f"{ticker}:{asof_date}:{regime_asof}:{regime_version}")
+    if invalid_assignment_modes:
+        raise ValueError(
+            "Observation cache is not effective-dated PIT by cohort: "
+            + ",".join(sorted(invalid_assignment_modes))
+        )
+    if invalid_regime_rows:
+        raise ValueError(
+            "Observation cache has invalid point-in-time XBI regime provenance: "
+            + ",".join(invalid_regime_rows[:10])
+        )
     manifest_path = path.with_name("tier1_observations_with_forward_returns_manifest.json")
     if not manifest_path.exists():
         raise ValueError(f"Observation cache manifest is required for provenance: {manifest_path}")
@@ -668,8 +798,12 @@ def build_secondary_horizon_evaluation(
     params: Any,
     settings: FrameworkSettings,
     fold_id: str,
+    incumbent_universe_rows: Iterable[Mapping[str, object]] | None = None,
+    live_policy_settings: Mapping[str, object] | None = None,
+    cohort_filter: str = "",
 ) -> dict[str, object]:
     """Evaluate one frozen primary policy on a secondary outer-test horizon."""
+    metric_settings = metric_settings_for_horizon(settings, horizon)
     fallback = candidate_spec is None or candidate_policy is None or threshold is None
     if fallback:
         selected: list[ReliabilityRecord] = []
@@ -701,12 +835,14 @@ def build_secondary_horizon_evaluation(
 
     incumbent, incumbent_records = incumbent_returns(
         module,
-        rows,
+        incumbent_universe_rows if incumbent_universe_rows is not None else rows,
         incumbent_spec,
         incumbent_policy,
         horizon=horizon,
         top_n=incumbent_top_n,
         params=params,
+        live_policy_settings=live_policy_settings,
+        cohort_filter=cohort_filter,
     )
     candidate = (
         {asof_date: 0.0 for asof_date in incumbent}
@@ -715,9 +851,17 @@ def build_secondary_horizon_evaluation(
             active_candidate,
             incumbent,
             active_weight=active_weight,
+            selected_counts=counts,
+            max_name_weight=threshold.max_name_weight if threshold is not None else 1.0,
         )
     )
-    comparison = paired_policy_comparison(candidate, incumbent, settings.metric_settings)
+    comparison = paired_policy_comparison(candidate, incumbent, metric_settings)
+    effective_weights = effective_active_weight_by_date(
+        incumbent,
+        counts,
+        active_weight=active_weight,
+        max_name_weight=threshold.max_name_weight if threshold is not None else 1.0,
+    )
     active_dates = sum(1 for asof_date in incumbent if counts.get(asof_date, 0) > 0)
     selected_name_dates = sum(counts.get(asof_date, 0) for asof_date in incumbent)
     comparison_row = {
@@ -729,6 +873,7 @@ def build_secondary_horizon_evaluation(
         "frozen_top_n": frozen_top_n,
         "frozen_min_score_pct_of_top": min_score_pct_of_top,
         "frozen_max_names": max_names,
+        "frozen_max_name_weight": threshold.max_name_weight if threshold is not None else 0.0,
         "validation_objective": validation_objective,
         "reliability_class": reliability_class,
         "active_weight": active_weight,
@@ -739,8 +884,9 @@ def build_secondary_horizon_evaluation(
         ),
         "test_active_date_count": active_dates,
         "test_evaluation_date_count": len(incumbent),
-        "test_active_date_coverage_pct": (
-            round(100.0 * active_dates / len(incumbent), 6) if incumbent else 0.0
+        "test_active_date_coverage_pct": active_date_coverage_pct(
+            counts,
+            len(incumbent),
         ),
         **comparison,
     }
@@ -761,10 +907,11 @@ def build_secondary_horizon_evaluation(
         "cohort_rows": cohort_comparisons(
             selected,
             incumbent_records,
-            settings.metric_settings,
+            metric_settings,
             fold_id=fold_id,
             horizon=horizon,
             active_weight=active_weight,
+            max_name_weight=threshold.max_name_weight if threshold is not None else 1.0,
         ),
         "sleeve_rows": [
             {
@@ -773,13 +920,11 @@ def build_secondary_horizon_evaluation(
                 "asof_date": asof_date,
                 "selected_name_count": counts.get(asof_date, 0),
                 "reliability_class": reliability_class,
-                "active_stock_selection_weight": (
-                    active_weight if counts.get(asof_date, 0) > 0 else 0.0
-                ),
-                "xbi_residual_weight": (
-                    round(1.0 - active_weight, 6)
-                    if counts.get(asof_date, 0) > 0
-                    else 1.0
+                "max_name_weight": threshold.max_name_weight if threshold is not None else 1.0,
+                "active_stock_selection_weight": effective_weights.get(asof_date, 0.0),
+                "xbi_residual_weight": round(
+                    1.0 - effective_weights.get(asof_date, 0.0),
+                    6,
                 ),
                 "sleeve_weight_sum": 1.0,
             }
@@ -860,6 +1005,10 @@ def ingest_frozen_evaluation(
     )
     candidate_records_rows = reliability_records_from_cache(candidate_records_payload)
     incumbent_records_rows = reliability_records_from_cache(incumbent_records_payload)
+    candidate_counts = record_counts_by_date(candidate_records_rows)
+    max_name_weight = finite_float(comparison_row.get("frozen_max_name_weight"))
+    if max_name_weight is None or not 0.0 < max_name_weight <= 1.0:
+        raise ValueError("Frozen secondary evaluation has invalid max-name weight")
     candidate_active = equal_weight_returns_by_date(
         record_rows(candidate_records_rows, fold_id="aggregate", split="candidate"),
         return_key="objective_return",
@@ -877,6 +1026,8 @@ def ingest_frozen_evaluation(
         candidate_active,
         evaluation_dates,
         active_weight=active_weight,
+        selected_counts=candidate_counts,
+        max_name_weight=max_name_weight,
     )
 
     fold_comparison_rows.append(dict(comparison_row))
@@ -895,6 +1046,10 @@ def ingest_frozen_evaluation(
                 candidate_cohorts.get(cohort, {}),
                 incumbent_map,
                 active_weight=active_weight,
+                selected_counts=record_counts_by_date(
+                    record for record in candidate_records_rows if record.cohort == cohort
+                ),
+                max_name_weight=max_name_weight,
             )
         )
         fold_incumbent_cohort_returns[horizon][cohort].append(incumbent_map)
@@ -908,6 +1063,8 @@ def ingest_frozen_evaluation(
                 candidate_regimes.get(regime, {}),
                 incumbent_map,
                 active_weight=active_weight,
+                selected_counts=candidate_counts,
+                max_name_weight=max_name_weight,
             )
         )
         fold_incumbent_regime_returns[horizon][regime].append(incumbent_map)
@@ -922,25 +1079,66 @@ def incumbent_returns(
     horizon: int,
     top_n: int,
     params: Any,
+    live_policy_settings: Mapping[str, object] | None = None,
+    cohort_filter: str = "",
 ) -> tuple[dict[str, float], list[ReliabilityRecord]]:
+    """Replay either the scoring incumbent or the actual current live selector.
+
+    When live_policy_settings is supplied, rows must contain the full biotech
+    universe for the fold. Global rank limits are applied before results are
+    sliced to one independently calibrated cohort.
+    """
     row_list = list(rows)
     return_key = module.objective_return_key(horizon, params)
+    evaluation_rows = [
+        row
+        for row in row_list
+        if not cohort_filter
+        or str(row.get("biotech_primary_cohort") or "").strip() == cohort_filter
+    ]
     evaluation_dates = sorted(
         {
             str(row.get("asof_date") or "").strip()
-            for row in row_list
+            for row in evaluation_rows
             if str(row.get("asof_date") or "").strip()
             and finite_float(row.get(return_key)) is not None
         }
     )
-    records = candidate_records(
+    selection_top_n = max(top_n, 100_000) if live_policy_settings is not None else top_n
+    selected = selected_rows(
         module,
         row_list,
         spec,
         policy,
         horizon=horizon,
-        top_n=top_n,
+        top_n=selection_top_n,
         params=params,
+    )
+    if live_policy_settings is not None:
+        selected = [
+            row
+            for row in selected
+            if portfolio_candidate_base_eligible(
+                row,
+                score_fields=("candidate_selection_score",),
+            )
+        ]
+        live_selection = select_portfolio_candidates(
+            selected,
+            policy_from_mapping(live_policy_settings),
+            score_fields=("candidate_selection_score",),
+        )
+        selected = [dict(row) for row in live_selection.selected_rows]
+    if cohort_filter:
+        selected = [
+            row
+            for row in selected
+            if str(row.get("biotech_primary_cohort") or "").strip() == cohort_filter
+        ]
+    records = records_from_rows(
+        selected,
+        score_key="candidate_selection_score",
+        return_key=return_key,
     )
     active_returns = equal_weight_returns_by_date(
         [{"asof_date": record.asof_date, "return_value": record.return_value} for record in records],
@@ -1038,27 +1236,43 @@ def optimize_with_optuna(
     max_pct = max(settings.score_pct_candidates)
     min_names = min(settings.max_name_candidates)
     max_names = max(settings.max_name_candidates)
+    metric_settings = metric_settings_for_horizon(settings, horizon)
 
     def evaluate_threshold(
         records: tuple[ReliabilityRecord, ...],
         *,
         score_pct: float,
         names: int,
+        max_name_weight: float,
     ) -> tuple[dict[str, object], str, float, dict[str, int]]:
         _selected, active_returns, counts = apply_reliability_threshold(
             records,
             min_score_pct_of_top=score_pct,
             max_names=names,
         )
-        active_metrics = paired_policy_comparison(active_returns, incumbent, settings.metric_settings)
+        active_metrics = paired_policy_comparison(active_returns, incumbent, metric_settings)
         reliability_class = reliability_class_from_metrics(active_metrics)
         active_weight = active_weight_for_class(reliability_class, settings.active_weight_by_class)
         sleeve_returns = blend_active_alpha_with_benchmark(
             active_returns,
             incumbent,
             active_weight=active_weight,
+            selected_counts=counts,
+            max_name_weight=max_name_weight,
         )
-        metrics = paired_policy_comparison(sleeve_returns, incumbent, settings.metric_settings)
+        metrics = paired_policy_comparison(sleeve_returns, incumbent, metric_settings)
+        effective_weights = effective_active_weight_by_date(
+            incumbent,
+            counts,
+            active_weight=active_weight,
+            max_name_weight=max_name_weight,
+        )
+        metrics["max_name_weight"] = max_name_weight
+        metrics["avg_effective_active_weight"] = (
+            round(sum(effective_weights.values()) / len(effective_weights), 6)
+            if effective_weights
+            else 0.0
+        )
         metrics["candidate_return_contract"] = "active_stock_alpha_plus_xbi_residual"
         metrics["active_selection_paired_delta_bootstrap_lcb_pct"] = active_metrics.get(
             "paired_delta_bootstrap_lcb_pct", ""
@@ -1075,11 +1289,18 @@ def optimize_with_optuna(
         candidate_id = str(trial.suggest_categorical("candidate_id", candidate_ids))
         score_pct = float(trial.suggest_float("min_score_pct_of_top", min_pct, max_pct, step=1.0))
         names = int(trial.suggest_int("max_names", min_names, max_names))
+        max_name_weight = float(
+            trial.suggest_categorical(
+                "max_name_weight",
+                list(getattr(settings, "max_name_weight_candidates", (0.25,))),
+            )
+        )
         records = evaluations[candidate_id][3]
         metrics, _reliability_class, _active_weight, _counts = evaluate_threshold(
             records,
             score_pct=score_pct,
             names=names,
+            max_name_weight=max_name_weight,
         )
         if int(finite_float(metrics.get("paired_date_count")) or 0) < min_dates:
             return -1e12
@@ -1099,6 +1320,7 @@ def optimize_with_optuna(
                 "candidate_id": trial.params.get("candidate_id", ""),
                 "min_score_pct_of_top": trial.params.get("min_score_pct_of_top", ""),
                 "max_names": trial.params.get("max_names", ""),
+                "max_name_weight": trial.params.get("max_name_weight", ""),
                 "outer_test_visible_to_objective": False,
             }
         )
@@ -1108,10 +1330,12 @@ def optimize_with_optuna(
     spec, policy, top_n, records = evaluations[candidate_id]
     score_pct = float(study.best_params["min_score_pct_of_top"])
     names = int(study.best_params["max_names"])
+    max_name_weight = float(study.best_params["max_name_weight"])
     metrics, reliability_class, active_weight, counts = evaluate_threshold(
         records,
         score_pct=score_pct,
         names=names,
+        max_name_weight=max_name_weight,
     )
     avg_names = sum(counts.values()) / len(counts) if counts else 0.0
     threshold = ReliabilityThreshold(
@@ -1126,6 +1350,7 @@ def optimize_with_optuna(
             "active_date_count": len([count for count in counts.values() if count > 0]),
             "evaluation_date_count": len(incumbent),
         },
+        max_name_weight=max_name_weight,
     )
     return CandidateEvaluation(candidate_id, spec, policy, top_n, records, threshold)
 def evaluate_validation_shortlist(
@@ -1141,6 +1366,7 @@ def evaluate_validation_shortlist(
     fold_id: str,
     trial_audit_rows: list[dict[str, object]],
 ) -> tuple[CandidateEvaluation | None, list[dict[str, object]], list[dict[str, object]]]:
+    metric_settings = metric_settings_for_horizon(settings, horizon)
     evaluations: dict[str, tuple[Any, Any, int, tuple[ReliabilityRecord, ...]]] = {}
     threshold_rows: list[dict[str, object]] = []
     curve_rows: list[dict[str, object]] = []
@@ -1164,11 +1390,12 @@ def evaluate_validation_shortlist(
             incumbent,
             score_pct_candidates=settings.score_pct_candidates,
             max_name_candidates=settings.max_name_candidates,
-            settings=settings.metric_settings,
+            settings=metric_settings,
             active_weight_by_class=settings.active_weight_by_class,
             min_dates=min_dates,
+            max_name_weight_candidates=getattr(settings, "max_name_weight_candidates", (0.25,)),
         )
-        for row in build_reliability_curve(records, bins=5, settings=settings.metric_settings):
+        for row in build_reliability_curve(records, bins=5, settings=metric_settings):
             curve_rows.append(
                 {
                     "candidate_id": candidate_id,
@@ -1313,6 +1540,13 @@ def returns_by_regime(
     }
 
 
+def record_counts_by_date(records: Iterable[ReliabilityRecord]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        counts[record.asof_date] += 1
+    return dict(counts)
+
+
 def returns_by_cohort(records: Iterable[ReliabilityRecord]) -> dict[str, dict[str, float]]:
     grouped: dict[str, list[ReliabilityRecord]] = defaultdict(list)
     for record in records:
@@ -1370,6 +1604,7 @@ def cohort_comparisons(
     fold_id: str,
     horizon: int,
     active_weight: float,
+    max_name_weight: float = 1.0,
 ) -> list[dict[str, object]]:
     candidate_by_cohort: dict[str, list[ReliabilityRecord]] = defaultdict(list)
     incumbent_by_cohort: dict[str, list[ReliabilityRecord]] = defaultdict(list)
@@ -1393,10 +1628,19 @@ def cohort_comparisons(
             ],
             return_key="return_value",
         )
-        candidate_sleeve, incumbent_sleeve = aligned_residual_sleeves(
+        cohort_candidate_records = candidate_by_cohort.get(cohort, [])
+        evaluation_dates = sorted(set(candidate_returns).union(incumbent_returns_map))
+        candidate_sleeve = blend_active_alpha_with_benchmark(
             candidate_returns,
-            incumbent_returns_map,
+            evaluation_dates,
             active_weight=active_weight,
+            selected_counts=record_counts_by_date(cohort_candidate_records),
+            max_name_weight=max_name_weight,
+        )
+        incumbent_sleeve = blend_active_alpha_with_benchmark(
+            incumbent_returns_map,
+            evaluation_dates,
+            active_weight=1.0,
         )
         rows.append(
             {
@@ -1404,6 +1648,7 @@ def cohort_comparisons(
                 "horizon_days": horizon,
                 "cohort": cohort,
                 "active_weight": active_weight,
+                "max_name_weight": max_name_weight,
                 **paired_policy_comparison(
                     candidate_sleeve,
                     incumbent_sleeve,
@@ -1474,14 +1719,9 @@ def main() -> int:
         scoring_config_hash=observation_scoring_config_hash(config, base_dir=config_path.parent),
         required_horizons=settings.windows,
     )
-    regime_field = next(
-        (
-            field
-            for field in ("market_regime", "macro_regime", "regime", "xbi_regime")
-            if field in observations[0]
-        ),
-        "",
-    )
+    # validate_observation_contract requires this field and verifies its
+    # point-in-time as-of lineage. Generic regime labels are diagnostic only.
+    regime_field = "xbi_regime"
     regime_lookup = {
         (str(row.get("asof_date") or ""), str(row.get("ticker") or "").strip().upper()): (
             str(row.get(regime_field) or "unclassified").strip() or "unclassified"
@@ -1499,6 +1739,8 @@ def main() -> int:
             PACKAGE_ROOT / "core" / "calibration_provenance.py",
             PACKAGE_ROOT / "core" / "score_reliability.py",
             PACKAGE_ROOT / "core" / "cohort_calibration.py",
+            PACKAGE_ROOT / "core" / "portfolio_candidate_policy.py",
+            PACKAGE_ROOT / "core" / "selection_robustness.py",
         ]
     )
     module = load_calibration_module()
@@ -1517,7 +1759,14 @@ def main() -> int:
         params=params,
         settings=settings,
     )
-    full_observation_count = len(observations)
+    full_observations = list(observations)
+    full_observation_count = len(full_observations)
+    raw_live_policy = cfg_get(config, "biotech_scoring.portfolio_candidate_policy", {}) or {}
+    live_policy_settings = (
+        dict(raw_live_policy)
+        if isinstance(raw_live_policy, Mapping) and _bool(raw_live_policy.get("enabled"), False)
+        else None
+    )
     if cohort_filter:
         observations = rows_for_cohort(observations, cohort_filter)
         if not observations:
@@ -1591,6 +1840,7 @@ def main() -> int:
         for fold in folds:
             LOGGER.info("Evaluating %s", fold.fold_id)
             partition = partition_rows_for_fold(observations, fold, return_key=return_key)
+            full_partition = partition_rows_for_fold(full_observations, fold, return_key=return_key)
             support_errors = validate_fold_support(partition, window)
             fold_manifest = {
                 **fold.as_dict(),
@@ -1622,6 +1872,12 @@ def main() -> int:
                 "candidate_limit": max(0, int(args.candidate_limit)),
                 "optuna_enabled": settings.optuna_enabled,
                 "framework_code_sha256": provenance["framework_code_sha256"],
+                "incumbent_comparator_type": (
+                    "current_live_portfolio_candidate_policy_replay"
+                    if live_policy_settings is not None
+                    else "scoring_incumbent_top_n"
+                ),
+                "live_policy_settings": live_policy_settings or {},
             }
             if args.resume and fold_cache.exists():
                 cached = json.loads(fold_cache.read_text(encoding="utf-8"))
@@ -1761,12 +2017,14 @@ def main() -> int:
             )
             validation_incumbent, _validation_incumbent_records = incumbent_returns(
                 module,
-                partition.validation,
+                full_partition.validation,
                 incumbent_spec,
                 incumbent_policy,
                 horizon=horizon,
                 top_n=incumbent_top_n,
                 params=params,
+                live_policy_settings=live_policy_settings,
+                cohort_filter=cohort_filter,
             )
             optuna_trial_start = len(optuna_trial_rows)
             winner, fold_thresholds, fold_curves = evaluate_validation_shortlist(
@@ -1798,12 +2056,14 @@ def main() -> int:
                 )
                 test_incumbent, test_incumbent_records = incumbent_returns(
                     module,
-                    partition.test,
+                    full_partition.test,
                     incumbent_spec,
                     incumbent_policy,
                     horizon=horizon,
                     top_n=incumbent_top_n,
                     params=params,
+                    live_policy_settings=live_policy_settings,
+                    cohort_filter=cohort_filter,
                 )
                 fallback_candidate = (
                     dict(test_incumbent)
@@ -1833,14 +2093,16 @@ def main() -> int:
                 fallback_return_contract = (
                     "production_incumbent_retained" if retain_incumbent else "xbi_benchmark_fallback"
                 )
+                horizon_metric_settings = metric_settings_for_horizon(settings, horizon)
                 fallback_comparison = paired_policy_comparison(
                     fallback_candidate,
                     test_incumbent,
-                    settings.metric_settings,
+                    horizon_metric_settings,
                 )
                 fallback_threshold = {
                     "min_score_pct_of_top": 0.0,
                     "max_names": fallback_max_names,
+                    "max_name_weight": 1.0,
                     "reliability_class": fallback_reliability_class,
                     "active_weight": fallback_active_weight,
                     "validation_objective": "",
@@ -1866,27 +2128,39 @@ def main() -> int:
                     "frozen_top_n": fallback_max_names,
                     "frozen_min_score_pct_of_top": 0.0,
                     "frozen_max_names": fallback_max_names,
+                    "frozen_max_name_weight": 1.0,
                     "validation_objective": "",
                     "reliability_class": fallback_reliability_class,
                     "active_weight": fallback_active_weight,
                     "xbi_residual_weight": round(1.0 - fallback_active_weight, 6),
+                    "incumbent_comparator_type": (
+                        "current_live_portfolio_candidate_policy_replay"
+                        if live_policy_settings is not None
+                        else "scoring_incumbent_top_n"
+                    ),
                     "candidate_return_contract": fallback_return_contract,
                     "test_avg_selected_names": (
                         round(sum(fallback_counts.values()) / len(test_incumbent), 6) if test_incumbent else 0.0
                     ),
-                    "test_active_date_count": sum(1 for count in fallback_counts.values() if count > 0),
+                    "test_active_date_count": sum(
+                        1 for count in fallback_counts.values() if count > 0
+                    ),
                     "test_evaluation_date_count": len(test_incumbent),
-                    "test_active_date_coverage_pct": 100.0 if retain_incumbent and test_incumbent else 0.0,
+                    "test_active_date_coverage_pct": active_date_coverage_pct(
+                        fallback_counts,
+                        len(test_incumbent),
+                    ),
                     **fallback_comparison,
                 }
                 fold_comparison_rows.append(fallback_comparison_row)
                 fold_cohort_rows = cohort_comparisons(
                     fallback_candidate_records,
                     test_incumbent_records,
-                    settings.metric_settings,
+                    horizon_metric_settings,
                     fold_id=fold.fold_id,
                     horizon=horizon,
                     active_weight=fallback_active_weight,
+                    max_name_weight=1.0,
                 )
                 cohort_rows.extend(fold_cohort_rows)
                 selected_rows_output.extend(
@@ -1910,6 +2184,7 @@ def main() -> int:
                         "asof_date": asof_date,
                         "selected_name_count": fallback_counts.get(asof_date, 0),
                         "reliability_class": fallback_reliability_class,
+                        "max_name_weight": 1.0,
                         "active_stock_selection_weight": (
                             fallback_active_weight if fallback_counts.get(asof_date, 0) > 0 else 0.0
                         ),
@@ -1960,6 +2235,7 @@ def main() -> int:
                                 reliability_class=fallback_reliability_class,
                                 active_weight=1.0,
                                 validation_objective=0.0,
+                                max_name_weight=1.0,
                                 validation_metrics={"fallback_reason": "no_validation_survivor"},
                             )
                             if retain_incumbent
@@ -1970,6 +2246,9 @@ def main() -> int:
                         incumbent_spec=incumbent_spec,
                         incumbent_policy=incumbent_policy,
                         incumbent_top_n=incumbent_top_n,
+                        incumbent_universe_rows=full_partition.test,
+                        live_policy_settings=live_policy_settings,
+                        cohort_filter=cohort_filter,
                         horizon=secondary_horizon,
                         params=params,
                         settings=settings,
@@ -2044,19 +2323,28 @@ def main() -> int:
             )
             test_incumbent, test_incumbent_records = incumbent_returns(
                 module,
-                partition.test,
+                full_partition.test,
                 incumbent_spec,
                 incumbent_policy,
                 horizon=horizon,
                 top_n=incumbent_top_n,
                 params=params,
+                live_policy_settings=live_policy_settings,
+                cohort_filter=cohort_filter,
             )
             test_candidate = blend_active_alpha_with_benchmark(
                 test_active_candidate,
                 test_incumbent,
                 active_weight=winner.threshold.active_weight,
+                selected_counts=test_counts,
+                max_name_weight=winner.threshold.max_name_weight,
             )
-            comparison = paired_policy_comparison(test_candidate, test_incumbent, settings.metric_settings)
+            horizon_metric_settings = metric_settings_for_horizon(settings, horizon)
+            comparison = paired_policy_comparison(
+                test_candidate,
+                test_incumbent,
+                horizon_metric_settings,
+            )
             comparison_row = {
                 "fold_id": fold.fold_id,
                 "horizon_days": horizon,
@@ -2066,23 +2354,25 @@ def main() -> int:
                 "frozen_top_n": winner.top_n,
                 "frozen_min_score_pct_of_top": winner.threshold.min_score_pct_of_top,
                 "frozen_max_names": winner.threshold.max_names,
+                "frozen_max_name_weight": winner.threshold.max_name_weight,
                 "validation_objective": winner.threshold.validation_objective,
                 "reliability_class": winner.threshold.reliability_class,
                 "active_weight": winner.threshold.active_weight,
                 "xbi_residual_weight": round(1.0 - winner.threshold.active_weight, 6),
+                "incumbent_comparator_type": (
+                    "current_live_portfolio_candidate_policy_replay"
+                    if live_policy_settings is not None
+                    else "scoring_incumbent_top_n"
+                ),
                 "candidate_return_contract": "active_stock_alpha_plus_xbi_residual",
                 "test_avg_selected_names": (
                     round(sum(test_counts.values()) / len(test_incumbent), 6) if test_incumbent else 0.0
                 ),
                 "test_active_date_count": sum(1 for count in test_counts.values() if count > 0),
                 "test_evaluation_date_count": len(test_incumbent),
-                "test_active_date_coverage_pct": (
-                    round(
-                        100.0 * sum(1 for count in test_counts.values() if count > 0) / len(test_incumbent),
-                        6,
-                    )
-                    if test_incumbent
-                    else 0.0
+                "test_active_date_coverage_pct": active_date_coverage_pct(
+                    test_counts,
+                    len(test_incumbent),
                 ),
                 **comparison,
             }
@@ -2090,15 +2380,22 @@ def main() -> int:
             fold_cohort_rows = cohort_comparisons(
                 test_selected,
                 test_incumbent_records,
-                settings.metric_settings,
+                horizon_metric_settings,
                 fold_id=fold.fold_id,
                 horizon=horizon,
                 active_weight=winner.threshold.active_weight,
+                max_name_weight=winner.threshold.max_name_weight,
             )
             cohort_rows.extend(fold_cohort_rows)
             selected_rows_output.extend(record_rows(test_selected, fold_id=fold.fold_id, split="outer_test_candidate"))
             selected_rows_output.extend(
                 record_rows(test_incumbent_records, fold_id=fold.fold_id, split="outer_test_incumbent")
+            )
+            effective_test_weights = effective_active_weight_by_date(
+                test_incumbent,
+                test_counts,
+                active_weight=winner.threshold.active_weight,
+                max_name_weight=winner.threshold.max_name_weight,
             )
             fold_sleeve_rows = [
                 {
@@ -2107,9 +2404,11 @@ def main() -> int:
                     "asof_date": asof_date,
                     "selected_name_count": selected_count,
                     "reliability_class": winner.threshold.reliability_class,
-                    "active_stock_selection_weight": winner.threshold.active_weight if selected_count > 0 else 0.0,
-                    "xbi_residual_weight": (
-                        round(1.0 - winner.threshold.active_weight, 6) if selected_count > 0 else 1.0
+                    "max_name_weight": winner.threshold.max_name_weight,
+                    "active_stock_selection_weight": effective_test_weights.get(asof_date, 0.0),
+                    "xbi_residual_weight": round(
+                        1.0 - effective_test_weights.get(asof_date, 0.0),
+                        6,
                     ),
                     "sleeve_weight_sum": 1.0,
                 }
@@ -2127,6 +2426,10 @@ def main() -> int:
                         test_candidate_cohorts.get(cohort, {}),
                         incumbent_map,
                         active_weight=winner.threshold.active_weight,
+                        selected_counts=record_counts_by_date(
+                            record for record in test_selected if record.cohort == cohort
+                        ),
+                        max_name_weight=winner.threshold.max_name_weight,
                     )
                 )
                 fold_incumbent_cohort_returns[horizon][cohort].append(incumbent_map)
@@ -2139,6 +2442,8 @@ def main() -> int:
                         test_candidate_regimes.get(regime, {}),
                         incumbent_map,
                         active_weight=winner.threshold.active_weight,
+                        selected_counts=test_counts,
+                        max_name_weight=winner.threshold.max_name_weight,
                     )
                 )
                 fold_incumbent_regime_returns[horizon][regime].append(incumbent_map)
@@ -2160,6 +2465,9 @@ def main() -> int:
                     incumbent_spec=incumbent_spec,
                     incumbent_policy=incumbent_policy,
                     incumbent_top_n=incumbent_top_n,
+                    incumbent_universe_rows=full_partition.test,
+                    live_policy_settings=live_policy_settings,
+                    cohort_filter=cohort_filter,
                     horizon=secondary_horizon,
                     params=params,
                     settings=settings,
@@ -2227,7 +2535,7 @@ def main() -> int:
                     "fold_id": "aggregate",
                     "horizon_days": horizon,
                     "cohort": cohort,
-                    **paired_policy_comparison(candidate, incumbent, settings.metric_settings),
+                    **paired_policy_comparison(candidate, incumbent, metric_settings_for_horizon(settings, horizon)),
                 }
             )
 
@@ -2251,16 +2559,96 @@ def main() -> int:
                     "horizon_days": horizon,
                     "regime": regime,
                     "regime_source_field": regime_field or "unclassified_no_pit_regime_field",
-                    **paired_policy_comparison(candidate, incumbent, settings.metric_settings),
+                    **paired_policy_comparison(candidate, incumbent, metric_settings_for_horizon(settings, horizon)),
                 }
             )
+
+    primary_metric_settings = metric_settings_for_horizon(settings, settings.primary_horizon)
+    same_cohort_return_key = f"fwd_{settings.primary_horizon}d_net_same_cohort_alpha_return"
+    same_cohort_return_lookup = {
+        (str(row.get("asof_date") or ""), str(row.get("ticker") or "").strip().upper()): value
+        for row in full_observations
+        if (value := finite_float(row.get(same_cohort_return_key))) is not None
+    }
+    same_cohort_candidate, same_cohort_incumbent, _ = replay_selected_policy_returns(
+        selected_rows=selected_rows_output,
+        sleeve_rows=sleeve_rows_output,
+        comparison_rows=fold_comparison_rows,
+        horizon=settings.primary_horizon,
+        return_lookup=same_cohort_return_lookup,
+    )
+    same_cohort_comparison: dict[str, object] = {
+        "horizon_days": settings.primary_horizon,
+        "benchmark_contract": "leave_one_out_same_cohort_equal_weight_v1",
+        **paired_policy_comparison(
+            same_cohort_candidate,
+            same_cohort_incumbent,
+            primary_metric_settings,
+        ),
+    }
+
+    ticker_robustness_summary, ticker_robustness_rows = ticker_jackknife_diagnostics(
+        selected_rows=selected_rows_output,
+        sleeve_rows=sleeve_rows_output,
+        comparison_rows=fold_comparison_rows,
+        horizon=settings.primary_horizon,
+        settings=primary_metric_settings,
+    )
+
+    exact_candidate, exact_incumbent, _ = replay_selected_policy_returns(
+        selected_rows=selected_rows_output,
+        sleeve_rows=sleeve_rows_output,
+        comparison_rows=fold_comparison_rows,
+        horizon=settings.primary_horizon,
+    )
+    regime_by_date: dict[str, str] = {}
+    for (asof_date, _ticker), regime in regime_lookup.items():
+        prior = regime_by_date.setdefault(asof_date, regime)
+        if prior != regime:
+            raise ValueError(
+                f"Conflicting point-in-time market regimes on {asof_date}: {prior!r} vs {regime!r}"
+            )
+    regime_rows = [
+        row
+        for row in regime_rows
+        if int(finite_float(row.get("horizon_days")) or 0) != settings.primary_horizon
+    ]
+    for regime in sorted(set(regime_by_date.values())):
+        candidate_regime = {
+            asof_date: value
+            for asof_date, value in exact_candidate.items()
+            if regime_by_date.get(asof_date) == regime
+        }
+        incumbent_regime = {
+            asof_date: value
+            for asof_date, value in exact_incumbent.items()
+            if regime_by_date.get(asof_date) == regime
+        }
+        if not candidate_regime and not incumbent_regime:
+            continue
+        regime_rows.append(
+            {
+                "horizon_days": settings.primary_horizon,
+                "regime": regime,
+                "regime_source_field": regime_field or "unclassified_no_pit_regime_field",
+                **paired_policy_comparison(
+                    candidate_regime,
+                    incumbent_regime,
+                    primary_metric_settings,
+                ),
+            }
+        )
 
     aggregate_comparisons: dict[int, dict[str, object]] = {}
     decision_objects: dict[int, PromotionDecision] = {}
     for horizon in sorted(fold_candidate_returns):
         candidate = aggregate_nonoverlapping_returns(fold_candidate_returns[horizon])
         incumbent = aggregate_nonoverlapping_returns(fold_incumbent_returns[horizon])
-        comparison = paired_policy_comparison(candidate, incumbent, settings.metric_settings)
+        comparison = paired_policy_comparison(
+            candidate,
+            incumbent,
+            metric_settings_for_horizon(settings, horizon),
+        )
         fold_rows = [
             row
             for row in fold_comparison_rows
@@ -2308,11 +2696,20 @@ def main() -> int:
     if primary is not None:
         primary = apply_no_harm_gate(
             primary,
-            no_harm_reason_codes(
-                primary_horizon=settings.primary_horizon,
-                horizon_comparisons=aggregate_comparisons,
-                cohort_comparisons=cohort_rows,
-                rules=settings.promotion_rules,
+            (
+                *no_harm_reason_codes(
+                    primary_horizon=settings.primary_horizon,
+                    horizon_comparisons=aggregate_comparisons,
+                    cohort_comparisons=cohort_rows,
+                    rules=settings.promotion_rules,
+                ),
+                *robustness_reason_codes(
+                    primary_horizon=settings.primary_horizon,
+                    regime_comparisons=regime_rows,
+                    same_cohort_comparison=same_cohort_comparison,
+                    ticker_robustness=ticker_robustness_summary,
+                    rules=settings.promotion_rules,
+                ),
             ),
         )
         statistical_primary_decision = primary.as_dict()
@@ -2385,6 +2782,18 @@ def main() -> int:
     write_csv(settings.output_dir / "walk_forward_cohort_no_harm.csv", cohort_rows)
     write_csv(settings.output_dir / "walk_forward_cohort_metrics.csv", cohort_rows)
     write_csv(settings.output_dir / "walk_forward_regime_metrics.csv", regime_rows)
+    write_csv(
+        settings.output_dir / "walk_forward_same_cohort_benchmark_metrics.csv",
+        [same_cohort_comparison],
+    )
+    write_csv(
+        settings.output_dir / "walk_forward_ticker_jackknife.csv",
+        ticker_robustness_rows,
+    )
+    write_json(
+        settings.output_dir / "walk_forward_ticker_robustness_summary.json",
+        ticker_robustness_summary,
+    )
     write_csv(settings.output_dir / "walk_forward_selected_tickers.csv", selected_rows_output)
     write_csv(settings.output_dir / "adaptive_selection_replay.csv", selected_rows_output)
     write_csv(settings.output_dir / "adaptive_sleeve_allocation_replay.csv", sleeve_rows_output)

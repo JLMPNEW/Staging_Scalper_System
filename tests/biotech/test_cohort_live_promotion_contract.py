@@ -239,7 +239,12 @@ def test_cohort_live_gate_changes_only_promoted_cohort(tmp_path: Path) -> None:
     assert by_ticker["A3"]["portfolio_candidate_gate"] == 0.0
     assert by_ticker["B1"]["portfolio_candidate_gate"] == 1.0
     assert by_ticker["B1"]["portfolio_candidate_reason"] == "incumbent_eligible"
-    assert by_ticker["A1"]["biotech_active_sleeve_weight"] == pytest.approx(0.60)
+    # Two selected names at the contract's default 25% name cap can support
+    # only 50% active exposure, despite the nominal 60% reliability weight.
+    assert by_ticker["A1"]["biotech_active_sleeve_weight"] == pytest.approx(0.50)
+    assert by_ticker["A1"]["biotech_xbi_residual_weight"] == pytest.approx(0.50)
+    assert by_ticker["A1"]["biotech_max_name_weight_within_cohort"] == pytest.approx(0.25)
+    assert by_ticker["A1"]["biotech_selected_name_count_within_cohort"] == 2.0
     assert "biotech_promotion_contract_id" not in by_ticker["B1"]
 
 

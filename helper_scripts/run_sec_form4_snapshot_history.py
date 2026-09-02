@@ -71,7 +71,8 @@ def subtract_years(d: date, years: int) -> date:
 def load_existing_asof_dates(db_path: Path) -> set[str]:
     if not db_path.exists():
         return set()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60.0)
+    conn.execute("PRAGMA busy_timeout=60000;")
     try:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stock_signal_snapshot_tier1' LIMIT 1"

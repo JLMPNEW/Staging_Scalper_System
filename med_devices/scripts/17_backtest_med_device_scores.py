@@ -182,6 +182,15 @@ def parse_args() -> argparse.Namespace:
             "Use this for lockbox calibration panels."
         ),
     )
+    parser.add_argument(
+        "--training-label-end-max",
+        type=str,
+        default="",
+        help=(
+            "Latest permissible forward-label date. Stage 11 mode defaults this to "
+            "calibration.training_label_end_max and refuses to run without a valid cap."
+        ),
+    )
     parser.add_argument("--horizons", type=str, default="30,60,120", help="Comma-separated trading-day forward horizons.")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
@@ -328,11 +337,16 @@ def load_price_series(
     *,
     tickers: list[str],
     source_priority: list[str],
+    end_date: date | None = None,
 ) -> dict[str, tuple[str, list[tuple[date, float]]]]:
     if not tickers:
         return {}
     ticker_placeholders = ",".join("?" for _ in tickers)
     source_placeholders = ",".join("?" for _ in source_priority)
+    end_date_clause = "AND bar_date <= ?" if end_date is not None else ""
+    params: list[object] = [*tickers, *source_priority]
+    if end_date is not None:
+        params.append(end_date.isoformat())
     rows = conn.execute(
         f"""
         SELECT ticker, bar_date, source_id, COALESCE(adj_close, close) AS price
@@ -340,9 +354,10 @@ def load_price_series(
         WHERE ticker IN ({ticker_placeholders})
           AND source_id IN ({source_placeholders})
           AND COALESCE(adj_close, close) > 0
+          {end_date_clause}
         ORDER BY ticker, source_id, bar_date
         """,
-        [*tickers, *source_priority],
+        params,
     ).fetchall()
     by_ticker_source: dict[tuple[str, str], list[tuple[date, float]]] = {}
     for row in rows:
@@ -391,6 +406,7 @@ def build_backtest_rows(
     asof: str,
     horizons: list[int],
     position_usd: float,
+    training_label_end_max: date | None = None,
 ) -> list[dict[str, Any]]:
     asof_date = parse_date(asof)
     if asof_date is None:
@@ -556,8 +572,15 @@ def build_backtest_rows(
                     if calendar_idx is not None and calendar_idx + horizon < len(market_dates)
                     else None
                 )
-                target_price = ticker_price_map.get(target_date) if target_date is not None else None
-                if target_date is not None and target_price is not None:
+                label_date_allowed = target_date is not None and (
+                    training_label_end_max is None or target_date <= training_label_end_max
+                )
+                target_price = (
+                    ticker_price_map.get(target_date)
+                    if label_date_allowed and target_date is not None
+                    else None
+                )
+                if label_date_allowed and target_date is not None and target_price is not None:
                     forward_return = (target_price - entry_price) / entry_price
                     item[f"forward_date_{horizon}d"] = target_date.isoformat()
                     item[f"forward_return_{horizon}d"] = round(forward_return, 6)
@@ -628,6 +651,21 @@ def main() -> None:
     if not horizons or any(horizon <= 0 for horizon in horizons):
         raise ValueError("--horizons must contain positive integers")
     position_usd = float(cfg_get(config, "calibration.transaction_cost.position_usd", 50_000.0))
+    training_label_end_raw = str(args.training_label_end_max or "").strip()
+    if args.stage11_eligible_only and not training_label_end_raw:
+        training_label_end_raw = str(
+            cfg_get(
+                config,
+                "calibration.training_label_end_max",
+                cfg_get(config, "calibration.dev_window_end", ""),
+            )
+            or ""
+        ).strip()
+    training_label_end_max = parse_date(training_label_end_raw)
+    if training_label_end_raw and training_label_end_max is None:
+        raise ValueError(f"Invalid --training-label-end-max date: {training_label_end_raw!r}")
+    if args.stage11_eligible_only and training_label_end_max is None:
+        raise RuntimeError("Stage 11 backtests require calibration.training_label_end_max")
 
     with connect(db_path, timeout_sec=float(cfg_get(config, "runtime.sqlite_timeout_sec", 30.0))) as conn:
         init_db_read_tolerant(conn)
@@ -679,7 +717,12 @@ def main() -> None:
                 for row in rows_for_asof
             }
         )
-        series = load_price_series(conn, tickers=tickers, source_priority=source_priority)
+        series = load_price_series(
+            conn,
+            tickers=tickers,
+            source_priority=source_priority,
+            end_date=training_label_end_max,
+        )
         rows: list[dict[str, Any]] = []
         for asof in asofs:
             rows.extend(
@@ -689,6 +732,7 @@ def main() -> None:
                     asof=asof,
                     horizons=horizons,
                     position_usd=position_usd,
+                    training_label_end_max=training_label_end_max,
                 )
             )
         fieldnames = [
@@ -711,11 +755,12 @@ def main() -> None:
             for horizon in horizons
         }
         LOGGER.info(
-            "Backtest complete: output=%s asofs=%d rows=%d forward_counts=%s",
+            "Backtest complete: output=%s asofs=%d rows=%d forward_counts=%s training_label_end_max=%s",
             output_csv,
             len(asofs),
             len(rows),
             available,
+            training_label_end_max.isoformat() if training_label_end_max is not None else "",
         )
 
 

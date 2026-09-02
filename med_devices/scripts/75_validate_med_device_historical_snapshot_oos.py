@@ -1087,6 +1087,7 @@ def validate_daily_db_reconciliation(
     asof: str,
     artifact: str,
     csv_row_count: int,
+    csv_score_model_versions: set[str],
     db_conn: sqlite3.Connection | None,
     db_path: Path | None,
     checks: list[dict[str, Any]],
@@ -1110,6 +1111,15 @@ def validate_daily_db_reconciliation(
             (asof,),
         ).fetchone()
         db_count = int(row[0]) if row else 0
+        version_rows = db_conn.execute(
+            """
+            SELECT DISTINCT TRIM(COALESCE(score_model_version, ''))
+            FROM med_device_daily_scores
+            WHERE asof_date = ?
+            """,
+            (asof,),
+        ).fetchall()
+        db_score_model_versions = {str(item[0]) for item in version_rows if str(item[0]).strip()}
     except sqlite3.Error as exc:
         add_check(
             checks,
@@ -1133,6 +1143,20 @@ def validate_daily_db_reconciliation(
         observed=f"csv={csv_row_count} db={db_count}",
         expected="csv row count equals med_device_daily_scores count for the as-of date",
         details="Published dated daily CSVs must reconcile with the med_device_daily_scores table.",
+    )
+    add_check(
+        checks,
+        asof=asof,
+        artifact=artifact,
+        check_id="daily_db_score_model_version_reconciliation",
+        severity="CRITICAL",
+        passed=db_score_model_versions == csv_score_model_versions,
+        observed=(
+            f"csv={','.join(sorted(csv_score_model_versions))} "
+            f"db={','.join(sorted(db_score_model_versions))}"
+        ),
+        expected="CSV and database score-model versions match exactly for the as-of date",
+        details="A row-count match cannot prove that the database and published snapshot use the same scoring logic.",
     )
 
     history_table = db_conn.execute(
@@ -1190,6 +1214,78 @@ def validate_daily_db_reconciliation(
     )
 
 
+def validate_db_panel_date_reconciliation(
+    *,
+    asofs: list[str],
+    db_conn: sqlite3.Connection | None,
+    db_path: Path | None,
+    checks: list[dict[str, Any]],
+) -> None:
+    artifact = "panel:med_device_daily_scores"
+    if db_conn is None:
+        add_check(
+            checks,
+            asof="ALL",
+            artifact=artifact,
+            check_id="db_score_asof_panel_reconciliation",
+            severity="WARNING",
+            passed=False,
+            observed="db_unavailable",
+            expected="database score dates match the dated file panel",
+            details=f"med_devices database not available for panel reconciliation: {db_path}",
+        )
+        return
+    expected_dates = set(asofs)
+    if not expected_dates:
+        return
+    start_asof = min(expected_dates)
+    end_asof = max(expected_dates)
+    try:
+        db_dates = {
+            str(row[0])
+            for row in db_conn.execute(
+                """
+                SELECT DISTINCT asof_date
+                FROM med_device_daily_scores
+                WHERE asof_date BETWEEN ? AND ?
+                """,
+                (start_asof, end_asof),
+            ).fetchall()
+        }
+    except sqlite3.Error as exc:
+        add_check(
+            checks,
+            asof="ALL",
+            artifact=artifact,
+            check_id="db_score_asof_panel_reconciliation",
+            severity="CRITICAL",
+            passed=False,
+            observed=f"db_error={exc}",
+            expected="database score dates match the dated file panel",
+            details=f"med_devices database query failed during panel reconciliation: {db_path}",
+        )
+        return
+    unexpected = sorted(db_dates - expected_dates)
+    missing = sorted(expected_dates - db_dates)
+    add_check(
+        checks,
+        asof="ALL",
+        artifact=artifact,
+        check_id="db_score_asof_panel_reconciliation",
+        severity="CRITICAL",
+        passed=not unexpected and not missing,
+        observed=(
+            f"file_dates={len(expected_dates)} db_dates={len(db_dates)} "
+            f"unexpected={unexpected[:10]} missing={missing[:10]}"
+        ),
+        expected="database score dates equal dated file-panel dates over the validated range",
+        details=(
+            "DB-only dates can contaminate calibration even when every published file passes. "
+            "Unexpected dates commonly indicate stale non-market snapshots or mixed model versions."
+        ),
+    )
+
+
 def write_checks(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["asof_date", "artifact", "check_id", "severity", "status", "observed", "expected", "details"]
@@ -1222,6 +1318,7 @@ def build_checks(
     new_daily_columns_required_from: date | None,
     product_family_shadow_columns_required_from: date | None,
     score_provenance_columns_required_from: date | None,
+    require_db_panel_date_match: bool,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     static_paths = static_source_paths(config, base_dir=base_dir)
@@ -1250,6 +1347,7 @@ def build_checks(
                     asof=asof,
                     artifact=str(daily_path),
                     csv_row_count=daily_summary["row_count"],
+                    csv_score_model_versions=set(daily_summary["score_model_versions"]),
                     db_conn=db_conn,
                     db_path=db_path,
                     checks=checks,
@@ -1266,6 +1364,13 @@ def build_checks(
                     asof=asof,
                     checks=checks,
                 )
+        if require_db_panel_date_match:
+            validate_db_panel_date_reconciliation(
+                asofs=asofs,
+                db_conn=db_conn,
+                db_path=db_path,
+                checks=checks,
+            )
     finally:
         if db_conn is not None:
             db_conn.close()
@@ -1368,6 +1473,7 @@ def main() -> int:
         new_daily_columns_required_from=new_daily_columns_required_from,
         product_family_shadow_columns_required_from=product_family_shadow_columns_required_from,
         score_provenance_columns_required_from=score_provenance_columns_required_from,
+        require_db_panel_date_match=not bool(args.asof.strip()),
     )
     write_checks(output_csv, checks)
     diagnostic_checks = diagnostic_checks_from_strict(checks)

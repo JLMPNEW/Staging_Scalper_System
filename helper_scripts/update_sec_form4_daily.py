@@ -1164,7 +1164,8 @@ def main() -> None:
     stop_deadline = time.monotonic() + stop_after_sec if stop_after_sec > 0 else None
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60.0)
+    conn.execute("PRAGMA busy_timeout=60000;")
     conn.execute("PRAGMA foreign_keys=ON;")
     ensure_schema(conn)
 

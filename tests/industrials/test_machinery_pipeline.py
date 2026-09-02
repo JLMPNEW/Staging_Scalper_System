@@ -5157,6 +5157,8 @@ def test_machinery_end_to_end_smoke(tmp_path: Path) -> None:
         history_namespace["validate_portfolio_handoff"](
             sector_output_root=sector_root,
             asof=ASOF,
+            rank_rows=published,
+            production_policy_active=manifest.get("production_policy_active") is True,
         )
         == 114
     )
@@ -5434,6 +5436,7 @@ def test_machinery_source_hash_ignores_platform_line_endings(tmp_path: Path) -> 
     assert changed_production_policy_sources(legacy) == []
 
 def test_machinery_source_seal_preflight_is_fail_closed(tmp_path: Path) -> None:
+    from industrials.machinery.scoring import file_sha256
     from industrials.machinery.stage12_activation import production_policy_source_hashes
     from industrials.machinery.stage12_governance import Stage12Paths
 
@@ -5448,8 +5451,14 @@ def test_machinery_source_seal_preflight_is_fail_closed(tmp_path: Path) -> None:
     )
     validate_source_seal = namespace["validate_source_seal"]
     governance_root = tmp_path / "stage12"
-    state_path = Stage12Paths(governance_root).activation_state_json
+    governance_paths = Stage12Paths(governance_root)
+    state_path = governance_paths.activation_state_json
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    governance_paths.lock_json.write_text("{}", encoding="utf-8")
+    lock_sha256 = file_sha256(governance_paths.lock_json)
+    validate_source_seal.__globals__["_sealed_governance"] = (
+        lambda _config, *, config_path, governance_root: ({}, Stage12Paths(governance_root))
+    )
     source_hashes = production_policy_source_hashes()
     state_path.write_text(
         json.dumps(
@@ -5457,6 +5466,8 @@ def test_machinery_source_seal_preflight_is_fail_closed(tmp_path: Path) -> None:
                 "acceptance": "PASS",
                 "production_policy_status": "ACTIVE",
                 "activation_asof": "2026-08-03",
+                "governance_root": str(governance_root),
+                "governance_lock_sha256": lock_sha256,
                 "production_source_sha256": source_hashes,
             }
         ),
@@ -5470,6 +5481,11 @@ def test_machinery_source_seal_preflight_is_fail_closed(tmp_path: Path) -> None:
     )
     assert result["acceptance"] == "PASS"
     assert result["production_policy_status"] == "ACTIVE"
+    assert result["governance_lock_sha256"] == lock_sha256
+
+    governance_paths.lock_json.write_text('{"changed":true}', encoding="utf-8")
+    with pytest.raises(ValueError, match="activation governance lock changed"):
+        validate_source_seal(config, config_path=config_path, asof="2026-08-17")
 
     changed = dict(source_hashes)
     changed["db.py"] = "0" * 64
@@ -5479,6 +5495,8 @@ def test_machinery_source_seal_preflight_is_fail_closed(tmp_path: Path) -> None:
                 "acceptance": "PASS",
                 "production_policy_status": "ACTIVE",
                 "activation_asof": "2026-08-03",
+                "governance_root": str(governance_root),
+                "governance_lock_sha256": lock_sha256,
                 "production_source_sha256": changed,
             }
         ),

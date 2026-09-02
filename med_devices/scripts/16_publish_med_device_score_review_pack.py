@@ -20,6 +20,7 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from med_devices.core.calibrated_baseline import effective_promoted_gate_overrides  # noqa: E402
 from med_devices.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from med_devices.core.db import connect, init_db  # noqa: E402
 from med_devices.core.fda_states import REGULATORY_RISK_STATES  # noqa: E402
@@ -726,6 +727,19 @@ def configured_gate_value(config: dict[str, Any], cohort: str, key: str) -> floa
     return to_float(raw)
 
 
+def configured_baseline_gate_value(
+    config: dict[str, Any],
+    cohort: str,
+    key: str,
+    *,
+    asof_raw: object,
+) -> float | None:
+    promoted = effective_promoted_gate_overrides(config, cohort=cohort, asof_raw=asof_raw)
+    if key in promoted:
+        return promoted[key]
+    return configured_gate_value(config, cohort, key)
+
+
 def production_seed_is_effective(row: dict[str, Any], config: dict[str, Any], cohort: str) -> bool:
     raw_effective_dates = (
         cfg_get(
@@ -798,9 +812,27 @@ def calibrated_baseline_candidate_status(row: dict[str, Any], config: dict[str, 
         ("data_completeness_score", "data_completeness_min"),
     ]
     for field, gate_key in checks:
-        if not passes_min_gate(row, field, configured_gate_value(config, cohort, gate_key)):
+        if not passes_min_gate(
+            row,
+            field,
+            configured_baseline_gate_value(
+                config,
+                cohort,
+                gate_key,
+                asof_raw=row.get("asof_date"),
+            ),
+        ):
             return None
-    if not passes_max_gate(row, "value_trap_score", configured_gate_value(config, cohort, "value_trap_max")):
+    if not passes_max_gate(
+        row,
+        "value_trap_score",
+        configured_baseline_gate_value(
+            config,
+            cohort,
+            "value_trap_max",
+            asof_raw=row.get("asof_date"),
+        ),
+    ):
         return None
     status = "production_baseline_candidate" if production_seed_active else "watchlist_baseline_candidate"
     reason = (

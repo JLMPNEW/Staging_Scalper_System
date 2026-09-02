@@ -15,8 +15,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from industrials.core.config import cfg_get, load_yaml, resolve_path  # noqa: E402
 from industrials.machinery.stage12_activation import (  # noqa: E402
     PRODUCTION_POLICY_STATUS_ACTIVE,
+    _active_cycle_root,
+    _sealed_governance,
     changed_production_policy_sources,
 )
+from industrials.machinery.scoring import file_sha256  # noqa: E402
 from industrials.machinery.stage12_governance import Stage12Paths  # noqa: E402
 from industrials.machinery.stage8_calibration import parse_date  # noqa: E402
 
@@ -69,12 +72,27 @@ def validate_source_seal(
             "Stage 8/9/12 calibration and activation before daily scoring: "
             + ",".join(changed)
         )
+    active_root = _active_cycle_root(state, default_root=governance_root)
+    _, active_paths = _sealed_governance(
+        config,
+        config_path=config_path,
+        governance_root=active_root,
+    )
+    expected_lock_sha256 = str(state.get("governance_lock_sha256") or "").strip()
+    if not expected_lock_sha256:
+        raise ValueError("Machinery production activation has no governance lock seal")
+    actual_lock_sha256 = file_sha256(active_paths.lock_json)
+    if actual_lock_sha256 != expected_lock_sha256:
+        raise ValueError("Machinery activation governance lock changed")
     return {
         "acceptance": "PASS",
         "asof_date": target.isoformat(),
         "production_policy_status": PRODUCTION_POLICY_STATUS_ACTIVE,
         "activation_asof": activation_asof.isoformat(),
         "activation_state": str(state_path),
+        "governance_root": str(active_root),
+        "governance_lock": str(active_paths.lock_json),
+        "governance_lock_sha256": actual_lock_sha256,
         "changed_source_files": [],
     }
 

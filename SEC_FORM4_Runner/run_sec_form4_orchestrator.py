@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sqlite3
 import subprocess
@@ -21,6 +22,14 @@ except ImportError:  # pragma: no cover - Python < 3.11 compatibility.
     utc_tz = _timezone.utc
 
 import yaml
+
+try:
+    from .process_lock import WaitFileLock
+except ImportError:  # Script execution from this directory.
+    _RUNNER_DIR = Path(__file__).resolve().parent
+    if str(_RUNNER_DIR) not in sys.path:
+        sys.path.insert(0, str(_RUNNER_DIR))
+    from process_lock import WaitFileLock
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("config_sec_form4_orchestrator.yaml")
 DEFAULT_SEC_SNAPSHOT_TABLE_CANDIDATES = (
@@ -1093,8 +1102,79 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def parse_lock_float(
+    raw_value: Any,
+    *,
+    config_key: str,
+    default: float,
+    allow_zero: bool,
+) -> float:
+    if raw_value is None or not str(raw_value).strip():
+        value = float(default)
+    else:
+        if isinstance(raw_value, bool):
+            raise ValueError(f"{config_key} must be numeric, got {raw_value!r}.")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{config_key} must be numeric, got {raw_value!r}.") from exc
+    if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+        comparator = ">= 0" if allow_zero else "> 0"
+        raise ValueError(f"{config_key} must be finite and {comparator}, got {raw_value!r}.")
+    return value
+
+
+def writer_lock_settings(args: argparse.Namespace) -> tuple[Path | None, float, float]:
+    """Resolve the shared Form 4 writer lock before any database access."""
+    repo_root = Path(__file__).resolve().parent.parent
+    orch_cfg_path = Path(args.config).expanduser()
+    if not orch_cfg_path.is_absolute():
+        orch_cfg_path = (Path.cwd() / orch_cfg_path).resolve()
+    orch_cfg = load_yaml_map(orch_cfg_path)
+    run_cfg = cfg_get(orch_cfg, "run", default={}) or {}
+    target = str(args.target or cfg_get(run_cfg, "target", default="both")).strip().lower()
+    dry_run = bool(args.dry_run or cfg_get(run_cfg, "dry_run", default=False))
+    timeout_seconds = parse_lock_float(
+        cfg_get(run_cfg, "form4_writer_lock_timeout_seconds", default=1800),
+        config_key="run.form4_writer_lock_timeout_seconds",
+        default=1800,
+        allow_zero=True,
+    )
+    poll_seconds = parse_lock_float(
+        cfg_get(run_cfg, "form4_writer_lock_poll_seconds", default=1),
+        config_key="run.form4_writer_lock_poll_seconds",
+        default=1,
+        allow_zero=False,
+    )
+    if target not in {"both", "form4"} or dry_run:
+        return None, timeout_seconds, poll_seconds
+
+    form4_cfg = cfg_get(orch_cfg, "form4", default={}) or {}
+    form4_config_path = resolve_repo_path(
+        repo_root,
+        cfg_get(form4_cfg, "config_path", default="config_sec_form4.yaml"),
+    )
+    if form4_config_path is None:
+        raise ValueError("Missing form4.config_path in orchestrator config.")
+    form4_runtime_cfg = load_form4_config(form4_config_path)
+    form4_db_raw = cfg_get(form4_runtime_cfg, "db_path", default="")
+    if not str(form4_db_raw).strip():
+        raise ValueError("Missing sec_form4.db_path.")
+    form4_db_path = resolve_config_relative_path(form4_config_path, form4_db_raw)
+    if form4_db_path is None:
+        raise ValueError("Failed to resolve Form4 db_path value.")
+
+    configured_lock_path = cfg_get(run_cfg, "form4_writer_lock_path", default=None)
+    if configured_lock_path is None or not str(configured_lock_path).strip():
+        lock_path = form4_db_path.with_suffix(form4_db_path.suffix + ".writer.lock")
+    else:
+        lock_path = resolve_config_relative_path(orch_cfg_path, str(configured_lock_path))
+        if lock_path is None:
+            raise ValueError("Failed to resolve run.form4_writer_lock_path.")
+    return lock_path, timeout_seconds, poll_seconds
+
+
+def run(args: argparse.Namespace) -> None:
     repo_root = Path(__file__).resolve().parent.parent
     orch_cfg_path = Path(args.config).expanduser()
     if not orch_cfg_path.is_absolute():
@@ -1662,6 +1742,26 @@ def main() -> None:
             warn(f"Failed to write orchestrator report {report_output_path}: {exc}")
 
     print("SEC/Form4 orchestrator completed.")
+
+
+def main() -> None:
+    args = parse_args()
+    lock_path, timeout_seconds, poll_seconds = writer_lock_settings(args)
+    if lock_path is None:
+        run(args)
+        return
+    print(
+        f"Waiting for shared Form4 writer lock: {lock_path} "
+        f"(timeout={timeout_seconds:.0f}s)"
+    )
+    with WaitFileLock(
+        lock_path,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        owner="sec_form4_orchestrator",
+    ):
+        print(f"Acquired shared Form4 writer lock: {lock_path}")
+        run(args)
 
 
 if __name__ == "__main__":

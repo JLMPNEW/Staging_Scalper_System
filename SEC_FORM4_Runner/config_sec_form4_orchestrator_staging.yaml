@@ -26,6 +26,8 @@ sec_form4_orchestrator:
     dry_run: false
     step_timeout_seconds: 1200
     step_heartbeat_seconds: 60
+    form4_writer_lock_timeout_seconds: 1800
+    form4_writer_lock_poll_seconds: 1
     report_output_path: "../output/sec_form4_orchestrator_report_staging.json"
 
   profiles:

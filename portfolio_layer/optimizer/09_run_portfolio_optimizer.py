@@ -138,11 +138,17 @@ def biotech_benchmark_overlay(
         ):
             continue
         active_weight = round(_f(row.get("active_sleeve_weight"), -1.0), 10)
+        name_weight_cap = _f(row.get("active_name_weight_cap"), -1.0)
+        selected_name_count = _f(row.get("active_selected_name_count"), -1.0)
         residual_weight = round(_f(row.get("benchmark_residual_weight"), -1.0), 10)
         if not 0.0 <= active_weight <= 1.0 or not 0.0 <= residual_weight <= 1.0:
             raise ValueError("Biotech adaptive sleeve weights must be within [0, 1]")
         if abs(active_weight + residual_weight - 1.0) > 1e-9:
             raise ValueError("Biotech adaptive sleeve contract has inconsistent active and residual weights")
+        if not 0.0 < name_weight_cap <= 1.0 or selected_name_count < 0.0:
+            raise ValueError("Biotech adaptive sleeve contract has invalid breadth/name-cap fields")
+        if active_weight - min(1.0, selected_name_count * name_weight_cap) > 1e-9:
+            raise ValueError("Biotech active sleeve exceeds its selected-name capacity")
         benchmark_ticker = str(row.get("benchmark_residual_ticker") or "").strip().upper()
         if not benchmark_ticker:
             raise ValueError("Biotech adaptive sleeve contract lacks benchmark_residual_ticker")
@@ -191,6 +197,12 @@ def biotech_benchmark_overlay(
         "biotech_indices": biotech_indices,
         "active_weights_by_index": active_weights_by_index,
         "residual_weights_by_index": residual_weights_by_index,
+        "active_name_weight_caps": sorted(
+            {_f(row.get("active_name_weight_cap"), -1.0) for row in contract_rows}
+        ),
+        "active_selected_name_counts": sorted(
+            {_f(row.get("active_selected_name_count"), -1.0) for row in contract_rows}
+        ),
     }
 
 

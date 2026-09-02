@@ -17,6 +17,9 @@ and fold consistency. Such a challenger may receive only a small provisional all
 2. Train and validation choose the challenger structure. Outer-test data is used once for evaluation.
 3. The runner invokes `62_compare_biotech_portfolio_profitability.py` automatically.
 4. Script 62 replays challenger and production holdings one trading day after each frozen signal.
+   A frozen target expires to XBI after the configured
+   `max_target_staleness_bars`; this prevents a truncated forward-label
+   window from leaving the final stock target in place until fold end.
 5. Script 62 independently reconstructs the result from frozen CSV inputs without database access.
 6. A final profitability-governed candidate contract is written. It is never activated implicitly.
 7. Script 61 validates the contract hash, scoring parity, replay verification, effective date, monitoring
@@ -53,6 +56,10 @@ did not access the database.
 The profitability score combines relative CAGR, Calmar ratio, profit factor, maximum drawdown, daily 5%
 CVaR, and turnover. Hard controls require adequate paired daily support, multiple folds, fold consistency,
 candidate profit factor of at least 1.0, and no material drawdown or CVaR deterioration.
+
+`profit_factor` is the gain/loss ratio of daily net percentage returns.
+`dollar_pnl_profit_factor` is also published and reconciles directly to
+terminal wealth through gross positive and negative daily dollar P&L.
 
 Full promotion additionally requires the configured composite score, a high deflated-Sharpe probability,
 and a positive paired daily block-bootstrap lower bound. Provisional promotion is permitted when terminal

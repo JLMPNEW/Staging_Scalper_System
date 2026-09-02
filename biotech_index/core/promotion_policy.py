@@ -31,6 +31,14 @@ class PromotionRules:
     min_cohort_paired_dates: int = 8
     required_secondary_horizons: tuple[int, ...] = ()
     required_no_harm_cohorts: tuple[str, ...] = ()
+    require_regime_no_harm: bool = True
+    max_regime_lcb_underperformance_pct: float = 5.0
+    min_regime_paired_dates: int = 8
+    require_same_cohort_benchmark_no_harm: bool = True
+    max_same_cohort_lcb_underperformance_pct: float = 3.0
+    require_ticker_jackknife: bool = True
+    max_largest_ticker_gain_contribution_pct: float = 60.0
+    max_ticker_jackknife_lcb_underperformance_pct: float = 3.0
     provisional_active_weight_cap: float = 0.55
 
 
@@ -93,6 +101,58 @@ def no_harm_reason_codes(
                 continue
             if delta_lcb < -abs(rules.max_cohort_lcb_underperformance_pct):
                 reasons.append(f"cohort_no_harm_failure:{cohort}")
+    return tuple(sorted(set(reasons)))
+
+
+def robustness_reason_codes(
+    *,
+    primary_horizon: int,
+    regime_comparisons: Iterable[Mapping[str, object]],
+    same_cohort_comparison: Mapping[str, object],
+    ticker_robustness: Mapping[str, object],
+    rules: PromotionRules,
+) -> tuple[str, ...]:
+    """Apply regime, peer-benchmark, and single-name robustness controls."""
+    reasons: list[str] = []
+    if rules.require_regime_no_harm:
+        supported_regimes = 0
+        for row in regime_comparisons:
+            if int(finite_float(row.get("horizon_days")) or 0) != primary_horizon:
+                continue
+            regime = str(row.get("regime") or "unclassified").strip() or "unclassified"
+            paired_dates = int(finite_float(row.get("paired_date_count")) or 0)
+            delta_lcb = finite_float(row.get("paired_delta_bootstrap_lcb_pct"))
+            if regime in {"unclassified", "insufficient_history"} or paired_dates < rules.min_regime_paired_dates:
+                continue
+            supported_regimes += 1
+            if delta_lcb is not None and delta_lcb < -abs(rules.max_regime_lcb_underperformance_pct):
+                reasons.append(f"regime_no_harm_failure:{regime}")
+        if supported_regimes == 0:
+            reasons.append("regime_insufficient_evidence")
+
+    if rules.require_same_cohort_benchmark_no_harm:
+        paired_dates = int(finite_float(same_cohort_comparison.get("paired_date_count")) or 0)
+        delta_lcb = finite_float(same_cohort_comparison.get("paired_delta_bootstrap_lcb_pct"))
+        if paired_dates < rules.min_cohort_paired_dates or delta_lcb is None:
+            reasons.append("same_cohort_benchmark_insufficient_evidence")
+        elif delta_lcb < -abs(rules.max_same_cohort_lcb_underperformance_pct):
+            reasons.append("same_cohort_benchmark_no_harm_failure")
+
+    if rules.require_ticker_jackknife:
+        largest_gain = finite_float(
+            ticker_robustness.get("largest_positive_ticker_contribution_share_pct")
+        )
+        min_leaveout_lcb = finite_float(
+            ticker_robustness.get("leave_one_out_min_paired_delta_lcb_pct")
+        )
+        ticker_count = int(finite_float(ticker_robustness.get("ticker_count")) or 0)
+        if ticker_count < 2 or largest_gain is None or min_leaveout_lcb is None:
+            reasons.append("ticker_jackknife_insufficient_evidence")
+        else:
+            if largest_gain > rules.max_largest_ticker_gain_contribution_pct:
+                reasons.append("ticker_concentration_no_harm_failure")
+            if min_leaveout_lcb < -abs(rules.max_ticker_jackknife_lcb_underperformance_pct):
+                reasons.append("ticker_jackknife_no_harm_failure")
     return tuple(sorted(set(reasons)))
 
 

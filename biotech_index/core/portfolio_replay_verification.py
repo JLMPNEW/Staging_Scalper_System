@@ -17,6 +17,7 @@ from biotech_index.core.portfolio_profitability import (
     compare_daily_replays,
     run_daily_portfolio_replay,
     summarize_daily_replay,
+    target_allocations_equal,
 )
 
 
@@ -82,6 +83,7 @@ def _chain_results(results: list[tuple[str, ReplayResult]], model: ReplayCostMod
         "partial_fill_count",
         "missing_adv_trade_count",
         "missing_target_price_count",
+        "target_expiry_rebalance_count",
     ):
         summary[field] = sum(finite_float(result.summary.get(field)) or 0.0 for _, result in results)
     total_cost = finite_float(summary.get("total_transaction_cost")) or 0.0
@@ -170,15 +172,23 @@ def replay_normalized_artifacts(
     prices, terminal_events, targets, fold_rows = load_normalized_replay_inputs(output_dir)
     candidate_results: list[tuple[str, ReplayResult]] = []
     incumbent_results: list[tuple[str, ReplayResult]] = []
+    independent_challenger_folds: list[str] = []
+    incumbent_fallback_folds: list[str] = []
     for row in sorted(fold_rows, key=lambda value: str(value.get("fold_id") or "")):
         fold_id = str(row.get("fold_id") or "").strip()
         if not fold_id:
             raise ValueError("Normalized fold row has no fold_id")
         start = _parse_date(row.get("start_date"), label="start_date")
         end = _parse_date(row.get("end_date"), label="end_date")
+        candidate_targets = targets.get((fold_id, "challenger"), ())
+        incumbent_targets = targets.get((fold_id, "production"), ())
+        if target_allocations_equal(candidate_targets, incumbent_targets):
+            incumbent_fallback_folds.append(fold_id)
+        else:
+            independent_challenger_folds.append(fold_id)
         candidate = run_daily_portfolio_replay(
             prices,
-            targets.get((fold_id, "challenger"), ()),
+            candidate_targets,
             benchmark_ticker=settings.benchmark_ticker,
             model=model,
             terminal_events=terminal_events,
@@ -187,7 +197,7 @@ def replay_normalized_artifacts(
         )
         incumbent = run_daily_portfolio_replay(
             prices,
-            targets.get((fold_id, "production"), ()),
+            incumbent_targets,
             benchmark_ticker=settings.benchmark_ticker,
             model=model,
             terminal_events=terminal_events,
@@ -198,7 +208,7 @@ def replay_normalized_artifacts(
         incumbent_results.append((fold_id, incumbent))
     aggregate_candidate = _chain_results(candidate_results, model)
     aggregate_incumbent = _chain_results(incumbent_results, model)
-    return compare_daily_replays(
+    comparison = compare_daily_replays(
         aggregate_candidate,
         aggregate_incumbent,
         effective_trials=settings.effective_trials,
@@ -207,6 +217,22 @@ def replay_normalized_artifacts(
         bootstrap_seed=settings.bootstrap_seed,
         periods_per_year=model.periods_per_year,
     )
+    if independent_challenger_folds and incumbent_fallback_folds:
+        candidate_replay_type = "mixed_challenger_and_production_fallback"
+    elif independent_challenger_folds:
+        candidate_replay_type = "independent_challenger_all_folds"
+    else:
+        candidate_replay_type = "production_incumbent_fallback_only"
+    comparison.update(
+        {
+            "candidate_replay_type": candidate_replay_type,
+            "independent_challenger_fold_count": len(independent_challenger_folds),
+            "production_fallback_fold_count": len(incumbent_fallback_folds),
+            "independent_challenger_folds": "|".join(independent_challenger_folds),
+            "production_fallback_folds": "|".join(incumbent_fallback_folds),
+        }
+    )
+    return comparison
 
 
 def compare_replay_payloads(

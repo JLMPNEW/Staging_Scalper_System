@@ -40,6 +40,7 @@ class ActiveCohortPromotion:
     xbi_residual_weight: float
     policy_payload: Mapping[str, object]
     score_spec: Mapping[str, object]
+    max_name_weight: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class ActivePromotionContract:
     active_weight: float
     xbi_residual_weight: float
     policy_payload: Mapping[str, object]
+    max_name_weight: float = 1.0
     contract_version: str = SUPPORTED_CONTRACT_VERSION
     score_spec: Mapping[str, object] = field(default_factory=dict)
     cohort_policies: Mapping[str, ActiveCohortPromotion] = field(default_factory=dict)
@@ -194,12 +196,17 @@ def _active_policy_from_fold(
         raise PromotionContractError(f"Cohort {cohort or 'ALL'} does not contain a promotable challenger")
     score_pct = _finite(threshold.get("min_score_pct_of_top"))
     active_weight = _finite(threshold.get("active_weight"))
+    max_name_weight = _finite(threshold.get("max_name_weight"))
+    if max_name_weight is None:
+        max_name_weight = 0.25
     max_names = int(_finite(threshold.get("max_names")) or 0)
     candidate_pool_top_n = int(_finite(fold_contract.get("candidate_pool_top_n")) or 0)
     if score_pct is None or not 0.0 <= score_pct <= 100.0 or max_names <= 0:
         raise PromotionContractError(f"Cohort {cohort or 'ALL'} has an invalid adaptive score threshold")
     if active_weight is None or not 0.0 <= active_weight <= 1.0:
         raise PromotionContractError(f"Cohort {cohort or 'ALL'} has an invalid active sleeve weight")
+    if not 0.0 < max_name_weight <= 1.0:
+        raise PromotionContractError(f"Cohort {cohort or 'ALL'} has an invalid max name weight")
     return ActiveCohortPromotion(
         cohort=cohort,
         candidate_id=candidate_id,
@@ -211,6 +218,7 @@ def _active_policy_from_fold(
         reliability_class=str(threshold.get("reliability_class") or "low"),
         active_weight=active_weight,
         xbi_residual_weight=round(1.0 - active_weight, 10),
+        max_name_weight=max_name_weight,
         policy_payload=dict(policy),
         score_spec=dict(spec),
     )
@@ -435,6 +443,7 @@ def load_active_promotion_contract(
             active_weight=1.0,
             xbi_residual_weight=0.0,
             policy_payload={},
+            max_name_weight=1.0,
             contract_version=contract_version,
             cohort_policies=active_cohorts,
         )
@@ -463,6 +472,7 @@ def load_active_promotion_contract(
         active_weight=promotion.active_weight,
         xbi_residual_weight=promotion.xbi_residual_weight,
         policy_payload=promotion.policy_payload,
+        max_name_weight=promotion.max_name_weight,
         contract_version=contract_version,
         score_spec=promotion.score_spec,
     )

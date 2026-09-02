@@ -27,6 +27,14 @@ PRODUCTION_BASELINE_SEED = "production_baseline_seed"
 WATCHLIST_BASELINE_SEED = "watchlist_baseline_seed"
 DIAGNOSTIC_ONLY = "diagnostic_only"
 EXCLUDED_EVENT_DRIVEN = "excluded_event_driven"
+MANUAL_SUPPORT_REJECTION_REASONS = {
+    "insufficient_selected_obs",
+    "insufficient_selected_ticker_coverage",
+    "insufficient_selected_validation_for_production",
+    "insufficient_unique_tickers",
+    "insufficient_unique_tickers_for_production",
+    "missing_full_cohort_support",
+}
 HARD_EXCLUDED_CLASSIFICATIONS = {
     "manual_review_regulatory_risk",
     "avoid",
@@ -146,7 +154,9 @@ BASELINE_SNAPSHOT_FIELDS = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a calibrated baseline seed for future med-device calibration comparisons.")
+    parser = argparse.ArgumentParser(
+        description="Build a calibrated baseline seed for future med-device calibration comparisons."
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--panel-csv", type=Path, default=None)
     parser.add_argument("--recommendations-csv", type=Path, default=None)
@@ -200,17 +210,43 @@ def valid_asof_dates(rows: list[dict[str, str]]) -> list[str]:
     return sorted(dates)
 
 
+def complete_label_asof_dates(rows: list[dict[str, str]], horizons: list[int]) -> list[str]:
+    complete_dates = {
+        str(row.get("asof_date") or "").strip()[:10]
+        for row in rows
+        if all(to_float(row.get(f"cohort_excess_return_{horizon}d")) is not None for horizon in horizons)
+    }
+    return sorted(complete_dates)
+
+
 def resolve_validation_window(
     rows: list[dict[str, str]],
     *,
     validation_start_raw: object,
     validation_end_raw: object,
+    horizons: list[int],
+    validation_window_asofs: int,
 ) -> tuple[str, str]:
     dates = valid_asof_dates(rows)
     if not dates:
         raise RuntimeError("Calibrated baseline cannot resolve validation window: panel has no valid asof_date rows.")
-    validation_start = dates[0] if is_auto_date(validation_start_raw) else str(validation_start_raw or "").strip()[:10]
-    validation_end = dates[-1] if is_auto_date(validation_end_raw) else str(validation_end_raw or "").strip()[:10]
+    complete_dates = complete_label_asof_dates(rows, horizons)
+    if not complete_dates:
+        raise RuntimeError(
+            "Calibrated baseline cannot resolve validation window: "
+            "no as-of date has complete configured-horizon labels."
+        )
+    validation_end = (
+        complete_dates[-1] if is_auto_date(validation_end_raw) else str(validation_end_raw or "").strip()[:10]
+    )
+    eligible_dates = [item for item in complete_dates if item <= validation_end]
+    if not eligible_dates:
+        raise RuntimeError(f"No complete-label rows on or before validation_end_asof={validation_end}")
+    validation_start = (
+        eligible_dates[max(0, len(eligible_dates) - max(1, validation_window_asofs))]
+        if is_auto_date(validation_start_raw)
+        else str(validation_start_raw or "").strip()[:10]
+    )
     if not (len(validation_start) == 10 and validation_start[4] == "-" and validation_start[7] == "-"):
         raise RuntimeError(f"Invalid calibration.validation_start_asof: {validation_start_raw!r}")
     if not (len(validation_end) == 10 and validation_end[4] == "-" and validation_end[7] == "-"):
@@ -344,7 +380,8 @@ def selected_tickers(rows: list[dict[str, str]], *, horizon: int) -> str:
         {
             str(row.get("ticker") or "").strip().upper()
             for row in rows
-            if to_float(row.get(f"cohort_excess_return_{horizon}d")) is not None and str(row.get("ticker") or "").strip()
+            if to_float(row.get(f"cohort_excess_return_{horizon}d")) is not None
+            and str(row.get("ticker") or "").strip()
         }
     )
     return ";".join(tickers)
@@ -376,11 +413,6 @@ def status_for_candidate(
     ref_ticker_coverage = coverage_ratio(ref["unique_tickers"], full_ref["unique_tickers"])
     if cohort in event_driven_excluded_cohorts:
         return EXCLUDED_EVENT_DRIVEN, "excluded_event_driven", "event_driven_or_binary_outcome_dominates_validation"
-    if str(rec.get("production_candidate") or "") != "1":
-        if cohort in watchlist_seed_cohorts and ref["count"] > 0:
-            reason = rec.get("rejection_reason") or "not_a_production_candidate"
-            return WATCHLIST_BASELINE_SEED, "manual_watchlist", reason
-        return DIAGNOSTIC_ONLY, "not_baseline", rec.get("rejection_reason") or "not_a_production_candidate"
     support_reasons: list[str] = []
     performance_reasons: list[str] = []
     if ref["count"] < min_selected_obs:
@@ -406,9 +438,25 @@ def status_for_candidate(
                 performance_reasons.append(f"{horizon}d_lcb_below_min")
     reasons = support_reasons + performance_reasons
     deduped_reasons = ";".join(dict.fromkeys(reasons))
-    if reasons and cohort in manual_production_seed_cohorts and ref["count"] > 0:
-        support_tier = "manual_monitoring" if performance_reasons else "manual_thin_support"
-        status_reason = "manual_production_seed_override"
+    raw_rejection_reasons = str(rec.get("rejection_reason") or "").replace(",", ";")
+    recommendation_reasons = {item.strip() for item in raw_rejection_reasons.split(";") if item.strip()}
+    recommendation_is_support_only = not recommendation_reasons or recommendation_reasons.issubset(
+        MANUAL_SUPPORT_REJECTION_REASONS
+    )
+    manual_support_override = (
+        cohort in manual_production_seed_cohorts
+        and ref["count"] > 0
+        and not performance_reasons
+        and recommendation_is_support_only
+    )
+    if str(rec.get("production_candidate") or "") != "1" and not manual_support_override:
+        if cohort in watchlist_seed_cohorts and ref["count"] > 0:
+            reason = rec.get("rejection_reason") or "not_a_production_candidate"
+            return WATCHLIST_BASELINE_SEED, "manual_watchlist", reason
+        return DIAGNOSTIC_ONLY, "not_baseline", rec.get("rejection_reason") or "not_a_production_candidate"
+    if reasons and manual_support_override:
+        support_tier = "manual_thin_support"
+        status_reason = "manual_support_only_production_seed_override"
         if deduped_reasons:
             status_reason = f"{status_reason};{deduped_reasons}"
         return PRODUCTION_BASELINE_SEED, support_tier, status_reason
@@ -430,7 +478,9 @@ def status_for_candidate(
     return WATCHLIST_BASELINE_SEED, "watchlist", "passes_minimums_but_not_promoted_to_production_baseline"
 
 
-def build_baseline_snapshot_rows(comparison_rows: list[dict[str, Any]], *, baseline_version: str) -> list[dict[str, Any]]:
+def build_baseline_snapshot_rows(
+    comparison_rows: list[dict[str, Any]], *, baseline_version: str
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in comparison_rows:
         if row.get("baseline_seed_status") != PRODUCTION_BASELINE_SEED:
@@ -470,7 +520,9 @@ def yaml_number(raw: object) -> str:
     return str(raw or "") if value is None else f"{value:g}"
 
 
-def write_config_fragment(path: Path, rows: list[dict[str, Any]], *, baseline_version: str, reference_horizon: int) -> None:
+def write_config_fragment(
+    path: Path, rows: list[dict[str, Any]], *, baseline_version: str, reference_horizon: int
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     eligible = [
         row
@@ -611,11 +663,18 @@ def main() -> None:
     frozen_baseline = load_frozen_baseline(frozen_baseline_csv)
     validation_start_raw = cfg_get(config, "calibration.validation_start_asof", "")
     validation_end_raw = cfg_get(config, "calibration.validation_end_asof", "")
-    horizons = [int(item.strip()) for item in str(cfg_get(config, "calibration.horizons", "30,60,120")).split(",") if item.strip()]
+    horizons = [
+        int(item.strip())
+        for item in str(cfg_get(config, "calibration.horizons", "30,60,120")).split(",")
+        if item.strip()
+    ]
+    validation_window_asofs = max(1, int(cfg_get(config, "calibration.validation_window_asofs", 26)))
     reference_horizon = max(horizons)
     min_selected_obs = int(cfg_get(config, "calibration.calibrated_baseline.min_selected_obs", 10))
     min_unique_tickers = int(cfg_get(config, "calibration.calibrated_baseline.min_unique_tickers", 2))
-    preferred_min_unique_tickers = int(cfg_get(config, "calibration.calibrated_baseline.preferred_min_unique_tickers", 3))
+    preferred_min_unique_tickers = int(
+        cfg_get(config, "calibration.calibrated_baseline.preferred_min_unique_tickers", 3)
+    )
     min_selected_ticker_coverage = float(
         cfg_get(config, "calibration.calibrated_baseline.min_selected_ticker_coverage", 0.0)
     )
@@ -624,25 +683,31 @@ def main() -> None:
     )
     min_hit_rate = float(cfg_get(config, "calibration.calibrated_baseline.min_hit_rate", 0.50))
     min_lcb_excess = float(cfg_get(config, "calibration.calibrated_baseline.min_lcb_excess_return", 0.0))
-    require_60_120_persistence = to_bool(cfg_get(config, "calibration.calibrated_baseline.require_60_120_persistence", True))
-    production_seed_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", ""))
+    require_60_120_persistence = to_bool(
+        cfg_get(config, "calibration.calibrated_baseline.require_60_120_persistence", True)
+    )
+    production_seed_cohorts = parse_csv_set(
+        cfg_get(config, "calibration.calibrated_baseline.production_seed_cohorts", "")
+    )
     manual_production_seed_cohorts = parse_csv_set(
         cfg_get(config, "calibration.calibrated_baseline.manual_production_seed_cohorts", "")
     )
-    watchlist_seed_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", ""))
-    event_driven_excluded_cohorts = parse_csv_set(cfg_get(config, "calibration.calibrated_baseline.event_driven_excluded_cohorts", ""))
+    watchlist_seed_cohorts = parse_csv_set(
+        cfg_get(config, "calibration.calibrated_baseline.watchlist_seed_cohorts", "")
+    )
+    event_driven_excluded_cohorts = parse_csv_set(
+        cfg_get(config, "calibration.calibrated_baseline.event_driven_excluded_cohorts", "")
+    )
 
     panel_rows = read_csv(panel_csv)
     validation_start, validation_end = resolve_validation_window(
         panel_rows,
         validation_start_raw=validation_start_raw,
         validation_end_raw=validation_end_raw,
+        horizons=horizons,
+        validation_window_asofs=validation_window_asofs,
     )
-    rows = [
-        row
-        for row in panel_rows
-        if validation_start <= str(row.get("asof_date") or "")[:10] <= validation_end
-    ]
+    rows = [row for row in panel_rows if validation_start <= str(row.get("asof_date") or "")[:10] <= validation_end]
     if not rows:
         raise RuntimeError(
             "Calibrated baseline validation window produced zero rows: "
@@ -652,7 +717,9 @@ def main() -> None:
     recommendations = {row["calibration_cohort"]: row for row in read_csv(recommendations_csv)}
     comparison_rows: list[dict[str, Any]] = []
     constituent_rows: list[dict[str, Any]] = []
-    for cohort in sorted({str(row.get("calibration_cohort") or "") for row in rows if str(row.get("calibration_cohort") or "")}):
+    for cohort in sorted(
+        {str(row.get("calibration_cohort") or "") for row in rows if str(row.get("calibration_cohort") or "")}
+    ):
         cohort_rows = [row for row in rows if str(row.get("calibration_cohort") or "") == cohort]
         rec = recommendations.get(cohort, {})
         candidate_rows = [row for row in cohort_rows if rec and passes_candidate_gates(row, rec)]
@@ -680,9 +747,17 @@ def main() -> None:
         )
         for horizon in horizons:
             candidate = candidate_metrics_by_horizon[horizon]
-            tier1 = metrics([row for row in cohort_rows if str(row.get("classification") or "") == "tier_1_long_candidate"], horizon=horizon)
-            broad = metrics([row for row in cohort_rows if str(row.get("final_investability_gate") or "") == "1"], horizon=horizon)
-            top_decile = metrics([row for row in cohort_rows if (to_float(row.get("cohort_percentile")) or -1.0) >= 90.0], horizon=horizon)
+            tier1 = metrics(
+                [row for row in cohort_rows if str(row.get("classification") or "") == "tier_1_long_candidate"],
+                horizon=horizon,
+            )
+            broad = metrics(
+                [row for row in cohort_rows if str(row.get("final_investability_gate") or "") == "1"], horizon=horizon
+            )
+            top_decile = metrics(
+                [row for row in cohort_rows if (to_float(row.get("cohort_percentile")) or -1.0) >= 90.0],
+                horizon=horizon,
+            )
             full = metrics(cohort_rows, horizon=horizon)
             frozen = frozen_baseline.get((cohort, horizon), {})
             frozen_lcb = to_float(frozen.get("baseline_lcb_excess"))
@@ -723,7 +798,9 @@ def main() -> None:
 
     write_csv(comparison_csv, comparison_rows, COMPARISON_FIELDS)
     write_csv(constituents_csv, constituent_rows, CONSTITUENT_FIELDS)
-    write_config_fragment(fragment_yaml, comparison_rows, baseline_version=baseline_version, reference_horizon=reference_horizon)
+    write_config_fragment(
+        fragment_yaml, comparison_rows, baseline_version=baseline_version, reference_horizon=reference_horizon
+    )
     snapshot_rows = build_baseline_snapshot_rows(comparison_rows, baseline_version=baseline_version)
     if snapshot_csv is not None:
         write_csv(snapshot_csv, snapshot_rows, BASELINE_SNAPSHOT_FIELDS)

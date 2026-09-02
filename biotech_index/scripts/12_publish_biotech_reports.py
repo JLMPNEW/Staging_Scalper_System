@@ -69,6 +69,12 @@ TOP_SCORE_FIELDS = [
     "biotech_selection_reliability_class",
     "biotech_active_sleeve_weight",
     "biotech_xbi_residual_weight",
+    "biotech_max_name_weight_within_cohort",
+    "biotech_selected_name_count_within_cohort",
+    "biotech_calibration_cohort_valid_from",
+    "biotech_calibration_cohort_valid_to",
+    "biotech_current_backcast_cohort",
+    "biotech_cohort_assignment_mode",
     "biotech_promotion_contract_id",
     "biotech_promotion_contract_sha256",
     "bucket",
@@ -1023,6 +1029,12 @@ def load_scores(conn: sqlite3.Connection, asof_date: str) -> list[dict[str, Any]
             s.survivorship_corrected_panel_flag,
             s.biotech_selection_reliability_class,
             s.biotech_active_sleeve_weight, s.biotech_xbi_residual_weight,
+            s.biotech_max_name_weight_within_cohort,
+            s.biotech_selected_name_count_within_cohort,
+            s.biotech_calibration_cohort_valid_from,
+            s.biotech_calibration_cohort_valid_to,
+            s.biotech_current_backcast_cohort,
+            s.biotech_cohort_assignment_mode,
             s.biotech_promotion_contract_id, s.biotech_promotion_contract_sha256,
             s.catalyst_score, s.credibility_score,
             s.financial_quality_score, s.risk_score, s.legacy_risk_score,
@@ -1338,6 +1350,20 @@ def flatten_score_row(row: dict[str, Any]) -> dict[str, Any]:
         "biotech_selection_reliability_class": row.get("biotech_selection_reliability_class", ""),
         "biotech_active_sleeve_weight": row.get("biotech_active_sleeve_weight", ""),
         "biotech_xbi_residual_weight": row.get("biotech_xbi_residual_weight", ""),
+        "biotech_max_name_weight_within_cohort": row.get(
+            "biotech_max_name_weight_within_cohort", ""
+        ),
+        "biotech_selected_name_count_within_cohort": row.get(
+            "biotech_selected_name_count_within_cohort", ""
+        ),
+        "biotech_calibration_cohort_valid_from": row.get(
+            "biotech_calibration_cohort_valid_from", ""
+        ),
+        "biotech_calibration_cohort_valid_to": row.get(
+            "biotech_calibration_cohort_valid_to", ""
+        ),
+        "biotech_current_backcast_cohort": row.get("biotech_current_backcast_cohort", ""),
+        "biotech_cohort_assignment_mode": row.get("biotech_cohort_assignment_mode", ""),
         "biotech_promotion_contract_id": row.get("biotech_promotion_contract_id", ""),
         "biotech_promotion_contract_sha256": row.get("biotech_promotion_contract_sha256", ""),
         "bucket": row.get("bucket", ""),
