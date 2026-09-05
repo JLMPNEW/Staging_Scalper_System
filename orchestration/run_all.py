@@ -16,7 +16,7 @@ Scheduling model
 * A global network semaphore (max_concurrent_network_lanes, default 2) caps how
   many network-heavy subprocesses run simultaneously to avoid SEC/Yahoo rate
   collisions across independent lanes.
-* Tier 1 (portfolio_layer, script 18) runs only after the Tier-0 gate passes
+* Tier 1 downstream jobs run in registry order after the Tier-0 gate passes
   (every `required` sector healthy). Excluding a required sector keeps it in the
   gate as UNKNOWN/unhealthy; running the portfolio with a required sector
   excluded needs an explicit --ignore-gate.
@@ -3577,8 +3577,8 @@ def main(argv: list[str] | None = None) -> int:
                         )
             log(f"tier0 gate: {'PASS' if gate_ok else 'FAIL'} (failing_required={failing})")
 
-            # Tier 1 (portfolio) only after the gate. It never runs in repair mode: the repair
-            # selection excludes portfolio (repair: null), so tier1_selected is empty there.
+            # Tier 1 downstream jobs run in registry order only after the gate.
+            # Jobs with repair: null are excluded from repair selection.
             if tier1_selected and args.mode in {"daily", "catch-up"}:
                 if gate_ok or args.ignore_gate:
                     for sector in tier1_selected:
@@ -5498,7 +5498,7 @@ def run_selftest() -> int:
 
     # --- real registry loads and every entry_script exists ---
     real = load_registry(DEFAULT_REGISTRY)
-    ok("real_registry_sectors", len(real.sectors) == 10)
+    ok("real_registry_jobs", len(real.sectors) == 11)
     try:
         validate_registry_paths(real)
         ok("real_registry_all_script_paths_exist", True)
@@ -5509,6 +5509,22 @@ def run_selftest() -> int:
         real.group_order.get("industrials") == ["defense", "machinery", "transportation"],
     )
     ok("real_portfolio_tier1", real.by_name("portfolio_layer").dependency_tier == 1)
+    correlations = real.by_name("index_correlations")
+    ok(
+        "real_index_correlations_tier1_after_portfolio",
+        correlations.dependency_tier == 1
+        and real.names.index("index_correlations") > real.names.index("portfolio_layer"),
+    )
+    ok(
+        "real_index_correlations_read_only_required",
+        correlations.required and not correlations.network,
+    )
+    ok(
+        "real_index_correlations_publish_contract",
+        correlations.publish_glob
+        == "output/index_correlations/{date}/correlation_manifest.json"
+        and correlations.health.status_keys == ["acceptance"],
+    )
     # M10: publish/health gate on end-of-run artifacts, with the advisory verdict healthy.
     rport = real.by_name("portfolio_layer")
     ok(

@@ -1,0 +1,286 @@
+"""Streamlit view for ETF benchmark/index rolling correlations."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import cast
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from index_correlations.pipeline import ETF_LABELS, ETF_TICKERS, PAIR_COLUMNS, WINDOWS
+
+ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = ROOT / "index_correlations" / "data"
+METHOD_LABELS = {"pearson": "Linear (Pearson)", "kendall_tau": "Kendall tau"}
+PLOT_COLORS = (
+    "#2a78d6", "#e68a00", "#0ca30c", "#a44bd8", "#d03b3b", "#008c95",
+    "#8f5f2f", "#5c6f82", "#c23b8b", "#657a2f",
+)
+
+
+def _data_signature() -> tuple[tuple[str, float, int], ...]:
+    paths = [DATA_DIR / "metadata.json", DATA_DIR / "daily_log_returns.csv"]
+    paths.extend(DATA_DIR / f"rolling_{method}_{window}.csv" for method in METHOD_LABELS for window in WINDOWS)
+    signature: list[tuple[str, float, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            signature.append((str(path), stat.st_mtime, stat.st_size))
+        except OSError:
+            signature.append((str(path), 0.0, 0))
+    return tuple(signature)
+
+
+@st.cache_data(show_spinner=False)
+def load_metadata(signature: tuple[tuple[str, float, int], ...]) -> dict:
+    _ = signature
+    path = DATA_DIR / "metadata.json"
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@st.cache_data(show_spinner=False)
+def load_rolling(method: str, window: int, signature: tuple[tuple[str, float, int], ...]) -> pd.DataFrame:
+    _ = signature
+    path = DATA_DIR / f"rolling_{method}_{window}.csv"
+    if not path.is_file():
+        return pd.DataFrame()
+    frame = pd.read_csv(path, parse_dates=["date"])
+    return frame.set_index("date").sort_index()
+
+
+def pair_column(left: str, right: str) -> str:
+    return f"{left}__{right}" if (left, right) in PAIR_COLUMNS else f"{right}__{left}"
+
+
+def _line_axis_range(rolling: pd.DataFrame, references: list[str]) -> list[float]:
+    """Return a padded y-axis range based on the displayed correlation series."""
+    values: list[float] = []
+    for reference in references:
+        for ticker in ETF_TICKERS:
+            if ticker == reference:
+                continue
+            column = pair_column(ticker, reference)
+            if column not in rolling.columns:
+                continue
+            series = cast(pd.Series, pd.to_numeric(rolling[column], errors="coerce"))
+            values.extend(float(value) for value in series.dropna().tolist())
+
+    if not values:
+        return [-1.0, 1.0]
+
+    lowest = min(values)
+    highest = max(values)
+    padding = max((highest - lowest) * 0.05, 0.01)
+    lower = max(-1.0, min(0.0, lowest - padding))
+    upper = min(1.0, max(0.0, highest + padding))
+    if upper - lower < 0.1:
+        midpoint = (lower + upper) / 2.0
+        lower = max(-1.0, midpoint - 0.05)
+        upper = min(1.0, midpoint + 0.05)
+    return [lower, upper]
+
+
+def _render_chart(rolling: pd.DataFrame, references: list[str]) -> None:
+    figure = go.Figure()
+    trace_number = 0
+    for reference in references:
+        for ticker in ETF_TICKERS:
+            if ticker == reference:
+                continue
+            column = pair_column(ticker, reference)
+            if column not in rolling.columns:
+                continue
+            figure.add_trace(go.Scatter(
+                x=rolling.index,
+                y=rolling[column],
+                mode="lines",
+                name=f"{ticker} vs {reference}",
+                line={"width": 1.7, "color": PLOT_COLORS[trace_number % len(PLOT_COLORS)]},
+                connectgaps=False,
+                hovertemplate=(
+                    "%{x|%Y-%m-%d}<br>"
+                    f"{ticker} vs {reference}: %{{y:.3f}}<extra></extra>"
+                ),
+            ))
+            trace_number += 1
+
+    figure.update_layout(
+        height=620,
+        margin={"l": 8, "r": 8, "t": 30, "b": 8},
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+        paper_bgcolor="#fcfcfb",
+        plot_bgcolor="#fcfcfb",
+        font={"family": 'system-ui, -apple-system, "Segoe UI", sans-serif', "color": "#0b0b0b"},
+    )
+    figure.update_xaxes(showgrid=True, gridcolor="#e1e0d9")
+    figure.update_yaxes(title="Correlation", range=_line_axis_range(rolling, references), showgrid=True, gridcolor="#e1e0d9", zeroline=True)
+    st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
+def _render_latest_heatmap(rolling: pd.DataFrame) -> None:
+    """Render the latest rolling correlation for every tracked ETF pair."""
+    latest = rolling.iloc[-1]
+    matrix = pd.DataFrame(index=pd.Index(ETF_TICKERS), columns=pd.Index(ETF_TICKERS), dtype=float)
+    for left in ETF_TICKERS:
+        for right in ETF_TICKERS:
+            if left == right:
+                value = 1.0
+            else:
+                value = latest.get(pair_column(left, right), float("nan"))
+            matrix.loc[left, right] = pd.to_numeric(value, errors="coerce")
+
+    matrix_values = matrix.to_numpy(dtype=float)
+    matrix_text = [
+        ["" if pd.isna(value) else f"{float(value):.2f}" for value in row]
+        for row in matrix_values
+    ]
+    figure = go.Figure(go.Heatmap(
+        z=matrix_values,
+        text=matrix_text,
+        texttemplate="%{text}",
+        textfont={"size": 11},
+        x=list(ETF_TICKERS),
+        y=list(ETF_TICKERS),
+        zmin=-1,
+        zmax=1,
+        zmid=0,
+        colorscale=[
+            [0.0, "#2a78d6"],
+            [0.5, "#fcfcfb"],
+            [1.0, "#d03b3b"],
+        ],
+        colorbar={"title": "Correlation", "len": 0.8},
+        hovertemplate=(
+            "<b>%{y}</b> vs <b>%{x}</b><br>"
+            "Correlation: %{z:.3f}<extra></extra>"
+        ),
+        xgap=1,
+        ygap=1,
+    ))
+    figure.update_layout(
+        height=620,
+        margin={"l": 8, "r": 8, "t": 24, "b": 8},
+        paper_bgcolor="#fcfcfb",
+        plot_bgcolor="#fcfcfb",
+        font={"family": 'system-ui, -apple-system, "Segoe UI", sans-serif', "color": "#0b0b0b"},
+    )
+    figure.update_xaxes(side="bottom", tickangle=-45)
+    figure.update_yaxes(autorange="reversed")
+    st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
+st.set_page_config(page_title="Position Monitor - Index Correlations", layout="wide")
+signature = _data_signature()
+metadata = load_metadata(signature)
+st.title("ETF index correlations")
+st.caption(
+    "Rolling correlations use daily adjusted-close log returns. The history is aligned to the common trading-date "
+    "intersection across all nine sector benchmarks plus SPY and QQQ."
+)
+
+if not metadata:
+    st.warning("Correlation artifacts are not available yet.")
+    st.code("python -m index_correlations.pipeline", language="powershell")
+    st.stop()
+
+window = st.selectbox(
+    "Rolling window (N trading days)",
+    options=list(WINDOWS),
+    index=0,
+    format_func=lambda value: f"{value} days",
+)
+
+history_years = st.selectbox(
+    "History",
+    options=[1, 2, 3, 4, 5],
+    index=4,
+    format_func=lambda value: f"{value} year{'s' if value != 1 else ''}",
+)
+method = st.radio(
+    "Correlation method",
+    options=list(METHOD_LABELS),
+    format_func=METHOD_LABELS.get,
+    horizontal=True,
+)
+references = st.multiselect(
+    "Reference indices",
+    options=list(ETF_TICKERS),
+    default=["SPY", "QQQ"],
+    format_func=lambda ticker: f"{ticker} - {ETF_LABELS[ticker]}",
+)
+
+rolling = load_rolling(method, int(window), signature)
+if not rolling.empty:
+    date_index = pd.DatetimeIndex(rolling.index)
+    latest_date = cast(pd.Timestamp, date_index.max())
+    first_date = latest_date - pd.DateOffset(years=int(history_years))
+    rolling = rolling.loc[date_index >= first_date]
+if rolling.empty:
+    st.error(f"Missing rolling artifact for {METHOD_LABELS[method]} / {window} days.")
+    st.stop()
+display_dates = pd.DatetimeIndex(rolling.index)
+left, middle, right = st.columns(3)
+left.metric("Displayed observations", f"{len(rolling):,}")
+middle.metric("History start", cast(pd.Timestamp, display_dates.min()).strftime("%Y-%m-%d"))
+right.metric("History end", cast(pd.Timestamp, display_dates.max()).strftime("%Y-%m-%d"))
+
+st.subheader(f"{window}-day {METHOD_LABELS[method]} correlation ({history_years}Y history)")
+if references:
+    _render_chart(rolling, references)
+else:
+    st.info("Select at least one reference index to display the line chart.")
+
+st.subheader("Latest correlation matrix")
+st.caption(
+    f"Latest available observation for the selected {window}-day {METHOD_LABELS[method].lower()} window. "
+    "The diagonal is 1.000 by definition."
+)
+_render_latest_heatmap(rolling)
+
+latest = rolling.iloc[-1]
+latest_rows: list[dict[str, object]] = []
+for reference in references:
+    for ticker in ETF_TICKERS:
+        if ticker == reference:
+            continue
+        column = pair_column(ticker, reference)
+        value = latest.get(column, float("nan"))
+        latest_rows.append({
+            "ETF": ticker,
+            "Sector": ETF_LABELS[ticker],
+            "Reference": reference,
+            "Correlation": value,
+        })
+latest_table = pd.DataFrame(latest_rows)
+st.subheader("Latest rolling correlation")
+st.dataframe(
+    latest_table.style.format({"Correlation": "{:.3f}"}, na_rep=""),
+    width="stretch",
+    hide_index=True,
+)
+st.caption(
+    f"Source: {metadata.get('source', 'n/a')}. Last fetched: {metadata.get('fetched_at_utc', 'n/a')}. "
+    "The first N-1 observations are intentionally blank because a full rolling window is required."
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

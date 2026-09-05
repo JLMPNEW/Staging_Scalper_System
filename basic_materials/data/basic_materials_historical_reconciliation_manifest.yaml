@@ -1,0 +1,35 @@
+manifest_version: 1
+artifact_id: basic_materials_historical_reconciliation_pilot_v1
+policy_version: basic_materials_historical_reconciliation_policy_v1
+as_of_date: '2026-09-05'
+state: stage2b_pilot_loaded_calibration_blocked
+calibration_eligible: false
+artifacts:
+  historical_membership:
+    path: ../system_csvs/basic_materials_historical_membership.csv
+    source_id: basic_materials_historical_membership_review
+    sha256: 5f41f6e989aecad56561f56a1f3f3e294e8658575828c28444835d4fd42aa695
+    byte_size: 8876
+    row_count: 20
+    unique_key: historical_ticker
+  ticker_aliases:
+    path: ../system_csvs/basic_materials_ticker_aliases.csv
+    source_id: basic_materials_historical_alias_review
+    sha256: 51cdc9b1a3d7d77918309f01445bf702f91ec4e1a6c1eb29f2b24ec4220807f8
+    byte_size: 1517
+    row_count: 4
+    unique_key: alias_key
+  security_events:
+    path: ../system_csvs/basic_materials_security_events.csv
+    source_id: basic_materials_security_event_review
+    sha256: 2b625121fd7654dfc1e25900fe41d18f182cede3cbe265f40dce20ff033dce8d
+    byte_size: 8167
+    row_count: 22
+    unique_key: event_key
+  terminal_events:
+    path: ../system_csvs/basic_materials_terminal_events.csv
+    source_id: basic_materials_terminal_event_review
+    sha256: 4100a02c65e526fe15baa5c0d2dccd4535e579219028c69a24c3ec54eb90467e
+    byte_size: 9822
+    row_count: 20
+    unique_key: event_key

@@ -76,7 +76,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--core-score-history-only",
         action="store_true",
-        help="Rebuild the PIT universe, required feature layers, and core scores without multibagger layers.",
+        help=(
+            "Rebuild the PIT universe and all score layers required by calibration, "
+            "while omitting report-only pipeline steps."
+        ),
     )
     parser.add_argument(
         "--no-snap-weekly-to-market-days",
@@ -1069,6 +1072,8 @@ def main() -> None:
                             "governance_events",
                             "biotech_features",
                             "biotech_scores",
+                            "multibagger_features",
+                            "multibagger_scores",
                         )
                     ),
                 ]

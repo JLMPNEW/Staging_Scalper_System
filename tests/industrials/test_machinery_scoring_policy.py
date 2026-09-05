@@ -18,9 +18,7 @@ def _development_row(
         "development_stage": "development_stage",
         "capital_raise_dependence": dependence,
         "canonical_quality": (
-            "mapped_xbrl;capital_raise_proceeds_partial_component_coverage"
-            if partial
-            else "mapped_xbrl"
+            "mapped_xbrl;capital_raise_proceeds_partial_component_coverage" if partial else "mapped_xbrl"
         ),
     }
 
@@ -33,21 +31,30 @@ def test_partial_capital_raise_lower_bound_penalizes_but_never_rewards() -> None
 
 
 def test_negative_profit_valuation_cap_is_absolute_and_one_sided() -> None:
-    assert _apply_negative_profit_valuation_cap(
-        50.0,
-        {"negative_profit_valuation_flag": 1},
-        cap=25.0,
-    ) == 25.0
-    assert _apply_negative_profit_valuation_cap(
-        20.0,
-        {"negative_profit_valuation_flag": 1},
-        cap=25.0,
-    ) == 20.0
-    assert _apply_negative_profit_valuation_cap(
-        80.0,
-        {"negative_profit_valuation_flag": 0},
-        cap=25.0,
-    ) == 80.0
+    assert (
+        _apply_negative_profit_valuation_cap(
+            50.0,
+            {"negative_profit_valuation_flag": 1},
+            cap=25.0,
+        )
+        == 25.0
+    )
+    assert (
+        _apply_negative_profit_valuation_cap(
+            20.0,
+            {"negative_profit_valuation_flag": 1},
+            cap=25.0,
+        )
+        == 20.0
+    )
+    assert (
+        _apply_negative_profit_valuation_cap(
+            80.0,
+            {"negative_profit_valuation_flag": 0},
+            cap=25.0,
+        )
+        == 80.0
+    )
 
 
 def test_production_source_seal_covers_financial_and_selection_logic() -> None:
@@ -60,4 +67,5 @@ def test_production_source_seal_covers_financial_and_selection_logic() -> None:
         "06a_build_machinery_scoring_features.py",
         "stage9_backtest.py",
         "stage12_governance.py",
+        "optimizer_semantics.py",
     }.issubset(hashes)

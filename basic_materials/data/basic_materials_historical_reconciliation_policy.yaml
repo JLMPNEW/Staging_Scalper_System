@@ -1,0 +1,106 @@
+policy_version: basic_materials_historical_reconciliation_policy_v1
+as_of_date: '2026-09-05'
+sector: Basic Materials
+review_status: approved_stage2b_pilot
+candidate_file: system_csvs/basic_materials_deactivated_candidates.csv
+
+files:
+  historical_membership:
+    path: system_csvs/basic_materials_historical_membership.csv
+    source_id: basic_materials_historical_membership_review
+    expected_rows: 20
+    unique_key: historical_ticker
+  ticker_aliases:
+    path: system_csvs/basic_materials_ticker_aliases.csv
+    source_id: basic_materials_historical_alias_review
+    expected_rows: 4
+    unique_key: alias_key
+  security_events:
+    path: system_csvs/basic_materials_security_events.csv
+    source_id: basic_materials_security_event_review
+    expected_rows: 22
+    unique_key: event_key
+  terminal_events:
+    path: system_csvs/basic_materials_terminal_events.csv
+    source_id: basic_materials_terminal_event_review
+    expected_rows: 20
+    unique_key: event_key
+
+expected_tickers:
+  - X
+  - RDUS
+  - HAYN
+  - ZEUS
+  - VAL
+  - MMX
+  - SAND
+  - GOLD
+  - GATO
+  - ANV
+  - MCP
+  - GMO
+  - ALTM
+  - BIOA
+  - AXLL
+  - SUM
+  - USCR
+  - MON
+  - POT
+  - AGU
+
+expected_cohort_counts:
+  agricultural_inputs_crop_science: 3
+  building_materials: 2
+  commodity_chemicals: 2
+  industrial_metals_mining: 3
+  mining_royalty_streaming: 2
+  precious_metals_producers: 3
+  specialty_chemicals_materials: 1
+  steel_producers_processors: 4
+
+cohort_calibration_parents:
+  agricultural_inputs_crop_science: chemicals_inputs
+  building_materials: basic_materials_sector
+  commodity_chemicals: chemicals_inputs
+  industrial_metals_mining: metals_mining_producers
+  mining_royalty_streaming: metals_mining_asset_light
+  precious_metals_producers: metals_mining_producers
+  specialty_chemicals_materials: chemicals_inputs
+  steel_producers_processors: metals_mining_producers
+
+allowed_alias_relationships:
+  - reused_ticker_scope
+  - ticker_predecessor
+
+allowed_event_types:
+  - bankruptcy_liquidation
+  - bankruptcy_reorganization
+  - cash_acquisition
+  - mixed_acquisition
+  - stock_acquisition
+  - stock_merger
+  - ticker_change
+
+allowed_terminal_types:
+  - bankruptcy_liquidation
+  - bankruptcy_reorganization
+  - cash_acquisition
+  - mixed_acquisition
+  - stock_acquisition
+  - stock_merger
+
+allowed_terminal_reconciliation_statuses:
+  - allocation_and_price_pending
+  - bankruptcy_distribution_pending
+  - successor_price_pending
+  - terms_verified_price_pending
+
+required_flags:
+  include_in_historical_universe: true
+  current_source_only: false
+  survivorship_corrected: true
+  membership_calibration_eligible: false
+  terminal_reconciliation_required: true
+  terminal_survivorship_complete: false
+  terminal_calibration_eligible: false
+  require_all_terminal_values_resolved_before_promotion: true

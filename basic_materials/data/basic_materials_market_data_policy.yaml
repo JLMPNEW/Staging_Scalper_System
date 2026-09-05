@@ -1,0 +1,111 @@
+policy_version: basic_materials_market_data_policy_v1
+contract_as_of_date: '2026-09-05'
+model_family: basic_materials
+sector: Basic Materials
+review_status: approved_stage3_instrument_contract
+
+files:
+  market_instruments:
+    path: system_csvs/basic_materials_market_instruments.csv
+    source_id: basic_materials_market_instrument_review
+    expected_rows: 162
+    unique_key: role_key
+  terminal_return_rules:
+    path: system_csvs/basic_materials_terminal_return_rules.csv
+    source_id: basic_materials_terminal_return_rule_review
+    expected_rows: 20
+    unique_key: event_key
+
+expected_role_counts:
+  current_universe: 134
+  historical_pilot: 20
+  sector_benchmark: 1
+  broad_benchmark: 1
+  terminal_successor: 6
+expected_unique_instruments: 158
+
+provider:
+  source_id: norgate_us_equities_total_return
+  databases:
+    - US Equities
+    - US Equities Delisted
+  adjustment_basis: norgate_total_return
+  stock_price_adjustment: TOTALRETURN
+  raw_price_adjustment: NONE
+  provider_asset_id_required: true
+  ticker_only_join_forbidden: true
+  snapshot_fence_required: true
+
+history:
+  history_start: '2009-01-02'
+  first_scoring_date: '2010-01-04'
+  current_end_is_run_asof: true
+
+benchmarks:
+  sector:
+    ticker: XLB
+    role_type: sector_benchmark
+  broad:
+    ticker: SPY
+    role_type: broad_benchmark
+  trading_calendar_role: broad_benchmark
+  trading_calendar_code: XNYS_PROXY_SPY
+
+coverage:
+  start_tolerance_calendar_days: 10
+  active_max_staleness_calendar_days: 7
+  historical_end_tolerance_calendar_days: 7
+  minimum_rows_partial: 63
+  minimum_rows_full: 253
+  first_snapshot_minimum_observations: 1
+  maximum_missing_session_ratio: 0.02
+  missing_session_warning_ratio: 0.01
+  maximum_consecutive_missing_sessions: 5
+  current_gate_minimum_ratio: 0.95
+  recent_listing_short_history_is_rank_ready: true
+  sparse_history_rank_minimum_observations: 253
+  sparse_history_rank_maximum_missing_session_ratio: 0.45
+  sparse_history_rank_maximum_consecutive_missing_sessions: 120
+
+features:
+  return_windows:
+    - 21
+    - 63
+    - 126
+    - 252
+  momentum_12m_days: 252
+  momentum_skip_days: 21
+  volatility_days: 63
+  drawdown_days: 252
+  short_moving_average_days: 50
+  long_moving_average_days: 200
+  average_dollar_volume_days: 63
+  beta_days: 252
+  beta_residual_momentum_days: 126
+  feature_definition_version: basic_materials_market_features_v1
+
+terminal_returns:
+  required_event_count: 20
+  allowed_outcome_classes:
+    - fixed_cash
+    - stock_conversion
+    - mixed_prorated
+    - bankruptcy_distribution
+    - otc_continuation
+  max_reference_lag_calendar_days: 7
+  require_exact_historical_final_quote: true
+  unresolved_distribution_is_explicit_exclusion: true
+  historical_calibration_activation_allowed: false
+
+provider_symbol_overrides:
+  terminal_ZEUS_20260213:
+    economic_successor_ticker: RYI
+    provider_symbol: RYZ
+    provider_asset_id: '1606887'
+    effective_date: '2026-02-24'
+    reason: Ryerson changed its NYSE ticker from RYI to RYZ after the merger.
+
+required_flags:
+  required_for_stage3: true
+  current_and_benchmark_required_for_current_gate: true
+  calibration_eligible: false

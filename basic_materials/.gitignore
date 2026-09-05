@@ -1,0 +1,11 @@
+.scratch/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+review/*.inspect.ndjson
+!system_csvs/basic_materials_deactivated_candidates.csv
+!system_csvs/basic_materials_historical_membership.csv
+!system_csvs/basic_materials_ticker_aliases.csv
+!system_csvs/basic_materials_security_events.csv
+!system_csvs/basic_materials_terminal_events.csv
+!review/basic_materials_deactivated_candidate_review.xlsx

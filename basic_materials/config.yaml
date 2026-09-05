@@ -1,0 +1,44 @@
+config_version: 1
+
+model:
+  family: basic_materials
+  sector: Basic Materials
+  schema_owner: basic_materials
+  implemented_stage: 3
+  promotion_state: shadow_monitor
+  portfolio_candidate_gate: false
+  oos_score_valid_flag: false
+
+paths:
+  database: '${BASIC_MATERIALS_DB_DIR:-C:/Users/josel/Documents/STAGING/DB}/basic_materials.sqlite'
+  output_root: ../output/basic_materials
+  cache_root: ../output/basic_materials/cache
+  authoritative_input_manifest: data/authoritative_input_manifest.yaml
+  source_registry: data/free_source_registry.yaml
+  universe_policy: data/basic_materials_universe_policy.yaml
+  universe_csv: ../ticker_mapping/basic_materials.csv
+  historical_candidate_policy: data/basic_materials_historical_candidate_policy.yaml
+  historical_candidate_manifest: data/basic_materials_historical_candidate_manifest.yaml
+  historical_candidates_csv: system_csvs/basic_materials_deactivated_candidates.csv
+  historical_reconciliation_policy: data/basic_materials_historical_reconciliation_policy.yaml
+  historical_reconciliation_manifest: data/basic_materials_historical_reconciliation_manifest.yaml
+  historical_membership_csv: system_csvs/basic_materials_historical_membership.csv
+  ticker_aliases_csv: system_csvs/basic_materials_ticker_aliases.csv
+  security_events_csv: system_csvs/basic_materials_security_events.csv
+  terminal_events_csv: system_csvs/basic_materials_terminal_events.csv
+  market_data_policy: data/basic_materials_market_data_policy.yaml
+  market_data_manifest: data/basic_materials_market_data_manifest.yaml
+  market_instruments_csv: system_csvs/basic_materials_market_instruments.csv
+  terminal_return_rules_csv: system_csvs/basic_materials_terminal_return_rules.csv
+
+runtime:
+  sqlite_timeout_seconds: 30
+  fail_closed: true
+  allow_cross_sector_imports: false
+  require_manifest_match_before_mutation: true
+  require_database_identity: true
+
+historical_contract:
+  point_in_time_membership_required_for_calibration: true
+  current_universe_is_survivorship_corrected: false
+  current_universe_calibration_eligible: false

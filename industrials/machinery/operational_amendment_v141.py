@@ -50,15 +50,17 @@ from portfolio_layer.scores.adapters import run_adapter
 from portfolio_layer.scores.adapter_semantics import (
     industrial_adapter_semantic_sha256,
 )
+from portfolio_layer.optimizer.optimizer_semantics import (
+    SEMANTIC_SEAL_VERSION as OPTIMIZER_SEMANTIC_SEAL_VERSION,
+    machinery_optimizer_semantic_sha256,
+)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parents[1]
 PROTOCOL_VERSION = "machinery_oos_v1.4.1_operational_amendment"
 DEFAULT_PROTOCOL_PATH = PACKAGE_ROOT / "model_protocols" / f"{PROTOCOL_VERSION}.json"
-DEFAULT_OUTPUT_ROOT = (
-    PROJECT_ROOT / "output" / "industrials" / "machinery" / "v141_operational"
-)
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "output" / "industrials" / "machinery" / "v141_operational"
 TURNOVER_FIELDS = (
     "model",
     "horizon_days",
@@ -184,14 +186,11 @@ def _verify_original_lockbox(
     ):
         raise ValueError("Original machinery lockbox is not completed and spent")
     if (
-        acceptance.get("conditional_promotion_status")
-        != "BLOCKED_KEEP_ACTIVE_MODEL"
+        acceptance.get("conditional_promotion_status") != "BLOCKED_KEEP_ACTIVE_MODEL"
         or acceptance.get("production_promotion_performed") is not False
     ):
         raise ValueError("Original conditional result is not the expected blocked result")
-    if manifest.get("protocol_definition_sha256") != file_sha256(
-        CONDITIONAL_PROTOCOL_PATH
-    ):
+    if manifest.get("protocol_definition_sha256") != file_sha256(CONDITIONAL_PROTOCOL_PATH):
         raise ValueError("Original conditional protocol hash mismatch")
     for metadata in manifest.get("files", {}).values():
         path = Path(str(metadata.get("path") or ""))
@@ -241,9 +240,7 @@ def recurring_turnover_diagnostics(
                 abs_tol=1e-10,
             )
         if not math.isclose(turnovers[0], 1.0, rel_tol=0.0, abs_tol=1e-10):
-            raise ValueError(
-                f"First {model} {horizon}d period is not portfolio formation"
-            )
+            raise ValueError(f"First {model} {horizon}d period is not portfolio formation")
         recurring = turnovers[1:]
         output.append(
             {
@@ -252,14 +249,10 @@ def recurring_turnover_diagnostics(
                 "period_count": len(turnovers),
                 "recurring_period_count": len(recurring),
                 "initial_formation_turnover": turnovers[0],
-                "average_turnover_including_formation": sum(turnovers)
-                / len(turnovers),
-                "average_recurring_one_way_turnover": sum(recurring)
-                / len(recurring),
+                "average_turnover_including_formation": sum(turnovers) / len(turnovers),
+                "average_recurring_one_way_turnover": sum(recurring) / len(recurring),
                 "maximum_recurring_one_way_turnover": max(recurring),
-                "transaction_cost_reconciliation_status": (
-                    "PASS" if costs_ok else "FAIL"
-                ),
+                "transaction_cost_reconciliation_status": ("PASS" if costs_ok else "FAIL"),
             }
         )
     return output
@@ -274,15 +267,9 @@ def _lockbox_parity(
     candidate_weights: Mapping[str, float],
 ) -> list[dict[str, Any]]:
     """Reuse production parity logic with the lockbox split normalized."""
-    normalized_panel = [
-        {**dict(row), "split_name": "holdout"} for row in panel_rows
-    ]
-    normalized_periods = [
-        {**dict(row), "split_name": "holdout"} for row in period_rows
-    ]
-    normalized_holdings = [
-        {**dict(row), "split_name": "holdout"} for row in holding_rows
-    ]
+    normalized_panel = [{**dict(row), "split_name": "holdout"} for row in panel_rows]
+    normalized_periods = [{**dict(row), "split_name": "holdout"} for row in period_rows]
+    normalized_holdings = [{**dict(row), "split_name": "holdout"} for row in holding_rows]
     parity = build_production_policy_parity(
         config,
         panel_rows=normalized_panel,
@@ -321,27 +308,14 @@ def assess_operational_amendment(
         if validation["acceptance"] == "PASS":
             return _load_json(paths.acceptance_json)
         raise ValueError("Existing operational amendment artifacts are invalid")
-    original, original_manifest = _verify_original_lockbox(
-        conditional_root=conditional_root
-    )
+    original, original_manifest = _verify_original_lockbox(conditional_root=conditional_root)
     conditional = conditional_paths(conditional_root)
     gate_rows = read_rows(conditional.gates_csv)
     failed_rows = [row for row in gate_rows if row.get("status") != "PASS"]
-    allowed_ids = {
-        str(value)
-        for value in protocol["decision_contract"][
-            "allowed_original_failed_gate_ids"
-        ]
-    }
-    allowed_horizons = {
-        int(value)
-        for value in protocol["decision_contract"][
-            "allowed_original_failed_horizons"
-        ]
-    }
+    allowed_ids = {str(value) for value in protocol["decision_contract"]["allowed_original_failed_gate_ids"]}
+    allowed_horizons = {int(value) for value in protocol["decision_contract"]["allowed_original_failed_horizons"]}
     failure_contract_pass = bool(failed_rows) and all(
-        row.get("gate_id") in allowed_ids
-        and int(str(row.get("horizon_days") or "0")) in allowed_horizons
+        row.get("gate_id") in allowed_ids and int(str(row.get("horizon_days") or "0")) in allowed_horizons
         for row in failed_rows
     )
     frozen = _load_json(conditional.freeze_manifest)
@@ -362,35 +336,24 @@ def assess_operational_amendment(
         holding_rows=read_rows(conditional.holdings_csv),
         candidate_weights=candidate_weights,
     )
-    maximum_turnover = float(
-        protocol["maximum_average_recurring_one_way_turnover"]
-    )
+    maximum_turnover = float(protocol["maximum_average_recurring_one_way_turnover"])
     amended_gates = [
         _gate_row(
             "original_failure_contract",
             actual=1.0 if failure_contract_pass else 0.0,
             threshold=1.0,
             direction="exact",
-            detail=";".join(
-                f"{row.get('gate_id')}:{row.get('horizon_days')}"
-                for row in failed_rows
-            ),
+            detail=";".join(f"{row.get('gate_id')}:{row.get('horizon_days')}" for row in failed_rows),
         ),
         _gate_row(
             "nonempty_production_policy_parity",
             actual=float(len(parity)),
-            threshold=float(
-                protocol["decision_contract"][
-                    "minimum_nonempty_parity_periods"
-                ]
-            ),
+            threshold=float(protocol["decision_contract"]["minimum_nonempty_parity_periods"]),
             direction="minimum",
         ),
         _gate_row(
             "production_policy_parity_failures",
-            actual=float(
-                sum(row.get("parity_status") != "PASS" for row in parity)
-            ),
+            actual=float(sum(row.get("parity_status") != "PASS" for row in parity)),
             threshold=0.0,
             direction="exact",
         ),
@@ -410,11 +373,7 @@ def assess_operational_amendment(
         amended_gates.append(
             _gate_row(
                 f"{model}_transaction_cost_reconciliation",
-                actual=(
-                    1.0
-                    if row["transaction_cost_reconciliation_status"] == "PASS"
-                    else 0.0
-                ),
+                actual=(1.0 if row["transaction_cost_reconciliation_status"] == "PASS" else 0.0),
                 threshold=1.0,
                 direction="exact",
                 horizon=horizon,
@@ -426,31 +385,17 @@ def assess_operational_amendment(
     write_csv_atomic(paths.gates_csv, GATE_FIELDS, amended_gates)
     acceptance = {
         "acceptance": "PASS",
-        "amendment_status": (
-            "READY_FOR_STAGE12_PREFLIGHT"
-            if ready
-            else "BLOCKED_KEEP_ACTIVE_MODEL"
-        ),
+        "amendment_status": ("READY_FOR_STAGE12_PREFLIGHT" if ready else "BLOCKED_KEEP_ACTIVE_MODEL"),
         "candidate_id": "equal_components",
         "created_at_utc": utc_now(),
-        "failed_amendment_gates": [
-            row["gate_id"] for row in amended_gates if row["status"] != "PASS"
-        ],
+        "failed_amendment_gates": [row["gate_id"] for row in amended_gates if row["status"] != "PASS"],
         "hard_gate_pass": ready,
         "initial_funding_cost_remains_charged": True,
         "lockbox_result_modified": False,
-        "original_conditional_acceptance_sha256": file_sha256(
-            conditional.acceptance_json
-        ),
-        "original_conditional_run_manifest_sha256": file_sha256(
-            conditional.run_manifest_json
-        ),
-        "original_conditional_status": original[
-            "conditional_promotion_status"
-        ],
-        "original_manifest_protocol_sha256": original_manifest[
-            "protocol_definition_sha256"
-        ],
+        "original_conditional_acceptance_sha256": file_sha256(conditional.acceptance_json),
+        "original_conditional_run_manifest_sha256": file_sha256(conditional.run_manifest_json),
+        "original_conditional_status": original["conditional_promotion_status"],
+        "original_manifest_protocol_sha256": original_manifest["protocol_definition_sha256"],
         "parity_period_count": len(parity),
         "post_lockbox_governance_exception": True,
         "production_promotion_performed": False,
@@ -469,16 +414,11 @@ def assess_operational_amendment(
         "artifact_family": "machinery_v141_operational_amendment",
         "created_at_utc": utc_now(),
         "lockbox_result_modified": False,
-        "original_conditional_run_manifest_sha256": file_sha256(
-            conditional.run_manifest_json
-        ),
+        "original_conditional_run_manifest_sha256": file_sha256(conditional.run_manifest_json),
         "production_promotion_performed": False,
         "protocol_definition_sha256": file_sha256(protocol_path),
         "protocol_version": PROTOCOL_VERSION,
-        "files": {
-            path.name: {"path": str(path), "sha256": file_sha256(path)}
-            for path in artifacts
-        },
+        "files": {path.name: {"path": str(path), "sha256": file_sha256(path)} for path in artifacts},
     }
     _write_json(paths.run_manifest_json, manifest)
     validation = validate_operational_amendment(
@@ -554,9 +494,7 @@ def build_operational_stage12_candidate(
             return _load_json(stage12_paths.lock_json)
         raise FileExistsError("Existing amended Stage 12 candidate is invalid")
     source_rank = source_dashboard_dir / "machinery_final_rank_table.csv"
-    source_manifest = (
-        source_dashboard_dir / "machinery_final_rank_table_manifest.json"
-    )
+    source_manifest = source_dashboard_dir / "machinery_final_rank_table_manifest.json"
     if not source_rank.is_file() or not source_manifest.is_file():
         raise FileNotFoundError("Current-schema source dashboard is incomplete")
     source_metadata = _load_json(source_manifest)
@@ -574,19 +512,14 @@ def build_operational_stage12_candidate(
         allow_production=False,
     )
     if source_issues:
-        raise ValueError(
-            "Current-schema source dashboard failed: "
-            + ";".join(source_issues[:20])
-        )
+        raise ValueError("Current-schema source dashboard failed: " + ";".join(source_issues[:20]))
     portfolio_path = resolve_path(
         cfg_get(config, "machinery_stage12.portfolio_config_path"),
         base_dir=config_path.parent,
     )
     portfolio = load_yaml(portfolio_path)
     family = _portfolio_family(portfolio)
-    cap = float(
-        cfg_get(portfolio, "optimizer.sector_weight_caps.machinery", -1.0)
-    )
+    cap = float(cfg_get(portfolio, "optimizer.sector_weight_caps.machinery", -1.0))
     approved_cap = float(protocol["maximum_portfolio_cap"])
     fixed_equal = {
         str(value)
@@ -596,14 +529,8 @@ def build_operational_stage12_candidate(
             [],
         )
     }
-    if (
-        family.get("required") is not True
-        or cap != approved_cap
-        or MODEL_FAMILY not in fixed_equal
-    ):
-        raise ValueError(
-            "Operational amendment cannot alter live machinery settings"
-        )
+    if family.get("required") is not True or cap != approved_cap or MODEL_FAMILY not in fixed_equal:
+        raise ValueError("Operational amendment cannot alter live machinery settings")
     conditional = conditional_paths(conditional_root)
     frozen = _load_json(conditional.freeze_manifest)
     candidate_weights = _float_map(
@@ -633,13 +560,9 @@ def build_operational_stage12_candidate(
         weights=candidate_weights,
         asof=asof,
         lock_date="2026-01-01",
-        score_model_version=str(
-            cfg_get(config, "machinery_stage12.score_model_version")
-        ),
+        score_model_version=str(cfg_get(config, "machinery_stage12.score_model_version")),
         model_version=str(cfg_get(config, "machinery_stage12.model_version")),
-        scoring_contract_version=str(
-            cfg_get(config, "machinery_stage12.scoring_contract_version")
-        ),
+        scoring_contract_version=str(cfg_get(config, "machinery_stage12.scoring_contract_version")),
         selection_spec=spec,
         minimum_positions=int(selection_policy["minimum_positions"]),
         universe_policy=str(selection_policy["universe_policy"]),
@@ -650,9 +573,7 @@ def build_operational_stage12_candidate(
         selection_policy=selection_policy,
     )
     if preview_issues:
-        raise ValueError(
-            "Amended production preview failed: " + ";".join(preview_issues)
-        )
+        raise ValueError("Amended production preview failed: " + ";".join(preview_issues))
     paths.stage12_root.mkdir(parents=True, exist_ok=True)
     write_rank_rows(stage12_paths.preview_csv, preview)
     sleeve_rows = [
@@ -676,22 +597,16 @@ def build_operational_stage12_candidate(
         ),
         asof,
     )
-    selected = {
-        row["ticker"]
-        for row in preview
-        if row["portfolio_sleeve_selected_flag"] == "1"
-    }
-    adapted = {
-        row.ticker for row in adapter_result.rows if row.investable_eligible == 1
-    }
+    selected = {row["ticker"] for row in preview if row["portfolio_sleeve_selected_flag"] == "1"}
+    adapted = {row.ticker for row in adapter_result.rows if row.investable_eligible == 1}
     if adapted != selected:
-        raise ValueError(
-            "Portfolio adapter changed amended machinery membership"
-        )
+        raise ValueError("Portfolio adapter changed amended machinery membership")
     active = _active_evidence(config, config_path=config_path)
     active_state = Path(str(active["activation_state_path"]))
     panel_manifest = stage8_paths(conditional.panel_root).panel_manifest_json
     lock = {
+        "portfolio_optimizer_semantic_sha256": (machinery_optimizer_semantic_sha256()),
+        "portfolio_optimizer_semantic_version": OPTIMIZER_SEMANTIC_SEAL_VERSION,
         "acceptance": "PASS",
         "activation_mode": ACTIVATION_MODE_REPLACE_ACTIVE,
         "activation_requires_explicit_operator_approval": True,
@@ -706,33 +621,17 @@ def build_operational_stage12_candidate(
         "development_end_date": "2025-12-31",
         "live_dashboard_modified": False,
         "lockbox_start_date": "2026-01-01",
-        "machinery_portfolio_policy_sha256": (
-            machinery_portfolio_policy_fingerprint(portfolio)
-        ),
+        "machinery_portfolio_policy_sha256": (machinery_portfolio_policy_fingerprint(portfolio)),
         "minimum_capacity_multiple": 5.0,
         "model_family": MODEL_FAMILY,
-        "portfolio_adapter_semantic_sha256": (
-            industrial_adapter_semantic_sha256()
-        ),
-        "portfolio_adapter_sha256": file_sha256(
-            PROJECT_ROOT / "portfolio_layer" / "scores" / "adapters.py"
-        ),
+        "portfolio_adapter_semantic_sha256": (industrial_adapter_semantic_sha256()),
+        "portfolio_adapter_sha256": file_sha256(PROJECT_ROOT / "portfolio_layer" / "scores" / "adapters.py"),
         "portfolio_config_sha256": file_sha256(portfolio_path),
         "portfolio_equal_weight_constraint_configured": True,
-        "portfolio_non_activation_config_sha256": (
-            portfolio_activation_fingerprint(portfolio)
-        ),
-        "portfolio_optimizer_sha256": file_sha256(
-            PROJECT_ROOT
-            / "portfolio_layer"
-            / "optimizer"
-            / "optimizer_core.py"
-        ),
+        "portfolio_non_activation_config_sha256": (portfolio_activation_fingerprint(portfolio)),
+        "portfolio_optimizer_sha256": file_sha256(PROJECT_ROOT / "portfolio_layer" / "optimizer" / "optimizer_core.py"),
         "portfolio_optimizer_runner_sha256": file_sha256(
-            PROJECT_ROOT
-            / "portfolio_layer"
-            / "optimizer"
-            / "09_run_portfolio_optimizer.py"
+            PROJECT_ROOT / "portfolio_layer" / "optimizer" / "09_run_portfolio_optimizer.py"
         ),
         "post_lockbox_governance_exception": True,
         "previous_activation_state_sha256": file_sha256(active_state),
@@ -775,9 +674,7 @@ def build_operational_stage12_candidate(
     write_json_atomic(
         stage12_paths.manifest_json,
         {
-            "artifact_family": (
-                "machinery_v141_operational_stage12_candidate"
-            ),
+            "artifact_family": ("machinery_v141_operational_stage12_candidate"),
             "created_at_utc": utc_now(),
             "production_promotion_performed": False,
             "files": {
@@ -789,9 +686,7 @@ def build_operational_stage12_candidate(
             },
         },
     )
-    stage12_validation = validate_stage12_lock(
-        output_root=paths.stage12_root
-    )
+    stage12_validation = validate_stage12_lock(output_root=paths.stage12_root)
     if stage12_validation.get("acceptance") != "PASS":
         raise ValueError("Amended Stage 12 candidate failed validation")
     return lock

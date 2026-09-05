@@ -1,0 +1,60 @@
+policy_version: basic_materials_historical_candidate_policy_v1
+as_of_date: '2026-09-05'
+sector: Basic Materials
+candidate_file: system_csvs/basic_materials_deactivated_candidates.csv
+expected_candidate_rows: 72
+expected_min_event_source_urls: 16
+default_review_status: candidate_unapproved
+include_in_historical_universe: false
+calibration_eligible: false
+
+required_columns:
+  - sector
+  - cohort
+  - historical_ticker
+  - provider_symbol
+  - provider_asset_id
+  - company_name
+  - provider_industry
+  - first_quoted_date
+  - provider_last_quoted_date
+  - expected_terminal_type
+  - expected_event_date
+  - expected_counterparty
+  - successor_ticker
+  - candidate_tier
+  - review_status
+  - event_reconciliation_status
+  - pit_membership_status
+  - terminal_value_status
+  - include_in_historical_universe
+  - calibration_eligible
+  - discovery_source
+  - event_source_url
+  - selection_rationale
+  - notes
+
+allowed_terminal_types:
+  - bankruptcy_liquidation
+  - bankruptcy_reorganization
+  - cash_acquisition
+  - cash_and_stock_acquisition
+  - cash_and_unit_acquisition
+  - mixed_acquisition
+  - stock_acquisition
+  - stock_merger
+
+allowed_event_reconciliation_statuses:
+  - pending_primary_source
+  - provider_mapping_blocked
+  - source_found_terminal_pending
+
+expected_cohort_counts:
+  agricultural_inputs_crop_science: 9
+  building_materials: 10
+  commodity_chemicals: 7
+  industrial_metals_mining: 11
+  mining_royalty_streaming: 4
+  precious_metals_producers: 13
+  specialty_chemicals_materials: 10
+  steel_producers_processors: 8

@@ -1,0 +1,11 @@
+manifest_version: 1
+artifact_id: basic_materials_deactivated_candidate_census_v1
+path: ../system_csvs/basic_materials_deactivated_candidates.csv
+as_of_date: '2026-09-05'
+sha256: eac142b0426c7bc16ee273898f45f0f14db25f1daa8e67b6cf93362a7026f711
+row_count: 72
+byte_size: 30927
+state: candidate_unapproved
+include_in_historical_universe: false
+calibration_eligible: false
+purpose: Stage 2B deactivated-company research queue for point-in-time and terminal-event review

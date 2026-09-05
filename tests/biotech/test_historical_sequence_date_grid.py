@@ -97,3 +97,15 @@ def test_market_daily_frequency_fills_sessions_missing_from_prior_scores(tmp_pat
     assert (start, end) == ("2024-01-02", "2024-01-05")
     assert dates == ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
 
+
+
+def test_core_score_history_mode_includes_all_calibration_score_layers() -> None:
+    source = Path("biotech_index/scripts/45_run_biotech_clean_historical_sequence.py").read_text(
+        encoding="utf-8"
+    )
+    core_block = source.split("if args.core_score_history_only:", maxsplit=1)[1].split(
+        "if (", maxsplit=1
+    )[0]
+    assert '"biotech_scores"' in core_block
+    assert '"multibagger_features"' in core_block
+    assert '"multibagger_scores"' in core_block

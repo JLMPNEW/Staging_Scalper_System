@@ -5,6 +5,7 @@ hash therefore couples machinery production governance to unrelated biotech or
 med-device edits. This module hashes the executable AST reachable from the
 industrial adapter only, plus the canonical row contracts it constructs.
 """
+
 from __future__ import annotations
 
 import ast
@@ -13,9 +14,9 @@ from hashlib import sha256
 from pathlib import Path
 
 
-SEMANTIC_SEAL_VERSION = "industrial_adapter_ast_v1"
+SEMANTIC_SEAL_VERSION = "industrial_adapter_ast_v2"
 _ADAPTER_ROOTS = ("run_adapter", "_adapt_industrial_family")
-_CONTRACT_ROOTS = ("CanonicalScore", "AdapterResult", "read_csv")
+_CONTRACT_ROOTS = ("AdapterResult", "read_csv")
 
 
 def _module_members(
@@ -40,7 +41,12 @@ def _module_members(
     return definitions, imports
 
 
-def _reachable_ast(source: str, roots: tuple[str, ...]) -> dict[str, object]:
+def _reachable_ast(
+    source: str,
+    roots: tuple[str, ...],
+    *,
+    ignored_dependencies: frozenset[str] = frozenset(),
+) -> dict[str, object]:
     tree = ast.parse(source)
     definitions, imports = _module_members(tree)
     queue = list(roots)
@@ -60,6 +66,8 @@ def _reachable_ast(source: str, roots: tuple[str, ...]) -> dict[str, object]:
             if not isinstance(child, ast.Name) or not isinstance(child.ctx, ast.Load):
                 continue
             dependency = child.id
+            if dependency in ignored_dependencies:
+                continue
             if dependency == "_ADAPTERS":
                 continue
             if dependency in definitions and dependency not in visited:
@@ -80,11 +88,7 @@ def _industrial_dispatch(source: str) -> dict[str, str]:
     tree = ast.parse(source)
     definitions, _imports = _module_members(tree)
     assignment = definitions.get("_ADAPTERS")
-    value = (
-        assignment.value
-        if isinstance(assignment, (ast.Assign, ast.AnnAssign))
-        else None
-    )
+    value = assignment.value if isinstance(assignment, (ast.Assign, ast.AnnAssign)) else None
     if not isinstance(value, ast.Dict):
         raise ValueError("_ADAPTERS must be a literal dictionary for semantic sealing")
     for key, target in zip(value.keys, value.values, strict=True):
@@ -94,9 +98,7 @@ def _industrial_dispatch(source: str) -> dict[str, str]:
             return {
                 "adapter": "industrial_family",
                 "target": target.id,
-                "target_ast": ast.dump(
-                    target, annotate_fields=True, include_attributes=False
-                ),
+                "target_ast": ast.dump(target, annotate_fields=True, include_attributes=False),
             }
     raise ValueError("industrial_family is missing from _ADAPTERS")
 
@@ -109,21 +111,17 @@ def industrial_adapter_semantic_payload(
     root = Path(__file__).resolve().parents[2]
     adapter_path = root / "portfolio_layer" / "scores" / "adapters.py"
     contracts_path = root / "portfolio_layer" / "core" / "contracts.py"
-    adapter_text = (
-        adapter_source
-        if adapter_source is not None
-        else adapter_path.read_text(encoding="utf-8")
-    )
-    contracts_text = (
-        contracts_source
-        if contracts_source is not None
-        else contracts_path.read_text(encoding="utf-8")
-    )
+    adapter_text = adapter_source if adapter_source is not None else adapter_path.read_text(encoding="utf-8")
+    contracts_text = contracts_source if contracts_source is not None else contracts_path.read_text(encoding="utf-8")
     return {
         "version": SEMANTIC_SEAL_VERSION,
         "adapter": _reachable_ast(adapter_text, _ADAPTER_ROOTS),
         "dispatch": _industrial_dispatch(adapter_text),
-        "contracts": _reachable_ast(contracts_text, _CONTRACT_ROOTS),
+        "contracts": _reachable_ast(
+            contracts_text,
+            _CONTRACT_ROOTS,
+            ignored_dependencies=frozenset({"CanonicalScore"}),
+        ),
     }
 
 

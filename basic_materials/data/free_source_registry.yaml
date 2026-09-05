@@ -1,0 +1,72 @@
+registry_version: basic_materials_source_registry_v2
+sources:
+  - source_id: basic_materials_current_universe
+    stage: universe
+    provider: local_authoritative_input
+    category: universe_membership
+    description: Reviewed current Basic Materials ticker universe.
+    point_in_time_role: current_snapshot_only
+    active: true
+  - source_id: basic_materials_universe_policy
+    stage: universe
+    provider: basic_materials_package
+    category: policy
+    description: Versioned cohort, calibration-group, and membership policy.
+    point_in_time_role: versioned_policy
+    active: true
+  - source_id: basic_materials_historical_membership_review
+    stage: stage_2b_historical_reconciliation
+    provider: reviewed_norgate_snapshot
+    category: historical_universe_membership
+    description: Reviewed point-in-time pilot membership for inactive Basic Materials issuers.
+    point_in_time_role: effective_dated_historical_membership
+    active: true
+  - source_id: basic_materials_historical_alias_review
+    stage: stage_2b_historical_reconciliation
+    provider: reviewed_sec_and_provider_lineage
+    category: security_identifier_lineage
+    description: Reviewed ticker aliases and reused-ticker scopes for the historical pilot.
+    point_in_time_role: effective_dated_identifier_lineage
+    active: true
+  - source_id: basic_materials_security_event_review
+    stage: stage_2b_historical_reconciliation
+    provider: sec_edgar
+    category: security_events
+    description: Primary-source security and terminal event facts for the historical pilot.
+    point_in_time_role: effective_dated_security_events
+    active: true
+  - source_id: basic_materials_terminal_event_review
+    stage: stage_2b_historical_reconciliation
+    provider: sec_edgar
+    category: terminal_event_terms
+    description: Reviewed consideration terms with unresolved price and distribution gates.
+    point_in_time_role: terminal_return_reconciliation
+    active: true
+  - source_id: basic_materials_market_instrument_review
+    stage: stage_3_adjusted_market_data
+    provider: basic_materials_package
+    category: market_instrument_identity
+    description: Reviewed stable provider identities and role assignments for current, historical, benchmark, and successor securities.
+    point_in_time_role: versioned_market_identity_contract
+    active: true
+  - source_id: basic_materials_terminal_return_rule_review
+    stage: stage_3_adjusted_market_data
+    provider: reviewed_sec_and_market_lineage
+    category: terminal_return_rules
+    description: Reviewed terminal-return outcome classes, allocation weights, and unresolved-distribution dispositions.
+    point_in_time_role: effective_dated_terminal_return_rule
+    active: true
+  - source_id: norgate_us_equities_total_return
+    stage: stage_3_adjusted_market_data
+    provider: norgate_data_local
+    category: adjusted_market_data
+    description: Local Norgate US Equities and US Equities Delisted total-return price history.
+    point_in_time_role: adjusted_price_and_corporate_action_history
+    active: true
+  - source_id: basic_materials_manual_override
+    stage: future_data_quality
+    provider: reviewed_internal_override
+    category: manual_override
+    description: Reserved source identifier for reviewed, documented corrections.
+    point_in_time_role: effective_dated_override
+    active: false

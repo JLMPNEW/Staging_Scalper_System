@@ -2716,6 +2716,47 @@ def load_score_aligned_snapshot_dates(
     return dates
 
 
+def filter_snapshot_dates_to_benchmark_sessions(
+    conn: sqlite3.Connection,
+    snapshot_dates: list[str],
+    *,
+    benchmark_ticker: str,
+) -> list[str]:
+    if not snapshot_dates:
+        return []
+    ticker = normalize_ticker(benchmark_ticker)
+    if not ticker:
+        raise ValueError("A valid benchmark ticker is required for calibration session filtering.")
+    rows = conn.execute(
+        """
+        SELECT DISTINCT bar_date
+        FROM market_bars_daily
+        WHERE ticker = ?
+          AND bar_date >= ?
+          AND bar_date <= ?
+        """,
+        (ticker, min(snapshot_dates), max(snapshot_dates)),
+    ).fetchall()
+    market_sessions = {
+        parsed.isoformat()
+        for row in rows
+        if (parsed := parse_date(row["bar_date"])) is not None
+    }
+    if not market_sessions:
+        raise ValueError(
+            f"No {ticker} market sessions cover the requested calibration snapshot range."
+        )
+    filtered = [asof for asof in snapshot_dates if asof in market_sessions]
+    excluded_count = len(snapshot_dates) - len(filtered)
+    if excluded_count:
+        LOGGER.warning(
+            "Excluded %d non-market snapshot date(s) from calibration using %s sessions.",
+            excluded_count,
+            ticker,
+        )
+    return filtered
+
+
 def validate_calibration_date_universe(
     conn: sqlite3.Connection,
     *,
@@ -2724,14 +2765,23 @@ def validate_calibration_date_universe(
     end_asof: date | None,
     fridays_only: bool,
     max_snapshots: int,
+    benchmark_ticker: str = "",
 ) -> None:
     score_aligned_dates = load_score_aligned_snapshot_dates(
         conn,
         start_asof=start_asof,
         end_asof=end_asof,
         fridays_only=fridays_only,
-        max_snapshots=max_snapshots,
+        max_snapshots=0 if benchmark_ticker else max_snapshots,
     )
+    if benchmark_ticker:
+        score_aligned_dates = filter_snapshot_dates_to_benchmark_sessions(
+            conn,
+            score_aligned_dates,
+            benchmark_ticker=benchmark_ticker,
+        )
+        if max_snapshots > 0:
+            score_aligned_dates = score_aligned_dates[-max_snapshots:]
     if snapshot_dates == score_aligned_dates:
         return
     feature_set = set(snapshot_dates)
@@ -8226,10 +8276,17 @@ def main() -> None:
             start_asof=start_asof,
             end_asof=end_asof,
             fridays_only=fridays_only,
-            max_snapshots=max_snapshots,
+            max_snapshots=0,
         )
+        snapshot_dates = filter_snapshot_dates_to_benchmark_sessions(
+            conn,
+            snapshot_dates,
+            benchmark_ticker=params.benchmark_ticker,
+        )
+        if max_snapshots > 0:
+            snapshot_dates = snapshot_dates[-max_snapshots:]
         if not snapshot_dates:
-            raise ValueError("No daily_features snapshot dates found for Tier-1 calibration.")
+            raise ValueError("No benchmark-aligned daily_features dates found for Tier-1 calibration.")
         validate_calibration_date_universe(
             conn,
             snapshot_dates=snapshot_dates,
@@ -8237,6 +8294,7 @@ def main() -> None:
             end_asof=end_asof,
             fridays_only=fridays_only,
             max_snapshots=max_snapshots,
+            benchmark_ticker=params.benchmark_ticker,
         )
         excluded_tickers = load_excluded_tickers(
             conn,

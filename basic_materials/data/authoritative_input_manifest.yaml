@@ -1,0 +1,26 @@
+manifest_version: basic_materials_authoritative_input_v1
+generated_at_utc: '2026-09-05T00:00:00Z'
+files:
+  - source_id: basic_materials_current_universe
+    path: ../../ticker_mapping/basic_materials.csv
+    sha256: 8fe31311a7683e9b207171ace0fe89156fac6154c0a4b40b11c73ed9b9e11be9
+    byte_size: 21265
+    row_count: 134
+    unique_key: ticker
+    unique_count: 134
+    header:
+      - ticker
+      - investability_status
+      - company_name
+      - cik
+      - exchange
+      - sector
+      - industry
+      - subsector
+      - country
+      - currency
+      - security_type
+      - listing_status
+      - is_primary_listing
+      - calibration_group
+

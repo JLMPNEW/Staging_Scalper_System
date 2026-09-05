@@ -41,6 +41,10 @@ from portfolio_layer.scores.adapters import run_adapter
 from portfolio_layer.scores.adapter_semantics import (
     industrial_adapter_semantic_sha256,
 )
+from portfolio_layer.optimizer.optimizer_semantics import (
+    SEMANTIC_SEAL_VERSION as OPTIMIZER_SEMANTIC_SEAL_VERSION,
+    machinery_optimizer_semantic_sha256,
+)
 
 
 ACTIVATION_STATUS_PREPARED = "PREPARED_NOT_ACTIVATED"
@@ -52,11 +56,7 @@ PRODUCTION_POLICY_STATUS_ACTIVE = "ACTIVE"
 
 def source_file_sha256(path: Path) -> str:
     """Hash source semantics without platform-specific newline noise."""
-    payload = (
-        path.read_bytes()
-        .replace(bytes((13, 10)), bytes((10,)))
-        .replace(bytes((13,)), bytes((10,)))
-    )
+    payload = path.read_bytes().replace(bytes((13, 10)), bytes((10,))).replace(bytes((13,)), bytes((10,)))
     return sha256(payload).hexdigest()
 
 
@@ -65,12 +65,11 @@ def production_policy_source_paths() -> dict[str, Path]:
     industrials_root = package_root.parent
     return {
         "stage12_activation.py": package_root / "stage12_activation.py",
-        "stage12_activation_transaction.py": (
-            package_root / "stage12_activation_transaction.py"
-        ),
+        "stage12_activation_transaction.py": (package_root / "stage12_activation_transaction.py"),
         "stage12_governance.py": package_root / "stage12_governance.py",
-        "adapter_semantics.py": (
-            package_root.parents[1] / "portfolio_layer" / "scores" / "adapter_semantics.py"
+        "adapter_semantics.py": (package_root.parents[1] / "portfolio_layer" / "scores" / "adapter_semantics.py"),
+        "optimizer_semantics.py": (
+            package_root.parents[1] / "portfolio_layer" / "optimizer" / "optimizer_semantics.py"
         ),
         "stage8_calibration.py": package_root / "stage8_calibration.py",
         "stage9_backtest.py": package_root / "stage9_backtest.py",
@@ -79,9 +78,7 @@ def production_policy_source_paths() -> dict[str, Path]:
         "08_build_industrials_financial_features.py": (
             industrials_root / "scripts" / "08_build_industrials_financial_features.py"
         ),
-        "financial_metric_contract.py": (
-            industrials_root / "core" / "financial_metric_contract.py"
-        ),
+        "financial_metric_contract.py": (industrials_root / "core" / "financial_metric_contract.py"),
         "db.py": industrials_root / "core" / "db.py",
         "06a_build_machinery_scoring_features.py": (
             package_root / "scripts" / "06a_build_machinery_scoring_features.py"
@@ -103,10 +100,7 @@ def production_policy_source_paths() -> dict[str, Path]:
 
 def production_policy_source_hashes() -> dict[str, str]:
     """Return canonical source hashes for newly written activation seals."""
-    return {
-        name: source_file_sha256(path)
-        for name, path in production_policy_source_paths().items()
-    }
+    return {name: source_file_sha256(path) for name, path in production_policy_source_paths().items()}
 
 
 def changed_production_policy_sources(expected: Mapping[str, object]) -> list[str]:
@@ -126,9 +120,7 @@ def changed_production_policy_sources(expected: Mapping[str, object]) -> list[st
             continue
         sealed = str(expected.get(name) or "")
         raw = path.read_bytes()
-        normalized = raw.replace(bytes((13, 10)), bytes((10,))).replace(
-            bytes((13,)), bytes((10,))
-        )
+        normalized = raw.replace(bytes((13, 10)), bytes((10,))).replace(bytes((13,)), bytes((10,)))
         accepted = {
             sha256(raw).hexdigest(),
             sha256(normalized).hexdigest(),
@@ -148,13 +140,10 @@ class ActivationPaths:
         self.validation_json = self.root / "machinery_activation_candidate_validation.json"
         self.shadow_backup_csv = self.root / "machinery_final_rank_table_shadow_backup.csv"
         self.shadow_sidecar_backup_csv = (
-            self.root
-            / "machinery_stage11_survivorship_calibration_panel_shadow_backup.csv"
+            self.root / "machinery_stage11_survivorship_calibration_panel_shadow_backup.csv"
         )
         self.shadow_manifest_backup_json = self.root / "machinery_final_rank_table_shadow_manifest_backup.json"
-        self.shadow_state_backup_json = (
-            self.root / "machinery_dashboard_pre_activation_state.json"
-        )
+        self.shadow_state_backup_json = self.root / "machinery_dashboard_pre_activation_state.json"
         self.activation_json = self.root / "machinery_activation_result.json"
 
 
@@ -226,9 +215,7 @@ def _restore_dashboard_state(
     """Restore files to their exact pre-activation existence and bytes."""
     if not paths.shadow_state_backup_json.is_file():
         raise FileNotFoundError(paths.shadow_state_backup_json)
-    snapshot = json.loads(
-        paths.shadow_state_backup_json.read_text(encoding="utf-8")
-    )
+    snapshot = json.loads(paths.shadow_state_backup_json.read_text(encoding="utf-8"))
     records = snapshot.get("files")
     if not isinstance(records, dict):
         raise ValueError("Activation dashboard state has no file records")
@@ -351,12 +338,8 @@ def _sealed_governance(
         raise ValueError("Stage 12 governance validation failed: " + ";".join(validation.get("issues", [])))
     paths = Stage12Paths(governance_root)
     lock = json.loads(paths.lock_json.read_text(encoding="utf-8"))
-    stage8_manifest_raw = str(
-        lock.get("stage8_run_manifest") or ""
-    ).strip()
-    stage9_manifest_raw = str(
-        lock.get("stage9_run_manifest") or ""
-    ).strip()
+    stage8_manifest_raw = str(lock.get("stage8_run_manifest") or "").strip()
+    stage9_manifest_raw = str(lock.get("stage9_run_manifest") or "").strip()
     stage8_manifest = (
         Path(stage8_manifest_raw)
         if stage8_manifest_raw
@@ -395,24 +378,27 @@ def _sealed_governance(
             "portfolio_optimizer_runner_sha256",
         ),
     )
+    optimizer_semantic_expected = str(lock.get("portfolio_optimizer_semantic_sha256") or "").strip()
+    if optimizer_semantic_expected:
+        if lock.get("portfolio_optimizer_semantic_version") != OPTIMIZER_SEMANTIC_SEAL_VERSION:
+            raise ValueError("Sealed machinery optimizer semantic version changed")
+        if machinery_optimizer_semantic_sha256() != optimizer_semantic_expected:
+            raise ValueError("Sealed machinery optimizer semantics changed")
+    optimizer_raw_fields = {
+        "portfolio_optimizer_sha256",
+        "portfolio_optimizer_runner_sha256",
+    }
     for path, field in checks:
+        if optimizer_semantic_expected and field in optimizer_raw_fields:
+            continue
         if not path.exists() or file_sha256(path) != lock.get(field):
             raise ValueError(f"Sealed governance dependency changed: {path}")
-    semantic_expected = str(
-        lock.get("portfolio_adapter_semantic_sha256") or ""
-    ).strip()
-    adapter_path = (
-        config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
-    )
+    semantic_expected = str(lock.get("portfolio_adapter_semantic_sha256") or "").strip()
+    adapter_path = config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
     if semantic_expected:
         if industrial_adapter_semantic_sha256() != semantic_expected:
-            raise ValueError(
-                "Sealed industrial adapter semantics changed: "
-                f"{adapter_path}"
-            )
-    elif not adapter_path.exists() or file_sha256(adapter_path) != lock.get(
-        "portfolio_adapter_sha256"
-    ):
+            raise ValueError(f"Sealed industrial adapter semantics changed: {adapter_path}")
+    elif not adapter_path.exists() or file_sha256(adapter_path) != lock.get("portfolio_adapter_sha256"):
         # Legacy locks predate scoped semantic sealing. They remain fail-closed
         # until migrated through the explicit activation-contract rail.
         raise ValueError(f"Sealed governance dependency changed: {adapter_path}")
@@ -446,9 +432,7 @@ def apply_active_production_policy(
             "production_policy_status": "SHADOW_NOT_ACTIVATED",
             "activation_state": str(state_paths.activation_state_json),
         }
-    state = json.loads(
-        state_paths.activation_state_json.read_text(encoding="utf-8")
-    )
+    state = json.loads(state_paths.activation_state_json.read_text(encoding="utf-8"))
     if state.get("acceptance") != "PASS" or state.get("production_policy_status") != PRODUCTION_POLICY_STATUS_ACTIVE:
         raise ValueError("Machinery production activation state is not active")
     activation_asof = parse_date(
@@ -462,17 +446,13 @@ def apply_active_production_policy(
             "production_policy_status": "SHADOW_BEFORE_ACTIVATION",
             "activation_asof": activation_asof.isoformat(),
             "activation_state": str(state_paths.activation_state_json),
-            "activation_state_sha256": file_sha256(
-                state_paths.activation_state_json
-            ),
+            "activation_state_sha256": file_sha256(state_paths.activation_state_json),
         }
     expected_source_hashes = state.get("production_source_sha256")
     expected = expected_source_hashes if isinstance(expected_source_hashes, Mapping) else {}
     changed = changed_production_policy_sources(expected)
     if changed:
-        raise ValueError(
-            "Machinery production policy source changed: " + ",".join(changed)
-        )
+        raise ValueError("Machinery production policy source changed: " + ",".join(changed))
     active_root = _active_cycle_root(state, default_root=governance_root)
     active_paths = Stage12Paths(active_root)
     lock, _ = _sealed_governance(
@@ -481,9 +461,7 @@ def apply_active_production_policy(
         governance_root=active_root,
     )
     _activation_date_checks(lock, activation_asof.isoformat())
-    if file_sha256(active_paths.lock_json) != state.get(
-        "governance_lock_sha256"
-    ):
+    if file_sha256(active_paths.lock_json) != state.get("governance_lock_sha256"):
         raise ValueError("Machinery activation governance lock changed")
     activation_paths = ActivationPaths(
         active_root,
@@ -516,9 +494,7 @@ def apply_active_production_policy(
         base_dir=config_path.parent,
     )
     portfolio_config = load_yaml(portfolio_config_path)
-    if machinery_portfolio_policy_fingerprint(portfolio_config) != lock.get(
-        "machinery_portfolio_policy_sha256"
-    ):
+    if machinery_portfolio_policy_fingerprint(portfolio_config) != lock.get("machinery_portfolio_policy_sha256"):
         raise ValueError("Machinery portfolio policy changed after activation")
     family = _portfolio_family(portfolio_config)
     cap = float(
@@ -580,9 +556,7 @@ def apply_active_production_policy(
         "production_policy_status": PRODUCTION_POLICY_STATUS_ACTIVE,
         "activation_asof": activation_asof.isoformat(),
         "activation_state": str(state_paths.activation_state_json),
-        "activation_state_sha256": file_sha256(
-            state_paths.activation_state_json
-        ),
+        "activation_state_sha256": file_sha256(state_paths.activation_state_json),
         "governance_root": str(active_root),
         "governance_lock_sha256": file_sha256(active_paths.lock_json),
         "production_selection_policy": dict(selection_policy),
@@ -618,36 +592,22 @@ def prepare_activation_candidate(
             -1.0,
         )
     )
-    activation_mode = str(
-        lock.get("activation_mode") or ACTIVATION_MODE_INITIAL
-    )
+    activation_mode = str(lock.get("activation_mode") or ACTIVATION_MODE_INITIAL)
     if activation_mode == ACTIVATION_MODE_INITIAL:
-        settings_valid = (
-            family.get("required") is False and current_cap == 0.0
-        )
+        settings_valid = family.get("required") is False and current_cap == 0.0
     elif activation_mode == ACTIVATION_MODE_REPLACE_ACTIVE:
-        settings_valid = (
-            family.get("required") is True
-            and current_cap == float(lock["proposed_portfolio_cap"])
-        )
-        active_state_path = Path(
-            str(lock.get("active_activation_state") or "")
-        )
-        if (
-            not active_state_path.is_file()
-            or file_sha256(active_state_path)
-            != str(lock.get("previous_activation_state_sha256") or "")
+        settings_valid = family.get("required") is True and current_cap == float(lock["proposed_portfolio_cap"])
+        active_state_path = Path(str(lock.get("active_activation_state") or ""))
+        if not active_state_path.is_file() or file_sha256(active_state_path) != str(
+            lock.get("previous_activation_state_sha256") or ""
         ):
             raise ValueError(
-                "Current machinery activation state changed after the "
-                "replacement governance cycle was sealed"
+                "Current machinery activation state changed after the replacement governance cycle was sealed"
             )
     else:
         raise ValueError(f"Unknown machinery activation mode: {activation_mode}")
     if not settings_valid:
-        raise ValueError(
-            "Portfolio settings do not match the sealed machinery activation mode"
-        )
+        raise ValueError("Portfolio settings do not match the sealed machinery activation mode")
     if portfolio_activation_fingerprint(portfolio_config) != lock.get("portfolio_non_activation_config_sha256"):
         raise ValueError("Portfolio configuration changed outside activation settings")
     source_rank, source_manifest = _lock_source_dashboard_paths(
@@ -661,9 +621,7 @@ def prepare_activation_candidate(
         config_path=config_path,
         asof=asof,
     )
-    publish_sidecar = publish_rank.with_name(
-        "machinery_stage11_survivorship_calibration_panel.csv"
-    )
+    publish_sidecar = publish_rank.with_name("machinery_stage11_survivorship_calibration_panel.csv")
     source_rows, _ = _verify_source_shadow(
         source_rank,
         source_manifest,
@@ -883,21 +841,12 @@ def activate_candidate(
             "Portfolio activation settings are not committed: machinery must "
             "be required, use the approved cap, and preserve equal weights"
         )
-    live_rank = Path(
-        str(manifest.get("publish_rank") or manifest["source_shadow_rank"])
-    )
-    live_manifest = Path(
-        str(
-            manifest.get("publish_manifest")
-            or manifest["source_shadow_manifest"]
-        )
-    )
+    live_rank = Path(str(manifest.get("publish_rank") or manifest["source_shadow_rank"]))
+    live_manifest = Path(str(manifest.get("publish_manifest") or manifest["source_shadow_manifest"]))
     live_sidecar = Path(
         str(
             manifest.get("publish_sidecar")
-            or live_rank.with_name(
-                "machinery_stage11_survivorship_calibration_panel.csv"
-            )
+            or live_rank.with_name("machinery_stage11_survivorship_calibration_panel.csv")
         )
     )
     dashboard_state = _capture_dashboard_state(
@@ -908,9 +857,7 @@ def activate_candidate(
     )
     source_manifest = Path(str(manifest["source_shadow_manifest"]))
     manifest_template = (
-        live_manifest.read_bytes()
-        if bool(dashboard_state["complete_dashboard"])
-        else source_manifest.read_bytes()
+        live_manifest.read_bytes() if bool(dashboard_state["complete_dashboard"]) else source_manifest.read_bytes()
     )
     candidate_rows = read_rows(paths.rank_csv)
     sidecar_rows = survivorship_sidecar(candidate_rows)
@@ -930,8 +877,7 @@ def activate_candidate(
                 "sidecar": str(live_sidecar),
                 "sidecar_sha256": file_sha256(live_sidecar),
                 "sidecar_calibration_eligible_count": sum(
-                    row["stage11_calibration_input_eligible_flag"] == "1"
-                    for row in sidecar_rows
+                    row["stage11_calibration_input_eligible_flag"] == "1" for row in sidecar_rows
                 ),
                 "contract_fields": FINAL_RANK_FIELDS,
                 "scoring_contract_versions": sorted({row["scoring_contract_version"] for row in candidate_rows}),
@@ -1009,26 +955,12 @@ def rollback_published_candidate(
     if missing:
         raise FileNotFoundError("Activation rollback artifacts are incomplete: " + ", ".join(missing))
     manifest = json.loads(paths.manifest_json.read_text(encoding="utf-8"))
-    live_rank = Path(
-        str(
-            manifest.get("publish_rank")
-            or manifest.get("source_shadow_rank")
-            or ""
-        )
-    )
-    live_manifest = Path(
-        str(
-            manifest.get("publish_manifest")
-            or manifest.get("source_shadow_manifest")
-            or ""
-        )
-    )
+    live_rank = Path(str(manifest.get("publish_rank") or manifest.get("source_shadow_rank") or ""))
+    live_manifest = Path(str(manifest.get("publish_manifest") or manifest.get("source_shadow_manifest") or ""))
     live_sidecar = Path(
         str(
             manifest.get("publish_sidecar")
-            or live_rank.with_name(
-                "machinery_stage11_survivorship_calibration_panel.csv"
-            )
+            or live_rank.with_name("machinery_stage11_survivorship_calibration_panel.csv")
         )
     )
     if paths.shadow_state_backup_json.is_file():
@@ -1047,10 +979,7 @@ def rollback_published_candidate(
         )
         legacy_missing = [str(path) for path in legacy_required if not path.exists()]
         if legacy_missing:
-            raise FileNotFoundError(
-                "Activation rollback artifacts are incomplete: "
-                + ", ".join(legacy_missing)
-            )
+            raise FileNotFoundError("Activation rollback artifacts are incomplete: " + ", ".join(legacy_missing))
         restore_sidecar = paths.shadow_sidecar_backup_csv.is_file()
         _write_bytes_atomic(live_rank, paths.shadow_backup_csv.read_bytes())
         if restore_sidecar:
@@ -1080,13 +1009,9 @@ def rollback_published_candidate(
         "rank_table": str(live_rank),
         "rank_table_sha256": file_sha256(live_rank) if live_rank.is_file() else "",
         "rank_manifest": str(live_manifest),
-        "rank_manifest_sha256": (
-            file_sha256(live_manifest) if live_manifest.is_file() else ""
-        ),
+        "rank_manifest_sha256": (file_sha256(live_manifest) if live_manifest.is_file() else ""),
         "sidecar": str(live_sidecar) if restore_sidecar else "",
-        "sidecar_sha256": (
-            file_sha256(live_sidecar) if restore_sidecar else ""
-        ),
+        "sidecar_sha256": (file_sha256(live_sidecar) if restore_sidecar else ""),
         "pre_activation_dashboard_complete": complete_dashboard,
         "production_promotion_performed": False,
         "full_portfolio_smoke_required": True,

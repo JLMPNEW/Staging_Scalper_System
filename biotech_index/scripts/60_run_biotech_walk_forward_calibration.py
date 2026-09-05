@@ -801,19 +801,50 @@ def build_secondary_horizon_evaluation(
     incumbent_universe_rows: Iterable[Mapping[str, object]] | None = None,
     live_policy_settings: Mapping[str, object] | None = None,
     cohort_filter: str = "",
+    incumbent_fallback: bool = False,
 ) -> dict[str, object]:
     """Evaluate one frozen primary policy on a secondary outer-test horizon."""
     metric_settings = metric_settings_for_horizon(settings, horizon)
-    fallback = candidate_spec is None or candidate_policy is None or threshold is None
-    if fallback:
-        selected: list[ReliabilityRecord] = []
-        active_candidate: dict[str, float] = {}
-        counts: dict[str, int] = {}
+    incumbent, incumbent_records = incumbent_returns(
+        module,
+        incumbent_universe_rows if incumbent_universe_rows is not None else rows,
+        incumbent_spec,
+        incumbent_policy,
+        horizon=horizon,
+        top_n=incumbent_top_n,
+        params=params,
+        live_policy_settings=live_policy_settings,
+        cohort_filter=cohort_filter,
+    )
+    benchmark_fallback = candidate_spec is None or candidate_policy is None or threshold is None
+    selected: list[ReliabilityRecord]
+    active_candidate: dict[str, float]
+    counts: dict[str, int]
+    validation_objective: object
+    if incumbent_fallback:
+        selected = list(incumbent_records)
+        active_candidate = dict(incumbent)
+        counts = defaultdict(int)
+        for record in selected:
+            counts[record.asof_date] += 1
+        active_weight = 1.0
+        reliability_class = "production_incumbent_fallback"
+        min_score_pct_of_top = 0.0
+        max_names = incumbent_top_n
+        max_name_weight = 1.0
+        validation_objective = ""
+        return_contract = "production_incumbent_retained_secondary_horizon"
+    elif benchmark_fallback:
+        selected = []
+        active_candidate = {}
+        counts = {}
         active_weight = 0.0
         reliability_class = "benchmark_fallback"
         min_score_pct_of_top = 0.0
         max_names = 0
-        validation_objective: object = ""
+        max_name_weight = 1.0
+        validation_objective = ""
+        return_contract = "xbi_benchmark_fallback_secondary_horizon"
     else:
         if candidate_spec is None or candidate_policy is None or threshold is None:
             raise ValueError("Non-fallback secondary evaluation lacks a frozen candidate contract")
@@ -831,36 +862,28 @@ def build_secondary_horizon_evaluation(
         reliability_class = threshold.reliability_class
         min_score_pct_of_top = threshold.min_score_pct_of_top
         max_names = threshold.max_names
+        max_name_weight = threshold.max_name_weight
         validation_objective = threshold.validation_objective
+        return_contract = "frozen_primary_policy_secondary_horizon"
 
-    incumbent, incumbent_records = incumbent_returns(
-        module,
-        incumbent_universe_rows if incumbent_universe_rows is not None else rows,
-        incumbent_spec,
-        incumbent_policy,
-        horizon=horizon,
-        top_n=incumbent_top_n,
-        params=params,
-        live_policy_settings=live_policy_settings,
-        cohort_filter=cohort_filter,
-    )
-    candidate = (
-        {asof_date: 0.0 for asof_date in incumbent}
-        if fallback
-        else blend_active_alpha_with_benchmark(
+    if incumbent_fallback:
+        candidate = dict(incumbent)
+    elif benchmark_fallback:
+        candidate = {asof_date: 0.0 for asof_date in incumbent}
+    else:
+        candidate = blend_active_alpha_with_benchmark(
             active_candidate,
             incumbent,
             active_weight=active_weight,
             selected_counts=counts,
-            max_name_weight=threshold.max_name_weight if threshold is not None else 1.0,
+            max_name_weight=max_name_weight,
         )
-    )
     comparison = paired_policy_comparison(candidate, incumbent, metric_settings)
     effective_weights = effective_active_weight_by_date(
         incumbent,
         counts,
         active_weight=active_weight,
-        max_name_weight=threshold.max_name_weight if threshold is not None else 1.0,
+        max_name_weight=max_name_weight,
     )
     active_dates = sum(1 for asof_date in incumbent if counts.get(asof_date, 0) > 0)
     selected_name_dates = sum(counts.get(asof_date, 0) for asof_date in incumbent)
@@ -873,12 +896,12 @@ def build_secondary_horizon_evaluation(
         "frozen_top_n": frozen_top_n,
         "frozen_min_score_pct_of_top": min_score_pct_of_top,
         "frozen_max_names": max_names,
-        "frozen_max_name_weight": threshold.max_name_weight if threshold is not None else 0.0,
+        "frozen_max_name_weight": max_name_weight,
         "validation_objective": validation_objective,
         "reliability_class": reliability_class,
         "active_weight": active_weight,
         "xbi_residual_weight": round(1.0 - active_weight, 6),
-        "candidate_return_contract": "frozen_primary_policy_secondary_horizon",
+        "candidate_return_contract": return_contract,
         "test_avg_selected_names": (
             round(selected_name_dates / len(incumbent), 6) if incumbent else 0.0
         ),
@@ -911,7 +934,7 @@ def build_secondary_horizon_evaluation(
             fold_id=fold_id,
             horizon=horizon,
             active_weight=active_weight,
-            max_name_weight=threshold.max_name_weight if threshold is not None else 1.0,
+            max_name_weight=max_name_weight,
         ),
         "sleeve_rows": [
             {
@@ -920,7 +943,7 @@ def build_secondary_horizon_evaluation(
                 "asof_date": asof_date,
                 "selected_name_count": counts.get(asof_date, 0),
                 "reliability_class": reliability_class,
-                "max_name_weight": threshold.max_name_weight if threshold is not None else 1.0,
+                "max_name_weight": max_name_weight,
                 "active_stock_selection_weight": effective_weights.get(asof_date, 0.0),
                 "xbi_residual_weight": round(
                     1.0 - effective_weights.get(asof_date, 0.0),
@@ -2253,6 +2276,7 @@ def main() -> int:
                         params=params,
                         settings=settings,
                         fold_id=fold.fold_id,
+                        incumbent_fallback=retain_incumbent,
                     )
                     secondary_evaluations.append(secondary_evaluation)
                     ingest_frozen_evaluation(

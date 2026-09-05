@@ -29,10 +29,13 @@ def test_industrial_semantic_seal_ignores_med_device_only_change() -> None:
         adapter_source,
         "def _med_device_score_provenance_unsafe(row: dict[str, str]) -> bool:",
     )
-    assert industrial_adapter_semantic_sha256(
-        adapter_source=changed,
-        contracts_source=contracts_source,
-    ) == baseline
+    assert (
+        industrial_adapter_semantic_sha256(
+            adapter_source=changed,
+            contracts_source=contracts_source,
+        )
+        == baseline
+    )
 
 
 def test_industrial_semantic_seal_detects_industrial_change() -> None:
@@ -46,7 +49,32 @@ def test_industrial_semantic_seal_detects_industrial_change() -> None:
         adapter_source,
         "def _adapt_industrial_family(cfg: dict[str, Any], rows: list[dict[str, str]]) -> list[CanonicalScore]:",
     )
-    assert industrial_adapter_semantic_sha256(
-        adapter_source=changed,
+    assert (
+        industrial_adapter_semantic_sha256(
+            adapter_source=changed,
+            contracts_source=contracts_source,
+        )
+        != baseline
+    )
+
+
+def test_industrial_semantic_seal_ignores_unrelated_optional_contract_field() -> None:
+    adapter_source = ADAPTER_PATH.read_text(encoding="utf-8")
+    contracts_source = CONTRACTS_PATH.read_text(encoding="utf-8")
+    baseline = industrial_adapter_semantic_sha256(
+        adapter_source=adapter_source,
         contracts_source=contracts_source,
-    ) != baseline
+    )
+    changed = contracts_source.replace(
+        "    active_name_weight_cap: float | None = None\n",
+        "    biotech_only_probe: float | None = None\n    active_name_weight_cap: float | None = None\n",
+        1,
+    )
+    assert changed != contracts_source
+    assert (
+        industrial_adapter_semantic_sha256(
+            adapter_source=adapter_source,
+            contracts_source=changed,
+        )
+        == baseline
+    )

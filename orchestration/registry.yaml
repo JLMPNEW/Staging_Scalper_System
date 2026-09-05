@@ -662,3 +662,35 @@ sectors:
         tolerance_days: 7
         warn_lead_days: 2
         notes: "Holdings ledger snapshot age (ledger/31); sizing against a stale book is silent otherwise."
+
+  # ----------------------------------------------- index_correlations
+  # Derived analytics only. This runs after portfolio_layer so it reads the
+  # Stage-2 Norgate cache and extraction manifest refreshed by the same run.
+  # It is non-network and publishes no duplicate price or return history.
+  - name: index_correlations
+    db_group: analytics
+    dependency_tier: 1
+    required: true
+    network: false
+    entry_script: index_correlations/pipeline.py
+    date_flag: "--as-of"
+    args_template: ["--as-of", "{date}"]
+    force_args: ["--force"]
+    retry_args: []
+    publish_glob: "output/index_correlations/{date}/correlation_manifest.json"
+    publish_date_format: "%Y-%m-%d"
+    publish_epoch: "2026-09-03"
+    oos_column: null
+    require_oos_valid: false
+    staleness_tolerance_days: 3
+    backfill_window_days: 30
+    timeout_sec: 600
+    retries: 0
+    health:
+      manifest: "output/index_correlations/{date}/correlation_manifest.json"
+      status_keys: ["acceptance"]
+    weekly_pre_steps: []
+    daily_post_steps: []
+    backfill: null
+    repair: null
+    freshness_probes: []

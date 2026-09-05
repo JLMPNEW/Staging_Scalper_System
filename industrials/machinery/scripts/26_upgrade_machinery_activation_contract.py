@@ -57,10 +57,7 @@ def parse_args() -> argparse.Namespace:
     operation.add_argument(
         "--migrate-optimizer-seal",
         action="store_true",
-        help=(
-            "Reseal one explicitly reviewed optimizer source change after "
-            "exact candidate reproduction."
-        ),
+        help=("Reseal one explicitly reviewed optimizer source change after exact candidate reproduction."),
     )
     parser.add_argument(
         "--expected-optimizer-sha256",
@@ -70,18 +67,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--expected-optimizer-runner-sha256",
         default="",
-        help=(
-            "Required reviewed 09_run_portfolio_optimizer.py SHA-256 for "
-            "--migrate-optimizer-seal."
-        ),
+        help=("Required reviewed 09_run_portfolio_optimizer.py SHA-256 for --migrate-optimizer-seal."),
+    )
+    parser.add_argument(
+        "--expected-optimizer-semantic-sha256",
+        default="",
+        help=("Required reviewed scoped optimizer semantic SHA-256 for --migrate-optimizer-seal."),
     )
     parser.add_argument(
         "--expected-adapter-semantic-sha256",
         default="",
-        help=(
-            "Required reviewed industrial adapter semantic SHA-256 for "
-            "--migrate-optimizer-seal."
-        ),
+        help=("Required reviewed industrial adapter semantic SHA-256 for --migrate-optimizer-seal."),
     )
     parser.add_argument(
         "--db",
@@ -125,10 +121,10 @@ def main() -> int:
             not args.expected_optimizer_sha256
             or not args.expected_optimizer_runner_sha256
             or not args.expected_adapter_semantic_sha256
+            or not args.expected_optimizer_semantic_sha256
         ):
             raise ValueError(
-                "All reviewed portfolio dependency SHA-256 arguments are required with "
-                "--migrate-optimizer-seal"
+                "All reviewed portfolio dependency SHA-256 arguments are required with --migrate-optimizer-seal"
             )
         result = migrate_active_optimizer_seal(
             config,
@@ -137,15 +133,12 @@ def main() -> int:
             asof=args.asof,
             expected_optimizer_sha256=args.expected_optimizer_sha256,
             expected_runner_sha256=args.expected_optimizer_runner_sha256,
-            expected_adapter_semantic_sha256=(
-                args.expected_adapter_semantic_sha256
-            ),
+            expected_adapter_semantic_sha256=(args.expected_adapter_semantic_sha256),
+            expected_optimizer_semantic_sha256=(args.expected_optimizer_semantic_sha256),
         )
     else:
         operation = (
-            migrate_active_adapter_semantic_seal
-            if args.migrate_adapter_semantic_seal
-            else upgrade_active_contract
+            migrate_active_adapter_semantic_seal if args.migrate_adapter_semantic_seal else upgrade_active_contract
         )
         result = operation(
             config,

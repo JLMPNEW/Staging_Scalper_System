@@ -374,6 +374,83 @@ def test_secondary_horizon_replays_the_frozen_primary_contract() -> None:
     assert len(incumbent_returns[60]) == 1
 
 
+def test_secondary_horizon_production_fallback_replays_incumbent_exactly() -> None:
+    runner = load_runner()
+    rows = [
+        {
+            "asof_date": f"2024-01-{day:02d}",
+            "ticker": ticker,
+            "score": score,
+            "biotech_primary_cohort": "late_clinical_pivotal_or_registrational",
+            "fwd_60d_net_benchmark_alpha_return": return_value,
+        }
+        for day in range(1, 5)
+        for ticker, score, return_value in (
+            ("AAA", 100.0, 0.10),
+            ("BBB", 50.0, -0.05),
+        )
+    ]
+    threshold = runner.ReliabilityThreshold(
+        min_score_pct_of_top=90.0,
+        max_names=1,
+        reliability_class="high",
+        active_weight=0.75,
+        validation_objective=2.0,
+        validation_metrics={},
+    )
+    settings = SimpleNamespace(
+        metric_settings=runner.MetricSettings(
+            min_profit_factor_wins=1,
+            min_profit_factor_losses=1,
+            bootstrap_iterations=100,
+        )
+    )
+
+    evaluation = runner.build_secondary_horizon_evaluation(
+        FakeCalibrationModule(),
+        rows,
+        candidate_spec=Spec("rejected_candidate"),
+        candidate_policy=Policy("core_structural_veto"),
+        candidate_id="production_incumbent_fallback",
+        candidate_name="Production incumbent",
+        selection_policy_name="core_structural_veto",
+        threshold=threshold,
+        frozen_top_n=10,
+        candidate_pool_top_n=20,
+        incumbent_spec=Spec("incumbent"),
+        incumbent_policy=Policy("core_structural_veto"),
+        incumbent_top_n=10,
+        horizon=60,
+        params=object(),
+        settings=settings,
+        fold_id="h120_f01",
+        incumbent_fallback=True,
+    )
+
+    comparison = evaluation["outer_test_comparison_row"]
+    assert isinstance(comparison, dict)
+    assert comparison["candidate_return_contract"] == (
+        "production_incumbent_retained_secondary_horizon"
+    )
+    assert comparison["reliability_class"] == "production_incumbent_fallback"
+    assert comparison["candidate_mean_return_pct"] == pytest.approx(
+        comparison["incumbent_mean_return_pct"]
+    )
+    assert comparison["candidate_lcb_return_pct"] == pytest.approx(
+        comparison["incumbent_lcb_return_pct"]
+    )
+    assert comparison["delta_mean_return_pct"] == pytest.approx(0.0)
+    assert comparison["paired_delta_bootstrap_lcb_pct"] == pytest.approx(0.0)
+    candidate_records = evaluation["candidate_records"]
+    incumbent_records = evaluation["incumbent_records"]
+    assert isinstance(candidate_records, list)
+    assert isinstance(incumbent_records, list)
+    assert candidate_records == [
+        {**row, "evaluation_split": "outer_test_candidate_secondary"}
+        for row in incumbent_records
+    ]
+
+
 def validation_metrics(*, delta_lcb: float) -> dict[str, object]:
     return {
         "paired_date_count": 20,

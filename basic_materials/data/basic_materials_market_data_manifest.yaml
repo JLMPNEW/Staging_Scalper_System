@@ -1,0 +1,23 @@
+manifest_version: 1
+artifact_id: basic_materials_market_data_contract_v1
+policy_version: basic_materials_market_data_policy_v1
+policy_sha256: 204f86432f585dcc5d0b81c603a323a74ca0af5bb630d3bb17a2a6d997b2b5d4
+contract_as_of_date: '2026-09-05'
+state: stage3_contract_reviewed_calibration_blocked
+calibration_eligible: false
+
+artifacts:
+  market_instruments:
+    path: ../system_csvs/basic_materials_market_instruments.csv
+    source_id: basic_materials_market_instrument_review
+    sha256: 0aad42b7f87ae2dea63977a1b005eb149724eefd5b17f4905c9016ba0a4a7613
+    byte_size: 50476
+    row_count: 162
+    unique_key: role_key
+  terminal_return_rules:
+    path: ../system_csvs/basic_materials_terminal_return_rules.csv
+    source_id: basic_materials_terminal_return_rule_review
+    sha256: 4abe94dcd7c5ad9662b1f10e944bee76fd54bca67c1c1f0c8a98a10f916aee44
+    byte_size: 7002
+    row_count: 20
+    unique_key: event_key

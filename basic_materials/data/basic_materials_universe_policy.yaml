@@ -1,0 +1,82 @@
+policy_version: basic_materials_universe_policy_v1
+sector: Basic Materials
+source_id: basic_materials_current_universe
+source_snapshot_date: '2026-09-05'
+membership_basis: current_authoritative_seed
+expected_current_rows: 134
+expected_foreign_rows: 51
+calibration_group_rule: subsector
+default_lifecycle_state: unreviewed
+current_source_only: true
+survivorship_corrected: false
+calibration_eligible: false
+
+required_columns:
+  - ticker
+  - investability_status
+  - company_name
+  - cik
+  - exchange
+  - sector
+  - industry
+  - subsector
+  - country
+  - currency
+  - security_type
+  - listing_status
+  - is_primary_listing
+  - calibration_group
+
+allowed_values:
+  investability_status:
+    - investable
+  exchange:
+    - NYSE
+    - NasdaqGS
+    - NasdaqGM
+    - NasdaqCM
+    - NYSE American
+  currency:
+    - USD
+  security_type:
+    - Common Stock
+    - ADR/ADS
+  listing_status:
+    - active
+  is_primary_listing:
+    - true
+
+cohorts:
+  agricultural_inputs_crop_science:
+    display_name: Agricultural Inputs and Crop Science
+    expected_count: 11
+    calibration_parent: chemicals_inputs
+  building_materials:
+    display_name: Building Materials
+    expected_count: 12
+    calibration_parent: basic_materials_sector
+  commodity_chemicals:
+    display_name: Commodity Chemicals
+    expected_count: 12
+    calibration_parent: chemicals_inputs
+  industrial_metals_mining:
+    display_name: Industrial Metals and Mining
+    expected_count: 11
+    calibration_parent: metals_mining_producers
+  mining_royalty_streaming:
+    display_name: Mining Royalty and Streaming
+    expected_count: 10
+    calibration_parent: metals_mining_asset_light
+  precious_metals_producers:
+    display_name: Precious Metals Producers
+    expected_count: 30
+    calibration_parent: metals_mining_producers
+  specialty_chemicals_materials:
+    display_name: Specialty Chemicals and Materials
+    expected_count: 37
+    calibration_parent: chemicals_inputs
+  steel_producers_processors:
+    display_name: Steel Producers and Processors
+    expected_count: 11
+    calibration_parent: metals_mining_producers
+

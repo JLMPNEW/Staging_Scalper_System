@@ -56,9 +56,7 @@ FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES = frozenset(
         "10b_validate_machinery_dashboard_reports.py",
     }
 )
-FINANCIAL_LINEAGE_INVARIANT_FIELDS = tuple(
-    field for field in FINAL_RANK_FIELDS if field not in LINEAGE_FIELDS
-)
+FINANCIAL_LINEAGE_INVARIANT_FIELDS = tuple(field for field in FINAL_RANK_FIELDS if field not in LINEAGE_FIELDS)
 MAPPED_FACT_IDEMPOTENCY_SOURCE = "08_build_industrials_financial_features.py"
 MAPPED_FACT_IDEMPOTENCY_PATCH = (
     "             ON CONFLICT(\n"
@@ -88,24 +86,14 @@ def _validate_optimizer_seal_migration(
 
     def reviewed_sha256(value: str, *, label: str) -> str:
         digest = value.strip().lower()
-        if len(digest) != 64 or any(
-            character not in "0123456789abcdef" for character in digest
-        ):
-            raise ValueError(
-                f"Expected {label} SHA-256 must be 64 lowercase hexadecimal characters"
-            )
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ValueError(f"Expected {label} SHA-256 must be 64 lowercase hexadecimal characters")
         return digest
 
-    reviewed_optimizer = reviewed_sha256(
-        expected_optimizer_sha256, label="optimizer"
-    )
+    reviewed_optimizer = reviewed_sha256(expected_optimizer_sha256, label="optimizer")
     reviewed_runner = reviewed_sha256(expected_runner_sha256, label="runner")
-    previous_optimizer = str(
-        lock.get("portfolio_optimizer_sha256") or ""
-    ).strip().lower()
-    previous_runner = str(
-        lock.get("portfolio_optimizer_runner_sha256") or ""
-    ).strip().lower()
+    previous_optimizer = str(lock.get("portfolio_optimizer_sha256") or "").strip().lower()
+    previous_runner = str(lock.get("portfolio_optimizer_runner_sha256") or "").strip().lower()
     if len(previous_optimizer) != 64:
         raise ValueError("Governance lock has no valid portfolio optimizer SHA-256")
     if len(previous_runner) != 64:
@@ -122,10 +110,7 @@ def _validate_optimizer_seal_migration(
             "Reviewed runner SHA-256 does not match the current source: "
             f"reviewed={reviewed_runner} current={current_runner}"
         )
-    if (
-        current_optimizer == previous_optimizer
-        and current_runner == previous_runner
-    ):
+    if current_optimizer == previous_optimizer and current_runner == previous_runner:
         raise ValueError("Portfolio optimizer dependency seal is already current")
     return (
         previous_optimizer,
@@ -139,11 +124,7 @@ def _changed_source_keys(
     previous: Mapping[str, str],
     current: Mapping[str, str],
 ) -> set[str]:
-    return {
-        key
-        for key in set(previous) | set(current)
-        if previous.get(key) != current.get(key)
-    }
+    return {key for key in set(previous) | set(current) if previous.get(key) != current.get(key)}
 
 
 def _assert_exact_mapped_fact_idempotency_patch(
@@ -155,17 +136,11 @@ def _assert_exact_mapped_fact_idempotency_patch(
     current = source_path.read_text(encoding="utf-8")
     occurrences = current.count(MAPPED_FACT_IDEMPOTENCY_PATCH)
     if occurrences != 1:
-        raise ValueError(
-            "Mapped-fact idempotency amendment must occur exactly once; "
-            f"found={occurrences}"
-        )
+        raise ValueError(f"Mapped-fact idempotency amendment must occur exactly once; found={occurrences}")
     predecessor = current.replace(MAPPED_FACT_IDEMPOTENCY_PATCH, "", 1)
     predecessor_sha256 = sha256(predecessor.encode("utf-8")).hexdigest()
     if predecessor_sha256 != sealed_predecessor_sha256:
-        raise ValueError(
-            "Mapped-fact idempotency amendment does not reconstruct the sealed "
-            "production source"
-        )
+        raise ValueError("Mapped-fact idempotency amendment does not reconstruct the sealed production source")
     return predecessor_sha256
 
 
@@ -216,17 +191,14 @@ def _mapped_fact_duplicate_group_count(
     ).fetchone()
     return int(row[0] if row is not None else 0)
 
+
 def _assert_rank_projection_unchanged(
     sealed_rows: Sequence[Mapping[str, Any]],
     reproduced_rows: Sequence[Mapping[str, Any]],
 ) -> None:
     """Require exact equality for every pre-lineage production output field."""
-    sealed_by_ticker = {
-        str(row.get("ticker") or ""): row for row in sealed_rows
-    }
-    reproduced_by_ticker = {
-        str(row.get("ticker") or ""): row for row in reproduced_rows
-    }
+    sealed_by_ticker = {str(row.get("ticker") or ""): row for row in sealed_rows}
+    reproduced_by_ticker = {str(row.get("ticker") or ""): row for row in reproduced_rows}
     if not sealed_by_ticker or set(sealed_by_ticker) != set(reproduced_by_ticker):
         raise ValueError("Lineage amendment changed the sealed ticker universe")
     for ticker in sorted(sealed_by_ticker):
@@ -271,13 +243,9 @@ def validate_active_portfolio_contract(
         or family.get("require_oos_score_valid") is not True
         or cap != expected_cap
         or MODEL_FAMILY not in fixed_equal
-        or machinery_portfolio_policy_fingerprint(portfolio_config)
-        != expected_policy_sha256
+        or machinery_portfolio_policy_fingerprint(portfolio_config) != expected_policy_sha256
     ):
-        raise ValueError(
-            "Current portfolio configuration no longer satisfies the sealed "
-            "machinery activation contract"
-        )
+        raise ValueError("Current portfolio configuration no longer satisfies the sealed machinery activation contract")
 
 
 def _run_validator(command: list[str], *, label: str) -> dict[str, Any]:
@@ -349,10 +317,7 @@ def upgrade_financial_lineage_contract(
     state_paths = Stage12Paths(governance_root)
     state_path = state_paths.activation_state_json
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    if (
-        state.get("acceptance") != "PASS"
-        or state.get("production_policy_status") != PRODUCTION_POLICY_STATUS_ACTIVE
-    ):
+    if state.get("acceptance") != "PASS" or state.get("production_policy_status") != PRODUCTION_POLICY_STATUS_ACTIVE:
         raise ValueError("Machinery activation state is not active")
 
     previous_source_hashes = state.get("production_source_sha256")
@@ -364,9 +329,7 @@ def upgrade_financial_lineage_contract(
     if not changed_sources:
         history = list(state.get("source_upgrade_history") or [])
         if any(
-            item.get("reason") == "financial_lineage_output_contract_v1"
-            for item in history
-            if isinstance(item, dict)
+            item.get("reason") == "financial_lineage_output_contract_v1" for item in history if isinstance(item, dict)
         ):
             return {
                 "acceptance": "PASS",
@@ -377,10 +340,7 @@ def upgrade_financial_lineage_contract(
         raise ValueError("Production source seal is already current")
     unexpected = changed_sources - FINANCIAL_LINEAGE_SOURCE_AMENDMENT_FILES
     if unexpected:
-        raise ValueError(
-            "Financial-lineage amendment found unrelated source changes: "
-            + ",".join(sorted(unexpected))
-        )
+        raise ValueError("Financial-lineage amendment found unrelated source changes: " + ",".join(sorted(unexpected)))
 
     activation_asof = parse_asof(str(state.get("activation_asof") or ""))
     active_root = _active_cycle_root(state, default_root=governance_root)
@@ -426,9 +386,7 @@ def upgrade_financial_lineage_contract(
         label="live machinery rank manifest",
     )
     live_metadata = json.loads(live_manifest.read_text(encoding="utf-8"))
-    sidecar_path = live_manifest.with_name(
-        "machinery_stage11_survivorship_calibration_panel.csv"
-    )
+    sidecar_path = live_manifest.with_name("machinery_stage11_survivorship_calibration_panel.csv")
     _require_hash(
         sidecar_path,
         live_metadata.get("sidecar_sha256"),
@@ -453,19 +411,12 @@ def upgrade_financial_lineage_contract(
     sidecar_rows = read_rows(sidecar_path)
     reproduced_rows = production_preview_rows(
         sidecar_rows,
-        weights={
-            str(key): float(value)
-            for key, value in lock["recommended_weights"].items()
-        },
+        weights={str(key): float(value) for key, value in lock["recommended_weights"].items()},
         asof=activation_asof,
         lock_date=str(lock["lockbox_start_date"]),
-        score_model_version=str(
-            cfg_get(config, "machinery_stage12.score_model_version")
-        ),
+        score_model_version=str(cfg_get(config, "machinery_stage12.score_model_version")),
         model_version=str(cfg_get(config, "machinery_stage12.model_version")),
-        scoring_contract_version=str(
-            cfg_get(config, "machinery_stage12.scoring_contract_version")
-        ),
+        scoring_contract_version=str(cfg_get(config, "machinery_stage12.scoring_contract_version")),
         selection_spec=strategy_spec_by_name(
             config,
             str(selection_policy.get("variant") or ""),
@@ -483,9 +434,7 @@ def upgrade_financial_lineage_contract(
             base_dir=config_path.parent,
         )
     )
-    with closing(
-        sqlite3.connect(f"{resolved_db.as_uri()}?mode=ro", uri=True)
-    ) as conn:
+    with closing(sqlite3.connect(f"{resolved_db.as_uri()}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         lineage = build_financial_filing_lineage(
             conn,
@@ -498,32 +447,19 @@ def upgrade_financial_lineage_contract(
         lineage,
     )
     unresolved = sorted(
-        str(row.get("ticker") or "")
-        for row in effective_rows
-        if str(row.get("financial_lineage_gate") or "") != "1"
+        str(row.get("ticker") or "") for row in effective_rows if str(row.get("financial_lineage_gate") or "") != "1"
     )
     if unresolved:
-        raise ValueError(
-            "Financial-lineage source amendment is not production-ready: "
-            + ",".join(unresolved)
-        )
+        raise ValueError("Financial-lineage source amendment is not production-ready: " + ",".join(unresolved))
 
     backup_root = (
-        governance_root
-        / "activation_contract_upgrades"
-        / effective_asof
-        / "financial_lineage_output_contract_v1"
+        governance_root / "activation_contract_upgrades" / effective_asof / "financial_lineage_output_contract_v1"
     )
     backup_root.mkdir(parents=True, exist_ok=True)
     manifest_path = active_paths.manifest_json
     stage12_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    lock_metadata = stage12_manifest.get("files", {}).get(
-        active_paths.lock_json.name
-    )
-    if (
-        not isinstance(lock_metadata, dict)
-        or lock_metadata.get("sha256") != file_sha256(active_paths.lock_json)
-    ):
+    lock_metadata = stage12_manifest.get("files", {}).get(active_paths.lock_json.name)
+    if not isinstance(lock_metadata, dict) or lock_metadata.get("sha256") != file_sha256(active_paths.lock_json):
         raise ValueError("Stage 12 manifest does not seal the current governance lock")
     backup_paths = {
         state_path: backup_root / "activation_state_before_upgrade.json",
@@ -555,26 +491,18 @@ def upgrade_financial_lineage_contract(
             industrial_adapter_semantic_sha256,
         )
 
-        adapter_path = (
-            config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
-        )
-        previous_adapter_semantic_sha256 = str(
-            lock.get("portfolio_adapter_semantic_sha256") or ""
-        )
+        adapter_path = config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
+        previous_adapter_semantic_sha256 = str(lock.get("portfolio_adapter_semantic_sha256") or "")
         current_adapter_semantic_sha256 = industrial_adapter_semantic_sha256()
         lock.update(
             {
-                "portfolio_adapter_semantic_sha256": (
-                    current_adapter_semantic_sha256
-                ),
+                "portfolio_adapter_semantic_sha256": (current_adapter_semantic_sha256),
                 "portfolio_adapter_sha256": file_sha256(adapter_path),
                 "financial_lineage_adapter_amendment": {
                     "version": "financial_lineage_output_contract_v1",
                     "effective_asof": effective_asof,
                     "upgraded_at_utc": upgraded_at,
-                    "previous_adapter_semantic_sha256": (
-                        previous_adapter_semantic_sha256
-                    ),
+                    "previous_adapter_semantic_sha256": (previous_adapter_semantic_sha256),
                     "candidate_reproduction_required": True,
                 },
             }
@@ -593,12 +521,8 @@ def upgrade_financial_lineage_contract(
                 "changed_source_files": sorted(changed_sources),
                 "candidate_reproduced_exactly": True,
                 "invariant_field_count": len(FINANCIAL_LINEAGE_INVARIANT_FIELDS),
-                "previous_adapter_semantic_sha256": (
-                    previous_adapter_semantic_sha256
-                ),
-                "portfolio_adapter_semantic_sha256": (
-                    current_adapter_semantic_sha256
-                ),
+                "previous_adapter_semantic_sha256": (previous_adapter_semantic_sha256),
+                "portfolio_adapter_semantic_sha256": (current_adapter_semantic_sha256),
                 "lineage_report": str(lineage_path),
                 "lineage_report_sha256": file_sha256(lineage_path),
             }
@@ -630,27 +554,18 @@ def upgrade_financial_lineage_contract(
             "changed_source_files": sorted(changed_sources),
             "candidate_reproduced_exactly": True,
             "portfolio_adapter_semantic_resealed": True,
-            "previous_adapter_semantic_sha256": (
-                previous_adapter_semantic_sha256
-            ),
-            "portfolio_adapter_semantic_sha256": (
-                current_adapter_semantic_sha256
-            ),
+            "previous_adapter_semantic_sha256": (previous_adapter_semantic_sha256),
+            "portfolio_adapter_semantic_sha256": (current_adapter_semantic_sha256),
             "governance_lock_sha256": file_sha256(active_paths.lock_json),
             "stage12_manifest_sha256": file_sha256(manifest_path),
             "invariant_field_count": len(FINANCIAL_LINEAGE_INVARIANT_FIELDS),
             "row_count": len(candidate_rows),
             "lineage_pass_count": len(effective_rows),
             "lineage_manifest": lineage_manifest,
-            "production_policy_status": policy_metadata[
-                "production_policy_status"
-            ],
+            "production_policy_status": policy_metadata["production_policy_status"],
             "activation_state": str(state_path),
             "activation_state_sha256": file_sha256(state_path),
-            "backup_artifacts": {
-                source.name: str(backup)
-                for source, backup in backup_paths.items()
-            },
+            "backup_artifacts": {source.name: str(backup) for source, backup in backup_paths.items()},
         }
         write_json_atomic(report_path, report)
     except BaseException:
@@ -680,10 +595,7 @@ def upgrade_mapped_fact_idempotency_contract(
     effective_asof = parse_asof(asof)
     state_path = Stage12Paths(governance_root).activation_state_json
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    if (
-        state.get("acceptance") != "PASS"
-        or state.get("production_policy_status") != PRODUCTION_POLICY_STATUS_ACTIVE
-    ):
+    if state.get("acceptance") != "PASS" or state.get("production_policy_status") != PRODUCTION_POLICY_STATUS_ACTIVE:
         raise ValueError("Machinery activation state is not active")
 
     previous_source_hashes = state.get("production_source_sha256")
@@ -694,10 +606,7 @@ def upgrade_mapped_fact_idempotency_contract(
     history = list(state.get("source_upgrade_history") or [])
     reason = "mapped_fact_idempotency_conflict_guard_v1"
     if not changed_sources:
-        if any(
-            isinstance(item, dict) and item.get("reason") == reason
-            for item in history
-        ):
+        if any(isinstance(item, dict) and item.get("reason") == reason for item in history):
             return {
                 "acceptance": "PASS",
                 "asof_date": effective_asof,
@@ -707,16 +616,13 @@ def upgrade_mapped_fact_idempotency_contract(
         raise ValueError("Production source seal is already current")
     if changed_sources != {MAPPED_FACT_IDEMPOTENCY_SOURCE}:
         raise ValueError(
-            "Mapped-fact idempotency amendment found unrelated source changes: "
-            + ",".join(sorted(changed_sources))
+            "Mapped-fact idempotency amendment found unrelated source changes: " + ",".join(sorted(changed_sources))
         )
 
     source_path = production_policy_source_paths()[MAPPED_FACT_IDEMPOTENCY_SOURCE]
     predecessor_sha256 = _assert_exact_mapped_fact_idempotency_patch(
         source_path,
-        sealed_predecessor_sha256=str(
-            previous_source_hashes[MAPPED_FACT_IDEMPOTENCY_SOURCE]
-        ),
+        sealed_predecessor_sha256=str(previous_source_hashes[MAPPED_FACT_IDEMPOTENCY_SOURCE]),
     )
     activation_asof = parse_asof(str(state.get("activation_asof") or ""))
     active_root = _active_cycle_root(state, default_root=governance_root)
@@ -758,9 +664,7 @@ def upgrade_mapped_fact_idempotency_contract(
         label="live rank manifest",
     )
     rank_manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
-    sidecar_path = live_manifest.with_name(
-        "machinery_stage11_survivorship_calibration_panel.csv"
-    )
+    sidecar_path = live_manifest.with_name("machinery_stage11_survivorship_calibration_panel.csv")
     _require_hash(
         sidecar_path,
         rank_manifest.get("sidecar_sha256"),
@@ -774,19 +678,12 @@ def upgrade_mapped_fact_idempotency_contract(
     sidecar_rows = read_rows(sidecar_path)
     reproduced_rows = production_preview_rows(
         sidecar_rows,
-        weights={
-            str(key): float(value)
-            for key, value in lock["recommended_weights"].items()
-        },
+        weights={str(key): float(value) for key, value in lock["recommended_weights"].items()},
         asof=activation_asof,
         lock_date=str(lock["lockbox_start_date"]),
-        score_model_version=str(
-            cfg_get(config, "machinery_stage12.score_model_version")
-        ),
+        score_model_version=str(cfg_get(config, "machinery_stage12.score_model_version")),
         model_version=str(cfg_get(config, "machinery_stage12.model_version")),
-        scoring_contract_version=str(
-            cfg_get(config, "machinery_stage12.scoring_contract_version")
-        ),
+        scoring_contract_version=str(cfg_get(config, "machinery_stage12.scoring_contract_version")),
         selection_spec=strategy_spec_by_name(
             config,
             str(selection_policy.get("variant") or ""),
@@ -797,8 +694,7 @@ def upgrade_mapped_fact_idempotency_contract(
     _assert_rank_projection_unchanged(candidate_rows, reproduced_rows)
 
     primary_source = str(
-        cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts")
-        or "sec_companyfacts"
+        cfg_get(config, "sec_fundamentals.companyfacts_source_id", "sec_companyfacts") or "sec_companyfacts"
     )
     supplemental_raw = cfg_get(
         config,
@@ -806,17 +702,11 @@ def upgrade_mapped_fact_idempotency_contract(
         None,
     )
     if supplemental_raw is None:
-        supplemental_raw = cfg_get(
-            config, "sec_fundamentals.supplemental_disclosure_source_ids", []
-        )
+        supplemental_raw = cfg_get(config, "sec_fundamentals.supplemental_disclosure_source_ids", [])
     if isinstance(supplemental_raw, str):
-        supplemental = [
-            item.strip() for item in supplemental_raw.split(",") if item.strip()
-        ]
+        supplemental = [item.strip() for item in supplemental_raw.split(",") if item.strip()]
     else:
-        supplemental = [
-            str(item).strip() for item in supplemental_raw or [] if str(item).strip()
-        ]
+        supplemental = [str(item).strip() for item in supplemental_raw or [] if str(item).strip()]
     source_ids = tuple(dict.fromkeys((primary_source, *supplemental)))
     resolved_db = (
         db_path.expanduser().resolve()
@@ -829,11 +719,7 @@ def upgrade_mapped_fact_idempotency_contract(
     with closing(sqlite3.connect(f"{resolved_db.as_uri()}?mode=ro", uri=True)) as conn:
         duplicate_groups = _mapped_fact_duplicate_group_count(
             conn,
-            tickers=sorted(
-                str(row.get("ticker") or "")
-                for row in candidate_rows
-                if str(row.get("ticker") or "")
-            ),
+            tickers=sorted(str(row.get("ticker") or "") for row in candidate_rows if str(row.get("ticker") or "")),
             source_ids=source_ids,
             asof=effective_asof,
         )
@@ -843,12 +729,7 @@ def upgrade_mapped_fact_idempotency_contract(
             f"universe; duplicate_groups={duplicate_groups}"
         )
 
-    backup_root = (
-        governance_root
-        / "activation_contract_upgrades"
-        / effective_asof
-        / reason
-    )
+    backup_root = governance_root / "activation_contract_upgrades" / effective_asof / reason
     backup_root.mkdir(parents=True, exist_ok=True)
     backup_path = backup_root / "activation_state_before_upgrade.json"
     original_state = state_path.read_bytes()
@@ -897,16 +778,12 @@ def upgrade_mapped_fact_idempotency_contract(
             "operation": "MAPPED_FACT_IDEMPOTENCY_CONTRACT_RESEAL",
             "changed_source_files": sorted(changed_sources),
             "sealed_predecessor_sha256": predecessor_sha256,
-            "current_source_sha256": current_source_hashes[
-                MAPPED_FACT_IDEMPOTENCY_SOURCE
-            ],
+            "current_source_sha256": current_source_hashes[MAPPED_FACT_IDEMPOTENCY_SOURCE],
             "candidate_reproduced_exactly": True,
             "active_universe_duplicate_group_count": duplicate_groups,
             "source_ids_checked": list(source_ids),
             "row_count": len(candidate_rows),
-            "production_policy_status": policy_metadata[
-                "production_policy_status"
-            ],
+            "production_policy_status": policy_metadata["production_policy_status"],
             "validations": validations,
             "activation_state": str(state_path),
             "activation_state_sha256": file_sha256(state_path),
@@ -918,6 +795,7 @@ def upgrade_mapped_fact_idempotency_contract(
         report_path.unlink(missing_ok=True)
         raise
     return report
+
 
 def upgrade_active_contract(
     config: dict[str, Any],
@@ -966,9 +844,7 @@ def upgrade_active_contract(
         "stage12_governance.py",
     }
     changed_semantic_sources = sorted(
-        semantic_source_keys.intersection(
-            changed_production_policy_sources(previous_source_hashes)
-        )
+        semantic_source_keys.intersection(changed_production_policy_sources(previous_source_hashes))
     )
     if changed_semantic_sources:
         raise ValueError(
@@ -996,15 +872,11 @@ def upgrade_active_contract(
         base_dir=config_path.parent,
     )
     portfolio_config = load_yaml(portfolio_config_path)
-    governance_lock = json.loads(
-        stage12_paths.lock_json.read_text(encoding="utf-8")
-    )
+    governance_lock = json.loads(stage12_paths.lock_json.read_text(encoding="utf-8"))
     validate_active_portfolio_contract(
         portfolio_config,
         expected_cap=float(governance_lock["proposed_portfolio_cap"]),
-        expected_policy_sha256=str(
-            governance_lock["machinery_portfolio_policy_sha256"]
-        ),
+        expected_policy_sha256=str(governance_lock["machinery_portfolio_policy_sha256"]),
     )
     current_portfolio_config_sha256 = file_sha256(portfolio_config_path)
     # The portfolio run directory is shared and may be rebuilt after
@@ -1113,9 +985,7 @@ def upgrade_active_contract(
         state.update(
             {
                 "activation_result_sha256": file_sha256(result_path),
-                "portfolio_config_sha256_at_activation": (
-                    current_portfolio_config_sha256
-                ),
+                "portfolio_config_sha256_at_activation": (current_portfolio_config_sha256),
                 "production_source_sha256": current_source_hashes,
                 "contract_upgraded_at_utc": upgraded_at,
                 "source_upgrade_history": history,
@@ -1214,10 +1084,7 @@ def migrate_active_adapter_semantic_seal(
     )
     stage12_validation = validate_stage12_lock(output_root=active_root)
     if stage12_validation.get("acceptance") != "PASS":
-        raise ValueError(
-            "Existing Stage 12 lock is invalid: "
-            + ";".join(stage12_validation.get("issues", []))
-        )
+        raise ValueError("Existing Stage 12 lock is invalid: " + ";".join(stage12_validation.get("issues", [])))
 
     portfolio_config_path = resolve_path(
         cfg_get(config, "machinery_stage12.portfolio_config_path"),
@@ -1236,9 +1103,7 @@ def migrate_active_adapter_semantic_seal(
     _require_hash(live_rank, result.get("rank_table_sha256"), label="live rank table")
     if file_sha256(live_rank) != file_sha256(candidate_path):
         raise ValueError("Live machinery rank table differs from sealed candidate")
-    previous_rank_manifest_sha256 = str(
-        result.get("rank_manifest_sha256") or ""
-    )
+    previous_rank_manifest_sha256 = str(result.get("rank_manifest_sha256") or "")
     current_rank_manifest_sha256 = file_sha256(live_manifest)
     rank_manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
     if (
@@ -1247,13 +1112,8 @@ def migrate_active_adapter_semantic_seal(
         or rank_manifest.get("rank_table_sha256") != file_sha256(live_rank)
         or rank_manifest.get("production_policy_active") is not True
     ):
-        raise ValueError(
-            "Live machinery rank manifest does not describe the sealed "
-            "production candidate"
-        )
-    sidecar_path = live_manifest.with_name(
-        "machinery_stage11_survivorship_calibration_panel.csv"
-    )
+        raise ValueError("Live machinery rank manifest does not describe the sealed production candidate")
+    sidecar_path = live_manifest.with_name("machinery_stage11_survivorship_calibration_panel.csv")
     _require_hash(
         sidecar_path,
         rank_manifest.get("sidecar_sha256"),
@@ -1278,20 +1138,12 @@ def migrate_active_adapter_semantic_seal(
     )
     if unexpected_source_changes:
         raise ValueError(
-            "Unrelated production policy sources changed; migration refused: "
-            + ",".join(unexpected_source_changes)
+            "Unrelated production policy sources changed; migration refused: " + ",".join(unexpected_source_changes)
         )
 
     semantic_sha256 = industrial_adapter_semantic_sha256()
-    adapter_path = (
-        config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
-    )
-    backup_root = (
-        governance_root
-        / "activation_contract_upgrades"
-        / asof
-        / "industrial_adapter_semantic_seal"
-    )
+    adapter_path = config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
+    backup_root = governance_root / "activation_contract_upgrades" / asof / "industrial_adapter_semantic_seal"
     backup_root.mkdir(parents=True, exist_ok=True)
     manifest_path = stage12_paths.manifest_json
     originals = {
@@ -1325,9 +1177,7 @@ def migrate_active_adapter_semantic_seal(
         write_json_atomic(stage12_paths.lock_json, lock)
 
         stage12_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        lock_metadata = stage12_manifest.get("files", {}).get(
-            stage12_paths.lock_json.name
-        )
+        lock_metadata = stage12_manifest.get("files", {}).get(stage12_paths.lock_json.name)
         if not isinstance(lock_metadata, dict):
             raise ValueError("Stage 12 manifest does not seal the governance lock")
         lock_metadata["path"] = str(stage12_paths.lock_json)
@@ -1369,9 +1219,7 @@ def migrate_active_adapter_semantic_seal(
             shadow_rows=sidecar_rows,
         )
         if regenerated_rows != candidate_rows:
-            raise ValueError(
-                "Scoped adapter seal does not reproduce the activated candidate"
-            )
+            raise ValueError("Scoped adapter seal does not reproduce the activated candidate")
         validations = _validate_live_outputs(config_path=config_path, asof=asof)
     except BaseException:
         for path, payload in originals.items():
@@ -1409,11 +1257,16 @@ def migrate_active_optimizer_seal(
     expected_optimizer_sha256: str,
     expected_runner_sha256: str,
     expected_adapter_semantic_sha256: str,
+    expected_optimizer_semantic_sha256: str,
 ) -> dict[str, Any]:
     """Atomically reseal reviewed portfolio dependencies without changing the model."""
     from industrials.machinery.stage12_governance import validate_stage12_lock
     from portfolio_layer.scores.adapter_semantics import (
         industrial_adapter_semantic_sha256,
+    )
+    from portfolio_layer.optimizer.optimizer_semantics import (
+        SEMANTIC_SEAL_VERSION as OPTIMIZER_SEMANTIC_SEAL_VERSION,
+        machinery_optimizer_semantic_sha256,
     )
 
     asof = parse_asof(asof)
@@ -1428,11 +1281,20 @@ def migrate_active_optimizer_seal(
     previous_source_hashes = state.get("production_source_sha256")
     if not isinstance(previous_source_hashes, dict):
         raise ValueError("Machinery activation state has no source seal")
-    changed_sources = changed_production_policy_sources(previous_source_hashes)
+    changed_sources = [
+        source
+        for source in changed_production_policy_sources(previous_source_hashes)
+        if source
+        not in {
+            "adapter_semantics.py",
+            "optimizer_semantics.py",
+            "stage12_activation.py",
+            "stage12_governance.py",
+        }
+    ]
     if changed_sources:
         raise ValueError(
-            "Machinery production sources changed; optimizer migration refused: "
-            + ",".join(changed_sources)
+            "Machinery production sources changed; optimizer migration refused: " + ",".join(changed_sources)
         )
 
     active_root = _active_cycle_root(state, default_root=governance_root)
@@ -1457,10 +1319,7 @@ def migrate_active_optimizer_seal(
     )
     stage12_validation = validate_stage12_lock(output_root=active_root)
     if stage12_validation.get("acceptance") != "PASS":
-        raise ValueError(
-            "Existing Stage 12 lock is invalid: "
-            + ";".join(stage12_validation.get("issues", []))
-        )
+        raise ValueError("Existing Stage 12 lock is invalid: " + ";".join(stage12_validation.get("issues", [])))
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
     if (
@@ -1482,15 +1341,8 @@ def migrate_active_optimizer_seal(
         expected_cap=float(lock["proposed_portfolio_cap"]),
         expected_policy_sha256=str(lock["machinery_portfolio_policy_sha256"]),
     )
-    optimizer_path = (
-        config_path.parents[2] / "portfolio_layer" / "optimizer" / "optimizer_core.py"
-    )
-    runner_path = (
-        config_path.parents[2]
-        / "portfolio_layer"
-        / "optimizer"
-        / "09_run_portfolio_optimizer.py"
-    )
+    optimizer_path = config_path.parents[2] / "portfolio_layer" / "optimizer" / "optimizer_core.py"
+    runner_path = config_path.parents[2] / "portfolio_layer" / "optimizer" / "09_run_portfolio_optimizer.py"
     (
         previous_optimizer_sha256,
         current_optimizer_sha256,
@@ -1503,16 +1355,11 @@ def migrate_active_optimizer_seal(
         expected_optimizer_sha256=expected_optimizer_sha256,
         expected_runner_sha256=expected_runner_sha256,
     )
-    reviewed_adapter_semantic_sha256 = (
-        expected_adapter_semantic_sha256.strip().lower()
-    )
+    reviewed_adapter_semantic_sha256 = expected_adapter_semantic_sha256.strip().lower()
     if len(reviewed_adapter_semantic_sha256) != 64 or any(
-        character not in "0123456789abcdef"
-        for character in reviewed_adapter_semantic_sha256
+        character not in "0123456789abcdef" for character in reviewed_adapter_semantic_sha256
     ):
-        raise ValueError(
-            "Expected adapter semantic SHA-256 must be 64 lowercase hexadecimal characters"
-        )
+        raise ValueError("Expected adapter semantic SHA-256 must be 64 lowercase hexadecimal characters")
     current_adapter_semantic_sha256 = industrial_adapter_semantic_sha256()
     if current_adapter_semantic_sha256 != reviewed_adapter_semantic_sha256:
         raise ValueError(
@@ -1520,14 +1367,23 @@ def migrate_active_optimizer_seal(
             f"reviewed={reviewed_adapter_semantic_sha256} "
             f"current={current_adapter_semantic_sha256}"
         )
-    previous_adapter_semantic_sha256 = str(
-        lock.get("portfolio_adapter_semantic_sha256") or ""
-    ).strip().lower()
+    reviewed_optimizer_semantic_sha256 = expected_optimizer_semantic_sha256.strip().lower()
+    if len(reviewed_optimizer_semantic_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in reviewed_optimizer_semantic_sha256
+    ):
+        raise ValueError("Expected optimizer semantic SHA-256 must be 64 lowercase hexadecimal characters")
+    current_optimizer_semantic_sha256 = machinery_optimizer_semantic_sha256()
+    if current_optimizer_semantic_sha256 != reviewed_optimizer_semantic_sha256:
+        raise ValueError(
+            "Reviewed optimizer semantic SHA-256 does not match current semantics: "
+            f"reviewed={reviewed_optimizer_semantic_sha256} "
+            f"current={current_optimizer_semantic_sha256}"
+        )
+    current_source_hashes = production_policy_source_hashes()
+    previous_adapter_semantic_sha256 = str(lock.get("portfolio_adapter_semantic_sha256") or "").strip().lower()
     if len(previous_adapter_semantic_sha256) != 64:
         raise ValueError("Governance lock has no valid adapter semantic SHA-256")
-    adapter_path = (
-        config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
-    )
+    adapter_path = config_path.parents[2] / "portfolio_layer" / "scores" / "adapters.py"
 
     live_rank = Path(str(result.get("rank_table") or ""))
     live_manifest = Path(str(result.get("rank_manifest") or ""))
@@ -1540,9 +1396,7 @@ def migrate_active_optimizer_seal(
         label="live rank manifest",
     )
     rank_manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
-    sidecar_path = live_manifest.with_name(
-        "machinery_stage11_survivorship_calibration_panel.csv"
-    )
+    sidecar_path = live_manifest.with_name("machinery_stage11_survivorship_calibration_panel.csv")
     _require_hash(
         sidecar_path,
         rank_manifest.get("sidecar_sha256"),
@@ -1551,12 +1405,7 @@ def migrate_active_optimizer_seal(
     candidate_rows = read_rows(candidate_path)
     sidecar_rows = read_rows(sidecar_path)
 
-    backup_root = (
-        governance_root
-        / "activation_contract_upgrades"
-        / asof
-        / "portfolio_optimizer_seal"
-    )
+    backup_root = governance_root / "activation_contract_upgrades" / asof / "portfolio_optimizer_seal"
     backup_root.mkdir(parents=True, exist_ok=True)
     manifest_path = stage12_paths.manifest_json
     originals = {
@@ -1579,25 +1428,23 @@ def migrate_active_optimizer_seal(
     migrated_at = utc_now()
     previous_lock_sha256 = file_sha256(stage12_paths.lock_json)
     try:
+        lock["portfolio_optimizer_semantic_sha256"] = current_optimizer_semantic_sha256
+        lock["portfolio_optimizer_semantic_version"] = OPTIMIZER_SEMANTIC_SEAL_VERSION
         lock["portfolio_optimizer_sha256"] = current_optimizer_sha256
         lock["portfolio_optimizer_runner_sha256"] = current_runner_sha256
-        lock["portfolio_adapter_semantic_sha256"] = (
-            current_adapter_semantic_sha256
-        )
+        lock["portfolio_adapter_semantic_sha256"] = current_adapter_semantic_sha256
         lock["portfolio_adapter_sha256"] = file_sha256(adapter_path)
         lock["optimizer_seal_migration"] = {
-            "version": "overlapping_group_caps_v1",
+            "semantic_version": OPTIMIZER_SEMANTIC_SEAL_VERSION,
+            "reviewed_semantic_sha256": current_optimizer_semantic_sha256,
+            "version": "machinery_optimizer_ast_v1",
             "migrated_at_utc": migrated_at,
             "previous_optimizer_sha256": previous_optimizer_sha256,
             "reviewed_optimizer_sha256": current_optimizer_sha256,
             "previous_runner_sha256": previous_runner_sha256,
             "reviewed_runner_sha256": current_runner_sha256,
-            "previous_adapter_semantic_sha256": (
-                previous_adapter_semantic_sha256
-            ),
-            "reviewed_adapter_semantic_sha256": (
-                current_adapter_semantic_sha256
-            ),
+            "previous_adapter_semantic_sha256": (previous_adapter_semantic_sha256),
+            "reviewed_adapter_semantic_sha256": (current_adapter_semantic_sha256),
             "previous_governance_lock_sha256": previous_lock_sha256,
             "candidate_reproduction_required": True,
             "portfolio_rerun_required": True,
@@ -1605,9 +1452,7 @@ def migrate_active_optimizer_seal(
         write_json_atomic(stage12_paths.lock_json, lock)
 
         stage12_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        lock_metadata = stage12_manifest.get("files", {}).get(
-            stage12_paths.lock_json.name
-        )
+        lock_metadata = stage12_manifest.get("files", {}).get(stage12_paths.lock_json.name)
         if not isinstance(lock_metadata, dict):
             raise ValueError("Stage 12 manifest does not seal the governance lock")
         lock_metadata["path"] = str(stage12_paths.lock_json)
@@ -1615,17 +1460,15 @@ def migrate_active_optimizer_seal(
         write_json_atomic(manifest_path, stage12_manifest)
 
         result["optimizer_seal_migration"] = {
+            "semantic_version": OPTIMIZER_SEMANTIC_SEAL_VERSION,
+            "reviewed_semantic_sha256": current_optimizer_semantic_sha256,
             "migrated_at_utc": migrated_at,
             "previous_optimizer_sha256": previous_optimizer_sha256,
             "reviewed_optimizer_sha256": current_optimizer_sha256,
             "previous_runner_sha256": previous_runner_sha256,
             "reviewed_runner_sha256": current_runner_sha256,
-            "previous_adapter_semantic_sha256": (
-                previous_adapter_semantic_sha256
-            ),
-            "reviewed_adapter_semantic_sha256": (
-                current_adapter_semantic_sha256
-            ),
+            "previous_adapter_semantic_sha256": (previous_adapter_semantic_sha256),
+            "reviewed_adapter_semantic_sha256": (current_adapter_semantic_sha256),
             "candidate_reproduced_exactly": True,
         }
         write_json_atomic(result_path, result)
@@ -1634,23 +1477,22 @@ def migrate_active_optimizer_seal(
         history.append(
             {
                 "upgraded_at_utc": migrated_at,
-                "reason": "portfolio_optimizer_overlapping_group_caps_v1",
+                "reason": "portfolio_optimizer_semantic_seal_v1",
+                "optimizer_semantic_version": OPTIMIZER_SEMANTIC_SEAL_VERSION,
+                "reviewed_optimizer_semantic_sha256": (current_optimizer_semantic_sha256),
                 "previous_governance_lock_sha256": previous_lock_sha256,
                 "previous_optimizer_sha256": previous_optimizer_sha256,
                 "reviewed_optimizer_sha256": current_optimizer_sha256,
                 "previous_runner_sha256": previous_runner_sha256,
                 "reviewed_runner_sha256": current_runner_sha256,
-                "previous_adapter_semantic_sha256": (
-                    previous_adapter_semantic_sha256
-                ),
-                "reviewed_adapter_semantic_sha256": (
-                    current_adapter_semantic_sha256
-                ),
+                "previous_adapter_semantic_sha256": (previous_adapter_semantic_sha256),
+                "reviewed_adapter_semantic_sha256": (current_adapter_semantic_sha256),
                 "candidate_reproduced_exactly": True,
             }
         )
         state.update(
             {
+                "production_source_sha256": current_source_hashes,
                 "activation_result_sha256": file_sha256(result_path),
                 "governance_lock_sha256": file_sha256(stage12_paths.lock_json),
                 "optimizer_seal_migrated_at_utc": migrated_at,
@@ -1667,9 +1509,7 @@ def migrate_active_optimizer_seal(
             shadow_rows=sidecar_rows,
         )
         if regenerated_rows != candidate_rows:
-            raise ValueError(
-                "Reviewed optimizer seal does not reproduce the activated candidate"
-            )
+            raise ValueError("Reviewed optimizer seal does not reproduce the activated candidate")
         validations = _validate_live_outputs(config_path=config_path, asof=asof)
     except BaseException:
         for path, payload in originals.items():
@@ -1690,6 +1530,8 @@ def migrate_active_optimizer_seal(
         "reviewed_optimizer_sha256": current_optimizer_sha256,
         "previous_runner_sha256": previous_runner_sha256,
         "reviewed_runner_sha256": current_runner_sha256,
+        "optimizer_semantic_version": OPTIMIZER_SEMANTIC_SEAL_VERSION,
+        "reviewed_optimizer_semantic_sha256": (current_optimizer_semantic_sha256),
         "previous_adapter_semantic_sha256": previous_adapter_semantic_sha256,
         "reviewed_adapter_semantic_sha256": current_adapter_semantic_sha256,
         "previous_governance_lock_sha256": previous_lock_sha256,
