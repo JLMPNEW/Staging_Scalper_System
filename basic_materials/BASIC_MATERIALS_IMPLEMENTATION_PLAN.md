@@ -1,10 +1,10 @@
 # Basic Materials Scoring and Ranking Model — Implementation Plan
 
-Status: living implementation authority; Stages 0–4A implemented; calibration blocked
+Status: living implementation authority; Stages 0–4B implemented; calibration blocked
 Prepared: 2026-09-05  
-Last implementation update: 2026-09-05  
+Last implementation update: 2026-09-06
 Authoritative current universe: ticker_mapping/basic_materials.csv
-Current schema version: 4
+Current schema version: 6
 
 ## Document control and reuse contract
 
@@ -29,6 +29,7 @@ Implementation ledger:
 | 2026-09-05 | Stage 2B reconciliation pilot | Schema v2; 20 effective-dated historical memberships; four ticker aliases; 22 security events; 20 terminal-event terms; four raw payload snapshots; atomic loader; database validator; reports; CLI and migration tests | All eight cohorts represented; current universe preserved; ticker reuse scoped; SEC event evidence present; historical membership marked survivorship-corrected; zero calibration activation | All 20 terminal values remain unresolved pending Stage 3 price/distribution work; remaining 52 census candidates remain outside the pilot |
 | 2026-09-05 | Stage 3 adjusted market data and terminal returns | Schema v3; governed v2 162-role/158-asset Norgate identity and listing-window contract; XLB/SPY; 537,739 adjusted bars; 5,648 corporate actions; 4,446 SPY calendar sessions; 162 coverage audits; 134 market-feature rows; 20 terminal calculations; atomic cache and evidence reports | Stable provider-ID joins; snapshot fencing; 100% current/benchmark rank-ready gate; active/current major-exchange checks; listing-window feature bounds; 16 calculable terminal events resolved; no-future-price checks; Stage 2A/2B revalidation; 24 passing tests at slice completion | Four bankruptcy distributions remain unresolved; 52 candidate-census names remain outside the pilot; calibration and portfolio gates remain closed |
 | 2026-09-05 | Stage 4A financial contract and reporting profiles | Schema v4; 16-source registry; immutable financial policy, manifest, 22-metric concept map, empty reviewed-override contract, and 154-row SEC-backed issuer-profile census; 315 cached SEC payloads; atomic loader; read-only validator and evidence pack | Exact 134 current/20 historical profile coverage; 22 metrics and 66 concept links; acceptance-time and amendment policy frozen; reporting/listing currency separation; row/artifact hashes; idempotent live load; every Stage 0–3 validator; 29 passing tests | Fourteen issuer profiles require governed Stage 4B fallback/review; raw filing facts, canonical statements, FX, features, valuation, specialized metrics, calibration, and portfolio gates remain closed |
+| 2026-09-06 | Stage 4B point-in-time fundamentals, FX, and common features | Stage 4A checkpoint commit `4b6bce4`; immutable Stage 4B policy/cache seals; schema v5 fact/resolution/audit extensions and schema v6 performance indexes; 5,754 filings; 310,067 raw facts; 239,705 canonical facts; 22,852 FX rows; 134 feature/coverage rows; governed 14-profile exception resolution; scratch and live idempotency runs | Exact acceptance-time lineage; future-fact exclusion; deterministic source precedence, amendment supersession, TTM and sign rules; zero canonical conflicts and zero missing FX conversions; all Stage 0–4B validators; 36 passing tests | OGC remains explicitly blocked; 48 foreign securities remain valuation-gated pending share/ADR ratios; specialized metrics, survivorship-correct calibration, scoring, ranking, and portfolio gates remain closed |
 
 ### Reusable sector-repository build sequence
 
@@ -1220,10 +1221,10 @@ Migration `basic_materials_adjusted_market_data` adds only Basic Materials-owned
 - `dim_terminal_return_rule` and `fact_terminal_return_calculation` for reviewed terminal economics and calculation evidence; and
 - `feature_market_technical` for one point-in-time market feature row per current security and as-of date.
 
-The v3 migration is append-only and checksummed. Under the current schema-v4
-initializer, an owned schema-v1 database advances through v2, v3, and v4; an
-owned v2 database advances through v3 and v4; an owned v3 database advances
-through v4; and an unidentified non-empty database is rejected.
+The v3 migration is append-only and checksummed. Under the current schema-v6
+initializer, an owned older database advances through every missing migration
+in ascending order; an unidentified non-empty database or any ledger checksum
+mismatch is rejected.
 
 ### Schema v4 financial-contract foundation
 
@@ -1383,9 +1384,10 @@ work; they are not silently imputed.
 
 ## Stage 4 — SEC fundamentals, reporting profiles, and FX
 
-Status: Stage 4A contract and reporting-profile foundation implemented and
-independently validated on 2026-09-05. Stage 4B fact ingestion, normalization,
-FX, common features, and valuation remain next. No financial score exists.
+Status: Stage 4A contract and reporting-profile foundation implemented on
+2026-09-05; Stage 4B point-in-time ingestion, normalization, FX, and common
+features implemented and independently validated on 2026-09-06. No financial
+score exists and no calibration or portfolio gate is open.
 
 ### Stage 4A implemented foundation
 
@@ -1468,71 +1470,147 @@ python -m pytest basic_materials/tests -q
 python -m ruff check basic_materials
 ```
 
-Stage 4A gate result: passed for engineering use. The filing, raw-fact,
-canonical-statement, FX, financial-feature, and financial-coverage tables are
-intentionally empty. Calibration, scoring, ranking, specialized weighting, and
-portfolio use remain closed.
+Stage 4A gate result: passed for engineering use and preserved as commit
+`4b6bce4`. Stage 4B extends that contract append-only; it does not weaken or
+rewrite the Stage 4A evidence boundary.
 
-### Stage 4B remaining build
+### Stage 4B implemented point-in-time financial layer
 
-- SEC submissions and filing history;
-- Company Facts ingestion;
-- inline-XBRL fallback;
-- US-GAAP, IFRS, and reviewed issuer-extension mapping;
-- issuer reporting profiles and cadence;
-- canonical point-in-time facts;
-- reported-currency and USD conversion;
-- common financial features;
-- daily valuation repricing;
-- financial metric availability.
+The implemented slice follows the six-step release sequence used here as the
+reusable pattern for future sector repositories:
 
-Core canonical metrics:
+1. **Checkpoint the contract.** Stage 4A was committed cleanly before fact
+   implementation so policy/schema review remains separable from data loading.
+2. **Create immutable SEC ingestion.** `core/financial_ingestion.py` verifies
+   every Stage 4A contract hash and the 315-payload reporting cache, reads root
+   and archive submissions, stores exact SEC acceptance times, caches governed
+   filing-package evidence atomically, and seals the final cache manifest.
+3. **Load the standard path.** All 140 `ready_for_ingestion` profiles use the
+   same Company Facts path; missing acceptance times are quarantined instead of
+   being inferred from filing or period dates.
+4. **Run a representative normalization pilot.** NUE, BHP, AEM, and RMIX cover
+   domestic quarterly, foreign annual/inline-XBRL, Canadian mining, and
+   interim-only/recent-listing behavior before the full rebuild.
+5. **Resolve the 14-profile queue.** Every exception has an exact route,
+   accession, document, acceptance timestamp, source hash, currency/taxonomy
+   decision, and explicit canonical-eligibility state.
+6. **Add FX and common features.** AUD, CAD, EUR, KRW, and USD observations are
+   stored with immutable source evidence; canonical facts retain reported and
+   USD values; 22 common financial features plus coverage/readiness rows are
+   published for all 134 current securities.
 
-- revenue;
-- gross profit;
-- operating income;
-- EBITDA or defensible proxy;
-- net income;
-- operating cash flow;
-- capex;
-- free cash flow;
-- cash;
-- debt;
-- assets;
-- equity;
-- inventory;
-- receivables/payables;
-- diluted shares;
-- dividends and repurchases where available.
+Implemented files and boundaries:
 
-Derived features:
+- `data/basic_materials_financial_ingestion_policy.yaml` is the Stage 4B
+  authority. It is bound to the Stage 4A manifest, profile census, concept map,
+  policy, and reporting-cache hashes and fixes the 2026-09-05 cutoff.
+- `core/financial_ingestion.py` owns SEC filing/fact ingestion, official filing
+  package fallback, immutable evidence manifests, the resolution ledger, and a
+  fail-closed reuse path for an already loaded matching snapshot.
+- `core/financial_fx.py` owns direct/inverse Yahoo FX extraction, USD identity
+  rows, exact payload hashes/times, and point-in-time rate loading.
+- `core/financial_normalization.py` owns source/concept precedence, duplicate
+  and conflict policy, signs and units, amendments/supersession, quarter and
+  YTD differencing, annual fallback, TTM/prior-period construction, reported
+  and USD values, and common feature generation. Weighted-average diluted
+  shares are selected by period and never summed.
+- `core/financial_validation.py` independently checks source seals, exact
+  profile/exception states, no-lookahead, lineage, units/currencies/FX,
+  canonical conflicts, feature counts, foreign-security valuation gates,
+  stored error-severity audit rows, and foreign keys.
+- scripts `07` through `10` expose each boundary separately;
+  `11_run_basic_materials_stage4.py` is the normal end-to-end command.
+- schema v5 adds the profile-resolution and normalization-issue ledgers plus
+  the Stage 4B lineage fields. Schema v6 adds indexes on
+  `(snapshot_key, ticker)` and `superseded_by_fact_id`; the latter prevents
+  SQLite's self-referencing canonical-fact foreign key from turning bounded
+  rebuilds into quadratic scans.
 
-- gross/operating/FCF margins;
-- ROIC;
-- asset turnover;
-- net debt/EBITDA;
-- interest coverage;
-- inventory days and turnover;
-- cash conversion cycle;
-- revenue/profit/FCF growth;
-- incremental operating margin;
-- inventory-sales growth spread;
-- capex/revenue;
-- FCF yield;
-- EV/EBITDA, EV/EBIT, and EV/gross profit when meaningful;
-- dilution; and
-- data confidence.
+The governed exception result is:
 
-Stage 4B gate:
+| Resolution | Tickers | Treatment |
+|---|---|---|
+| `resolved_inline_xbrl` | AUGO, BHP, CMCL, PKX, VMET | Official inline-XBRL fallback supplements or replaces lagging Company Facts |
+| `resolved_xbrl_instance` | MAKO, SCZM, TII | Full filing-package XBRL instance; TII uses the original 40-F rather than the cover-only amendment |
+| `resolved_metadata_unstructured` | AGU, POT | Historical metadata evidence only; no unsupported structured facts are manufactured |
+| `resolved_metadata_unstructured` | ASM, CGAU | Older Company Facts remain canonical-eligible; latest annual exhibits are explicitly unstructured gaps |
+| `resolved_interim_only` | RMIX | Available domestic interim Company Facts are retained; unavailable annual/TTM values stay null |
+| `missing_required_source` | OGC | No cutoff-valid structured source; current feature row is explicitly blocked |
 
-- no fact appears before SEC acceptance;
-- amendments preserve history;
-- TTM construction respects quarterly, semiannual, and annual cadence;
-- mixed currencies or periods are rejected;
-- listing currency never substitutes for reporting currency;
-- negative denominator and loss-making valuation rules pass;
-- current financial coverage by cohort is published;
-- foreign-issuer gaps are explicit.
+Normalization and availability rules are fail-closed:
+
+- a fact is usable only with an exact accession-matched acceptance timestamp on
+  or before the issuer cutoff and not before its own period end;
+- facts lacking exact acceptance remain in the raw audit layer with a reason;
+- Company Facts has priority over governed filing fallback; equal-rank
+  disagreements are conflicts, while equal duplicates collapse with lineage;
+- amendments remain visible and supersession is explicit;
+- duration facts use quarter/YTD/annual cadence-aware logic; instant facts and
+  diluted shares use latest valid observations; and
+- foreign listed-security valuation remains null until an explicit
+  ADR/ordinary-share ratio contract exists. Reporting currency is never
+  inferred from listing currency.
+
+Stage 4B live acceptance evidence for snapshot
+`basic_materials_sec:2026-09-05:06030312536c4d01f7ed`:
+
+| Measure | Result |
+|---|---:|
+| Profiles / standard / exceptions | 154 / 140 / 14 |
+| Company Facts / fallback payloads | 152 / 26 |
+| SEC filings | 5,754 |
+| Raw facts | 310,067 |
+| Usable / quarantined raw facts | 253,687 / 56,380 |
+| Canonical facts | 239,705 |
+| Usable / superseded canonical facts | 109,210 / 130,495 |
+| Canonical conflicts / missing FX | 0 / 0 |
+| FX observations | 22,852 across AUD, CAD, EUR, KRW, USD |
+| Current feature / coverage rows | 134 / 134 |
+| Feature quality | 94 full, 29 partial, 9 insufficient, 1 stale, 1 blocked |
+| Rank-ready / valuation-ready | 49 / 84 |
+
+The pilot produced full rows for AEM and BHP, a partial row for NUE because its
+mapped operating-income TTM is unavailable, and an insufficient row for RMIX
+because only interim history exists. These outcomes are accepted missing-data
+states, not imputed successes.
+
+ARIS, AUGO, CRH, MTA, and TII are all active securities. AUGO and TII are now
+financially rank-ready. ARIS and MTA have usable facts but remain non-rank-ready
+because required common metrics and foreign share ratios are missing. CRH has
+all 22 metrics but three stale observations and therefore remains
+conservatively non-rank-ready for this cutoff.
+
+Operator sequence from the repository root:
+
+```powershell
+# Normal end-to-end run for a reviewed policy/cache snapshot.
+python basic_materials/scripts/11_run_basic_materials_stage4.py
+
+# Deterministic offline replay after the immutable caches are sealed.
+python basic_materials/scripts/11_run_basic_materials_stage4.py --cache-only
+
+# Independent read-only acceptance check.
+python basic_materials/scripts/10_validate_basic_materials_financial_stage.py
+```
+
+For diagnosis, the equivalent component order is `07` ingestion, `09
+--pilot-only`, `08` FX, `09` full normalization/features, and `10` validation.
+Do not use `--allow-partial` for an acceptance run.
+
+The final scratch run, live load, and live cache-only rerun produced the same
+snapshot key and exact row counts. Validation passed with zero errors and two
+expected warnings: 48 foreign/current securities remain valuation-gated until
+share ratios are governed, and OGC remains explicitly source-blocked. The full
+package suite passes 36 tests, Ruff is clean, and every independent Stage 0–4B
+validator passes after the live schema-v6 migration. A consistent pre-load
+backup is retained at
+`C:/Users/josel/Documents/STAGING/DB/basic_materials.pre_stage4b_20260906.sqlite`
+with SHA-256
+`037f65f73e1c93c8e1a11048200d73725ca62625c325945fd1860d9cf8678258`.
+
+Stage 4B gate result: passed for engineering and future shadow-feature use.
+Calibration eligibility, specialized-metric weights, score/rank publication,
+`portfolio_candidate_gate`, and `oos_score_valid_flag` remain closed.
 
 ## Stage 5 — Positioning, commodity data, and foundation audit
 
@@ -1983,25 +2061,36 @@ If the lifecycle audit identifies development or precommercial companies:
 
 - exact 154-profile, 22-metric, and 66-concept-link contract census;
 - financial policy, manifest, artifact hash, and per-profile row-hash integrity;
-- atomic and repeat-load-idempotent schema-v4 contract publication;
+- atomic and repeat-load-idempotent schema-v4 contract publication plus
+  append-only v5 and v6 migration checks;
+- immutable Stage 4B cache seal, fallback path containment, payload checksums,
+  resolution seal, and verified existing-snapshot reuse;
+- exact 140-standard/14-exception resolution states, including ASM/CGAU
+  unstructured-latest-report gaps and TII's original full XBRL instance;
 - SEC acceptance-bound profile inference and future-filing exclusion;
 - ordinary 6-K exclusion unless Company Facts identifies financial XBRL;
 - reporting currency derived only from filing evidence, never listing currency;
 - explicit missing Company Facts, taxonomy, currency, and annual-form review
   states;
-- 10-K/10-Q and 20-F/40-F/6-K examples;
-- US-GAAP and IFRS concepts;
+- 10-K/10-Q and 20-F/40-F/6-K examples plus inline and traditional instance
+  XBRL context, unit, scale, and lineage preservation;
+- US-GAAP and IFRS concepts with deterministic source/concept precedence;
 - issuer-extension mapping;
-- amendments;
+- amendments and supersession lineage;
 - SEC acceptance-time gating;
 - quarterly, semiannual, annual, and stub TTM;
-- capex sign;
+- weighted-average share selection without summation and positive-outflow capex
+  sign normalization;
 - debt/cash and enterprise value;
-- daily valuation repricing;
+- as-of valuation repricing against the Stage 3 price snapshot;
 - point-in-time FX;
 - mixed-currency quarantine;
 - negative-profit valuation cap;
-- reporting-currency versus listing-currency distinction.
+- reporting-currency versus listing-currency distinction;
+- foreign ADR/ordinary-share ratio fail-closed valuation behavior;
+- zero stored error-severity ingestion/normalization issues; and
+- canonical self-reference/snapshot indexes that keep deterministic repeat
+  rebuilds bounded.
 
 ### 14.5 Commodity and parser tests
 
@@ -2200,69 +2289,56 @@ profile, but a profile is only routing metadata. No SEC fact, canonical
 statement, FX observation, financial feature, score, rank, or portfolio signal
 was inferred from the census.
 
-Next slice E2 — Stage 4B point-in-time financial ingestion, FX, and common
+Completed slice E2 — Stage 4B point-in-time financial ingestion, FX, and common
 features:
 
-1. Freeze a Stage 4B ingestion-snapshot contract tied to the Stage 4A manifest
-   and source cutoff. A rerun may create a new snapshot; it may not mutate the
-   evidence identity of an older snapshot.
-2. Resolve the 14-profile queue with primary filing evidence. Define exact
-   fallback routes for ASM, BHP, CGAU, CMCL, PKX, and TII; taxonomy/currency
-   decisions for AUGO, MAKO, SCZM, VMET, AGU, and POT; and annual-form handling
-   for OGC and RMIX. Keep unresolved fields null.
-3. Load SEC submissions and archive metadata first for all 154 issuers. Store
-   one normalized filing row per accession, preserve amendments, and make SEC
-   acceptance timestamp the earliest usable time. Filing date and period end
-   cannot substitute for acceptance time.
-4. Load Company Facts into `fact_sec_xbrl_fact_raw` without selecting preferred
-   values. Preserve accession, taxonomy, concept, unit, value, start/end,
-   fiscal-year/period, frame, form, filed date, acceptance time, and raw-payload
-   lineage.
-5. Normalize the standard path using the frozen US-GAAP and IFRS map. Resolve
-   duplicate contexts, duration-versus-instant semantics, capex sign, units,
-   scale, quarter/YTD/annual periods, amendments, and supersession
-   deterministically. Quarantine conflicts rather than averaging them.
-6. Add inline-XBRL or filing-document fallback only for the governed exception
-   queue and high-value missing metrics. Every issuer-extension mapping needs an
-   evidence URL, accession, reviewed definition, effective interval, and
-   regression fixture before use.
-7. Publish the 22 point-in-time canonical metrics in reported currency. Derive
-   free cash flow from operating cash flow and capital expenditures only after
-   both inputs pass period, unit, currency, and availability checks.
-8. Load effective-dated FX observations and preserve both reported and USD
-   values. Apply period-average conversion to flows and latest-on-or-before
-   period-end conversion to instants, retaining rate date, source, and staleness
-   on every converted value.
-9. Compute the 22 common financial features and daily valuation repricing using
-   only facts available by the as-of timestamp and the governed Stage 3 prices.
-   Undefined or loss-making denominators remain null and cannot receive an
-   attractive rank by coercion.
-10. Publish issuer/cohort/regime coverage, freshness, cadence, fallback,
-    mapping, unit, currency, amendment, conflict, and lineage audits. Require a
-    machine-readable missing reason for every absent required metric.
-11. Keep all 20 historical issuers engineering-only. Do not change
-    `calibration_eligible`, `portfolio_candidate_gate`, or
-    `oos_score_valid_flag` during Stage 4B.
-12. Add fixture tests for domestic US-GAAP, IFRS foreign-private issuer,
-    Canadian MJDS, annual-only, semiannual, amended, multi-currency,
-    issuer-extension, duplicate-context, stub-period, and no-lookahead cases.
-    Prove atomic rollback and idempotence, then rerun every Stage 0–4A
-    validator.
-13. Update this master document, README, implementation status, stage gates,
-    run order, test count, coverage census, and remaining exceptions in the same
-    change.
+- preserved Stage 4A as clean checkpoint `4b6bce4` before implementation;
+- froze the Stage 4B policy against every Stage 4A artifact and the immutable
+  reporting cache;
+- added append-only schema v5 ingestion/resolution/audit fields and schema v6
+  canonical foreign-key/snapshot indexes;
+- loaded exact-acceptance filing metadata for 154 profiles and the standard
+  Company Facts path for all 140 ready profiles;
+- completed the NUE/BHP/AEM/RMIX representative pilot before full
+  normalization;
+- gave all 14 exceptions primary-evidence routes without converting
+  unstructured reports into invented structured facts;
+- loaded 310,067 raw facts, preserving 56,380 quarantined observations for
+  audit, and selected 239,705 canonical facts with zero value conflicts;
+- loaded 22,852 point-in-time FX observations and retained both reported and
+  USD lineage with zero missing required conversions;
+- published 134 common-feature and coverage rows plus issuer/cohort/regime,
+  pilot, exception, and validation evidence packs;
+- implemented conservative foreign share-ratio and loss/denominator valuation
+  gates rather than manufacturing market caps or attractive multiples;
+- proved scratch and live cache-only idempotency with identical snapshot key
+  and table counts;
+- reran every Stage 0–4B validator, 36 package tests, and Ruff successfully;
+  and
+- retained all calibration, scoring, ranking, and portfolio flags in their
+  closed state.
 
-Slice E2 exit condition: every current issuer has either governed canonical
-facts or an explicit unusable reason; no fact appears before acceptance;
-currencies, units, periods, amendments, conflicts, and lineage reconcile;
-common feature coverage is published by cohort and filing regime; daily
-valuation uses only the Stage 3 price contract; and all calibration/portfolio
-flags remain false.
+Slice E2 exit condition result: passed for engineering use. OGC is the one
+explicitly blocked current profile; 48 foreign/current securities retain null
+valuation until the next share/ADR-ratio contract. These are visible follow-up
+contracts, not silent Stage 4B failures.
 
-Do not start specialized parsing beyond the bounded Stage 4B fallback queue,
-factor search, optimizer work, portfolio integration, or orchestration
-registration during Slice E2. The first Stage 5 specialized-metric wave begins
-only after the common-fact coverage audit identifies high-value cohort gaps.
+Next slice F1 — Stage 5 positioning, commodity data, and foundation audit:
+
+1. Freeze the commodity series registry and effective-dated issuer exposure
+   map before extraction.
+2. Add read-only positioning inputs with source-birthdate and freshness gates.
+3. Build measurement-only commodity, input-cost, and demand-cycle features with
+   release/vintage controls and zero scoring weight.
+4. Publish a foundation audit that reports the earliest reproducible score
+   date and the specific blockers to survivorship-correct calibration.
+5. Keep OGC, foreign share ratios, four bankruptcy distributions, and the
+   remaining 52 historical candidates as explicit work queues; none can be
+   inferred or promoted by Stage 5.
+
+Do not start optimizer work, portfolio integration, or production scheduling
+during Slice F1. Cohort-specialized parsing begins only after Stage 5 measures
+which common-data gaps have sufficient value and source coverage.
 
 ## 17. Key risks and mitigations
 

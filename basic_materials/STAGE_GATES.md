@@ -6,7 +6,12 @@ Pass requires matching model-family and sector constants, `shadow_monitor` promo
 
 ## Stage 1 — database and source contract
 
-Pass requires an empty or correctly identified Basic Materials database, matching migration checksums through schema v4, the package-owned source registry, and byte-for-byte authoritative manifests before mutation. An unidentified non-empty database is rejected. An owned v1 database may advance only through v2, v3, and v4; an owned v2 database may advance only through v3 and v4; an owned v3 database may advance only through v4.
+Pass requires an empty or correctly identified Basic Materials database,
+matching append-only migration checksums through schema v6, the package-owned
+source registry, and byte-for-byte authoritative manifests before mutation. An
+unidentified non-empty database is rejected. An older owned database may
+advance only through every missing migration in ascending order; a migration
+name or checksum mismatch fails before mutation.
 
 ## Stage 2 — current-universe contract
 
@@ -72,26 +77,85 @@ reporting cadence, currency rules, 22 canonical metrics, common future features,
 and closed promotion flags. Listing currency may never fill missing reporting
 currency.
 
-Database pass requires schema v4 and exact loaded counts of 154 issuer profiles,
-22 canonical metrics, and 66 metric-to-taxonomy concept links. All artifacts and
-each reporting-profile row must pass SHA-256 validation before mutation; loading
-must be atomic and idempotent; foreign keys must pass; and no filing facts,
-financial features, calibration eligibility, score validity, or portfolio
-authority may be activated.
+Database pass requires the checksummed Stage 4A schema-v4 migration (within the
+current schema-v6 ledger) and exact loaded counts of 154 issuer profiles, 22
+canonical metrics, and 66 metric-to-taxonomy concept links. All artifacts and
+each reporting-profile row must pass SHA-256 validation before mutation;
+loading must be atomic and idempotent; foreign keys must pass; and Stage 4A
+itself may not activate filing facts, financial features, calibration
+eligibility, score validity, or portfolio authority.
 
 The 2026-09-05 census passes Stage 4A with 140 profiles ready for ingestion, six
 requiring Company Facts fallback, six requiring taxonomy review, and two
 requiring annual-form review. The explicit 14-profile review queue is permitted
 at this contract gate because every exception is visible and fail-closed; it must
 be resolved or governed during Stage 4B before affected facts can become usable.
-Every Stage 0–3 validator still passes after the schema-v4 load.
+Every Stage 0–3 validator still passes after the Stage 4A contract load.
 
-## Next implementation gate — Stage 4B point-in-time fundamentals and FX
+## Stage 4B — point-in-time fundamentals, FX, and common features
 
-Stage 4B must ingest SEC submissions and Company Facts and preserve SEC accession, form, acceptance timestamp, fiscal period, period start/end, taxonomy, unit, reported currency, amendment state, and source lineage. A fact may not exist before its acceptance time. US-GAAP, IFRS, Canadian, issuer-extension, annual, semiannual, and quarterly paths must be explicit. FX conversion must retain the rate, date, method, and source while keeping reported values. Missing facts remain null with reasons.
+Contract pass requires a Stage 4B policy whose hash is bound to every Stage 4A
+policy/manifest/profile/concept-map artifact and the immutable reporting cache.
+The policy must fix its as-of date, history boundary, source precedence,
+representative pilot, exact 14-profile exception routes, normalization/TTM
+rules, FX methods, common feature definitions, and closed promotion flags.
 
-Stage 4B pass also requires common financial features and daily valuation repricing to use only governed point-in-time facts and Stage 3 prices. Every Stage 0–4A validator must still pass. Historical rows remain engineering-only until the later survivorship-correct panel gate.
+Ingestion pass requires exactly 154 resolution rows—140 standard and 14
+governed exceptions—and immutable source evidence. SEC submissions and Company
+Facts must preserve accession, form, exact acceptance timestamp, fiscal period,
+period start/end, taxonomy, unit, reported currency, amendment state, payload
+hash, URL, and source lineage. A fact with no exact acceptance timestamp, a
+future acceptance, an acceptance before period end, a wrong period type, or an
+invalid/mixed reporting currency remains quarantined. Filing date and period
+end may never substitute for acceptance time.
+
+Fallback pass requires every structured route to produce at least one usable
+mapped fact from the exact governed accession/document. Cover-only XBRL shells
+do not pass. An unstructured annual report may establish metadata but may not
+be represented as structured financial facts. Every resolution status must
+match policy. A missing source remains explicit and blocked.
+
+Normalization pass requires deterministic Company Facts/fallback and concept
+precedence, equal-rank conflict quarantine, duplicate collapse with lineage,
+explicit amendment supersession, correct sign/unit handling, cadence-aware
+quarter/YTD/annual and TTM construction, and weighted-average diluted shares
+that are selected rather than summed. Reported values must remain available
+beside USD values.
+
+FX pass requires effective-dated AUD, CAD, EUR, KRW, and USD observations with
+payload hash, source time, direction/inversion method, and latest-on-or-before
+rate date. Required converted canonical facts may not retain missing FX.
+Listing currency may never fill reporting currency.
+
+Feature pass requires one feature and one coverage row for every current
+security, using only canonical facts available by the cutoff and prices from
+the governed Stage 3 snapshot. Undefined or loss-making valuation denominators
+remain null. Foreign market cap and valuation require a reviewed
+ADR/ordinary-share ratio; absent ratios are a valid fail-closed gate, not an
+implicit 1:1 assumption. Every missing metric has a machine-readable reason.
+
+Validation pass requires zero error-severity audit rows, zero canonical value
+conflicts, zero future facts, zero required FX misses, valid lineage/foreign
+keys, exact profile/feature counts, published issuer/cohort/regime coverage,
+and passing Stage 0–4A validators. Historical rows remain engineering-only.
+
+The 2026-09-05 live snapshot passes with 5,754 filings, 310,067 raw facts,
+239,705 canonical facts, 22,852 FX observations, and 134 feature/coverage rows.
+Quality is 94 full, 29 partial, 9 insufficient, 1 stale, and 1 blocked; 49 rows
+are rank-ready and 84 valuation-ready. Validation has zero errors and two
+accepted warnings: OGC lacks a cutoff-valid structured source, and 48
+foreign/current securities remain valuation-gated pending share ratios. The
+scratch run, live load, and live cache-only rerun reproduce the same snapshot
+identity and counts. Schema v6 indexes the canonical self-reference and
+snapshot/ticker rebuild paths so idempotent replay remains bounded.
+
+Stage 4B pass does not imply a score, rank, calibration result, or investment
+recommendation.
 
 ## Promotion gate
 
-`portfolio_candidate_gate` and `oos_score_valid_flag` remain false until point-in-time panels, specialized applicability, purged walk-forward out-of-sample validation, coverage thresholds, stale-data controls, and portfolio-layer acceptance tests are implemented and reviewed. Stage 0–4A output is research infrastructure, not an investment recommendation.
+`portfolio_candidate_gate` and `oos_score_valid_flag` remain false until
+point-in-time panels, specialized applicability, purged walk-forward
+out-of-sample validation, coverage thresholds, stale-data controls, and
+portfolio-layer acceptance tests are implemented and reviewed. Stage 0–4B
+output is research infrastructure, not an investment recommendation.

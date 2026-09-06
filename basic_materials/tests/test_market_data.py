@@ -683,7 +683,7 @@ def test_norgate_adapter_fences_caches_and_publishes_atomically(tmp_path: Path) 
         conn.close()
 
 
-def test_schema_v2_database_migrates_to_v4(tmp_path: Path) -> None:
+def test_schema_v2_database_migrates_to_v5(tmp_path: Path) -> None:
     conn = connect(tmp_path / "basic_materials.sqlite")
     try:
         conn.executescript(FOUNDATION_SQL)
@@ -711,8 +711,8 @@ def test_schema_v2_database_migrates_to_v4(tmp_path: Path) -> None:
         )
         conn.commit()
         result = init_db(conn)
-        assert result["schema_version"] == 4
-        assert result["migrations_applied"] == [3, 4]
+        assert result["schema_version"] == 6
+        assert result["migrations_applied"] == [3, 4, 5, 6]
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='feature_market_technical'"
         ).fetchone()[0] == 1

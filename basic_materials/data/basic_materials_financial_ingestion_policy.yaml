@@ -1,0 +1,292 @@
+policy_version: basic_materials_financial_ingestion_v1
+model_family: basic_materials
+sector: Basic Materials
+snapshot_as_of_date: '2026-09-05'
+history_start_date: '2009-01-01'
+calibration_eligible: false
+
+stage4a_contract:
+  manifest_file_sha256: 02c240f6ea9aa815f1faa949fb3dfa53b093fd58061cfc151c021663b6cbb237
+  policy_sha256: 087af14909223dd94b60450b44c75fa2f57219c6fbbc6c810c3615d6dc1da8ba
+  reporting_profiles_sha256: 8d562825a53286e37fca486d36f295129e9f38597b4ce4216508817a64e16230
+  concept_map_sha256: beee0b7aaef49afb12d6ee0e43834df1f1eb330de92c13ad0a7aed6984c25aad
+
+immutable_cache:
+  reporting_cache_relative_path: sec_reporting_profiles/2026-09-05
+  reporting_cache_manifest: reporting_profile_cache_manifest.json
+  reporting_cache_manifest_file_sha256: 5fe482669acb30bae284c7d74dfa4d2ed6d7c18e1e79613be282ce27792cb5b6
+  reporting_cache_manifest_internal_sha256: a329353021770108c278c648ef92066fd8807828227c0f7c38396e6aa101836f
+  ingestion_cache_relative_path: sec_financials/2026-09-05
+  write_once_payloads: true
+  verify_every_payload_hash: true
+  allow_cache_only_rerun: true
+
+snapshot:
+  snapshot_prefix: basic_materials_sec
+  expected_profiles: 154
+  expected_current_profiles: 134
+  expected_historical_profiles: 20
+  expected_standard_profiles: 140
+  expected_exception_profiles: 14
+  representative_pilot_tickers: [NUE, BHP, AEM, RMIX]
+  status_after_sec_ingestion: partial
+  preserve_prior_snapshots: true
+
+sec:
+  archive_base_url: https://www.sec.gov/Archives/edgar/data
+  accepted_form_families: [10-K, 10-Q, 20-F, 40-F, 6-K]
+  accepted_variants: [10-K/A, 10-KT, 10-KT/A, 10-Q/A, 10-QT, 10-QT/A, 20-F/A, 40-F/A, 6-K/A]
+  ordinary_6k_requires_structured_fact_evidence: true
+  require_exact_accession_acceptance: true
+  missing_acceptance_action: quarantine
+  future_acceptance_action: exclude
+  preserve_amendments: true
+  mapped_taxonomies: [us-gaap, ifrs-full]
+  companyfacts_source_id: sec_companyfacts
+  submissions_source_id: sec_submissions
+  fallback_source_id: sec_inline_xbrl_fallback
+  fetch_filing_index_for_fallback: true
+  filing_package_candidates: [primary_document, '*_htm.xml']
+  request_retry_statuses: [429, 500, 502, 503, 504]
+
+normalization:
+  definition_version: basic_materials_financial_normalization_v1
+  canonical_precedence: [sec_companyfacts, sec_inline_xbrl_fallback]
+  dimensioned_fact_action: quarantine
+  duplicate_equal_value_action: deterministic_first
+  duplicate_conflicting_value_action: quarantine_group
+  mixed_currency_action: quarantine_group
+  amendment_policy: latest_accepted_preserve_history
+  sign_policy_from_stage4a_contract: true
+  quarter_duration_days: [70, 110]
+  semiannual_duration_days: [150, 210]
+  nine_month_duration_days: [240, 310]
+  annual_duration_days: [330, 400]
+  ttm_quarter_gap_max_days: 130
+  ttm_annual_fallback_allowed: true
+  flow_fx_method: period_average
+  instant_fx_method: latest_on_or_before_period_end
+  max_fx_staleness_calendar_days: 7
+
+features:
+  definition_version: basic_materials_financial_features_v1
+  expected_canonical_metrics: 22
+  minimum_metrics_partial: 8
+  minimum_metrics_full: 16
+  maximum_current_staleness_days: 550
+  maximum_price_staleness_days: 45
+  require_positive_denominator_for_valuation: true
+  loss_or_undefined_denominator_action: null
+  publish_all_current_tickers: true
+  current_feature_rows: 134
+  historical_feature_rows: 0
+  valuation_price_field: close
+  valuation_source: stage3_norgate_contract
+  foreign_security_ratio_required_for_market_cap: true
+  unresolved_foreign_share_basis_action: null_valuation_with_reason
+
+fx:
+  source_id: yahoo_fx_rates
+  chart_url_template: https://query1.finance.yahoo.com/v8/finance/chart/{symbol}
+  quote_currency: USD
+  identity_currency: USD
+  symbol_candidates:
+    direct: '{base}USD=X'
+    inverse: 'USD{base}=X'
+    legacy_inverse: '{base}=X'
+  start_date: '2009-01-01'
+  end_date: '2026-09-05'
+  request_timeout_seconds: 30
+  max_retries: 4
+  request_interval_seconds: 0.12
+
+exception_resolutions:
+  AGU:
+    route: legacy_filing_html_metadata
+    resolution_status: resolved_metadata_unstructured
+    canonical_eligible: false
+    annual_form: 40-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001193125-17-067096
+    evidence_form: 40-F
+    evidence_accepted_at: '2017-03-02T12:41:15Z'
+    evidence_document: d327314dex993.htm
+    reason: Cutoff-valid annual-report exhibit states IFRS and USD; no structured statement facts were available by the historical cutoff.
+  ASM:
+    route: companyfacts_with_unstructured_latest_annual
+    resolution_status: resolved_metadata_unstructured
+    canonical_eligible: true
+    annual_form: 40-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001477932-26-001629
+    evidence_form: 40-F
+    evidence_accepted_at: '2026-03-27T20:16:30Z'
+    evidence_document: avino_ex991.htm
+    reason: Historical Company Facts remain canonical-eligible, while the latest annual-report exhibit is unstructured and its newest facts remain explicitly unavailable.
+  AUGO:
+    route: inline_xbrl_fallback
+    resolution_status: resolved_inline_xbrl
+    canonical_eligible: true
+    annual_form: 20-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001171843-26-002783
+    evidence_form: 20-F/A
+    evidence_accepted_at: '2026-04-28T23:00:30Z'
+    evidence_document: f20fa_033126.htm
+    reason: Official inline XBRL exposes IFRS taxonomy and USD mapped statement units.
+  BHP:
+    route: inline_xbrl_fallback
+    resolution_status: resolved_inline_xbrl
+    canonical_eligible: true
+    annual_form: 20-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001193125-26-354647
+    evidence_form: 20-F
+    evidence_accepted_at: '2026-08-18T10:06:03Z'
+    evidence_document: bhp-20260630.htm
+    reason: Latest annual filing is inline XBRL and fills Company Facts lag.
+  CGAU:
+    route: companyfacts_with_unstructured_latest_annual
+    resolution_status: resolved_metadata_unstructured
+    canonical_eligible: true
+    annual_form: 40-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001104659-26-033394
+    evidence_form: 40-F
+    evidence_accepted_at: '2026-03-23T21:04:39Z'
+    evidence_document: tm261243d1_ex99-3.htm
+    reason: Historical Company Facts remain canonical-eligible, while the latest audited financial exhibit is unstructured and its newest facts remain explicitly unavailable.
+  CMCL:
+    route: inline_xbrl_fallback
+    resolution_status: resolved_inline_xbrl
+    canonical_eligible: true
+    annual_form: 20-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001104659-26-047739
+    evidence_form: 20-F
+    evidence_accepted_at: '2026-04-23T20:30:53Z'
+    evidence_document: cmcl-20251231x20f.htm
+    reason: Latest annual filing is inline XBRL and fills Company Facts lag.
+  MAKO:
+    route: filing_package_xbrl_instance
+    resolution_status: resolved_xbrl_instance
+    canonical_eligible: true
+    annual_form: 40-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001062993-26-002209
+    evidence_form: 40-F
+    evidence_accepted_at: '2026-04-29T20:51:23Z'
+    evidence_document: form40f_htm.xml
+    reason: Filing-package XBRL instance contains standard IFRS statement facts in USD.
+  OGC:
+    route: interim_6k_unstructured
+    resolution_status: missing_required_source
+    canonical_eligible: false
+    annual_form: UNKNOWN
+    accounting_basis: UNKNOWN
+    taxonomy: unknown
+    reporting_currency: ''
+    evidence_accession: 0001279569-26-000750
+    evidence_form: 6-K
+    evidence_accepted_at: '2026-08-06T00:47:14Z'
+    evidence_document: form6k.htm
+    reason: New SEC listing had only unstructured 6-K materials and no annual or structured financial filing by cutoff.
+  PKX:
+    route: inline_xbrl_fallback
+    resolution_status: resolved_inline_xbrl
+    canonical_eligible: true
+    annual_form: 20-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: KRW
+    evidence_accession: 0001193125-26-188766
+    evidence_form: 20-F
+    evidence_accepted_at: '2026-04-29T10:02:05Z'
+    evidence_document: d26797d20f.htm
+    reason: Latest annual filing is inline XBRL and fills Company Facts lag.
+  POT:
+    route: legacy_filing_html_metadata
+    resolution_status: resolved_metadata_unstructured
+    canonical_eligible: false
+    annual_form: 10-K
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001193125-17-055499
+    evidence_form: 10-K
+    evidence_accepted_at: '2017-02-24T10:58:42Z'
+    evidence_document: d280847d10k.htm
+    reason: Cutoff-valid annual filing states IFRS and US dollars; structured statement facts were not available by the historical cutoff.
+  RMIX:
+    route: domestic_interim_companyfacts
+    resolution_status: resolved_interim_only
+    canonical_eligible: true
+    annual_form: UNKNOWN
+    accounting_basis: US_GAAP
+    taxonomy: us-gaap
+    reporting_currency: USD
+    evidence_accession: 0001193125-26-352341
+    evidence_form: 10-Q
+    evidence_accepted_at: '2026-08-14T20:20:55Z'
+    evidence_document: rmix-20260630.htm
+    reason: Active domestic issuer has two structured 10-Q filings but no 10-K by cutoff; partial history remains explicit.
+  SCZM:
+    route: filing_package_xbrl_instance
+    resolution_status: resolved_xbrl_instance
+    canonical_eligible: true
+    annual_form: 40-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001493152-26-020908
+    evidence_form: 40-F
+    evidence_accepted_at: '2026-05-01T20:46:14Z'
+    evidence_document: form40-f_htm.xml
+    reason: Filing-package XBRL instance contains standard IFRS statement facts in USD.
+  TII:
+    route: filing_package_xbrl_instance
+    resolution_status: resolved_xbrl_instance
+    canonical_eligible: true
+    annual_form: 40-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001213900-26-031504
+    evidence_form: 40-F
+    evidence_accepted_at: '2026-03-19T10:31:19Z'
+    evidence_document: ea0281557-40f_titan_htm.xml
+    reason: The original annual filing package contains the full IFRS XBRL instance; the later amendment contains cover facts only.
+  VMET:
+    route: inline_xbrl_fallback
+    resolution_status: resolved_inline_xbrl
+    canonical_eligible: true
+    annual_form: 20-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001104659-26-052847
+    evidence_form: 20-F
+    evidence_accepted_at: '2026-04-30T20:00:52Z'
+    evidence_document: tmb-20251231x20f.htm
+    reason: Official inline XBRL exposes IFRS taxonomy and USD mapped statement units.
+
+gates:
+  portfolio_candidate_gate: false
+  oos_score_valid_flag: false
+  historical_calibration_activated: false
+  specialized_metrics_activated: false
+  cross_sector_runtime_imports_allowed: false

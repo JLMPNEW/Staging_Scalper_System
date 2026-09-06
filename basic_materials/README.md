@@ -1,48 +1,58 @@
 # Basic Materials
 
-This directory is a self-contained, fail-closed implementation of the Basic Materials scoring and ranking model. It owns its configuration, policies, source registry, SQLite schema, provider cache, validation reports, commands, and tests. It neither imports another sector implementation nor writes to another sector's database or output tree.
+This directory is a self-contained, fail-closed Basic Materials data, scoring,
+and ranking package. It owns its configuration, policies, source registry,
+SQLite schema, caches, reports, commands, and tests. It neither imports another
+sector implementation nor writes to another sector's database or output tree.
 
-## Implemented through Stage 4A
+## Implemented through Stage 4B
 
 The package currently provides:
 
 - an immutable 134-ticker current universe across eight cohorts;
-- a checksummed 72-security deactivated-company candidate census;
-- a governed 20-security historical pilot spanning all eight cohorts;
-- effective-dated memberships, four ticker aliases, 22 security events, and 20 terminal-event contracts;
-- schema v4 in the dedicated `basic_materials.sqlite` database;
-- a 16-source package registry and a checksummed Stage 4A financial-source,
-  metric, filing-timing, currency, and feature contract;
-- a governed v2 162-role market contract over 158 immutable Norgate asset IDs, with
-  current histories bounded to verified U.S. major-exchange listing windows;
-- raw OHLCV/dividends plus total-return-adjusted close, capital-event flags, XLB, SPY, and a SPY trading calendar;
-- per-role history audits and 134 current-security market-feature rows;
-- evidence-backed fixed-cash, stock-conversion, mixed, and pending-bankruptcy terminal calculations; and
-- a SEC-backed reporting-profile census covering all 134 current and 20
-  historical-pilot issuers, with 22 canonical financial metrics and 66 reviewed
-  US-GAAP/IFRS concept mappings; and
-- atomic canonical caches, read-only validators, machine-readable evidence reports, and 29 regression tests.
+- a checksummed 72-security deactivated-company candidate census and a governed
+  20-security historical pilot;
+- effective-dated memberships, four ticker aliases, 22 security events, and 20
+  terminal-event contracts;
+- a v2 market contract over 158 Norgate assets and 162 roles, with 537,739
+  adjusted bars, 5,648 actions, XLB/SPY, 4,446 calendar sessions, and 134
+  technical feature rows;
+- schema v6 in the dedicated `basic_materials.sqlite` database;
+- an immutable 154-profile SEC reporting census, 22 canonical financial
+  metrics, and 66 reviewed US-GAAP/IFRS concept mappings;
+- immutable SEC filing/package and FX caches with exact payload hashes;
+- 5,754 filing rows and 310,067 raw facts preserving accession, acceptance
+  time, periods, units, currencies, taxonomy, amendment state, and evidence;
+- 239,705 deterministic canonical facts with source precedence,
+  supersession, TTM/prior-period logic, reported/USD values, and explicit
+  quarantine/conflict states;
+- 22,852 AUD/CAD/EUR/KRW/USD FX observations;
+- 134 common financial feature rows and 134 coverage/readiness rows; and
+- atomic loaders, independent validators, machine-readable evidence reports,
+  36 regression tests, and a clean static check.
 
-The live 2026-09-05 Stage 3 run loaded 537,739 bars, 5,648 corporate-action rows,
-and 4,446 calendar sessions. The current/benchmark rank-ready gate passed at
-136/136, or 100%. ARIS, AUGO, CRH, MTA, and TII are active securities; their
-former gaps came from pre-major-exchange OTC/ADR quote regimes. ARIS, AUGO, CRH,
-and MTA now have complete governed listing-window coverage, while TII is
-rank-ready as a recent listing. ELE, MAKO, OGC, SCZM, SOLS, TII, and VMET retain
-honest `partial_history` feature labels until they accumulate 253 major-exchange
-sessions. Of 20 historical terminal events, 16 have calculable values and
-four—ANV, MCP, GMO, and BIOA—remain explicitly unresolved pending old-equity
-distribution evidence.
+The live governed snapshot is
+`basic_materials_sec:2026-09-05:06030312536c4d01f7ed`. Stage 4B resolves 140
+profiles through the standard path and all 14 review profiles through explicit
+routes. OGC is the one intentionally blocked current profile because no
+cutoff-valid structured source was available. ASM and CGAU retain older usable
+Company Facts while their latest annual exhibits remain explicit unstructured
+gaps. TII uses the full XBRL instance from its original 40-F rather than the
+cover-only amendment.
 
-The live Stage 4A contract load added 154 issuer profiles: 140 are ready for
-Company Facts ingestion, six require a governed Company Facts fallback, six
-require taxonomy review, and two require annual-form review. The census records
-102 US-GAAP, 45 IFRS, and seven unresolved accounting-basis profiles without
-substituting the security's listing currency for missing reporting-currency
-evidence. Stage 4A creates and validates the ingestion schema and contracts; it
-does not yet load filing facts or calculate financial features.
+Feature quality is 94 full, 29 partial, 9 insufficient, 1 stale, and 1 blocked;
+49 rows are financially rank-ready and 84 are valuation-ready. Forty-eight
+foreign/current securities retain null market-cap/valuation features until a
+reviewed ADR/ordinary-share ratio contract exists.
 
-No company score, ranking, calibration claim, or portfolio candidate is produced yet. Current membership is still a current snapshot, the remaining 52 candidate-census names are not promoted, and all current and historical memberships remain `calibration_eligible=0`. Model promotion and portfolio flags remain false.
+ARIS, AUGO, CRH, MTA, and TII are all active. AUGO and TII are now financially
+rank-ready. ARIS and MTA remain gated by missing common metrics and foreign
+share ratios; CRH has complete metric coverage but three stale observations at
+the cutoff.
+
+No company score, calibrated ranking, or portfolio candidate is produced yet.
+All memberships remain `calibration_eligible=0`, and both
+`portfolio_candidate_gate` and `oos_score_valid_flag` remain false.
 
 ## Standard run order
 
@@ -61,39 +71,68 @@ python basic_materials/scripts/03_run_basic_materials_market_stage.py --as-of YY
 python basic_materials/scripts/04_validate_basic_materials_market_data.py --as-of YYYY-MM-DD
 python basic_materials/scripts/05_load_basic_materials_financial_contract.py
 python basic_materials/scripts/06_validate_basic_materials_financial_contract.py
+python basic_materials/scripts/11_run_basic_materials_stage4.py
+python basic_materials/scripts/10_validate_basic_materials_financial_stage.py
 python basic_materials/scripts/02_validate_basic_materials_universe.py
 python basic_materials/scripts/02c_validate_basic_materials_historical_membership.py
 python -m pytest basic_materials/tests -q
 python -m ruff check basic_materials
 ```
 
+After a Stage 4B cache is sealed, use this deterministic offline replay:
+
+```powershell
+python basic_materials/scripts/11_run_basic_materials_stage4.py --cache-only
+```
+
+The end-to-end Stage 4B runner performs ingestion, the representative
+NUE/BHP/AEM/RMIX pilot, FX, full normalization/features, and independent
+validation. For diagnosis, use the component order:
+
+```powershell
+python basic_materials/scripts/07_ingest_basic_materials_sec_financials.py --cache-only
+python basic_materials/scripts/09_build_basic_materials_financial_features.py --pilot-only
+python basic_materials/scripts/08_sync_basic_materials_fx_rates.py --cache-only
+python basic_materials/scripts/09_build_basic_materials_financial_features.py
+python basic_materials/scripts/10_validate_basic_materials_financial_stage.py
+```
+
+Do not use `--allow-partial` for an acceptance run.
+
 `02d_build_basic_materials_market_instrument_review.py` and
-`04a_build_basic_materials_reporting_profiles.py` are not routine refresh
-commands. Use them only when deliberately rebuilding the corresponding governed
-review artifacts. Replacing an existing contract requires
+`04a_build_basic_materials_reporting_profiles.py` are deliberate contract-build
+commands, not routine refresh commands. Replacing a reviewed contract requires
 `--replace-reviewed-contract`, review of the diff, and matching manifest
 fingerprints.
 
-By default, the database is `C:/Users/josel/Documents/STAGING/DB/basic_materials.sqlite`. Set `BASIC_MATERIALS_DB_DIR` to select a different database directory. Reports and canonical provider caches stay under `output/basic_materials` unless a scratch `--report-dir` is supplied.
-
-For a scratch run, pass the same `--db <scratch-path>/basic_materials.sqlite` argument to every mutating or validating command. The filename must remain `basic_materials.sqlite` so accidental cross-sector database use fails closed.
+By default, the database is
+`C:/Users/josel/Documents/STAGING/DB/basic_materials.sqlite`. Set
+`BASIC_MATERIALS_DB_DIR` to select a different database directory. Reports and
+caches stay under `output/basic_materials` unless an explicit scratch path is
+supplied. A scratch database must still be named `basic_materials.sqlite` for
+commands that enforce the filename boundary.
 
 ## Key documents and outputs
 
-- `BASIC_MATERIALS_IMPLEMENTATION_PLAN.md` is the living implementation authority and reusable sector-repository blueprint.
-- `STAGE_GATES.md` defines the exact pass/fail boundaries.
+- `BASIC_MATERIALS_IMPLEMENTATION_PLAN.md` is the living implementation
+  authority and reusable sector-repository blueprint.
+- `STAGE_GATES.md` defines exact pass/fail boundaries.
 - `IMPLEMENTATION_STATUS.md` summarizes current state and the next slice.
-- `HISTORICAL_DEACTIVATED_CANDIDATES.md` documents the 72-name candidate census and promotion process.
-- `output/basic_materials/stage3/<as-of>` contains market coverage, features, terminal calculations, issues, summary, and artifact hashes.
-- `output/basic_materials/cache/norgate/<as-of>` contains canonical per-asset cache files and the provider snapshot manifest.
+- `HISTORICAL_DEACTIVATED_CANDIDATES.md` documents the 72-name candidate census
+  and promotion process.
+- `output/basic_materials/stage3/<as-of>` contains market coverage, features,
+  terminal calculations, issues, summaries, and artifact hashes.
 - `output/basic_materials/cache/sec_reporting_profiles/<as-of>` contains the
-  immutable SEC submissions/Company Facts census evidence and cache manifest.
-- `output/basic_materials/stage4_financial_contract/<as-of>` contains the
-  reporting census, metric registry, review issues, validation summary, and
-  artifact hashes.
+  immutable Stage 4A SEC census cache.
+- `output/basic_materials/cache/sec_financials/<as-of>` contains governed Stage
+  4B filing-package evidence, FX payloads, and sealed manifests.
+- `output/basic_materials/stage4_financial_contract/<as-of>` contains the Stage
+  4A contract evidence pack.
+- `output/basic_materials/stage4b_financials/<as-of>` contains SEC ingestion,
+  exception resolution, pilot/full normalization, FX, features, cohort/regime
+  coverage, and validation evidence.
 
-The next implementation slice is Stage 4B: ingest SEC submissions and Company
-Facts into the governed raw tables, resolve the 14-profile review queue, build
-acceptance-time canonical facts, add point-in-time FX, and publish common
-financial features plus daily valuation repricing. Specialized cohort metrics
-start only after Stage 4B coverage identifies the actual filing-text gaps.
+The next bounded slice is Stage 5: freeze positioning and commodity exposure
+contracts, build release-aware measurement-only overlays, and publish the
+foundation-readiness audit. Specialized cohort metrics begin only where that
+audit shows a high-value, sourceable gap.

@@ -14,7 +14,7 @@ from basic_materials import MODEL_FAMILY, SECTOR
 
 
 SCHEMA_OWNER = MODEL_FAMILY
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 class DatabaseIdentityError(RuntimeError):
@@ -929,11 +929,137 @@ CREATE INDEX IF NOT EXISTS idx_financial_coverage_status
 """
 
 
+FINANCIAL_INGESTION_SQL = r"""
+CREATE TABLE IF NOT EXISTS dim_financial_profile_resolution (
+    profile_key TEXT PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    security_id INTEGER NOT NULL UNIQUE,
+    ticker TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    role_type TEXT NOT NULL CHECK (role_type IN ('current_universe', 'historical_pilot')),
+    original_profile_status TEXT NOT NULL,
+    ingestion_route TEXT NOT NULL,
+    resolution_status TEXT NOT NULL CHECK (
+        resolution_status IN (
+            'resolved_standard',
+            'resolved_inline_xbrl',
+            'resolved_xbrl_instance',
+            'resolved_metadata_unstructured',
+            'resolved_interim_only',
+            'missing_required_source'
+        )
+    ),
+    effective_annual_form TEXT NOT NULL,
+    effective_accounting_basis TEXT NOT NULL,
+    effective_taxonomy TEXT NOT NULL,
+    effective_reporting_currency TEXT NOT NULL,
+    canonical_eligible INTEGER NOT NULL CHECK (canonical_eligible IN (0, 1)),
+    evidence_accession TEXT NOT NULL,
+    evidence_form TEXT NOT NULL,
+    evidence_accepted_at TEXT NOT NULL,
+    evidence_url TEXT NOT NULL,
+    evidence_sha256 TEXT NOT NULL,
+    resolution_reason TEXT NOT NULL,
+    source_cutoff_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    resolution_sha256 TEXT NOT NULL,
+    calibration_eligible INTEGER NOT NULL CHECK (calibration_eligible = 0),
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (profile_key) REFERENCES dim_issuer_reporting_profile(profile_key),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id)
+);
+
+CREATE TABLE IF NOT EXISTS fact_financial_normalization_issue (
+    issue_key TEXT PRIMARY KEY,
+    snapshot_key TEXT NOT NULL,
+    company_id INTEGER NOT NULL,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    stage TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'error')),
+    issue_code TEXT NOT NULL,
+    canonical_metric TEXT NOT NULL,
+    accession_number TEXT NOT NULL,
+    source_observation_ids_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    message TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    FOREIGN KEY (snapshot_key) REFERENCES fact_financial_ingestion_snapshot(snapshot_key),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id)
+);
+
+ALTER TABLE fact_financial_ingestion_snapshot ADD COLUMN policy_sha256 TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_ingestion_snapshot ADD COLUMN resolution_sha256 TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_ingestion_snapshot ADD COLUMN companyfacts_payload_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fact_financial_ingestion_snapshot ADD COLUMN inline_payload_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fact_financial_ingestion_snapshot ADD COLUMN canonical_fact_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fact_financial_ingestion_snapshot ADD COLUMN feature_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fact_financial_ingestion_snapshot ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}';
+
+ALTER TABLE fact_sec_filing ADD COLUMN fiscal_year TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_filing ADD COLUMN fiscal_period TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_filing ADD COLUMN is_amendment INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fact_sec_filing ADD COLUMN filing_payload_kind TEXT NOT NULL DEFAULT 'submissions';
+
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN fiscal_year TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN fiscal_period TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN decimals TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN context_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN payload_sha256 TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN evidence_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN quality_status TEXT NOT NULL DEFAULT 'usable';
+ALTER TABLE fact_sec_xbrl_fact_raw ADD COLUMN quarantine_reason TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE fact_financial_statement_canonical ADD COLUMN fiscal_year TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_statement_canonical ADD COLUMN fiscal_period TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_statement_canonical ADD COLUMN context_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_statement_canonical ADD COLUMN normalization_method TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_statement_canonical ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '{}';
+
+ALTER TABLE feature_financial_statement ADD COLUMN market_price REAL;
+ALTER TABLE feature_financial_statement ADD COLUMN market_price_date TEXT NOT NULL DEFAULT '';
+ALTER TABLE feature_financial_statement ADD COLUMN market_cap_usd REAL;
+ALTER TABLE feature_financial_statement ADD COLUMN enterprise_value_usd REAL;
+ALTER TABLE feature_financial_statement ADD COLUMN ebitda_ttm_usd REAL;
+ALTER TABLE feature_financial_statement ADD COLUMN feature_inputs_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE feature_financial_statement ADD COLUMN available_metric_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feature_financial_statement ADD COLUMN expected_metric_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE fact_financial_data_coverage ADD COLUMN role_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_data_coverage ADD COLUMN filing_regime TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_data_coverage ADD COLUMN ingestion_route TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_data_coverage ADD COLUMN latest_accepted_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE fact_financial_data_coverage ADD COLUMN missing_metrics_json TEXT NOT NULL DEFAULT '[]';
+
+CREATE INDEX IF NOT EXISTS idx_financial_resolution_status
+    ON dim_financial_profile_resolution(role_type, resolution_status, ticker);
+CREATE INDEX IF NOT EXISTS idx_financial_normalization_issue
+    ON fact_financial_normalization_issue(snapshot_key, severity, issue_code, ticker);
+CREATE INDEX IF NOT EXISTS idx_raw_financial_fact_period
+    ON fact_sec_xbrl_fact_raw(ticker, period_end, fiscal_period, quality_status);
+"""
+
+
+FINANCIAL_PERFORMANCE_SQL = r"""
+CREATE INDEX IF NOT EXISTS idx_canonical_financial_snapshot_ticker
+    ON fact_financial_statement_canonical(snapshot_key, ticker);
+CREATE INDEX IF NOT EXISTS idx_canonical_financial_superseded_by
+    ON fact_financial_statement_canonical(superseded_by_fact_id);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "basic_materials_foundation", FOUNDATION_SQL),
     (2, "basic_materials_historical_reconciliation", HISTORICAL_RECONCILIATION_SQL),
     (3, "basic_materials_adjusted_market_data", MARKET_DATA_SQL),
     (4, "basic_materials_financial_contract", FINANCIAL_CONTRACT_SQL),
+    (5, "basic_materials_financial_ingestion", FINANCIAL_INGESTION_SQL),
+    (6, "basic_materials_financial_performance_indexes", FINANCIAL_PERFORMANCE_SQL),
 )
 
 
@@ -1214,6 +1340,7 @@ def database_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "dim_financial_metric",
         "bridge_financial_metric_concept",
         "dim_issuer_reporting_profile",
+        "dim_financial_profile_resolution",
         "fact_financial_ingestion_snapshot",
         "fact_sec_filing",
         "fact_sec_xbrl_fact_raw",
@@ -1221,5 +1348,6 @@ def database_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "fact_financial_statement_canonical",
         "feature_financial_statement",
         "fact_financial_data_coverage",
+        "fact_financial_normalization_issue",
     )
     return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in tables}

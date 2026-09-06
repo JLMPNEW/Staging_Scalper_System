@@ -56,6 +56,7 @@ class PathConfig:
     financial_data_policy: Path
     financial_data_manifest: Path
     financial_concept_map: Path
+    financial_ingestion_policy: Path
     reporting_profiles_csv: Path
     reporting_overrides_csv: Path
 
@@ -230,6 +231,7 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             "financial_data_policy",
             "financial_data_manifest",
             "financial_concept_map",
+            "financial_ingestion_policy",
             "reporting_profiles_csv",
             "reporting_overrides_csv",
         },
@@ -289,6 +291,9 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
         ),
         financial_concept_map=_resolve_path(
             paths_raw["financial_concept_map"], base, "paths.financial_concept_map"
+        ),
+        financial_ingestion_policy=_resolve_path(
+            paths_raw["financial_ingestion_policy"], base, "paths.financial_ingestion_policy"
         ),
         reporting_profiles_csv=_resolve_path(
             paths_raw["reporting_profiles_csv"], base, "paths.reporting_profiles_csv"
@@ -402,7 +407,7 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
     if config.model.schema_owner != MODEL_FAMILY:
         raise ConfigError(f"model.schema_owner must be {MODEL_FAMILY!r}")
     if config.model.implemented_stage != 4:
-        raise ConfigError("model.implemented_stage must be 4 for the Stage 4A financial-contract release")
+        raise ConfigError("model.implemented_stage must be 4 for the Stage 4 financial-data release")
     if config.model.promotion_state != "shadow_monitor":
         raise ConfigError("model.promotion_state must remain 'shadow_monitor'")
     if config.model.portfolio_candidate_gate or config.model.oos_score_valid_flag:
@@ -464,6 +469,7 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         ("financial_data_policy", config.paths.financial_data_policy),
         ("financial_data_manifest", config.paths.financial_data_manifest),
         ("financial_concept_map", config.paths.financial_concept_map),
+        ("financial_ingestion_policy", config.paths.financial_ingestion_policy),
     ):
         if not _is_within(path, expected_data_root):
             raise ConfigError(f"paths.{label} must be owned by basic_materials/data")
