@@ -57,6 +57,8 @@ class PathConfig:
     financial_data_manifest: Path
     financial_concept_map: Path
     financial_ingestion_policy: Path
+    security_ratio_policy: Path
+    security_share_ratios_csv: Path
     reporting_profiles_csv: Path
     reporting_overrides_csv: Path
 
@@ -232,6 +234,8 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             "financial_data_manifest",
             "financial_concept_map",
             "financial_ingestion_policy",
+            "security_ratio_policy",
+            "security_share_ratios_csv",
             "reporting_profiles_csv",
             "reporting_overrides_csv",
         },
@@ -294,6 +298,12 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
         ),
         financial_ingestion_policy=_resolve_path(
             paths_raw["financial_ingestion_policy"], base, "paths.financial_ingestion_policy"
+        ),
+        security_ratio_policy=_resolve_path(
+            paths_raw["security_ratio_policy"], base, "paths.security_ratio_policy"
+        ),
+        security_share_ratios_csv=_resolve_path(
+            paths_raw["security_share_ratios_csv"], base, "paths.security_share_ratios_csv"
         ),
         reporting_profiles_csv=_resolve_path(
             paths_raw["reporting_profiles_csv"], base, "paths.reporting_profiles_csv"
@@ -470,6 +480,7 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         ("financial_data_manifest", config.paths.financial_data_manifest),
         ("financial_concept_map", config.paths.financial_concept_map),
         ("financial_ingestion_policy", config.paths.financial_ingestion_policy),
+        ("security_ratio_policy", config.paths.security_ratio_policy),
     ):
         if not _is_within(path, expected_data_root):
             raise ConfigError(f"paths.{label} must be owned by basic_materials/data")
@@ -489,6 +500,7 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         "terminal_return_rules_csv": "basic_materials_terminal_return_rules.csv",
         "reporting_profiles_csv": "basic_materials_reporting_profiles.csv",
         "reporting_overrides_csv": "basic_materials_reporting_overrides.csv",
+        "security_share_ratios_csv": "basic_materials_security_share_ratios.csv",
     }
     for label, filename in expected_system_files.items():
         path = getattr(config.paths, label)

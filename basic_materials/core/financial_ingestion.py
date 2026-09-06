@@ -20,6 +20,10 @@ import yaml
 
 from basic_materials import MODEL_FAMILY, SECTOR
 from basic_materials.core.atomic_io import atomic_write_bytes, atomic_write_csv, atomic_write_json
+from basic_materials.core.audited_html_financials import (
+    AuditedHtmlFinancialError,
+    parse_ogc_audited_html,
+)
 from basic_materials.core.config import BasicMaterialsConfig
 from basic_materials.core.db import assert_database_identity, utc_now
 
@@ -168,6 +172,7 @@ _RESOLUTION_STATUSES = {
     "resolved_standard",
     "resolved_inline_xbrl",
     "resolved_xbrl_instance",
+    "resolved_audited_html",
     "resolved_metadata_unstructured",
     "resolved_interim_only",
     "missing_required_source",
@@ -259,6 +264,7 @@ def load_financial_ingestion_policy(path: str | Path) -> FinancialIngestionPolic
         "history_start_date",
         "calibration_eligible",
         "stage4a_contract",
+        "security_ratio_contract",
         "immutable_cache",
         "snapshot",
         "sec",
@@ -273,7 +279,7 @@ def load_financial_ingestion_policy(path: str | Path) -> FinancialIngestionPolic
             f"Stage 4B policy keys differ: missing={sorted(required - set(root))}, "
             f"unexpected={sorted(set(root) - required)}"
         )
-    if root["policy_version"] != "basic_materials_financial_ingestion_v1":
+    if root["policy_version"] != "basic_materials_financial_ingestion_v2":
         raise FinancialIngestionError("Unsupported Stage 4B policy version")
     if root["model_family"] != MODEL_FAMILY or root["sector"] != SECTOR:
         raise FinancialIngestionError("Stage 4B policy identity mismatch")
@@ -326,11 +332,29 @@ def validate_ingestion_contract_files(
     """Verify Stage 4B is bound to the frozen Stage 4A files and cache."""
 
     stage4a = _as_mapping(policy.payload["stage4a_contract"], "stage4a_contract")
+    ratio_contract = _as_mapping(
+        policy.payload["security_ratio_contract"], "security_ratio_contract"
+    )
+    expected_ratio_keys = {"policy_sha256", "csv_sha256", "expected_current_rows"}
+    if set(ratio_contract) != expected_ratio_keys:
+        raise FinancialIngestionError("Security-ratio contract keys differ from the governed policy")
+    if int(ratio_contract["expected_current_rows"]) != 47:
+        raise FinancialIngestionError(
+            "Security-ratio contract must contain the exact 47 current foreign listings"
+        )
     expected = {
         "financial_manifest": (config.paths.financial_data_manifest, stage4a["manifest_file_sha256"]),
         "financial_policy": (config.paths.financial_data_policy, stage4a["policy_sha256"]),
         "reporting_profiles": (config.paths.reporting_profiles_csv, stage4a["reporting_profiles_sha256"]),
         "concept_map": (config.paths.financial_concept_map, stage4a["concept_map_sha256"]),
+        "security_ratio_policy": (
+            config.paths.security_ratio_policy,
+            ratio_contract["policy_sha256"],
+        ),
+        "security_share_ratios": (
+            config.paths.security_share_ratios_csv,
+            ratio_contract["csv_sha256"],
+        ),
     }
     actual: dict[str, str] = {}
     for label, (path, checksum) in expected.items():
@@ -1134,13 +1158,84 @@ def _exception_evidence(
                             "message": f"Governed structured fallback produced no usable mapped facts from {document}.",
                         }
                     )
+            elif route == "audited_filing_html":
+                observations = parse_ogc_audited_html(payload)
+                for observation in observations:
+                    links = concept_contract.get(
+                        (observation.taxonomy, observation.concept), ()
+                    )
+                    if not any(
+                        str(link["canonical_metric"]) == observation.canonical_metric
+                        and str(link["period_type"]) == observation.period_type
+                        for link in links
+                    ):
+                        raise FinancialIngestionError(
+                            f"{ticker}: audited HTML observation {observation.concept} "
+                            "does not match the frozen concept contract"
+                        )
+                    context_id = (
+                        f"audited-html:{observation.canonical_metric}:"
+                        f"{observation.period_end[:4]}"
+                    )
+                    parsed.append(
+                        RawFinancialFact(
+                            source_observation_id=_stable_hash(
+                                "sec_audited_filing_html",
+                                document_record["sha256"],
+                                ticker,
+                                observation.taxonomy,
+                                observation.concept,
+                                observation.period_start,
+                                observation.period_end,
+                                observation.numeric_value,
+                            ),
+                            filing_key=filing.filing_key,
+                            company_id=filing.company_id,
+                            security_id=filing.security_id,
+                            ticker=ticker,
+                            cik=filing.cik,
+                            accession_number=filing.accession_number,
+                            taxonomy=observation.taxonomy,
+                            concept=observation.concept,
+                            value_text=format(observation.numeric_value, ".15g"),
+                            numeric_value=observation.numeric_value,
+                            unit=observation.unit,
+                            period_start=observation.period_start,
+                            period_end=observation.period_end,
+                            filed_date=filing.filing_date,
+                            accepted_at=filing.accepted_at,
+                            form_type=filing.form_type,
+                            frame="",
+                            dimensions_json="[]",
+                            source_id="sec_audited_filing_html",
+                            source_detail=observation.source_detail,
+                            fiscal_year=observation.period_end[:4],
+                            fiscal_period="FY",
+                            decimals="-6",
+                            context_id=context_id,
+                            payload_sha256=str(document_record["sha256"]),
+                            evidence_url=document_url,
+                            quality_status="usable",
+                            quarantine_reason="",
+                        )
+                    )
+                raw_facts.extend(parsed)
+                if len(parsed) != 42:
+                    raise FinancialIngestionError(
+                        f"{ticker}: expected 42 audited HTML facts, found {len(parsed)}"
+                    )
             evidence[ticker] = {
                 "url": document_url,
                 "sha256": document_record["sha256"],
                 "structured_fact_count": len(parsed),
                 "usable_structured_fact_count": sum(item.quality_status == "usable" for item in parsed),
             }
-        except (FinancialIngestionError, requests.RequestException, json.JSONDecodeError) as exc:
+        except (
+            AuditedHtmlFinancialError,
+            FinancialIngestionError,
+            requests.RequestException,
+            json.JSONDecodeError,
+        ) as exc:
             issues.append(
                 {
                     "ticker": ticker,

@@ -14,7 +14,7 @@ from basic_materials import MODEL_FAMILY, SECTOR
 
 
 SCHEMA_OWNER = MODEL_FAMILY
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class DatabaseIdentityError(RuntimeError):
@@ -1052,6 +1052,128 @@ CREATE INDEX IF NOT EXISTS idx_canonical_financial_superseded_by
     ON fact_financial_statement_canonical(superseded_by_fact_id);
 """
 
+FINANCIAL_REMEDIATION_SQL = r"""
+ALTER TABLE dim_financial_profile_resolution
+    RENAME TO dim_financial_profile_resolution_v6;
+
+CREATE TABLE dim_financial_profile_resolution (
+    profile_key TEXT PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    security_id INTEGER NOT NULL UNIQUE,
+    ticker TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    role_type TEXT NOT NULL CHECK (role_type IN ('current_universe', 'historical_pilot')),
+    original_profile_status TEXT NOT NULL,
+    ingestion_route TEXT NOT NULL,
+    resolution_status TEXT NOT NULL CHECK (
+        resolution_status IN (
+            'resolved_standard',
+            'resolved_inline_xbrl',
+            'resolved_xbrl_instance',
+            'resolved_audited_html',
+            'resolved_metadata_unstructured',
+            'resolved_interim_only',
+            'missing_required_source'
+        )
+    ),
+    effective_annual_form TEXT NOT NULL,
+    effective_accounting_basis TEXT NOT NULL,
+    effective_taxonomy TEXT NOT NULL,
+    effective_reporting_currency TEXT NOT NULL,
+    canonical_eligible INTEGER NOT NULL CHECK (canonical_eligible IN (0, 1)),
+    evidence_accession TEXT NOT NULL,
+    evidence_form TEXT NOT NULL,
+    evidence_accepted_at TEXT NOT NULL,
+    evidence_url TEXT NOT NULL,
+    evidence_sha256 TEXT NOT NULL,
+    resolution_reason TEXT NOT NULL,
+    source_cutoff_date TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    resolution_sha256 TEXT NOT NULL,
+    calibration_eligible INTEGER NOT NULL CHECK (calibration_eligible = 0),
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (profile_key) REFERENCES dim_issuer_reporting_profile(profile_key),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id)
+);
+
+INSERT INTO dim_financial_profile_resolution (
+    profile_key, company_id, security_id, ticker, role_type,
+    original_profile_status, ingestion_route, resolution_status,
+    effective_annual_form, effective_accounting_basis, effective_taxonomy,
+    effective_reporting_currency, canonical_eligible, evidence_accession,
+    evidence_form, evidence_accepted_at, evidence_url, evidence_sha256,
+    resolution_reason, source_cutoff_date, source_id, policy_version,
+    policy_sha256, resolution_sha256, calibration_eligible,
+    created_at_utc, updated_at_utc
+)
+SELECT
+    profile_key, company_id, security_id, ticker, role_type,
+    original_profile_status, ingestion_route, resolution_status,
+    effective_annual_form, effective_accounting_basis, effective_taxonomy,
+    effective_reporting_currency, canonical_eligible, evidence_accession,
+    evidence_form, evidence_accepted_at, evidence_url, evidence_sha256,
+    resolution_reason, source_cutoff_date, source_id, policy_version,
+    policy_sha256, resolution_sha256, calibration_eligible,
+    created_at_utc, updated_at_utc
+FROM dim_financial_profile_resolution_v6;
+
+DROP TABLE dim_financial_profile_resolution_v6;
+
+CREATE TABLE dim_security_share_ratio (
+    ratio_key TEXT PRIMARY KEY,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    cik TEXT NOT NULL CHECK (length(cik) = 10 AND cik NOT GLOB '*[^0-9]*'),
+    exchange TEXT NOT NULL,
+    listed_security_title TEXT NOT NULL,
+    security_basis TEXT NOT NULL CHECK (security_basis IN ('direct_share', 'adr_ads')),
+    issuer_shares_per_traded_security REAL NOT NULL CHECK (
+        issuer_shares_per_traded_security > 0
+    ),
+    effective_from_date TEXT NOT NULL,
+    effective_to_date TEXT NOT NULL DEFAULT '',
+    evidence_accession TEXT NOT NULL,
+    evidence_form TEXT NOT NULL,
+    evidence_accepted_at TEXT NOT NULL,
+    evidence_document TEXT NOT NULL,
+    evidence_url TEXT NOT NULL,
+    evidence_payload_sha256 TEXT NOT NULL,
+    ratio_evidence_text TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL,
+    review_status TEXT NOT NULL CHECK (review_status = 'approved_current_snapshot'),
+    reviewed_on TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    row_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    UNIQUE (security_id, effective_from_date),
+    UNIQUE (ticker, effective_from_date),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id),
+    CHECK (effective_to_date = '' OR effective_to_date >= effective_from_date),
+    CHECK (substr(evidence_accepted_at, 1, 10) >= effective_from_date)
+);
+
+ALTER TABLE feature_financial_statement
+    ADD COLUMN security_ratio_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE feature_financial_statement
+    ADD COLUMN security_basis TEXT NOT NULL DEFAULT '';
+ALTER TABLE feature_financial_statement
+    ADD COLUMN issuer_shares_per_traded_security REAL;
+
+CREATE INDEX IF NOT EXISTS idx_financial_resolution_status
+    ON dim_financial_profile_resolution(role_type, resolution_status, ticker);
+CREATE INDEX IF NOT EXISTS idx_security_share_ratio_effective
+    ON dim_security_share_ratio(security_id, effective_from_date, effective_to_date);
+CREATE INDEX IF NOT EXISTS idx_security_share_ratio_ticker
+    ON dim_security_share_ratio(ticker, effective_from_date);
+"""
+
 
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "basic_materials_foundation", FOUNDATION_SQL),
@@ -1060,6 +1182,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (4, "basic_materials_financial_contract", FINANCIAL_CONTRACT_SQL),
     (5, "basic_materials_financial_ingestion", FINANCIAL_INGESTION_SQL),
     (6, "basic_materials_financial_performance_indexes", FINANCIAL_PERFORMANCE_SQL),
+    (7, "basic_materials_financial_source_and_security_ratio_remediation", FINANCIAL_REMEDIATION_SQL),
 )
 
 
@@ -1349,5 +1472,6 @@ def database_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "feature_financial_statement",
         "fact_financial_data_coverage",
         "fact_financial_normalization_issue",
+        "dim_security_share_ratio",
     )
     return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in tables}

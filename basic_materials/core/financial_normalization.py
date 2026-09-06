@@ -18,6 +18,7 @@ from basic_materials.core.financial_ingestion import (
     FinancialIngestionError,
     FinancialIngestionPolicy,
 )
+from basic_materials.core.security_ratios import active_security_ratio
 
 
 @dataclass(frozen=True)
@@ -261,7 +262,11 @@ def _raw_candidates(
     ).fetchall()
     candidates: list[CanonicalCandidate] = []
     issues: list[dict[str, Any]] = []
-    source_precedence = {"sec_companyfacts": 1, "sec_inline_xbrl_fallback": 2}
+    source_precedence = {
+        "sec_companyfacts": 1,
+        "sec_inline_xbrl_fallback": 2,
+        "sec_audited_filing_html": 3,
+    }
     for row in rows:
         metric = str(row["canonical_metric"])
         currency, unit_error = _candidate_currency(metric, str(row["unit"]))
@@ -1283,18 +1288,47 @@ def _feature_row_for_profile(
             price = None
     else:
         reasons.append("missing_stage3_market_price")
-    share_basis_safe = (
+    domestic_share_basis = (
         str(profile["filing_regime"]) == "domestic_sec"
         or str(profile["ingestion_route"]) == "domestic_interim_companyfacts"
     )
-    if not share_basis_safe:
-        reasons.append("foreign_security_share_ratio_unresolved")
+    ratio_record: dict[str, Any] | None = None
+    security_ratio_key = ""
+    security_basis = "direct_share_domestic" if domestic_share_basis else ""
+    issuer_shares_per_traded_security: float | None = 1.0 if domestic_share_basis else None
+    share_basis_safe = domestic_share_basis
+    if not domestic_share_basis:
+        ratio_record = active_security_ratio(
+            conn,
+            security_id=security_id,
+            as_of_date=as_of_date,
+        )
+        if ratio_record is None:
+            reasons.append("foreign_security_share_ratio_unresolved")
+        else:
+            expected_ratio_policy_sha = str(
+                policy.payload["security_ratio_contract"]["policy_sha256"]
+            )
+            if str(ratio_record["policy_sha256"]) != expected_ratio_policy_sha:
+                raise FinancialIngestionError(
+                    f"{ticker}: active security ratio does not match the financial policy"
+                )
+            security_ratio_key = str(ratio_record["ratio_key"])
+            security_basis = str(ratio_record["security_basis"])
+            issuer_shares_per_traded_security = float(
+                ratio_record["issuer_shares_per_traded_security"]
+            )
+            share_basis_safe = issuer_shares_per_traded_security > 0
     if trading_currency and trading_currency != "USD":
         reasons.append(f"non_usd_trading_price_unconverted:{trading_currency}")
         share_basis_safe = False
     market_cap = (
-        price * diluted_shares
-        if price is not None and diluted_shares is not None and diluted_shares > 0 and share_basis_safe
+        price * diluted_shares / issuer_shares_per_traded_security
+        if price is not None
+        and diluted_shares is not None
+        and diluted_shares > 0
+        and issuer_shares_per_traded_security is not None
+        and share_basis_safe
         else None
     )
     if diluted_shares is None:
@@ -1370,9 +1404,39 @@ def _feature_row_for_profile(
         },
         "valuation": {
             "share_basis_safe": share_basis_safe,
+            "market_cap_formula": (
+                "market_price_usd * diluted_issuer_shares / "
+                "issuer_shares_per_traded_security"
+            ),
             "price_source": "stage3_norgate_contract",
             "price_field": "close",
             "trading_currency": trading_currency,
+            "security_ratio": (
+                {
+                    "ratio_key": security_ratio_key,
+                    "security_basis": security_basis,
+                    "issuer_shares_per_traded_security": (
+                        issuer_shares_per_traded_security
+                    ),
+                    "evidence_accession": str(ratio_record["evidence_accession"]),
+                    "evidence_accepted_at": str(ratio_record["evidence_accepted_at"]),
+                    "evidence_url": str(ratio_record["evidence_url"]),
+                    "evidence_payload_sha256": str(
+                        ratio_record["evidence_payload_sha256"]
+                    ),
+                    "policy_sha256": str(ratio_record["policy_sha256"]),
+                    "row_sha256": str(ratio_record["row_sha256"]),
+                }
+                if ratio_record is not None
+                else {
+                    "ratio_key": "",
+                    "security_basis": security_basis,
+                    "issuer_shares_per_traded_security": (
+                        issuer_shares_per_traded_security
+                    ),
+                    "basis": "domestic_issuer_share" if domestic_share_basis else "unresolved",
+                }
+            ),
         },
         "missing_metrics": missing_metrics,
         "conflict_metrics": sorted(conflict_metrics),
@@ -1436,6 +1500,9 @@ def _feature_row_for_profile(
         "feature_inputs_json": json.dumps(input_payload, sort_keys=True),
         "available_metric_count": len(available_metrics),
         "expected_metric_count": len(expected_metrics),
+        "security_ratio_key": security_ratio_key,
+        "security_basis": security_basis,
+        "issuer_shares_per_traded_security": issuer_shares_per_traded_security,
     }
     coverage = {
         "audit_asof_date": as_of_date,
@@ -1517,6 +1584,9 @@ _FEATURE_COLUMNS = (
     "feature_inputs_json",
     "available_metric_count",
     "expected_metric_count",
+    "security_ratio_key",
+    "security_basis",
+    "issuer_shares_per_traded_security",
 )
 
 _COVERAGE_COLUMNS = (

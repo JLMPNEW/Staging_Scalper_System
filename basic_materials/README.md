@@ -5,7 +5,7 @@ and ranking package. It owns its configuration, policies, source registry,
 SQLite schema, caches, reports, commands, and tests. It neither imports another
 sector implementation nor writes to another sector's database or output tree.
 
-## Implemented through Stage 4B
+## Implemented Stage 4C acceptance candidate
 
 The package currently provides:
 
@@ -14,45 +14,55 @@ The package currently provides:
   20-security historical pilot;
 - effective-dated memberships, four ticker aliases, 22 security events, and 20
   terminal-event contracts;
-- a v2 market contract over 158 Norgate assets and 162 roles, with 537,739
-  adjusted bars, 5,648 actions, XLB/SPY, 4,446 calendar sessions, and 134
-  technical feature rows;
-- schema v6 in the dedicated `basic_materials.sqlite` database;
+- a v2 market contract over 158 Norgate assets and 162 roles, with 492,653
+  adjusted bars, 5,388 actions, XLB/SPY, 4,446 calendar sessions, and 134
+  technical feature rows in the clean acceptance build;
+- schema v7 and an 18-source registry in the dedicated
+  `basic_materials.sqlite` database design;
 - an immutable 154-profile SEC reporting census, 22 canonical financial
   metrics, and 66 reviewed US-GAAP/IFRS concept mappings;
-- immutable SEC filing/package and FX caches with exact payload hashes;
-- 5,754 filing rows and 310,067 raw facts preserving accession, acceptance
+- immutable SEC filing/package, audited-HTML, security-ratio, and FX caches
+  with exact payload hashes;
+- 5,754 filing rows and 310,109 raw facts preserving accession, acceptance
   time, periods, units, currencies, taxonomy, amendment state, and evidence;
-- 239,705 deterministic canonical facts with source precedence,
+- 239,747 deterministic canonical facts with source precedence,
   supersession, TTM/prior-period logic, reported/USD values, and explicit
   quarantine/conflict states;
-- 22,852 AUD/CAD/EUR/KRW/USD FX observations;
-- 134 common financial feature rows and 134 coverage/readiness rows; and
+- 22,851 AUD/CAD/EUR/KRW/USD FX observations;
+- a 47-row current security-unit contract: 42 direct shares and five ADSs;
+- an OGC audited IFRS fallback with 42 tied-out 2024/2025 observations;
+- 134 current common financial feature rows and 134 coverage/readiness rows;
+  and
 - atomic loaders, independent validators, machine-readable evidence reports,
-  36 regression tests, and a clean static check.
+  38 regression tests, and a clean static check.
 
-The live governed snapshot is
-`basic_materials_sec:2026-09-05:06030312536c4d01f7ed`. Stage 4B resolves 140
-profiles through the standard path and all 14 review profiles through explicit
-routes. OGC is the one intentionally blocked current profile because no
-cutoff-valid structured source was available. ASM and CGAU retain older usable
-Company Facts while their latest annual exhibits remain explicit unstructured
-gaps. TII uses the full XBRL instance from its original 40-F rather than the
-cover-only amendment.
+The validated acceptance snapshot is
+`basic_materials_sec:2026-09-05:2cf5219d8855588066ba`. Stage 4C resolves all
+154 profiles: 140 standard routes and 14 explicit exception routes. OGC is now
+`resolved_audited_html` and its current feature row is full. The audited parser
+does not relabel the exhibit as XBRL; it deterministically maps audited tables,
+retains exact SEC lineage, and fails unless balance, cash, and profit tie-outs
+pass.
 
-Feature quality is 94 full, 29 partial, 9 insufficient, 1 stale, and 1 blocked;
-49 rows are financially rank-ready and 84 are valuation-ready. Forty-eight
-foreign/current securities retain null market-cap/valuation features until a
-reviewed ADR/ordinary-share ratio contract exists.
+Feature quality is 95 full, 29 partial, 9 insufficient, and 1 stale; 50 rows
+are financially rank-ready and 87 are valuation-ready. All 47 ratio-required
+foreign listings have an effective SEC-evidenced conversion. The five ADS
+ratios (issuer shares represented by one traded ADS) are BHP 2, ELVR 10, PKX
+0.25, RIO 1, and TX 10. No missing ratio is inferred.
 
-ARIS, AUGO, CRH, MTA, and TII are all active. AUGO and TII are now financially
-rank-ready. ARIS and MTA remain gated by missing common metrics and foreign
-share ratios; CRH has complete metric coverage but three stale observations at
-the cutoff.
+The source layers contain financial, market, and FX observations before
+2019-01-01, but the model-ready financial feature table currently has only one
+as-of date, 2026-09-05. A 2019-forward longitudinal point-in-time feature panel
+is therefore not yet implemented. That is the next Stage 4D gate.
 
 No company score, calibrated ranking, or portfolio candidate is produced yet.
 All memberships remain `calibration_eligible=0`, and both
 `portfolio_candidate_gate` and `oos_score_valid_flag` remain false.
+
+The installed live database remains on the previous Stage 4B file until an
+explicit live-replacement authorization is given. The fully validated Stage 4C
+candidate is at
+`output/basic_materials/verification_stage4c_20260906/basic_materials.sqlite`.
 
 ## Standard run order
 
@@ -71,6 +81,7 @@ python basic_materials/scripts/03_run_basic_materials_market_stage.py --as-of YY
 python basic_materials/scripts/04_validate_basic_materials_market_data.py --as-of YYYY-MM-DD
 python basic_materials/scripts/05_load_basic_materials_financial_contract.py
 python basic_materials/scripts/06_validate_basic_materials_financial_contract.py
+python basic_materials/scripts/08a_load_basic_materials_security_ratios.py
 python basic_materials/scripts/11_run_basic_materials_stage4.py
 python basic_materials/scripts/10_validate_basic_materials_financial_stage.py
 python basic_materials/scripts/02_validate_basic_materials_universe.py
@@ -79,17 +90,20 @@ python -m pytest basic_materials/tests -q
 python -m ruff check basic_materials
 ```
 
-After a Stage 4B cache is sealed, use this deterministic offline replay:
+The Stage 4C runner already loads and validates security ratios; command `08a`
+exists for diagnosis or contract-only operation. After all evidence caches are
+sealed, use deterministic offline replay:
 
 ```powershell
 python basic_materials/scripts/11_run_basic_materials_stage4.py --cache-only
 ```
 
-The end-to-end Stage 4B runner performs ingestion, the representative
+The runner performs security-ratio evidence verification, SEC ingestion, the
 NUE/BHP/AEM/RMIX pilot, FX, full normalization/features, and independent
-validation. For diagnosis, use the component order:
+validation. For lower-level diagnosis, use:
 
 ```powershell
+python basic_materials/scripts/08a_load_basic_materials_security_ratios.py --cache-only
 python basic_materials/scripts/07_ingest_basic_materials_sec_financials.py --cache-only
 python basic_materials/scripts/09_build_basic_materials_financial_features.py --pilot-only
 python basic_materials/scripts/08_sync_basic_materials_fx_rates.py --cache-only
@@ -117,22 +131,24 @@ commands that enforce the filename boundary.
 - `BASIC_MATERIALS_IMPLEMENTATION_PLAN.md` is the living implementation
   authority and reusable sector-repository blueprint.
 - `STAGE_GATES.md` defines exact pass/fail boundaries.
-- `IMPLEMENTATION_STATUS.md` summarizes current state and the next slice.
+- `IMPLEMENTATION_STATUS.md` records implemented state, limitations, counts,
+  and deployment status.
 - `HISTORICAL_DEACTIVATED_CANDIDATES.md` documents the 72-name candidate census
   and promotion process.
 - `output/basic_materials/stage3/<as-of>` contains market coverage, features,
   terminal calculations, issues, summaries, and artifact hashes.
 - `output/basic_materials/cache/sec_reporting_profiles/<as-of>` contains the
   immutable Stage 4A SEC census cache.
-- `output/basic_materials/cache/sec_financials/<as-of>` contains governed Stage
-  4B filing-package evidence, FX payloads, and sealed manifests.
+- `output/basic_materials/cache/sec_financials/2026-09-05-v2` contains governed
+  Stage 4C filing-package/audited-HTML evidence and its sealed manifest.
+- `output/basic_materials/cache/security_share_ratios/<as-of>` contains the 47
+  verified SEC security-unit documents and sealed manifest.
 - `output/basic_materials/stage4_financial_contract/<as-of>` contains the Stage
   4A contract evidence pack.
-- `output/basic_materials/stage4b_financials/<as-of>` contains SEC ingestion,
-  exception resolution, pilot/full normalization, FX, features, cohort/regime
-  coverage, and validation evidence.
+- `output/basic_materials/stage4c_financial_remediation/<as-of>` is the normal
+  Stage 4C SEC, ratio, FX, normalization, feature, and validation evidence root.
 
-The next bounded slice is Stage 5: freeze positioning and commodity exposure
-contracts, build release-aware measurement-only overlays, and publish the
-foundation-readiness audit. Specialized cohort metrics begin only where that
-audit shows a high-value, sourceable gap.
+Next: Stage 4D builds the 2019-01-01-forward common point-in-time panel. Stage
+5A then freezes specialized metric definitions, variants, applicability, and
+sourceability; Stage 6B loads accepted specialized observations as
+measurement-only features with zero score weight.

@@ -1,4 +1,4 @@
-policy_version: basic_materials_financial_ingestion_v1
+policy_version: basic_materials_financial_ingestion_v2
 model_family: basic_materials
 sector: Basic Materials
 snapshot_as_of_date: '2026-09-05'
@@ -11,12 +11,17 @@ stage4a_contract:
   reporting_profiles_sha256: 8d562825a53286e37fca486d36f295129e9f38597b4ce4216508817a64e16230
   concept_map_sha256: beee0b7aaef49afb12d6ee0e43834df1f1eb330de92c13ad0a7aed6984c25aad
 
+security_ratio_contract:
+  policy_sha256: 279fa92de97a39236bb45e920b2bbf59a589273e9c7dc6f39225b9311d814f85
+  csv_sha256: 7de87a2d30aa33d61b13c35afa65988009e985cea36628665b141076fa71501a
+  expected_current_rows: 47
+
 immutable_cache:
   reporting_cache_relative_path: sec_reporting_profiles/2026-09-05
   reporting_cache_manifest: reporting_profile_cache_manifest.json
   reporting_cache_manifest_file_sha256: 5fe482669acb30bae284c7d74dfa4d2ed6d7c18e1e79613be282ce27792cb5b6
   reporting_cache_manifest_internal_sha256: a329353021770108c278c648ef92066fd8807828227c0f7c38396e6aa101836f
-  ingestion_cache_relative_path: sec_financials/2026-09-05
+  ingestion_cache_relative_path: sec_financials/2026-09-05-v2
   write_once_payloads: true
   verify_every_payload_hash: true
   allow_cache_only_rerun: true
@@ -45,13 +50,14 @@ sec:
   companyfacts_source_id: sec_companyfacts
   submissions_source_id: sec_submissions
   fallback_source_id: sec_inline_xbrl_fallback
+  audited_html_source_id: sec_audited_filing_html
   fetch_filing_index_for_fallback: true
   filing_package_candidates: [primary_document, '*_htm.xml']
   request_retry_statuses: [429, 500, 502, 503, 504]
 
 normalization:
-  definition_version: basic_materials_financial_normalization_v1
-  canonical_precedence: [sec_companyfacts, sec_inline_xbrl_fallback]
+  definition_version: basic_materials_financial_normalization_v2
+  canonical_precedence: [sec_companyfacts, sec_inline_xbrl_fallback, sec_audited_filing_html]
   dimensioned_fact_action: quarantine
   duplicate_equal_value_action: deterministic_first
   duplicate_conflicting_value_action: quarantine_group
@@ -69,7 +75,7 @@ normalization:
   max_fx_staleness_calendar_days: 7
 
 features:
-  definition_version: basic_materials_financial_features_v1
+  definition_version: basic_materials_financial_features_v2
   expected_canonical_metrics: 22
   minimum_metrics_partial: 8
   minimum_metrics_full: 16
@@ -193,18 +199,18 @@ exception_resolutions:
     evidence_document: form40f_htm.xml
     reason: Filing-package XBRL instance contains standard IFRS statement facts in USD.
   OGC:
-    route: interim_6k_unstructured
-    resolution_status: missing_required_source
-    canonical_eligible: false
-    annual_form: UNKNOWN
-    accounting_basis: UNKNOWN
-    taxonomy: unknown
-    reporting_currency: ''
-    evidence_accession: 0001279569-26-000750
+    route: audited_filing_html
+    resolution_status: resolved_audited_html
+    canonical_eligible: true
+    annual_form: 40-F
+    accounting_basis: IFRS
+    taxonomy: ifrs-full
+    reporting_currency: USD
+    evidence_accession: 0001628280-26-029399
     evidence_form: 6-K
-    evidence_accepted_at: '2026-08-06T00:47:14Z'
-    evidence_document: form6k.htm
-    reason: New SEC listing had only unstructured 6-K materials and no annual or structured financial filing by cutoff.
+    evidence_accepted_at: '2026-05-01T20:53:37Z'
+    evidence_document: exhibit991-oceanagoldfinan.htm
+    reason: SEC-hosted audited IFRS annual statements in USD are extracted by a deterministic governed HTML parser with statement tie-outs and exact filing lineage.
   PKX:
     route: inline_xbrl_fallback
     resolution_status: resolved_inline_xbrl

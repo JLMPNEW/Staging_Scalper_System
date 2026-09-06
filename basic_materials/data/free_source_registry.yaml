@@ -1,4 +1,4 @@
-registry_version: basic_materials_source_registry_v3
+registry_version: basic_materials_source_registry_v4
 sources:
   - source_id: basic_materials_current_universe
     stage: universe
@@ -97,6 +97,20 @@ sources:
     category: filing_document_fallback
     description: Filing-document and inline-XBRL fallback for gaps not covered by Company Facts.
     point_in_time_role: acceptance_bounded_filing_document_fallback
+    active: true
+  - source_id: sec_audited_filing_html
+    stage: stage_4_financial_data
+    provider: sec_edgar
+    category: audited_financial_statement_exhibit
+    description: Deterministic extraction from SEC-hosted audited HTML financial-statement exhibits when XBRL is unavailable.
+    point_in_time_role: acceptance_bounded_audited_statement_fallback
+    active: true
+  - source_id: basic_materials_security_ratio_review
+    stage: stage_4_financial_data
+    provider: reviewed_sec_edgar
+    category: listed_security_unit_conversion
+    description: Reviewed effective-dated issuer-share per traded-security ratios supported by SEC filing evidence.
+    point_in_time_role: effective_dated_security_unit_conversion
     active: true
   - source_id: yahoo_fx_rates
     stage: stage_4_financial_data

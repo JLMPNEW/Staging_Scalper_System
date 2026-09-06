@@ -34,6 +34,8 @@ paths:
   financial_data_manifest: data/basic_materials_financial_data_manifest.yaml
   financial_concept_map: data/basic_materials_financial_concept_map.yaml
   financial_ingestion_policy: data/basic_materials_financial_ingestion_policy.yaml
+  security_ratio_policy: data/basic_materials_security_ratio_policy.yaml
+  security_share_ratios_csv: system_csvs/basic_materials_security_share_ratios.csv
   reporting_profiles_csv: system_csvs/basic_materials_reporting_profiles.csv
   reporting_overrides_csv: system_csvs/basic_materials_reporting_overrides.csv
 

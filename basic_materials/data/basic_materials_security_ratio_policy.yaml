@@ -1,0 +1,100 @@
+policy_version: basic_materials_security_ratio_policy_v1
+model_family: basic_materials
+sector: Basic Materials
+contract_as_of_date: '2026-09-05'
+reviewed_on: '2026-09-06'
+calibration_eligible: false
+
+contract:
+  csv_sha256: 7de87a2d30aa33d61b13c35afa65988009e985cea36628665b141076fa71501a
+  expected_rows: 47
+  expected_direct_share_rows: 42
+  expected_adr_ads_rows: 5
+  unique_key: ticker|effective_from_date
+  source_id: basic_materials_security_ratio_review
+  allowed_review_statuses: [approved_current_snapshot]
+
+ratio_semantics:
+  field_name: issuer_shares_per_traded_security
+  definition: Number of issuer-reported common or ordinary shares represented by one traded US security.
+  market_cap_formula: market_price_usd * diluted_issuer_shares / issuer_shares_per_traded_security
+  direct_share_ratio: 1
+  require_positive_ratio: true
+  effective_date_must_not_follow_contract_as_of: true
+  evidence_acceptance_must_not_follow_contract_as_of: true
+  infer_missing_ratio: false
+  historical_backfill_authorized: false
+
+coverage:
+  expected_current_tickers:
+    - AAUC
+    - AEM
+    - AGI
+    - ALM
+    - ARIS
+    - ASM
+    - ASTL
+    - AU
+    - AUGO
+    - B
+    - BHP
+    - BTG
+    - CGAU
+    - CMCL
+    - EGO
+    - ELE
+    - ELVR
+    - EQX
+    - FNV
+    - FSM
+    - GAU
+    - GROY
+    - GSM
+    - IAG
+    - ICL
+    - ITRG
+    - KGC
+    - LAR
+    - MAKO
+    - MEOH
+    - MT
+    - MTA
+    - NTR
+    - OGC
+    - OR
+    - PAAS
+    - PKX
+    - RIO
+    - SCZM
+    - TFPM
+    - TII
+    - TTAM
+    - TX
+    - USAS
+    - VMET
+    - VOXR
+    - WPM
+  adr_ads_ratios:
+    BHP: 2
+    ELVR: 10
+    PKX: 0.25
+    RIO: 1
+    TX: 10
+
+evidence:
+  provider: sec_edgar
+  archive_host: www.sec.gov
+  cache_relative_path: security_share_ratios/2026-09-05
+  cache_manifest: security_share_ratio_cache_manifest.json
+  verify_listed_title_in_document: true
+  verify_ratio_phrase_for_adr_ads: true
+  retain_payload_sha256: true
+  allow_cache_only_replay: true
+
+gates:
+  current_valuation_enabled_after_validation: true
+  historical_valuation_enabled: false
+  specialized_metric_weighting_activated: false
+  historical_calibration_activated: false
+  portfolio_candidate_gate: false
+  oos_score_valid_flag: false

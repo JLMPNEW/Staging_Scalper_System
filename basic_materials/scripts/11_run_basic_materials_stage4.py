@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the independent Basic Materials Stage 4B pipeline end to end."""
+"""Run the independent Basic Materials Stage 4C-remediated pipeline end to end."""
 
 from __future__ import annotations
 
@@ -36,6 +36,11 @@ from basic_materials.core.source_registry import (  # noqa: E402
     load_source_registry,
     upsert_source_registry,
 )
+from basic_materials.core.security_ratios import (  # noqa: E402
+    load_security_ratio_policy,
+    load_security_share_ratios,
+    write_security_ratio_reports,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,9 +61,17 @@ def main() -> None:
     policy = load_financial_ingestion_policy(
         resolve_cli_path(args.policy, config.paths.financial_ingestion_policy)
     )
+    ratio_policy = load_security_ratio_policy(config.paths.security_ratio_policy)
+    expected_ratio_sha = str(
+        policy.payload["security_ratio_contract"]["policy_sha256"]
+    )
+    if ratio_policy.checksum != expected_ratio_sha:
+        raise RuntimeError("Security-ratio policy does not match the financial policy")
+    if ratio_policy.as_of_date != policy.as_of_date:
+        raise RuntimeError("Security-ratio and financial policy as-of dates differ")
     report_root = resolve_cli_path(
         args.report_root,
-        config.paths.output_root / "stage4b_financials" / policy.as_of_date,
+        config.paths.output_root / "stage4c_financial_remediation" / policy.as_of_date,
     )
     conn = connect(database, config.runtime.sqlite_timeout_seconds)
     run_id = ""
@@ -70,7 +83,7 @@ def main() -> None:
         conn.commit()
         run_id = start_run(
             conn,
-            stage="stage4b_financial_pipeline",
+            stage="stage4c_financial_remediation",
             command="11_run_basic_materials_stage4.py",
             database_path=database,
             input_path=policy.path,
@@ -79,7 +92,20 @@ def main() -> None:
                 "cache_only": args.cache_only,
                 "allow_partial": args.allow_partial,
                 "promotion_state": "shadow_monitor",
+                "security_ratio_policy_sha256": ratio_policy.checksum,
             },
+        )
+        ratios = load_security_share_ratios(
+            conn,
+            config=config,
+            policy=ratio_policy,
+            cache_only=args.cache_only,
+        )
+        result["security_ratios"] = ratios.as_dict()
+        result["security_ratio_artifacts"] = write_security_ratio_reports(
+            conn,
+            stats=ratios,
+            report_dir=report_root / "security_ratios",
         )
         sec = ingest_sec_financials(
             conn,
@@ -151,7 +177,7 @@ def main() -> None:
         )
         if not validation.passed:
             raise RuntimeError(
-                "Stage 4B validation failed: "
+                "Stage 4C validation failed: "
                 + ",".join(
                     item.issue_code for item in validation.issues if item.severity == "error"
                 )

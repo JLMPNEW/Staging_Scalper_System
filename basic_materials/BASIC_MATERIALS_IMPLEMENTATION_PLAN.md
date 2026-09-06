@@ -1,10 +1,10 @@
 # Basic Materials Scoring and Ranking Model — Implementation Plan
 
-Status: living implementation authority; Stages 0–4B implemented; calibration blocked
+Status: living implementation authority; Stage 4C acceptance candidate implemented; live promotion and calibration blocked
 Prepared: 2026-09-05  
 Last implementation update: 2026-09-06
 Authoritative current universe: ticker_mapping/basic_materials.csv
-Current schema version: 6
+Current schema version: 7
 
 ## Document control and reuse contract
 
@@ -30,6 +30,7 @@ Implementation ledger:
 | 2026-09-05 | Stage 3 adjusted market data and terminal returns | Schema v3; governed v2 162-role/158-asset Norgate identity and listing-window contract; XLB/SPY; 537,739 adjusted bars; 5,648 corporate actions; 4,446 SPY calendar sessions; 162 coverage audits; 134 market-feature rows; 20 terminal calculations; atomic cache and evidence reports | Stable provider-ID joins; snapshot fencing; 100% current/benchmark rank-ready gate; active/current major-exchange checks; listing-window feature bounds; 16 calculable terminal events resolved; no-future-price checks; Stage 2A/2B revalidation; 24 passing tests at slice completion | Four bankruptcy distributions remain unresolved; 52 candidate-census names remain outside the pilot; calibration and portfolio gates remain closed |
 | 2026-09-05 | Stage 4A financial contract and reporting profiles | Schema v4; 16-source registry; immutable financial policy, manifest, 22-metric concept map, empty reviewed-override contract, and 154-row SEC-backed issuer-profile census; 315 cached SEC payloads; atomic loader; read-only validator and evidence pack | Exact 134 current/20 historical profile coverage; 22 metrics and 66 concept links; acceptance-time and amendment policy frozen; reporting/listing currency separation; row/artifact hashes; idempotent live load; every Stage 0–3 validator; 29 passing tests | Fourteen issuer profiles require governed Stage 4B fallback/review; raw filing facts, canonical statements, FX, features, valuation, specialized metrics, calibration, and portfolio gates remain closed |
 | 2026-09-06 | Stage 4B point-in-time fundamentals, FX, and common features | Stage 4A checkpoint commit `4b6bce4`; immutable Stage 4B policy/cache seals; schema v5 fact/resolution/audit extensions and schema v6 performance indexes; 5,754 filings; 310,067 raw facts; 239,705 canonical facts; 22,852 FX rows; 134 feature/coverage rows; governed 14-profile exception resolution; scratch and live idempotency runs | Exact acceptance-time lineage; future-fact exclusion; deterministic source precedence, amendment supersession, TTM and sign rules; zero canonical conflicts and zero missing FX conversions; all Stage 0–4B validators; 36 passing tests | OGC remains explicitly blocked; 48 foreign securities remain valuation-gated pending share/ADR ratios; specialized metrics, survivorship-correct calibration, scoring, ranking, and portfolio gates remain closed |
+| 2026-09-06 | Stage 4C OGC and listed-security-unit remediation | Financial policy v2; schema v7; deterministic audited-HTML parser; exact 47-row SEC-evidenced ratio contract; 42 direct-share and five ADS rows; ratio-aware market-cap lineage; hard OGC/ratio/formula gates; fresh Stage 0-4C acceptance build and cache-only replay | OGC has 42 usable raw and canonical facts and a full current row; zero unresolved ratio-required foreign listings; exact ADS ratios; zero Stage 4C validation errors/warnings; 38 tests and independence/Ruff pass | Live database replacement requires explicit authorization; longitudinal 2019-forward feature panel, specialized metrics, calibration, scoring, ranking, and portfolio gates remain closed |
 
 ### Reusable sector-repository build sequence
 
@@ -46,10 +47,11 @@ The following sequence is the portable part of this implementation. A future sec
 | 7 | Promote a bounded historical pilot through four governed contracts: membership, aliases, security events, and terminal events | Exact cross-file keys; candidate-census reconciliation; primary-source events; explicit unresolved terminal states |
 | 8 | Load and validate the historical pilot in one transaction | Current universe unchanged; historical rows effective-dated; aliases scoped; raw inputs retained; rerun idempotent; failure rollback proven |
 | 9 | Ingest adjusted prices and reconcile cash, stock, mixed, bankruptcy, OTC, and successor returns | Every terminal event has an auditable final-return treatment before calibration eligibility can change |
-| 10 | Add point-in-time fundamentals, reporting profiles, FX, and common features | Filing-acceptance timing, units, currencies, cadence, and amendments validated |
-| 11 | Add sector-specialized metrics as measurement-only features | Applicability, source evidence, definition variants, coverage, and zero-weight enforcement pass |
-| 12 | Build survivorship-correct panels, diagnostics, shadow scores, constrained calibration, and backtests | Leakage tests, walk-forward evidence, untouched outer test, costs, capacity, and explicit no-promotion outcomes |
-| 13 | Publish governed outputs and integrate downstream by file only | Dated hash-sealed contract; independent orchestration; rollback and last-success preservation |
+| 10 | Add acceptance-bounded fundamentals, reporting profiles, FX, security-unit ratios, and current common features | Filing timing, units, currencies, cadence, amendments, listed-security basis, and current features validated |
+| 11 | Build the longitudinal common point-in-time panel before specialized parsing | Scheduled-date hashes, historical membership, contemporaneous ratios, source birthdates, and no-lookahead pass |
+| 12 | Define and load sector-specialized metrics as measurement-only features | Applicability, source evidence, definition variants, coverage, and zero-weight enforcement pass |
+| 13 | Build diagnostics, shadow scores, constrained calibration, and backtests | Leakage tests, walk-forward evidence, untouched outer test, costs, capacity, and explicit no-promotion outcomes |
+| 14 | Publish governed outputs and integrate downstream by file only | Dated hash-sealed contract; independent orchestration; rollback and last-success preservation |
 
 For every future stage, use the same five-part unit of work: contract first, immutable inputs second, atomic loader third, independent validator/report fourth, and regression tests plus this document fifth. This ordering is mandatory because it prevents implementation code from silently defining its own data policy.
 
@@ -1386,8 +1388,10 @@ work; they are not silently imputed.
 
 Status: Stage 4A contract and reporting-profile foundation implemented on
 2026-09-05; Stage 4B point-in-time ingestion, normalization, FX, and common
-features implemented and independently validated on 2026-09-06. No financial
-score exists and no calibration or portfolio gate is open.
+features implemented and independently validated on 2026-09-06; Stage 4C OGC
+and security-unit remediation implemented as a fully validated acceptance
+candidate on 2026-09-06. Live replacement remains separately authorized. No
+financial score exists and no calibration or portfolio gate is open.
 
 ### Stage 4A implemented foundation
 
@@ -1612,6 +1616,125 @@ Stage 4B gate result: passed for engineering and future shadow-feature use.
 Calibration eligibility, specialized-metric weights, score/rank publication,
 `portfolio_candidate_gate`, and `oos_score_valid_flag` remain closed.
 
+### Stage 4C implemented OGC and security-unit remediation
+
+Stage 4C closes the two current-snapshot fail-closed queues left by Stage 4B
+without weakening historical or calibration gates.
+
+Build:
+
+1. `data/basic_materials_security_ratio_policy.yaml` defines
+   `issuer_shares_per_traded_security`, the market-cap formula, exact current
+   coverage, ADS values, SEC evidence requirements, and explicit prohibitions
+   on inference and historical backfill.
+2. `system_csvs/basic_materials_security_share_ratios.csv` contains 47 reviewed
+   effective-dated rows with CIK, exchange, registered title, basis, ratio,
+   exact SEC accession/form/acceptance/document, URL, and review lineage.
+3. `core/security_ratios.py` verifies the CSV hash and ticker census, proves
+   each listed title appears in the SEC document, proves every ADS conversion
+   phrase, seals payloads, loads the ratio dimension atomically, and reports
+   evidence.
+4. `core/audited_html_financials.py` extracts 21 OGC metrics for 2024 and 2025
+   from the audited IFRS exhibit furnished on May 1, 2026. Exact statement
+   tables plus balance-sheet, ending-cash, and net-profit tie-outs are required.
+5. `core/financial_ingestion.py` adds `resolved_audited_html`, binds financial
+   policy v2 to both ratio artifacts, and uses a new immutable
+   `sec_financials/2026-09-05-v2` cache namespace.
+6. `core/financial_normalization.py` applies
+   `price * diluted issuer shares / issuer shares per traded security` and
+   stores the complete ratio/evidence/policy lineage on applicable features.
+7. Schema v7 adds `dim_security_share_ratio`, feature ratio lineage, and the
+   audited-HTML resolution state. Source registry v4 adds the audited-HTML and
+   security-ratio sources.
+8. Validation requires the exact ratio census, no overlaps, the exact five ADS
+   conversions, no unresolved ratio-required current foreign listing, exact
+   market-cap arithmetic, and exactly 42 OGC raw and 42 canonical facts.
+
+The five ADS conversions are issuer shares represented by one traded ADS:
+
+| Ticker | Issuer shares per ADS |
+|---|---:|
+| BHP | 2 |
+| ELVR | 10 |
+| PKX | 0.25 |
+| RIO | 1 |
+| TX | 10 |
+
+The other 42 contracted foreign securities are direct common/ordinary-share
+listings with ratio 1. A ratio-1 ADS such as RIO remains classified as an ADS.
+RMIX is a governed domestic interim filer and sits outside this 47-row foreign
+contract.
+
+OGC evidence is accession `0001628280-26-029399`, accepted exactly at
+`2026-05-01T20:53:37Z`, document
+`exhibit991-oceanagoldfinan.htm`. The source is retained as audited HTML, not
+misrepresented as XBRL. OGC is now `full`, with 21 of 22 common metrics and a
+direct-share ratio of 1.
+
+Fresh isolated acceptance and cache-only replay reproduce snapshot
+`basic_materials_sec:2026-09-05:2cf5219d8855588066ba`:
+
+| Measure | Stage 4C result |
+|---|---:|
+| Profiles / standard / exceptions | 154 / 140 / 14 |
+| Security ratios / direct / ADS | 47 / 42 / 5 |
+| SEC filings | 5,754 |
+| Raw / canonical facts | 310,109 / 239,747 |
+| OGC raw / canonical | 42 / 42 |
+| FX observations | 22,851 |
+| Current feature / coverage rows | 134 / 134 |
+| Feature quality | 95 full, 29 partial, 9 insufficient, 1 stale, 0 blocked |
+| Rank-ready / valuation-ready | 50 / 87 |
+| Validation errors / warnings | 0 / 0 |
+
+The package passes 38 tests, Ruff, and the 54-file independence scan. The
+verified database remains at
+`output/basic_materials/verification_stage4c_20260906/basic_materials.sqlite`.
+Replacing the installed live database is an explicit deployment action and was
+not performed without that authorization.
+
+Stage 4C passes as a current engineering acceptance candidate. It does not
+authorize historical ratio backfill, calibration, specialized weights,
+score/rank publication, or portfolio use.
+
+### Stage 4D next - longitudinal common point-in-time panel
+
+Stage 4B/4C loaded long source histories, but published only one current
+financial-feature date:
+
+| Layer | Verified coverage |
+|---|---|
+| Raw SEC facts | 2009-01-01 to 2026-07-05; 147,577 rows / 145 tickers from 2019-01-01 |
+| Canonical facts | 2009-01-03 to 2026-07-05; 134,378 rows / 145 tickers from 2019-01-01 |
+| Adjusted prices | 2009-01-02 to 2026-09-04 |
+| FX | 2009-01-01 to 2026-09-04 |
+| Common financial features | 134 rows at one as-of date: 2026-09-05 |
+
+The historical model-ready time series is therefore not yet aligned with the
+other repositories. Stage 4D must build monthly or 21-session rows from
+2019-01-01 while retaining pre-2019 source history for TTM construction and
+market warm-up.
+
+Build:
+
+- an immutable panel-date calendar;
+- effective-dated membership and lifecycle joins;
+- latest-known SEC facts selected by acceptance timestamp at each date;
+- amendment/supersession state as known on each date;
+- on-or-before-date FX and adjusted prices;
+- effective-dated security-unit conversion, with historical valuation null
+  when no contemporaneously supported ratio exists;
+- terminal-event and sample-role fields; and
+- deterministic row hashes and date/year/cohort coverage reports.
+
+Gate:
+
+- zero future-availability or current-universe-only history leakage;
+- no backward projection of 2025/2026 ratio evidence;
+- explicit historical ratio and source-birthdate gaps;
+- cache-only reproduction of exact panel hashes; and
+- calibration and portfolio flags remain closed.
+
 ## Stage 5 — Positioning, commodity data, and foundation audit
 
 Build:
@@ -1621,6 +1744,9 @@ Build:
 - commodity registry and company exposure map;
 - FRED/ALFRED, EIA, USGS, and USDA source adapters selected through policy;
 - cycle and input-cost feature tables;
+- a versioned specialized-metric registry and definition-variant catalog;
+- an exact ticker-by-metric applicability matrix and bounded source/document
+  census with source-birthdate and parser-target decisions;
 - a foundation-readiness audit.
 
 Gate:
@@ -1631,6 +1757,8 @@ Gate:
 - each company-cycle exposure has a dated source and confidence;
 - no overlay has production weight;
 - earliest reproducible score date is reported honestly;
+- every specialized candidate is explicitly sourceable, deferred, or rejected
+  before parser implementation starts;
 - calibration remains blocked if historical membership or terminal events are incomplete.
 
 The Stage 5 decision is one of:
@@ -1638,6 +1766,11 @@ The Stage 5 decision is one of:
 1. continue to common scoring and specialized research;
 2. continue as a limited shadow model; or
 3. defer expensive parser work while preserving the foundation.
+
+Formal specialized-metric identification occurs in Stage 5A only after the
+Stage 4D common historical panel passes. The output is a frozen registry,
+definition variants, applicability matrix, and sourceability decision set; it
+does not yet create specialized observations or score weight.
 
 ## Stage 6A — Common scoring feature contract
 
@@ -1664,6 +1797,10 @@ Gate:
 - reruns are deterministic.
 
 ## Stage 6B — Specialized metrics and cohort overlays
+
+Specialized observations are first loaded in Stage 6B, after Stage 4D and
+Stage 5A pass. They enter measurement-only feature tables with zero score
+weight; source coverage alone cannot promote them.
 
 Build:
 
@@ -1692,13 +1829,14 @@ Gate:
 - no parser output directly mutates scores;
 - all specialized weights remain zero until separately promoted.
 
-## Stage 6C — Historical point-in-time panel
+## Stage 6C — Extended historical panel integration
 
-Build:
+Build by extending the Stage 4D common panel, not rebuilding its history:
 
-- scheduled monthly or 21-session panel dates;
+- the immutable Stage 4D monthly or 21-session panel dates;
 - point-in-time membership and lifecycle;
-- point-in-time market, financial, positioning, cycle, and specialized features;
+- point-in-time positioning, cycle, and accepted specialized features joined to
+  the already validated market/financial panel;
 - forward adjusted returns;
 - XLB excess and residual returns;
 - SPY beta-residual robustness targets;
@@ -2323,22 +2461,54 @@ explicitly blocked current profile; 48 foreign/current securities retain null
 valuation until the next share/ADR-ratio contract. These are visible follow-up
 contracts, not silent Stage 4B failures.
 
-Next slice F1 — Stage 5 positioning, commodity data, and foundation audit:
+Completed slice E3 - Stage 4C OGC and listed-security-unit remediation:
 
-1. Freeze the commodity series registry and effective-dated issuer exposure
-   map before extraction.
-2. Add read-only positioning inputs with source-birthdate and freshness gates.
-3. Build measurement-only commodity, input-cost, and demand-cycle features with
-   release/vintage controls and zero scoring weight.
-4. Publish a foundation audit that reports the earliest reproducible score
-   date and the specific blockers to survivorship-correct calibration.
-5. Keep OGC, foreign share ratios, four bankruptcy distributions, and the
-   remaining 52 historical candidates as explicit work queues; none can be
-   inferred or promoted by Stage 5.
+- froze the 47-row security-ratio policy/CSV contract against exact SEC
+  evidence, with 42 direct-share rows and five ADS conversions;
+- added schema v7, the ratio dimension, feature ratio lineage, and two package
+  source-registry entries;
+- implemented deterministic OGC audited-HTML extraction with 42 tied-out
+  observations and no claim that the source is XBRL;
+- upgraded financial policy, source precedence, immutable cache namespace,
+  market-cap formula, and validation gates;
+- eliminated the OGC blocked state and all unresolved ratio-required current
+  foreign listings in the acceptance candidate;
+- produced 95 full, 29 partial, 9 insufficient, and 1 stale current rows, with
+  50 rank-ready and 87 valuation-ready;
+- passed fresh build, zero-error/zero-warning validation, cache-only replay, 38
+  tests, Ruff, and independence checks; and
+- retained all calibration, score, rank, specialized-weight, and portfolio
+  flags closed.
 
-Do not start optimizer work, portfolio integration, or production scheduling
-during Slice F1. Cohort-specialized parsing begins only after Stage 5 measures
-which common-data gaps have sufficient value and source coverage.
+Slice E3 exit condition result: passed as an engineering acceptance candidate.
+The installed live database remains unchanged until explicit replacement
+authorization is provided.
+
+Next slice F0 - Stage 4D longitudinal common point-in-time panel:
+
+1. Freeze monthly or 21-session panel dates from 2019-01-01.
+2. Reconstruct membership, latest-known accepted facts, amendments, FX, prices,
+   and security-unit ratios independently at every date.
+3. Leave historical valuation null where no contemporaneous ratio evidence
+   exists; never project the current ratio contract backward.
+4. Publish date/year/cohort coverage, missing-source reasons, and row hashes.
+5. Prove no-lookahead and cache-only reproduction while calibration remains
+   closed.
+
+Following slice F1 - Stage 5A definition and foundation audit:
+
+1. Freeze commodity series and effective-dated issuer exposure contracts.
+2. Add read-only positioning inputs with source-birthdate/freshness gates.
+3. Freeze the specialized metric registry, definition variants, exact
+   applicability matrix, and sourceability census.
+4. Build measurement-only cycle features and publish the earliest reproducible
+   score date.
+5. Keep four bankruptcy distributions and 52 unpromoted historical candidates
+   explicit; do not infer or activate them.
+
+Stage 6B then loads only accepted specialized metrics as measurement-only,
+zero-weight features. Do not begin optimization, portfolio integration, or
+production scheduling in F0/F1.
 
 ## 17. Key risks and mitigations
 
@@ -2381,4 +2551,12 @@ The implementation is complete only when:
 
 Proceed with the Basic Materials implementation using Consumer Defensive as the structural scaffold and Machinery as the economic design reference. Port Technology's foreign-issuer, financial, and overlay mechanics. Borrow Biotech's calibration safeguards and only the narrow review/entity patterns needed from Med Devices.
 
-The correct build order is the independent foundation and identity spine first; adjusted prices and terminal returns second; point-in-time financials and the current common shadow score third; specialized metrics fourth; survivorship-correct calibration and backtesting fifth; and Portfolio Layer integration last. This produces an auditable ranking without allowing specialized-parser work, small-cohort overfitting, ticker ambiguity, current-universe survivorship bias, or another sector's production state to contaminate the model.
+The correct build order is the independent foundation and identity spine first;
+adjusted prices and terminal returns second; acceptance-bounded financials and
+current common features third; the 2019-forward common point-in-time panel
+fourth; specialized metric definition and measurement-only loading fifth;
+survivorship-correct scoring, calibration, and backtesting sixth; and Portfolio
+Layer integration last. This produces an auditable ranking without allowing
+specialized-parser work, small-cohort overfitting, ticker ambiguity,
+current-universe survivorship bias, or another sector's production state to
+contaminate the model.

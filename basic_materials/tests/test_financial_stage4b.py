@@ -16,6 +16,7 @@ from basic_materials.core.db import (
     migration_checksum,
     utc_now,
 )
+from basic_materials.core.audited_html_financials import parse_ogc_audited_html
 from basic_materials.core.financial_fx import parse_yahoo_rates
 from basic_materials.core.financial_ingestion import (
     FilingRecord,
@@ -29,6 +30,10 @@ from basic_materials.core.financial_normalization import (
     _canonicalize_candidates,
     _current_and_prior_flow,
     _current_and_prior_shares,
+)
+from basic_materials.core.security_ratios import (
+    load_security_ratio_policy,
+    load_security_ratio_rows,
 )
 
 
@@ -86,7 +91,7 @@ def _concept_contract():
 
 def test_stage4b_policy_has_exact_exception_and_pilot_contract() -> None:
     policy = _policy()
-    assert policy.version == "basic_materials_financial_ingestion_v1"
+    assert policy.version == "basic_materials_financial_ingestion_v2"
     assert policy.as_of_date == "2026-09-05"
     assert len(policy.checksum) == 64
     assert len(policy.payload["exception_resolutions"]) == 14
@@ -97,8 +102,16 @@ def test_stage4b_policy_has_exact_exception_and_pilot_contract() -> None:
         "RMIX",
     ]
     assert policy.payload["exception_resolutions"]["OGC"]["resolution_status"] == (
-        "missing_required_source"
+        "resolved_audited_html"
     )
+    assert policy.payload["exception_resolutions"]["OGC"] == {
+        **policy.payload["exception_resolutions"]["OGC"],
+        "route": "audited_filing_html",
+        "canonical_eligible": True,
+        "evidence_accession": "0001628280-26-029399",
+        "evidence_accepted_at": "2026-05-01T20:53:37Z",
+        "evidence_document": "exhibit991-oceanagoldfinan.htm",
+    }
     assert policy.payload["exception_resolutions"]["AGU"]["taxonomy"] == "ifrs-full"
     assert policy.payload["exception_resolutions"]["POT"]["reporting_currency"] == "USD"
     assert policy.payload["exception_resolutions"]["ASM"] == {
@@ -124,7 +137,7 @@ def test_stage4b_policy_has_exact_exception_and_pilot_contract() -> None:
     }
 
 
-def test_schema_v5_migrates_append_only_to_v6(tmp_path: Path) -> None:
+def test_schema_v5_migrates_to_v7_with_remediation_contract(tmp_path: Path) -> None:
     conn = connect(tmp_path / "basic_materials.sqlite")
     try:
         migrations = (
@@ -153,8 +166,8 @@ def test_schema_v5_migrates_append_only_to_v6(tmp_path: Path) -> None:
         )
         conn.commit()
         result = init_db(conn)
-        assert result["schema_version"] == 6
-        assert result["migrations_applied"] == [6]
+        assert result["schema_version"] == 7
+        assert result["migrations_applied"] == [6, 7]
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
             "AND name='dim_financial_profile_resolution'"
@@ -172,6 +185,19 @@ def test_schema_v5_migrates_append_only_to_v6(tmp_path: Path) -> None:
         }
         assert "idx_canonical_financial_superseded_by" in index_names
         assert "idx_canonical_financial_snapshot_ticker" in index_names
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name='dim_security_share_ratio'"
+        ).fetchone()[0] == 1
+        feature_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(feature_financial_statement)").fetchall()
+        }
+        assert {
+            "security_ratio_key",
+            "security_basis",
+            "issuer_shares_per_traded_security",
+        } <= feature_columns
     finally:
         conn.close()
 
@@ -266,6 +292,86 @@ def test_structured_instance_preserves_context_unit_scale_and_lineage() -> None:
     assert rows[0].accepted_at == filing.accepted_at
     assert rows[0].quality_status == "usable"
     assert rows[0].payload_sha256 == "c" * 64
+
+
+def test_ogc_audited_html_parser_extracts_42_tied_observations() -> None:
+    html = b"""
+    <html><body>
+    <table>
+      <tr><td>Balance</td><td>2025</td><td>2024</td></tr>
+      <tr><td>Cash and cash equivalents</td><td>100</td><td>90</td></tr>
+      <tr><td>Trade and other receivables</td><td>50</td><td>45</td></tr>
+      <tr><td>Inventories</td><td>70</td><td>60</td></tr>
+      <tr><td>Trade and other receivables</td><td>10</td><td>8</td></tr>
+      <tr><td>Inventories</td><td>5</td><td>4</td></tr>
+      <tr><td>Debt</td><td>50</td><td>40</td></tr>
+      <tr><td>Trade and other payables</td><td>80</td><td>70</td></tr>
+      <tr><td>TOTAL ASSETS</td><td>1000</td><td>900</td></tr>
+      <tr><td>TOTAL LIABILITIES</td><td>400</td><td>350</td></tr>
+      <tr><td>TOTAL SHAREHOLDERS' EQUITY</td><td>600</td><td>550</td></tr>
+    </table>
+    <table>
+      <tr><td>Income</td><td>2025</td><td>2024</td></tr>
+      <tr><td>Revenue</td><td>1000</td><td>900</td></tr>
+      <tr><td>Cost of sales, excluding depreciation and amortization</td><td>(600)</td><td>(550)</td></tr>
+      <tr><td>Operating profit</td><td>200</td><td>180</td></tr>
+      <tr><td>Depreciation and amortization</td><td>(50)</td><td>(45)</td></tr>
+      <tr><td>Interest expense and finance costs</td><td>(10)</td><td>(9)</td></tr>
+      <tr><td>Income tax expense</td><td>(40)</td><td>(35)</td></tr>
+      <tr><td>Profit before income tax</td><td>160</td><td>145</td></tr>
+      <tr><td>Net profit</td><td>120</td><td>110</td></tr>
+    </table>
+    <table>
+      <tr><td>Cash flow</td><td>2025</td><td>2024</td></tr>
+      <tr><td>Net profit</td><td>120</td><td>110</td></tr>
+      <tr><td>Net cash provided by operating activities</td><td>250</td><td>220</td></tr>
+      <tr><td>Payment for property, plant and equipment</td><td>(80)</td><td>(70)</td></tr>
+      <tr><td>Payment for mining assets</td><td>(70)</td><td>(60)</td></tr>
+      <tr><td>Dividends paid to equity holders of the Company</td><td>(20)</td><td>(18)</td></tr>
+      <tr><td>Share buybacks</td><td>-</td><td>-</td></tr>
+      <tr><td>Cash and cash equivalents at the end of the year</td><td>100</td><td>90</td></tr>
+    </table>
+    <table>
+      <tr><td>Shares</td><td>2025</td><td>2024</td></tr>
+      <tr><td>Basic weighted average number of shares (in millions)</td><td>200</td><td>190</td></tr>
+      <tr><td>Diluted weighted average number of shares (in millions)</td><td>205</td><td>195</td></tr>
+    </table>
+    <table>
+      <tr><td>Capital</td><td>2025</td><td>2024</td></tr>
+      <tr><td>Total debt</td><td>200</td><td>180</td></tr>
+      <tr><td>Total equity</td><td>600</td><td>550</td></tr>
+      <tr><td>Net (cash) / debt</td><td>100</td><td>90</td></tr>
+    </table>
+    </body></html>
+    """
+    rows = parse_ogc_audited_html(html)
+    assert len(rows) == 42
+    assert len({row.canonical_metric for row in rows}) == 21
+    assert {row.period_end for row in rows} == {"2024-12-31", "2025-12-31"}
+    revenue = [row.numeric_value for row in rows if row.canonical_metric == "revenue"]
+    capex = [
+        row.numeric_value
+        for row in rows
+        if row.canonical_metric == "capital_expenditures"
+    ]
+    assert revenue == [900_000_000.0, 1_000_000_000.0]
+    assert capex == [-130_000_000.0, -150_000_000.0]
+
+
+def test_security_ratio_contract_has_exact_foreign_and_ads_census() -> None:
+    config = load_config()
+    policy = load_security_ratio_policy(config.paths.security_ratio_policy)
+    rows = load_security_ratio_rows(
+        config.paths.security_share_ratios_csv,
+        policy=policy,
+    )
+    assert len(rows) == 47
+    assert sum(row["security_basis"] == "direct_share" for row in rows) == 42
+    assert {
+        row["ticker"]: row["issuer_shares_per_traded_security"]
+        for row in rows
+        if row["security_basis"] == "adr_ads"
+    } == {"BHP": 2.0, "ELVR": 10.0, "PKX": 0.25, "RIO": 1.0, "TX": 10.0}
 
 
 def _candidate(value: float, *, source: str = "sec_companyfacts", observation: str = "one"):

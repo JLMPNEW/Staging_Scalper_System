@@ -141,6 +141,7 @@ def validate_financial_stage(
         "dim_financial_profile_resolution": 154,
         "feature_financial_statement": 134,
         "fact_financial_data_coverage": 134,
+        "dim_security_share_ratio": 47,
     }
     for table, expected_count in expected.items():
         actual = counts[table]
@@ -234,6 +235,43 @@ def validate_financial_stage(
                 "STRUCTURED_FALLBACK_EMPTY",
                 "A resolved structured fallback has no usable mapped facts.",
                 details={"tickers": structured_route_without_facts},
+            )
+        )
+    audited_html_state = conn.execute(
+        """
+        SELECT r.resolution_status, r.canonical_eligible,
+               COUNT(DISTINCT x.source_observation_id) AS raw_fact_count,
+               COUNT(DISTINCT c.canonical_fact_id) AS canonical_fact_count
+        FROM dim_financial_profile_resolution AS r
+        LEFT JOIN fact_sec_xbrl_fact_raw AS x
+          ON x.security_id = r.security_id
+         AND x.snapshot_key = ?
+         AND x.source_id = 'sec_audited_filing_html'
+         AND x.accession_number = r.evidence_accession
+         AND x.quality_status = 'usable'
+        LEFT JOIN fact_financial_statement_canonical AS c
+          ON c.source_observation_id = x.source_observation_id
+         AND c.snapshot_key = ?
+         AND c.quality_status = 'usable'
+        WHERE r.ticker = 'OGC'
+        GROUP BY r.resolution_status, r.canonical_eligible
+        """,
+        (snapshot_key, snapshot_key),
+    ).fetchone()
+    if (
+        audited_html_state is None
+        or str(audited_html_state["resolution_status"]) != "resolved_audited_html"
+        or int(audited_html_state["canonical_eligible"]) != 1
+        or int(audited_html_state["raw_fact_count"]) != 42
+        or int(audited_html_state["canonical_fact_count"]) != 42
+    ):
+        issues.append(
+            FinancialStageIssue(
+                "error",
+                "OGC_AUDITED_HTML_CONTRACT_INVALID",
+                "OGC must have exactly 42 usable and canonical audited-HTML facts.",
+                ticker="OGC",
+                details=dict(audited_html_state) if audited_html_state else {},
             )
         )
     stored_error_issues = [
@@ -419,18 +457,119 @@ def validate_financial_stage(
                 f"{missing_current_visibility} current profiles lack a feature or coverage row.",
             )
         )
+    ratio_policy_sha = str(policy.payload["security_ratio_contract"]["policy_sha256"])
+    ratio_policy_rows = _count(
+        conn,
+        "SELECT COUNT(*) FROM dim_security_share_ratio WHERE policy_sha256 = ?",
+        (ratio_policy_sha,),
+    )
+    if ratio_policy_rows != 47:
+        issues.append(
+            FinancialStageIssue(
+                "error",
+                "SECURITY_RATIO_POLICY_CENSUS_MISMATCH",
+                f"Expected 47 ratios for the bound policy, found {ratio_policy_rows}.",
+            )
+        )
+    overlapping_ratios = _count(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM dim_security_share_ratio AS a
+        JOIN dim_security_share_ratio AS b
+          ON b.security_id = a.security_id AND b.ratio_key > a.ratio_key
+         AND (a.effective_to_date = '' OR b.effective_from_date <= a.effective_to_date)
+         AND (b.effective_to_date = '' OR a.effective_from_date <= b.effective_to_date)
+        """,
+    )
+    if overlapping_ratios:
+        issues.append(
+            FinancialStageIssue(
+                "error",
+                "SECURITY_RATIO_EFFECTIVE_PERIOD_OVERLAP",
+                f"Found {overlapping_ratios} overlapping security-ratio periods.",
+            )
+        )
+    unresolved_foreign_ratios = _count(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM dim_issuer_reporting_profile AS p
+        JOIN dim_financial_profile_resolution AS pr
+          ON pr.security_id = p.security_id
+        WHERE p.role_type = 'current_universe'
+          AND p.filing_regime <> 'domestic_sec'
+          AND pr.ingestion_route <> 'domestic_interim_companyfacts'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dim_security_share_ratio AS r
+              WHERE r.security_id = p.security_id
+                AND r.policy_sha256 = ?
+                AND r.effective_from_date <= ?
+                AND (r.effective_to_date = '' OR r.effective_to_date >= ?)
+                AND r.evidence_accepted_at <= ?
+          )
+        """,
+        (
+            ratio_policy_sha,
+            policy.as_of_date,
+            policy.as_of_date,
+            f"{policy.as_of_date}T23:59:59Z",
+        ),
+    )
+    if unresolved_foreign_ratios:
+        issues.append(
+            FinancialStageIssue(
+                "error",
+                "FOREIGN_SECURITY_RATIO_UNRESOLVED",
+                f"{unresolved_foreign_ratios} current foreign listings lack an active governed ratio.",
+            )
+        )
+    ads_mismatches = _count(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM dim_security_share_ratio
+        WHERE (ticker = 'BHP' AND (security_basis <> 'adr_ads' OR issuer_shares_per_traded_security <> 2))
+           OR (ticker = 'ELVR' AND (security_basis <> 'adr_ads' OR issuer_shares_per_traded_security <> 10))
+           OR (ticker = 'PKX' AND (security_basis <> 'adr_ads' OR issuer_shares_per_traded_security <> 0.25))
+           OR (ticker = 'RIO' AND (security_basis <> 'adr_ads' OR issuer_shares_per_traded_security <> 1))
+           OR (ticker = 'TX' AND (security_basis <> 'adr_ads' OR issuer_shares_per_traded_security <> 10))
+        """,
+    )
+    ads_count = _count(
+        conn,
+        "SELECT COUNT(*) FROM dim_security_share_ratio WHERE security_basis = 'adr_ads'",
+    )
+    if ads_mismatches or ads_count != 5:
+        issues.append(
+            FinancialStageIssue(
+                "error",
+                "ADR_ADS_RATIO_CONTRACT_INVALID",
+                f"Expected the exact five reviewed ADS conversions; count={ads_count}, mismatches={ads_mismatches}.",
+            )
+        )
     unsafe_foreign_valuations = _count(
         conn,
         """
         SELECT COUNT(*)
         FROM feature_financial_statement AS f
         JOIN dim_issuer_reporting_profile AS p ON p.security_id = f.security_id
-        JOIN dim_financial_profile_resolution AS r ON r.security_id = f.security_id
+        JOIN dim_financial_profile_resolution AS pr ON pr.security_id = f.security_id
+        LEFT JOIN dim_security_share_ratio AS r
+          ON r.ratio_key = f.security_ratio_key
+         AND r.security_id = f.security_id
         WHERE f.asof_date = ? AND f.market_cap_usd IS NOT NULL
           AND p.filing_regime <> 'domestic_sec'
-          AND r.ingestion_route <> 'domestic_interim_companyfacts'
+          AND pr.ingestion_route <> 'domestic_interim_companyfacts'
+          AND (
+              r.ratio_key IS NULL
+              OR r.policy_sha256 <> ?
+              OR f.issuer_shares_per_traded_security IS NULL
+              OR f.issuer_shares_per_traded_security <> r.issuer_shares_per_traded_security
+          )
         """,
-        (policy.as_of_date,),
+        (policy.as_of_date, ratio_policy_sha),
     )
     if unsafe_foreign_valuations:
         issues.append(
@@ -438,6 +577,33 @@ def validate_financial_stage(
                 "error",
                 "UNSAFE_FOREIGN_SHARE_BASIS",
                 f"{unsafe_foreign_valuations} foreign listings received valuation without a ratio contract.",
+            )
+        )
+    invalid_market_cap_formula = _count(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM feature_financial_statement
+        WHERE asof_date = ?
+          AND market_cap_usd IS NOT NULL
+          AND (
+              market_price IS NULL OR diluted_shares IS NULL
+              OR issuer_shares_per_traded_security IS NULL
+              OR issuer_shares_per_traded_security <= 0
+              OR ABS(
+                  market_cap_usd
+                  - market_price * diluted_shares / issuer_shares_per_traded_security
+              ) > MAX(0.01, ABS(market_cap_usd) * 1e-10)
+          )
+        """,
+        (policy.as_of_date,),
+    )
+    if invalid_market_cap_formula:
+        issues.append(
+            FinancialStageIssue(
+                "error",
+                "MARKET_CAP_SECURITY_RATIO_FORMULA_INVALID",
+                f"{invalid_market_cap_formula} feature rows violate the governed market-cap formula.",
             )
         )
     invalid_valuation_denominators = _count(
@@ -470,7 +636,10 @@ def validate_financial_stage(
         SELECT COUNT(*)
         FROM feature_financial_statement AS f
         JOIN dim_issuer_reporting_profile AS p ON p.security_id = f.security_id
+        JOIN dim_financial_profile_resolution AS r ON r.security_id = f.security_id
         WHERE f.asof_date = ? AND p.filing_regime <> 'domestic_sec'
+          AND r.ingestion_route <> 'domestic_interim_companyfacts'
+          AND f.quality_reasons_json LIKE '%foreign_security_share_ratio_unresolved%'
         """,
         (policy.as_of_date,),
     )
@@ -479,7 +648,7 @@ def validate_financial_stage(
             FinancialStageIssue(
                 "warning",
                 "FOREIGN_VALUATION_RATIO_CONTRACT_PENDING",
-                f"{foreign_features} foreign/current profiles keep valuation null until security ratios are governed.",
+                f"{foreign_features} foreign/current profiles remain valuation-gated by missing ratios.",
             )
         )
     missing_source_profiles = [
