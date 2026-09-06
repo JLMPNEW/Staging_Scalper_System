@@ -170,43 +170,58 @@ errors and zero warnings, the cache-only replay is deterministic, 38 tests
 pass, and Ruff/independence checks pass. Live file replacement is a separate
 authorization boundary.
 
-## Stage 4D - 2019-forward historical common point-in-time panel
+## Stage 4D - 2019-forward historical feasibility preflight
 
-Source-history presence is not panel completion. Stage 4D pass requires
-scheduled monthly or 21-session panel dates beginning no earlier than
-2019-01-01, while retaining the earlier source history needed for warm-up and
-TTM calculations.
+Source-history presence is not panel completion. Stage 4D freezes the candidate
+monthly or 21-session dates beginning no earlier than 2019-01-01 and performs
+read-only membership, filing-availability, amendment, FX, market, security-
+ratio, and terminal-event feasibility checks. It retains earlier source
+history for warm-up and TTM calculations.
 
-Each row must reconstruct effective membership/lifecycle, latest available SEC
-facts by acceptance time, amendments, FX, market data, and the security-unit
-ratio effective on that date. Current 2025/2026 ratio evidence cannot be
-backfilled to 2019. A missing historical ratio leaves valuation null with a
-reason. No current-only universe may be labeled survivorship-correct.
+Stage 4D must write no historical feature, score, outcome, or rank rows.
+Current 2025/2026 ratio evidence cannot be backfilled to 2019. Every historical
+source gap must be classified and included in the eventual Stage 6C partition
+plan. Pass requires deterministic counts and input hashes, zero streamed
+future-availability violations, and a matching cache-only preflight.
 
-Pass requires zero future-availability violations, deterministic row hashes,
-published coverage by date/year/cohort, explicit source-birthdate gaps,
-terminal-event integration, and matching cache-only replay. Calibration stays
-closed after an engineering pass.
+## Stage 5A and Stage 6B - specialized source and coverage closure
 
-## Stage 5A and Stage 6B - specialized metrics
+Stage 5A identifies and freezes the full specialized discovery set, supporting
+operands, formulas, definition variants, table families, exact current-plus-
+historical ticker-by-metric applicability, source birthdates, and the complete
+declared SEC/IR/local-exchange/technical-report source census. The remaining
+deactivated-candidate and terminal-event scope must be closed before the final
+parser universe seal.
 
-Stage 5A identifies and freezes specialized metrics. Pass requires a versioned
-metric registry, definition variants, exact ticker-by-metric applicability,
-source/document census, source birthdates, units, periods, scope, evidence
-locators, parser targets, and explicit sourceability decisions. Candidate
-metric prose in the master plan is not a loaded registry.
+Stage 6B hydrates the sealed source manifest into Basic Materials-owned
+content-addressed storage, compiles each unique document once, and executes one
+resumable all-issuer/all-metric parse. Review and policy changes replay stored
+evidence without opening documents. At most one consolidated residual source
+batch may run, excluding completed content hashes.
 
-Stage 6B loads accepted specialized observations only after Stage 5A and the
-foundation audit. Pass requires immutable source payloads, deterministic
-fixtures, duplicate/conflict/amendment controls, adjudication, coverage, and
-measurement-only feature output. Every specialized score weight remains zero
-until separate out-of-sample promotion evidence exists.
+Pass requires 100% applicability and source-manifest accounting, 100% completed
+or resume-linked parser work, zero unexplained failures, at least 80% current
+core applicable-pair coverage in every cohort, at least 70% core historical
+issuer-period coverage from 2019 forward and 60% in each fixed chronological
+block, explicit evidence states for all gaps, and zero unresolved accepted-
+store conflicts. Every specialized score weight remains zero.
+
+## Stage 6C - single unified historical PIT panel
+
+Stage 6C is the first and only model-ready historical feature-panel write. It
+joins common financial, market, ratio, positioning, commodity/cycle, and
+accepted specialized observations using only information available on each
+date. Pass requires Stage 4D partition/hash reconciliation, unchanged Stage 6B
+observation and metric-disposition hashes, survivorship-correct membership,
+terminal outcomes, zero future availability, published year/cohort/metric
+coverage, deterministic row hashes, and byte-identical cache-only replay.
 
 ## Promotion gate
 
 `portfolio_candidate_gate` and `oos_score_valid_flag` remain false until the
-Stage 4D point-in-time panel, Stage 5A applicability, Stage 6B evidence,
+Stage 4D preflight, Stage 5A applicability/source seal, Stage 6B high-coverage
+evidence freeze, Stage 6C unified point-in-time panel,
 survivorship correction, purged walk-forward out-of-sample validation,
 coverage/staleness controls, and portfolio-layer acceptance tests are all
-implemented and reviewed. Stage 0-6B engineering output is research
+implemented and reviewed. Stage 0-6C engineering output is research
 infrastructure, not an investment recommendation.

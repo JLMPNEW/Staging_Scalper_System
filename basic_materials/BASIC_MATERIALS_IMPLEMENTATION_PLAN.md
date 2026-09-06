@@ -1,6 +1,6 @@
 # Basic Materials Scoring and Ranking Model — Implementation Plan
 
-Status: living implementation authority; Stage 4C acceptance candidate implemented; live promotion and calibration blocked
+Status: living implementation authority; Stage 4C acceptance candidate implemented; extraction-first Stage 5A contract is next; live promotion and calibration blocked
 Prepared: 2026-09-05  
 Last implementation update: 2026-09-06
 Authoritative current universe: ticker_mapping/basic_materials.csv
@@ -31,6 +31,7 @@ Implementation ledger:
 | 2026-09-05 | Stage 4A financial contract and reporting profiles | Schema v4; 16-source registry; immutable financial policy, manifest, 22-metric concept map, empty reviewed-override contract, and 154-row SEC-backed issuer-profile census; 315 cached SEC payloads; atomic loader; read-only validator and evidence pack | Exact 134 current/20 historical profile coverage; 22 metrics and 66 concept links; acceptance-time and amendment policy frozen; reporting/listing currency separation; row/artifact hashes; idempotent live load; every Stage 0–3 validator; 29 passing tests | Fourteen issuer profiles require governed Stage 4B fallback/review; raw filing facts, canonical statements, FX, features, valuation, specialized metrics, calibration, and portfolio gates remain closed |
 | 2026-09-06 | Stage 4B point-in-time fundamentals, FX, and common features | Stage 4A checkpoint commit `4b6bce4`; immutable Stage 4B policy/cache seals; schema v5 fact/resolution/audit extensions and schema v6 performance indexes; 5,754 filings; 310,067 raw facts; 239,705 canonical facts; 22,852 FX rows; 134 feature/coverage rows; governed 14-profile exception resolution; scratch and live idempotency runs | Exact acceptance-time lineage; future-fact exclusion; deterministic source precedence, amendment supersession, TTM and sign rules; zero canonical conflicts and zero missing FX conversions; all Stage 0–4B validators; 36 passing tests | OGC remains explicitly blocked; 48 foreign securities remain valuation-gated pending share/ADR ratios; specialized metrics, survivorship-correct calibration, scoring, ranking, and portfolio gates remain closed |
 | 2026-09-06 | Stage 4C OGC and listed-security-unit remediation | Financial policy v2; schema v7; deterministic audited-HTML parser; exact 47-row SEC-evidenced ratio contract; 42 direct-share and five ADS rows; ratio-aware market-cap lineage; hard OGC/ratio/formula gates; fresh Stage 0-4C acceptance build and cache-only replay | OGC has 42 usable raw and canonical facts and a full current row; zero unresolved ratio-required foreign listings; exact ADS ratios; zero Stage 4C validation errors/warnings; 38 tests and independence/Ruff pass | Live database replacement requires explicit authorization; longitudinal 2019-forward feature panel, specialized metrics, calibration, scoring, ranking, and portfolio gates remain closed |
+| 2026-09-06 | Extraction-first parser and PIT sequence revision | Cross-repository review of the shared parser, Transportation, Consumer Defensive, Technology, Medical Devices, and Biotech; high-coverage gates; all-source census; content-addressed semantic cache; one resumable all-metric run; parse-free review; one unified PIT build | The former common-PIT-before-specialized plan is retired; historical materialization is blocked until specialized source and coverage closure | Stage 5A/6B code and data are not yet implemented; Stage 6C PIT and all calibration/promotion gates remain closed |
 
 ### Reusable sector-repository build sequence
 
@@ -48,10 +49,11 @@ The following sequence is the portable part of this implementation. A future sec
 | 8 | Load and validate the historical pilot in one transaction | Current universe unchanged; historical rows effective-dated; aliases scoped; raw inputs retained; rerun idempotent; failure rollback proven |
 | 9 | Ingest adjusted prices and reconcile cash, stock, mixed, bankruptcy, OTC, and successor returns | Every terminal event has an auditable final-return treatment before calibration eligibility can change |
 | 10 | Add acceptance-bounded fundamentals, reporting profiles, FX, security-unit ratios, and current common features | Filing timing, units, currencies, cadence, amendments, listed-security basis, and current features validated |
-| 11 | Build the longitudinal common point-in-time panel before specialized parsing | Scheduled-date hashes, historical membership, contemporaneous ratios, source birthdates, and no-lookahead pass |
-| 12 | Define and load sector-specialized metrics as measurement-only features | Applicability, source evidence, definition variants, coverage, and zero-weight enforcement pass |
-| 13 | Build diagnostics, shadow scores, constrained calibration, and backtests | Leakage tests, walk-forward evidence, untouched outer test, costs, capacity, and explicit no-promotion outcomes |
-| 14 | Publish governed outputs and integrate downstream by file only | Dated hash-sealed contract; independent orchestration; rollback and last-success preservation |
+| 11 | Freeze the complete specialized-metric, supporting-operand, applicability, and all-source census before historical materialization | Every governed identity/metric pair has an applicability and source-lane disposition; no PIT feature rows are written |
+| 12 | Hydrate all selected sources, compile each unique document once, execute one resumable all-metric parse, and close coverage through parse-free review | Exact source seals; content-addressed cache; zero missing planned work; explicit accepted/missing/not-applicable states; zero specialized weight |
+| 13 | Materialize one unified common, cycle, positioning, and specialized point-in-time panel | Scheduled-date hashes, historical membership, contemporaneous ratios, source birthdates, accepted-at rules, and no-lookahead pass |
+| 14 | Build diagnostics, shadow scores, constrained calibration, and backtests | Leakage tests, walk-forward evidence, untouched outer test, costs, capacity, and explicit no-promotion outcomes |
+| 15 | Publish governed outputs and integrate downstream by file only | Dated hash-sealed contract; independent orchestration; rollback and last-success preservation |
 
 For every future stage, use the same five-part unit of work: contract first, immutable inputs second, atomic loader third, independent validator/report fourth, and regression tests plus this document fifth. This ordering is mandatory because it prevents implementation code from silently defining its own data policy.
 
@@ -70,7 +72,7 @@ The recommended composition is:
 | US-GAAP plus IFRS, 20-F/40-F/6-K handling, point-in-time FX, and daily valuation repricing | technology | Port the patterns into the Basic Materials namespace |
 | Cyclic, capital-intensive financial metrics; loss-making valuation caps; lifecycle state; metric availability; D+1 execution | industrials/machinery | Primary financial and calibration design reference |
 | Sector and cycle overlays that begin as measurement-only features | technology/semiconductors | Use for commodity, feedstock, and demand-cycle overlays |
-| Specialized disclosure parsing and explicit applicability | consumer_defensive plus industrials/machinery | Use the repository-level dedicated_parser through a Basic Materials-owned adapter |
+| Specialized disclosure parsing and explicit applicability | consumer_defensive plus industrials/transportation | Use the repository-level dedicated_parser through a Basic Materials-owned adapter; adopt Transportation's content-deduplicated one-pass execution and Consumer Defensive's specialized-before-final-PIT ordering |
 | Purged expanding walk-forward, untouched outer tests, reliability, and promotion discipline | biotech_index | Borrow the calibration safeguards only |
 | Entity-resolution and analyst-review workflow | med_devices | Borrow only where useful for mine/property, commodity, and issuer-definition review |
 
@@ -963,23 +965,225 @@ Licensed commodity-price or continuous-futures data may be added later. A licens
 - Do not use a quarter-end commodity exposure derived from a later annual filing before that filing was public.
 - Freeze continuous-futures construction and roll policy before signal testing.
 
-## 11. Specialized parser strategy
+## 11. Specialized data capture and one-pass parser strategy
 
-Do not begin with a Transportation-scale exhaustive parser. Start with a bounded, value-ranked metric set and expand only when coverage and expected signal value justify the cost.
+Specialized, commodity, positioning, and remaining historical-identity data
+must be captured and coverage-frozen before a longitudinal feature panel is
+written. Stage 4D is therefore a read-only historical feasibility preflight;
+Stage 6C is the one authorized 2019-forward PIT materialization. There is no
+intermediate common-only historical panel that must later be rebuilt.
 
-### 11.1 Source precedence
+High coverage never means manufacturing values. A structurally
+not-applicable pair is excluded from the denominator, but not reported,
+missing source, parser failure, conflicting, and review-required pairs remain
+visible and count as uncovered until resolved or the metric is excluded from
+the panel-required set.
 
-1. Standard SEC XBRL facts.
-2. Reviewed issuer-extension XBRL concepts.
-3. Deterministic filing tables.
-4. Structured filing sections and exhibits.
-5. Filing prose candidates.
-6. Hash-sealed issuer investor-relations documents.
-7. Manual adjudication.
+### 11.1 Parser lessons adopted from the existing repositories
 
-Prose-only numeric matches are review_required by default.
+| Reference | Adopt for Basic Materials | Deliberate improvement or exclusion |
+|---|---|---|
+| repository-level `dedicated_parser` | Offline providers, immutable work/evidence ledgers, parent-only SQLite writes, deterministic multiprocessing, exact review policy, golden corpus, and policy-only replay | Shared code remains sector-neutral; Basic Materials owns every metric, source, cache, policy, database, and output |
+| Industrials/Transportation | Freeze metrics and supporting operands first; seal the exact source manifest; content-hash deduplication; unique-content text cache; one document/many metrics; one resumable parse; parse-free adjudication; one panel build | Complete the SEC, issuer-IR, local-exchange, technical-report, and archived-source census before the first full parse so Transportation's later source-exhaustion delta cycle is not repeated |
+| Consumer Defensive | Independent sector adapter; immutable content-addressed objects; contextual table/prose rejection rules; specialized observations before final historical panel; explicit applicability and missingness | Expand the golden corpus and table-family fixtures before the full run so repeated adapter/term and OCR repair passes are minimized |
+| Technology/Software | Complete accession hydration, source hashes, standard-XBRL precedence, and measurement-only promotion | Use canaries only for synthetic/golden fixtures and plan validation. Do not parse the same production filing in canary, cohort, current, and historical waves |
+| Medical Devices | Raw-before-canonical storage, event date separate from publication date, confidence-scored entity mapping, parallel retrieval with serialized writes | Use these patterns for mine/property/operator, commodity, technical-report, and government-data identity rather than importing Med Devices code |
+| Biotech | Host-level throttling, bounded retries, explicit full-history mode, source-window controls, and changed-source detection | Historical source objects are immutable and content-addressed; mutable TTL cache state is not evidence authority |
 
-### 11.2 Metric states
+### 11.2 Target data flow
+
+```text
+frozen universe + metric/operand registry + applicability
+                         |
+                         v
+all-source document/API census with exact availability timestamps
+                         |
+                         v
+immutable content-addressed raw objects (one object per SHA-256)
+                         |
+                         v
+unique-document compiler: XBRL + tables + text + bounded PDF/OCR
+                         |
+                         v
+semantic intermediate records keyed by content hash and decoder contract
+                         |
+                         v
+one resumable issuer-context run evaluating every applicable metric
+                         |
+                         v
+immutable candidates/evidence -> parse-free policy replay and derivations
+                         |
+                         v
+coverage cube + final metric dispositions + frozen observation store
+                         |
+                         v
+one unified 2019-forward PIT panel -> diagnostics -> calibration
+```
+
+Acquisition, physical decoding, semantic evaluation, adjudication, derivation,
+feature materialization, and calibration are separate ledgers. A downstream
+policy, coverage threshold, metric disposition, or score-weight change cannot
+authorize retrieval or physical decoding.
+
+### 11.3 Metric and applicability contract before retrieval
+
+Stage 5A freezes the full discovery universe, not only the metrics expected to
+reach calibration. Every registry row must declare:
+
+- metric ID and version, cohort, operating archetype, and definition variant;
+- role: `core_required`, `supporting_operand`, `diagnostic_candidate`,
+  `derived_only`, or `excluded`;
+- unit family, scale, sign/direction, allowed period kinds, value bounds, and
+  freshness;
+- issuer, mine/property, segment, commodity, geography, ownership, reserve
+  code, and adjusted-versus-GAAP scope rules where relevant;
+- direct source lanes, fallback source lanes, table families, concept aliases,
+  contextual terms, and prohibited contexts;
+- formula and exact operands for derived metrics;
+- current and historical applicability with a reason for every
+  not-applicable pair; and
+- predeclared coverage, review, and final-disposition rules.
+
+The applicability product covers all 134 current identities, all 20 governed
+historical identities, and every additional deactivated identity promoted
+before the source seal. The remaining 52 Stage 2B candidates must be promoted
+or rejected before the final parser universe is frozen; adding an issuer after
+the full parse requires a separately versioned delta rather than silently
+changing the original run.
+
+Supporting operands are first-class parser targets. Production ounces,
+commodity-specific volumes, asset-level production, cost components, ownership
+percentages, sustaining/growth capex, reserve classes, grades, recoveries,
+price, volume, mix, segment EBITDA, capacity, utilization, outage days, and
+end-market shares are captured even when the final feature is derived. This
+prevents a later formula from forcing another document search.
+
+### 11.4 All-source census and precedence
+
+The source census is completed before the full parser run and includes:
+
+1. Standard and issuer-extension SEC Inline XBRL facts.
+2. SEC periodic forms and amendments: 10-K, 10-Q, 20-F, 40-F, and transition
+   forms.
+3. Financial and operating-statistics 8-K/6-K exhibits.
+4. S-1/F-1 and relevant transaction filings for IPO, spin-off, relisting, and
+   predecessor history.
+5. Hash-sealed issuer annual reports, earnings releases, operating reports,
+   presentations, reserve/resource reports, and technical reports.
+6. Official local-exchange or mining-regulator filings when the SEC filing
+   does not contain the operating schedule.
+7. Public government/API sources for commodity, energy, crop, reserve, and
+   macro data under separate raw/canonical ingestion contracts.
+8. Manual adjudication only for an already captured evidence candidate; it
+   cannot create an unsupported value.
+
+Every selected document records issuer/security identity, accession or
+document ID, form/type, report period, published/accepted/available timestamp,
+source URL, local content-addressed path, byte size, SHA-256, document role,
+selection rule, and all applicable metrics. Every planned document must be
+cached and hash-verified or have a terminal, reviewed source-gap disposition
+before parsing.
+
+### 11.5 Compile once and evaluate all metrics
+
+The Basic Materials adapter uses the shared parser runtime but owns a
+sector-specific document compiler contract:
+
+- Physical decoding is keyed by `content_sha256 + decoder_contract_sha256`.
+  HTML/XML, Inline XBRL, XLS/XLSX, DOC/DOCX, native PDF text, and bounded OCR
+  each produce one immutable result per unique content hash and option set.
+- Inline XBRL is normalized once with contexts, units, dimensions, labels,
+  presentation/calculation relations, and source coordinates retained.
+- HTML, spreadsheet, and PDF tables compile to a generic table intermediate
+  representation preserving headings, merged cells, row/column coordinates,
+  units, scale, footnotes, and nearby section text.
+- Narrative text compiles to section, paragraph, sentence, and bullet blocks.
+  Narrative numeric matches are review-required unless a frozen metric rule
+  explicitly permits deterministic acceptance.
+- Duplicate content is decoded once and may be evaluated in multiple
+  issuer/security contexts only through reviewed identity-continuity rules.
+- Each issuer/content context constructs the semantic document once and runs
+  every applicable metric/table-family matcher in the same work item. A metric
+  loop may not reopen, retokenize, or reparse a document.
+- Workers read immutable objects and return serializable evidence; only the
+  parent process writes bounded SQLite transactions.
+- Work keys include content identity, issuer context, decoder/evaluator
+  release, metric registry, applicability, and extraction policy. Resume skips
+  completed keys; `--force` is prohibited for the historical corpus.
+
+The initial adapter is organized around reusable table families rather than
+one regex per final feature:
+
+- production, shipment, capacity, and utilization schedules;
+- realized price, volume, mix, and unit-cost schedules;
+- sustaining/growth capex and project-commitment schedules;
+- reserve/resource, grade, recovery, ownership, and mine-life schedules;
+- asset, commodity, geography, customer, and end-market mix schedules; and
+- segment earnings, margin, outage/turnaround, and feedstock-sensitivity
+  schedules.
+
+Metric mapping and derivation operate from the stored semantic records and
+accepted operands. Review decisions use policy-only replay with zero document
+opens, provider calls, or OCR. A parser term, mapping, or policy correction
+first re-evaluates stored semantic records; it does not physically decode the
+source again.
+
+### 11.6 Bounded retry and residual policy
+
+Before the full run, every table family requires positive, hard-negative,
+cross-cohort, unit, period, scope, duplicate, amendment, and after-close
+fixtures. Each family should include at least 20 reviewed positives, 10 hard
+negatives, and three historical/deactivated examples where the source
+population permits.
+
+After the one full run, unresolved pairs are partitioned exactly once:
+
+- `review_required` or `conflicting`: adjudicate stored evidence and replay
+  policy without parsing;
+- `derived_operand_gap`: calculate from already accepted facts or retain the
+  explicit missing operand;
+- `parser_failure`: bounded format repair or OCR only for the affected content
+  hashes;
+- `source_document_missing`: include in one sealed residual acquisition batch
+  only when the expected coverage lift is material;
+- `searched_not_reported`: terminal for that source window and not retried; or
+- `definition_not_comparable`: keep measurement-only or exclude the metric.
+
+At most one consolidated residual acquisition/parse batch is allowed before
+the metric freeze. It contains every approved residual source and all
+applicable metrics, excludes previously completed content hashes, and reuses
+the semantic cache. Further work requires a new parser/source contract version
+and must not mutate the original evidence.
+
+### 11.7 Coverage gates before PIT materialization
+
+Coverage is reported by cohort, metric, definition variant, source lane,
+current/historical role, year, and evidence state. The following are minimum
+gates for the first unified historical panel:
+
+- universe/applicability accounting: 100% of governed identity-metric pairs;
+- source-manifest accounting: 100% cached-and-hashed or terminally disposed;
+- parser execution: 100% completed/resume-linked work and zero unexplained
+  failures;
+- core current breadth: at least 80% of applicable current ticker-metric pairs
+  in every cohort;
+- core historical depth: at least 70% of expected applicable issuer-period
+  observations from 2019 forward and at least 60% in each fixed chronological
+  block (2019-2021, 2022-2023, and 2024-current);
+- PIT feasibility: at least eight comparable issuers on at least 36 scheduled
+  dates for any cohort metric admitted to calibration research; and
+- evidence quality: zero unresolved conflicts, future-availability errors,
+  invalid units/periods, or unreviewed prose/OCR observations in the accepted
+  store.
+
+These thresholds apply to the frozen `core_required` set. Sparse optional
+metrics remain captured in the discovery store as measurement-only and do not
+block the panel when they are explicitly classified diagnostic, deferred, or
+excluded. If the core set misses a gate after the residual batch, narrow the
+core set under the predeclared disposition policy or keep the cohort in a
+limited shadow state; do not impute or repeatedly reparse to force coverage.
+
+### 11.8 Metric states and admission to production
 
 Every ticker-metric-as-of combination must have one state:
 
@@ -990,15 +1194,15 @@ Every ticker-metric-as-of combination must have one state:
 - not_applicable;
 - stale;
 - conflicting;
-- review_required; or
+- review_required;
+- parser_failure;
+- source_document_missing; or
 - insufficient_history.
-
-### 11.3 Admission to production
 
 A specialized metric may receive non-zero score weight only when:
 
 - definition, direction, unit, and transformation are versioned;
-- applicability is complete for all current tickers;
+- applicability is complete for all current and governed historical tickers;
 - point-in-time availability is proven;
 - issuer-definition variants are handled;
 - unit and plausibility checks pass;
@@ -1009,7 +1213,7 @@ A specialized metric may receive non-zero score weight only when:
 - walk-forward evidence is positive or non-inferior; and
 - promotion is explicitly hash-sealed.
 
-Until then it remains measurement_only with weight zero.
+Until then it remains `measurement_only` with weight zero.
 
 ## 12. Stage-by-stage implementation
 
@@ -1697,7 +1901,7 @@ Stage 4C passes as a current engineering acceptance candidate. It does not
 authorize historical ratio backfill, calibration, specialized weights,
 score/rank publication, or portfolio use.
 
-### Stage 4D next - longitudinal common point-in-time panel
+### Stage 4D next - historical PIT feasibility preflight only
 
 Stage 4B/4C loaded long source histories, but published only one current
 financial-feature date:
@@ -1711,42 +1915,59 @@ financial-feature date:
 | Common financial features | 134 rows at one as-of date: 2026-09-05 |
 
 The historical model-ready time series is therefore not yet aligned with the
-other repositories. Stage 4D must build monthly or 21-session rows from
-2019-01-01 while retaining pre-2019 source history for TTM construction and
-market warm-up.
+other repositories. Stage 4D must not write a common-only historical feature
+panel that would later be rebuilt after specialized extraction. It performs a
+read-only feasibility and partition preflight while retaining pre-2019 source
+history for TTM construction and market warm-up.
 
 Build:
 
-- an immutable panel-date calendar;
-- effective-dated membership and lifecycle joins;
-- latest-known SEC facts selected by acceptance timestamp at each date;
-- amendment/supersession state as known on each date;
-- on-or-before-date FX and adjusted prices;
-- effective-dated security-unit conversion, with historical valuation null
-  when no contemporaneously supported ratio exists;
-- terminal-event and sample-role fields; and
-- deterministic row hashes and date/year/cohort coverage reports.
+- an immutable candidate monthly or 21-session date calendar beginning
+  2019-01-01;
+- a read-only effective-membership, lifecycle, filing-availability, amendment,
+  FX, price, ratio, and terminal-event feasibility matrix;
+- explicit missing historical ratio, filing, currency, market, membership, and
+  terminal-event queues;
+- expected issuer/date and cohort/date row counts for the eventual unified
+  panel;
+- a deterministic partition plan identifying source warm-up and rebuild
+  boundaries; and
+- input hashes that Stage 6C must reproduce before materialization.
 
 Gate:
 
-- zero future-availability or current-universe-only history leakage;
+- no historical feature, score, outcome, or rank rows are written;
+- zero future-availability or current-universe-only history leakage in the
+  streamed feasibility checks;
 - no backward projection of 2025/2026 ratio evidence;
-- explicit historical ratio and source-birthdate gaps;
-- cache-only reproduction of exact panel hashes; and
+- every gap has an owner and terminal or remediable disposition;
+- the same cache-only preflight reproduces identical counts and hashes; and
 - calibration and portfolio flags remain closed.
 
 ## Stage 5 — Positioning, commodity data, and foundation audit
 
+Stage 5A begins after the no-write Stage 4D feasibility preflight and before
+any historical feature materialization. It closes the metric, universe, and
+source scope needed for a one-pass extraction.
+
 Build:
 
+- resolve or reject the remaining 52 Stage 2B deactivated candidates and close
+  the four pending bankruptcy-distribution treatments before the parser
+  universe seal;
 - read-only imports from SEC ownership and market_positioning;
 - source-birthdate-aware positioning features;
 - commodity registry and company exposure map;
 - FRED/ALFRED, EIA, USGS, and USDA source adapters selected through policy;
-- cycle and input-cost feature tables;
-- a versioned specialized-metric registry and definition-variant catalog;
-- an exact ticker-by-metric applicability matrix and bounded source/document
-  census with source-birthdate and parser-target decisions;
+- immutable raw and canonical commodity/cycle observations with release or
+  vintage timestamps;
+- a versioned specialized-metric, supporting-operand, formula, definition-
+  variant, and table-family registry;
+- an exact current-plus-historical ticker-by-metric applicability matrix;
+- a complete declared SEC, issuer-IR, local-exchange, technical-report, and
+  archived-source document census with source birthdates, exact parser targets,
+  and terminal source-gap dispositions;
+- expected-period and read-only historical coverage projections; and
 - a foundation-readiness audit.
 
 Gate:
@@ -1759,7 +1980,13 @@ Gate:
 - earliest reproducible score date is reported honestly;
 - every specialized candidate is explicitly sourceable, deferred, or rejected
   before parser implementation starts;
-- calibration remains blocked if historical membership or terminal events are incomplete.
+- every governed issuer/metric pair has applicability and source-lane
+  accounting;
+- no source hydration or production-document parse starts until the registry,
+  applicability matrix, source census, and fixture contract are hash-frozen;
+- no historical feature panel exists; and
+- calibration remains blocked if historical membership or terminal events are
+  incomplete.
 
 The Stage 5 decision is one of:
 
@@ -1767,10 +1994,11 @@ The Stage 5 decision is one of:
 2. continue as a limited shadow model; or
 3. defer expensive parser work while preserving the foundation.
 
-Formal specialized-metric identification occurs in Stage 5A only after the
-Stage 4D common historical panel passes. The output is a frozen registry,
-definition variants, applicability matrix, and sourceability decision set; it
-does not yet create specialized observations or score weight.
+Formal specialized-metric identification occurs in Stage 5A after the Stage 4D
+preflight, not after a common historical panel. The output is a frozen
+registry, definition variants, supporting operands, applicability matrix,
+sourceability decision set, and sealed all-source plan; it does not yet create
+score weight.
 
 ## Stage 6A — Common scoring feature contract
 
@@ -1798,45 +2026,66 @@ Gate:
 
 ## Stage 6B — Specialized metrics and cohort overlays
 
-Specialized observations are first loaded in Stage 6B, after Stage 4D and
-Stage 5A pass. They enter measurement-only feature tables with zero score
-weight; source coverage alone cannot promote them.
+Specialized observations are loaded and coverage-frozen in Stage 6B after the
+Stage 4D preflight, Stage 5A source/metric contract, and Stage 6A component
+shape pass. They enter measurement-only tables with zero score weight; source
+coverage alone cannot promote them.
 
 Build:
 
-- Basic Materials-owned metric registry;
-- 134-by-metric applicability matrix;
-- bounded source/document census;
-- Basic Materials adapter to dedicated_parser;
+- Basic Materials-owned content-addressed raw-object and semantic-record
+  caches;
+- one complete hydration pass for the frozen all-source manifest;
+- a Basic Materials adapter to `dedicated_parser` organized by reusable table
+  families and contextual narrative rules;
+- one unique-document compiler pass for XBRL, HTML, spreadsheet, Word, native
+  PDF, and approved bounded OCR inputs;
+- one resumable all-issuer/all-metric semantic evaluation;
 - candidate, evidence, adjudication, accepted-fact, and coverage tables;
+- policy-only replay and exact derived-metric construction from accepted
+  operands;
+- one optional consolidated residual source/parse batch under Section 11.6;
+- final metric dispositions and a frozen accepted-observation manifest;
 - cohort overlay features;
 - measurement-only component outputs.
 
-Implementation order:
+Adapter/fixture implementation order:
 
-1. mining production, AISC/unit cost, reserves, and sustaining capex;
-2. steel/chemical/building/ag price-volume-mix;
-3. commodity and feedstock exposure;
-4. reserve life, concentration, and jurisdiction;
-5. lower-priority metrics only after coverage review.
+1. shared production, shipment, capacity, utilization, price, volume, mix, and
+   unit-cost table families;
+2. reserves/resources, grade, recovery, mine-life, ownership, and asset-mix
+   table families;
+3. sustaining/growth capex, project commitments, outages, turnarounds, and
+   feedstock-sensitivity table families;
+4. cohort-specific contextual and definition-variant rules; and
+5. full golden fixtures and plan-only source validation before the one
+   production-document run.
 
 Gate:
 
-- exact applicability coverage;
-- deterministic fixtures for every production-capable mapping;
-- source hashes and evidence locators;
+- the Section 11.7 applicability, source, parser, current-breadth, historical-
+  depth, and PIT-feasibility thresholds pass for the frozen core set;
+- deterministic positive and prohibited fixtures for every parser table family
+  and production-capable mapping;
+- every source hash, semantic-record hash, evidence locator, parser work key,
+  and review-policy hash reconciles;
 - unit, period, scope, duplicate, conflict, and amendment tests;
+- policy replay performs zero source opens/provider/OCR calls;
+- no previously completed content hash is physically decoded in the residual
+  batch;
 - no parser output directly mutates scores;
 - all specialized weights remain zero until separately promoted.
 
-## Stage 6C — Extended historical panel integration
+## Stage 6C — Single unified historical PIT materialization
 
-Build by extending the Stage 4D common panel, not rebuilding its history:
+Stage 6C is the first and only model-ready historical feature-panel write.
+Build once from the Stage 4D partition preflight and the final Stage 6B
+observation/coverage seals:
 
-- the immutable Stage 4D monthly or 21-session panel dates;
+- the immutable Stage 4D candidate monthly or 21-session panel dates;
 - point-in-time membership and lifecycle;
-- point-in-time positioning, cycle, and accepted specialized features joined to
-  the already validated market/financial panel;
+- point-in-time market, common financial, security-ratio, positioning,
+  commodity/cycle, and accepted specialized features;
 - forward adjusted returns;
 - XLB excess and residual returns;
 - SPY beta-residual robustness targets;
@@ -1848,10 +2097,17 @@ Gate:
 - zero future-availability violations;
 - historical membership and terminal-event coverage pass;
 - each source is absent before its birthdate;
+- every accepted specialized value obeys period-end and
+  publication/acceptance availability;
+- the Stage 4D expected partition counts and input hashes reconcile;
+- the Stage 6B observation and metric-subset hashes are unchanged;
 - row hashes reproduce;
 - no current-universe-only panel is labeled survivorship-correct;
 - panel coverage by year and cohort is published;
-- source-date reconciliation passes.
+- source-date reconciliation passes;
+- a cache-only replay is byte-identical; and
+- a second full historical materialization is prohibited unless a new frozen
+  input contract is explicitly authorized.
 
 ## Signal diagnostics — Before weight optimization
 
@@ -2232,6 +2488,17 @@ If the lifecycle audit identifies development or precommercial companies:
 
 ### 14.5 Commodity and parser tests
 
+- exact registry/supporting-operand/applicability Cartesian completeness;
+- all-source manifest hash, row-count, availability-time, and terminal-gap
+  validation;
+- local-path containment, immutable object hashes, and cache-only replay;
+- one physical decode per unique content hash and decoder contract;
+- one semantic-document construction per issuer/content context with all
+  applicable metrics evaluated together;
+- serial/parallel evidence fingerprint equality;
+- interrupted-run resume without force or completed-work repetition;
+- policy-only replay with zero document, provider, or OCR calls;
+- residual batch exclusion of all previously completed content hashes;
 - effective-dated company exposure weights;
 - publication lag and macro vintage;
 - continuous-futures roll policy when applicable;
@@ -2244,6 +2511,9 @@ If the lifecycle audit identifies development or precommercial companies:
 - duplicate and conflict handling;
 - prose review requirement;
 - immutable evidence hashes;
+- complete evidence-state and coverage-denominator reconciliation;
+- core current/historical coverage thresholds;
+- no historical feature materialization before the Stage 6B coverage seal;
 - measurement-only zero-weight enforcement.
 
 ### 14.6 Scoring and calibration tests
@@ -2294,44 +2564,52 @@ Implement Stages 0-2:
 
 Exit condition: a fresh scratch DB loads and validates exactly 134 current rows without importing another sector package.
 
-### Work package B — Current common shadow model
+### Work package B — Current common data and feature contract
 
 Implement Stages 3-6A:
 
 - adjusted market history;
 - SEC/IFRS/FX;
 - common financial features;
-- positioning import;
-- common scoring;
+- common component shape and specialized placeholders;
 - current 134-row shadow output.
 
 Exit condition: current score contract passes, all rows are visible, and no specialized metric or portfolio authority is active.
 
-### Work package C — Cycle data and specialized metrics
+### Work package C — Source closure and one-pass specialized capture
 
-Implement Stage 5 commodity feeds and Stage 6B in bounded batches:
+Implement Stage 4D preflight, Stage 5A, and Stage 6B before any historical
+feature materialization:
 
+- remaining historical/deactivated identity and terminal-event closure;
+- no-write 2019-forward feasibility and partition preflight;
 - company exposure registry;
-- public macro/commodity series;
-- top-priority mining metrics;
-- price/volume/mix metrics;
-- coverage and evidence review;
+- raw and canonical positioning, macro, commodity, and government data;
+- complete specialized metric/supporting-operand registry and applicability;
+- all-source SEC, IR, local-exchange, archived, reserve/resource, and technical-
+  report census;
+- immutable hydration and unique-document semantic compilation;
+- one resumable all-metric extraction plus parse-free review and derivations;
+- at most one consolidated residual source batch;
+- current/historical coverage cube and final metric dispositions;
 - measurement-only overlays.
 
-Exit condition: specialized evidence is auditable, applicability is complete, and zero-weight enforcement passes.
+Exit condition: Section 11.7 source, execution, current-breadth, historical-
+depth, and PIT-feasibility gates pass for the frozen core set; specialized
+evidence is auditable; and zero-weight enforcement passes.
 
-### Work package D — Survivorship-correct research
+### Work package D — Single survivorship-correct PIT build and diagnostics
 
 Implement Stage 6C and diagnostics:
 
-- historical/delisted membership;
-- terminal outcomes;
-- point-in-time panel;
+- one unified common/cycle/positioning/specialized point-in-time panel;
 - forward targets;
 - factor validation;
 - lifecycle and regime diagnostics.
 
-Exit condition: the panel is survivorship-correct, PIT-safe, and reproducible.
+Exit condition: the panel is survivorship-correct, PIT-safe, cache-reproducible,
+and hash-bound to the final source, observation, applicability, and metric-
+disposition contracts.
 
 ### Work package E — Calibration and product evidence
 
@@ -2484,31 +2762,64 @@ Slice E3 exit condition result: passed as an engineering acceptance candidate.
 The installed live database remains unchanged until explicit replacement
 authorization is provided.
 
-Next slice F0 - Stage 4D longitudinal common point-in-time panel:
+Next slice F0 - Stage 5A metric, universe, and source contract:
 
-1. Freeze monthly or 21-session panel dates from 2019-01-01.
-2. Reconstruct membership, latest-known accepted facts, amendments, FX, prices,
-   and security-unit ratios independently at every date.
-3. Leave historical valuation null where no contemporaneous ratio evidence
+1. Resolve or reject the remaining 52 deactivated candidates and finish the
+   four pending terminal-distribution treatments so the historical parser
+   universe will not change after extraction.
+2. Freeze candidate monthly/21-session dates from 2019-01-01 and run the
+   Stage 4D read-only source/partition feasibility audit; write no feature
+   history.
+3. Convert the Section 9 candidates into a versioned registry of direct
+   metrics, supporting operands, formulas, definition variants, table
+   families, units, periods, scopes, and plausibility bounds.
+4. Build and review the exact current-plus-historical ticker-by-metric
+   applicability matrix.
+5. Enumerate the complete SEC, issuer-IR, local-exchange, archived,
+   reserve/resource, and technical-report source universe and freeze expected
+   availability timestamps and source-gap dispositions.
+6. Freeze commodity/positioning sources and effective-dated issuer exposure
+   contracts.
+
+Following slice F1 - adapter fixtures, sealed hydration, and document compiler:
+
+1. Implement the Basic Materials-owned adapter and table-family extractors
+   against synthetic and reviewed golden fixtures.
+2. Require positive, prohibited, cross-cohort, unit, period, scope, amendment,
+   and after-close cases before production-document execution.
+3. Hydrate the entire approved source manifest once into Basic Materials-owned
+   content-addressed storage.
+4. Compile every unique content hash once into immutable XBRL/table/text
+   semantic records and seal the decoder contract.
+5. Pass the offline exact plan with all metrics, all issuers, zero missing
+   unexplained documents, and parser execution still disabled.
+
+Following slice F2 - one-pass extraction and coverage closure:
+
+1. Execute one resumable all-issuer/all-metric parser run.
+2. Build candidates, accepted observations, derivations, conflicts, and the
+   complete evidence-state coverage cube without building historical features.
+3. Adjudicate stored evidence through policy-only replay.
+4. If the Section 11.7 core coverage gate still has source-driven gaps, execute
+   at most one hash-sealed residual acquisition/parse batch that excludes all
+   completed content hashes.
+5. Freeze final core, diagnostic, deferred, and excluded metric dispositions
+   plus the accepted-observation manifest.
+
+Following slice F3 - Stage 6C single unified historical PIT build:
+
+1. Materialize common financial, market, ratio, positioning, commodity/cycle,
+   and accepted specialized features together from 2019-01-01.
+2. Leave historical valuation null where no contemporaneous ratio evidence
    exists; never project the current ratio contract backward.
-4. Publish date/year/cohort coverage, missing-source reasons, and row hashes.
-5. Prove no-lookahead and cache-only reproduction while calibration remains
-   closed.
+3. Publish date/year/cohort/metric coverage, missing-source reasons, forward
+   outcomes, and deterministic row/partition hashes.
+4. Prove no-lookahead and cache-only reproduction.
+5. Only after F3 passes may signal diagnostics and a preregistered calibration
+   bundle begin.
 
-Following slice F1 - Stage 5A definition and foundation audit:
-
-1. Freeze commodity series and effective-dated issuer exposure contracts.
-2. Add read-only positioning inputs with source-birthdate/freshness gates.
-3. Freeze the specialized metric registry, definition variants, exact
-   applicability matrix, and sourceability census.
-4. Build measurement-only cycle features and publish the earliest reproducible
-   score date.
-5. Keep four bankruptcy distributions and 52 unpromoted historical candidates
-   explicit; do not infer or activate them.
-
-Stage 6B then loads only accepted specialized metrics as measurement-only,
-zero-weight features. Do not begin optimization, portfolio integration, or
-production scheduling in F0/F1.
+Do not begin optimization, portfolio integration, production scheduling, or
+historical PIT materialization in F0-F2.
 
 ## 17. Key risks and mitigations
 
@@ -2523,7 +2834,7 @@ production scheduling in F0/F1.
 | Specialized disclosure inconsistency | False precision | Definition variants, evidence hashes, review-required prose, zero weight until validation |
 | Revised macro data | Look-ahead bias | Release timestamps and ALFRED/vintage policy |
 | Commodity data licensing/rolls | Non-reproducible signals | Entitlement registry, frozen roll methodology, public baseline, explicit proxy labels |
-| Parser scope explosion | Long, expensive implementation | Bounded high-value metric waves with go/no-go coverage reviews |
+| Parser scope explosion | Long, expensive implementation | Freeze a value-ranked core plus full supporting operands, complete the all-source census first, compile unique content once, and allow only one consolidated residual batch |
 | Automatic optimizer promotion | Model-selection overfit | Pre-registration, report-only optimization, untouched outer test, manual lockbox promotion |
 | Cross-sector state coupling | Operational failure or contamination | Own DB/output/cache, banned imports, read-only upstream adapters, independent db_group |
 
@@ -2537,8 +2848,14 @@ The implementation is complete only when:
 - current and historical universe contracts are separate and valid;
 - adjusted market, SEC/IFRS/FX, positioning, and commodity sources are point-in-time controlled;
 - common and specialized metrics have explicit applicability and provenance;
+- the frozen core specialized set passes the source, execution, current-
+  breadth, historical-depth, and PIT-feasibility gates;
+- each unique source document is physically decoded once per decoder contract,
+  all applicable metrics are evaluated together, and review replay is
+  parse-free;
 - current shadow scores reproduce exactly;
-- historical research is survivorship-correct;
+- one unified historical research panel is survivorship-correct and
+  point-in-time safe;
 - calibration uses purged walk-forward and an untouched outer test;
 - portfolio results include costs, capacity, concentration, and terminal events;
 - the final rank contract is dated, hash-sealed, and validated;
@@ -2549,14 +2866,19 @@ The implementation is complete only when:
 
 ## 19. Final recommendation
 
-Proceed with the Basic Materials implementation using Consumer Defensive as the structural scaffold and Machinery as the economic design reference. Port Technology's foreign-issuer, financial, and overlay mechanics. Borrow Biotech's calibration safeguards and only the narrow review/entity patterns needed from Med Devices.
+Proceed with the Basic Materials implementation using Consumer Defensive as
+the structural scaffold, Machinery as the economic design reference, and
+Transportation as the one-pass parser-execution reference. Port Technology's
+foreign-issuer, financial, and overlay mechanics. Borrow Biotech's calibration
+safeguards and only the narrow review/entity patterns needed from Med Devices.
 
 The correct build order is the independent foundation and identity spine first;
 adjusted prices and terminal returns second; acceptance-bounded financials and
-current common features third; the 2019-forward common point-in-time panel
-fourth; specialized metric definition and measurement-only loading fifth;
-survivorship-correct scoring, calibration, and backtesting sixth; and Portfolio
-Layer integration last. This produces an auditable ranking without allowing
-specialized-parser work, small-cohort overfitting, ticker ambiguity,
-current-universe survivorship bias, or another sector's production state to
-contaminate the model.
+current common features third; historical/universe and source feasibility
+preflight fourth; specialized metric/operand definition, all-source hydration,
+one-pass extraction, parse-free adjudication, and high-coverage freeze fifth;
+one unified 2019-forward PIT panel sixth; survivorship-correct diagnostics,
+calibration, and backtesting seventh; and Portfolio Layer integration last.
+This produces an auditable ranking without repeated source parsing, small-
+cohort overfitting, ticker ambiguity, current-universe survivorship bias, or
+another sector's production state contaminating the model.

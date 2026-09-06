@@ -53,7 +53,10 @@ ratios (issuer shares represented by one traded ADS) are BHP 2, ELVR 10, PKX
 The source layers contain financial, market, and FX observations before
 2019-01-01, but the model-ready financial feature table currently has only one
 as-of date, 2026-09-05. A 2019-forward longitudinal point-in-time feature panel
-is therefore not yet implemented. That is the next Stage 4D gate.
+is therefore not yet implemented. Stage 4D now performs only a no-write
+historical feasibility preflight. Specialized, commodity, positioning, and
+remaining historical-identity data must reach the frozen coverage gates before
+Stage 6C writes the first unified historical panel.
 
 No company score, calibrated ranking, or portfolio candidate is produced yet.
 All memberships remain `calibration_eligible=0`, and both
@@ -148,7 +151,11 @@ commands that enforce the filename boundary.
 - `output/basic_materials/stage4c_financial_remediation/<as-of>` is the normal
   Stage 4C SEC, ratio, FX, normalization, feature, and validation evidence root.
 
-Next: Stage 4D builds the 2019-01-01-forward common point-in-time panel. Stage
-5A then freezes specialized metric definitions, variants, applicability, and
-sourceability; Stage 6B loads accepted specialized observations as
-measurement-only features with zero score weight.
+Next: run the Stage 4D no-write 2019-forward feasibility preflight and freeze
+Stage 5A metric/supporting-operand definitions, variants, applicability, and
+the complete declared source census. Stage 6B then hydrates all selected
+sources into content-addressed storage, compiles each unique document once,
+executes one resumable all-metric parse, and closes high-coverage evidence
+through parse-free review. Stage 6C materializes the common, cycle,
+positioning, and specialized PIT panel once. Every specialized score weight
+remains zero until separate promotion evidence exists.

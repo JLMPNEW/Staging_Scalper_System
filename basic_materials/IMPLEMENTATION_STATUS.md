@@ -18,10 +18,11 @@ data-contract, command, or gate change.
 | 4A - financial contract and reporting profiles | Implemented; checkpointed | Commit `4b6bce4`; immutable policy/manifest/concept map; 154 SEC-backed profiles; 22 metrics; 66 mappings |
 | 4B - SEC facts, FX, and one-cutoff common features | Implemented; engineering gate passed | Exact acceptance-time history; 5,754 filings; 310,109 raw facts; 239,747 canonical facts; 22,851 FX rows; 134 current feature/coverage rows |
 | 4C - OGC and listed-security-unit remediation | Implemented and independently validated; live promotion pending | OGC audited HTML route; 47 effective-dated ratios; five exact ADS conversions; schema v7; zero validation errors/warnings; deterministic cache-only replay |
-| 4D - longitudinal common point-in-time panel | Next | Build monthly/21-session feature rows from 2019-01-01 with filing-availability, membership, ratio-history, and no-lookahead gates |
-| 5A - specialized metric definition and source census | Planned after Stage 4D | Freeze metric registry, definition variants, applicability matrix, source birthdates, and bounded parser targets |
-| 6B - specialized metric loading | Not started | Load accepted observations as measurement-only features after source/applicability validation; all weights remain zero |
-| 6+ - calibration, scoring, ranking | Not started | No calibrated score, published rank, or portfolio output exists |
+| 4D - historical PIT feasibility preflight | Next, no-write | Freeze dates and stream membership/source/ratio/terminal feasibility from 2019-01-01; do not materialize historical features |
+| 5A - specialized metric, applicability, and all-source census | Next implementation contract | Freeze direct metrics, supporting operands, formulas, definition variants, current-plus-historical applicability, source birthdates, and exact SEC/IR/local-exchange/technical-report scope |
+| 6B - one-pass specialized capture and coverage closure | Not started | Content-address all sources, compile each unique document once, run one resumable all-metric parse, use parse-free review, and meet the high-coverage gate with all weights zero |
+| 6C - unified historical point-in-time panel | Blocked by Stage 6B coverage | Materialize common, cycle, positioning, and specialized features together once from 2019-01-01 |
+| 7+ - diagnostics, calibration, scoring, ranking | Not started | No calibrated score, published rank, or portfolio output exists |
 
 ## Stage 4C acceptance candidate
 
@@ -76,8 +77,10 @@ That is not yet a longitudinal model-ready feature panel. The
 2026-09-05. Therefore the answer to "is the historical time series aligned
 with other repositories from 2019-01-01?" is **no** at the feature/scoring
 panel layer. Stage 4D must reconstruct each scheduled date using only facts,
-membership, prices, FX, and security ratios available on that date. The current
-ratio evidence cannot be projected backward.
+membership, prices, FX, and security ratios available on that date in a
+read-only feasibility audit. It must not write a common-only panel. The current
+ratio evidence cannot be projected backward. Stage 6C will write the first and
+only unified historical panel after specialized coverage is frozen.
 
 ## Controlled limitations and next gates
 
@@ -93,7 +96,9 @@ ratio evidence cannot be projected backward.
 - Candidate specialized metrics are described by cohort in the master plan,
   but no formal specialized registry, applicability matrix, or observation
   table has been loaded. Formal identification is Stage 5A; measurement-only
-  loading is Stage 6B, after Stage 4D and the foundation audit.
+  loading and high-coverage closure are Stage 6B, after the no-write Stage 4D
+  preflight and Stage 5A all-source seal. Stage 6C historical materialization
+  remains blocked until those gates pass.
 - All 154 memberships remain calibration-ineligible.
   `portfolio_candidate_gate` and `oos_score_valid_flag` remain false.
 
@@ -116,7 +121,11 @@ ratio evidence cannot be projected backward.
   authorization. No Stage 4C claim in this document implies that the current
   live file has already been replaced.
 
-The next bounded implementation slice is Stage 4D, not scoring: build and
-validate the 2019-01-01-forward common point-in-time panel. Stage 5A then
-formalizes specialized metrics and sourceability; Stage 6B loads only accepted
-specialized observations as zero-weight measurement features.
+The next bounded implementation slice is the Stage 4D/5A contract, not a
+historical build or scoring: finish the historical-identity scope, run the
+no-write 2019-forward feasibility preflight, freeze all specialized metrics and
+supporting operands, complete ticker applicability, and seal the all-source
+document/API census. Stage 6B then hydrates and compiles each unique source
+once, executes one resumable all-metric parse, performs parse-free review, and
+freezes coverage and metric dispositions. Only Stage 6C may build the unified
+historical PIT panel.
