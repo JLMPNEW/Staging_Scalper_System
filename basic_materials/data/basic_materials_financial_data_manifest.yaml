@@ -1,0 +1,29 @@
+manifest_version: 1
+artifact_id: basic_materials_financial_contract_v1
+policy_version: basic_materials_financial_data_policy_v1
+policy_sha256: 087af14909223dd94b60450b44c75fa2f57219c6fbbc6c810c3615d6dc1da8ba
+contract_as_of_date: '2026-09-05'
+state: stage4a_profile_contract_calibration_blocked
+calibration_eligible: false
+artifacts:
+  reporting_profiles:
+    path: ../system_csvs/basic_materials_reporting_profiles.csv
+    source_id: basic_materials_reporting_profile_review
+    sha256: 8d562825a53286e37fca486d36f295129e9f38597b4ce4216508817a64e16230
+    byte_size: 165729
+    row_count: 154
+    unique_key: profile_key
+  financial_concept_map:
+    path: basic_materials_financial_concept_map.yaml
+    source_id: basic_materials_financial_metric_policy
+    sha256: beee0b7aaef49afb12d6ee0e43834df1f1eb330de92c13ad0a7aed6984c25aad
+    byte_size: 5149
+    row_count: 22
+    unique_key: canonical_metric
+  reporting_overrides:
+    path: ../system_csvs/basic_materials_reporting_overrides.csv
+    source_id: basic_materials_manual_override
+    sha256: 4705439481a5c9c339f4fddcb09924a8bb72325f6be7fcf41196d8a244f1b4ce
+    byte_size: 93
+    row_count: 0
+    unique_key: ticker|field_name|effective_from

@@ -1,0 +1,156 @@
+policy_version: basic_materials_financial_data_policy_v1
+contract_as_of_date: '2026-09-05'
+model_family: basic_materials
+sector: Basic Materials
+state: stage4a_profile_contract_calibration_blocked
+calibration_eligible: false
+
+expected_counts:
+  current_profiles: 134
+  historical_profiles: 20
+  total_profiles: 154
+  canonical_metrics: 22
+
+sources:
+  reporting_profile_source_id: basic_materials_reporting_profile_review
+  metric_policy_source_id: basic_materials_financial_metric_policy
+  submissions_source_id: sec_submissions
+  companyfacts_source_id: sec_companyfacts
+  inline_xbrl_source_id: sec_inline_xbrl_fallback
+  fx_source_id: yahoo_fx_rates
+  reviewed_override_source_id: basic_materials_manual_override
+  canonical_precedence:
+    - sec_companyfacts
+    - sec_inline_xbrl_fallback
+    - basic_materials_manual_override
+
+sec:
+  accepted_annual_form_families: [10-K, 20-F, 40-F]
+  accepted_interim_form_families: [10-Q, 6-K]
+  recognized_variants: [10-K/A, 10-KT, 10-KT/A, 10-Q/A, 10-QT, 10-QT/A, 20-F/A, 40-F/A, 6-K/A]
+  financial_6k_requires_xbrl_evidence: true
+  acceptance_timestamp_is_earliest_availability: true
+  preserve_amendments: true
+  allow_submission_archives: true
+
+reporting_profiles:
+  required_roles: [current_universe, historical_pilot]
+  allowed_annual_forms: [10-K, 20-F, 40-F, UNKNOWN]
+  allowed_filing_regimes: [domestic_sec, foreign_private_issuer, canadian_mjds, unknown]
+  allowed_accounting_bases: [US_GAAP, IFRS, MIXED_REVIEW, UNKNOWN]
+  allowed_profile_statuses:
+    - ready_for_ingestion
+    - companyfacts_fallback_required
+    - taxonomy_review_required
+    - currency_review_required
+    - profile_metadata_review_required
+    - annual_form_review_required
+    - legacy_archive_required
+  cadence_by_annual_form:
+    10-K: quarterly
+    20-F: annual_or_interim_6k
+    40-F: annual_or_interim_6k
+    UNKNOWN: unknown
+  companyfacts_lag_days_before_fallback: 120
+  reporting_currency_must_be_evidence_derived: true
+  trading_currency_fallback_prohibited: true
+
+canonical_metrics:
+  concept_map_version: basic_materials_financial_concepts_v1
+  required_metrics:
+    - revenue
+    - cost_of_revenue
+    - gross_profit
+    - operating_income
+    - depreciation_depletion_amortization
+    - interest_expense
+    - income_tax_expense
+    - pretax_income
+    - net_income
+    - operating_cash_flow
+    - capital_expenditures
+    - cash_and_equivalents
+    - debt_current
+    - debt_noncurrent
+    - assets
+    - equity
+    - inventory
+    - accounts_receivable
+    - accounts_payable
+    - diluted_shares
+    - dividends_paid
+    - share_repurchases
+  duration_metrics:
+    - revenue
+    - cost_of_revenue
+    - gross_profit
+    - operating_income
+    - depreciation_depletion_amortization
+    - interest_expense
+    - income_tax_expense
+    - pretax_income
+    - net_income
+    - operating_cash_flow
+    - capital_expenditures
+    - diluted_shares
+    - dividends_paid
+    - share_repurchases
+  instant_metrics:
+    - cash_and_equivalents
+    - debt_current
+    - debt_noncurrent
+    - assets
+    - equity
+    - inventory
+    - accounts_receivable
+    - accounts_payable
+
+availability:
+  earliest_usable_timestamp: sec_acceptance_timestamp
+  period_end_is_not_availability: true
+  filing_date_is_not_availability_when_acceptance_exists: true
+  amendment_supersession: acceptance_ordered_non_destructive
+  future_availability_tolerance_seconds: 0
+
+fx:
+  quote_currency: USD
+  flow_conversion_method: period_average_on_or_before_acceptance
+  instant_conversion_method: latest_on_or_before_period_end
+  max_staleness_calendar_days: 7
+  retain_reported_and_usd_values: true
+  retain_rate_source_and_date: true
+  listing_currency_substitution_prohibited: true
+
+features:
+  feature_definition_version: basic_materials_financial_features_v1
+  common_features:
+    - gross_margin
+    - operating_margin
+    - free_cash_flow_margin
+    - return_on_invested_capital
+    - asset_turnover
+    - net_debt_to_ebitda
+    - interest_coverage
+    - inventory_days
+    - inventory_turnover
+    - cash_conversion_cycle
+    - revenue_growth
+    - operating_income_growth
+    - free_cash_flow_growth
+    - incremental_operating_margin
+    - inventory_sales_growth_spread
+    - capex_to_revenue
+    - free_cash_flow_yield
+    - enterprise_value_to_ebitda
+    - enterprise_value_to_ebit
+    - enterprise_value_to_gross_profit
+    - dilution
+    - data_confidence
+  undefined_or_loss_denominators_remain_null: true
+  daily_valuation_uses_stage3_prices_only: true
+
+required_flags:
+  portfolio_candidate_gate: false
+  oos_score_valid_flag: false
+  historical_calibration_activated: false
+  specialized_metric_weighting_activated: false

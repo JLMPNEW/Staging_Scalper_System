@@ -1,0 +1,135 @@
+definition_version: basic_materials_financial_concepts_v1
+metrics:
+  revenue:
+    statement_type: income
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [RevenueFromContractWithCustomerExcludingAssessedTax, RevenueFromContractWithCustomerIncludingAssessedTax, Revenues, SalesRevenueNet]
+    ifrs-full: [Revenue]
+  cost_of_revenue:
+    statement_type: income
+    period_type: duration
+    sign_policy: positive_expense
+    us-gaap: [CostOfRevenue, CostOfGoodsAndServicesSold, CostOfGoodsSold, CostOfSales]
+    ifrs-full: [CostOfSales]
+  gross_profit:
+    statement_type: income
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [GrossProfit]
+    ifrs-full: [GrossProfit]
+  operating_income:
+    statement_type: income
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [OperatingIncomeLoss]
+    ifrs-full: [ProfitLossFromOperatingActivities]
+  depreciation_depletion_amortization:
+    statement_type: cash_flow
+    period_type: duration
+    sign_policy: positive_expense
+    us-gaap: [DepreciationDepletionAndAmortization, DepreciationDepletionAndAmortizationPropertyPlantAndEquipment]
+    ifrs-full: [DepreciationAndAmortisationExpense]
+  interest_expense:
+    statement_type: income
+    period_type: duration
+    sign_policy: positive_expense
+    us-gaap: [InterestExpenseNonOperating, InterestExpenseDebt]
+    ifrs-full: [FinanceCosts]
+  income_tax_expense:
+    statement_type: income
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [IncomeTaxExpenseBenefit, IncomeTaxExpenseContinuingOperations]
+    ifrs-full: [IncomeTaxExpenseContinuingOperations, IncomeTaxExpense]
+  pretax_income:
+    statement_type: income
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest, IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments]
+    ifrs-full: [ProfitLossBeforeTax]
+  net_income:
+    statement_type: income
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [NetIncomeLoss]
+    ifrs-full: [ProfitLoss, ProfitLossAttributableToOwnersOfParent]
+  operating_cash_flow:
+    statement_type: cash_flow
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [NetCashProvidedByUsedInOperatingActivities, NetCashProvidedByUsedInOperatingActivitiesContinuingOperations]
+    ifrs-full: [CashFlowsFromUsedInOperatingActivities]
+  capital_expenditures:
+    statement_type: cash_flow
+    period_type: duration
+    sign_policy: positive_outflow
+    us-gaap: [PaymentsToAcquirePropertyPlantAndEquipment, PaymentsForAdditionsToPropertyPlantAndEquipment]
+    ifrs-full: [PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities, PurchaseOfPropertyPlantAndEquipment]
+  cash_and_equivalents:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: preserve
+    us-gaap: [CashAndCashEquivalentsAtCarryingValue, CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents]
+    ifrs-full: [CashAndCashEquivalents]
+  debt_current:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: positive_liability
+    us-gaap: [ShortTermBorrowings, LongTermDebtCurrent, LongTermDebtAndFinanceLeaseObligationsCurrent]
+    ifrs-full: [CurrentBorrowings]
+  debt_noncurrent:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: positive_liability
+    us-gaap: [LongTermDebtNoncurrent, LongTermDebtAndFinanceLeaseObligationsNoncurrent]
+    ifrs-full: [NoncurrentBorrowings]
+  assets:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: preserve
+    us-gaap: [Assets]
+    ifrs-full: [Assets]
+  equity:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: preserve
+    us-gaap: [StockholdersEquity, StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest]
+    ifrs-full: [Equity, EquityAttributableToOwnersOfParent]
+  inventory:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: preserve
+    us-gaap: [InventoryNet]
+    ifrs-full: [Inventories]
+  accounts_receivable:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: preserve
+    us-gaap: [AccountsReceivableNetCurrent]
+    ifrs-full: [TradeAndOtherCurrentReceivables]
+  accounts_payable:
+    statement_type: balance_sheet
+    period_type: instant
+    sign_policy: positive_liability
+    us-gaap: [AccountsPayableCurrent]
+    ifrs-full: [TradeAndOtherCurrentPayables]
+  diluted_shares:
+    statement_type: income
+    period_type: duration
+    sign_policy: preserve
+    us-gaap: [WeightedAverageNumberOfDilutedSharesOutstanding]
+    ifrs-full: [WeightedAverageNumberOfSharesOutstandingDiluted]
+  dividends_paid:
+    statement_type: cash_flow
+    period_type: duration
+    sign_policy: positive_outflow
+    us-gaap: [PaymentsOfDividendsCommonStock, PaymentsOfDividends]
+    ifrs-full: [DividendsPaid]
+  share_repurchases:
+    statement_type: cash_flow
+    period_type: duration
+    sign_policy: positive_outflow
+    us-gaap: [PaymentsForRepurchaseOfCommonStock]
+    ifrs-full: [PaymentsForRepurchaseOfEquity]
+

@@ -28,6 +28,7 @@ from basic_materials.core.historical_membership import (
     validate_historical_reconciliation_manifest,
 )
 from basic_materials.core.input_manifest import validate_authoritative_input
+from basic_materials.core.market_data import build_market_coverage, build_market_features
 from basic_materials.core.market_data_contract import (
     MarketDataContractError,
     load_market_data_contract,
@@ -144,7 +145,7 @@ def test_market_contract_is_exact_and_uses_stable_provider_ids() -> None:
         "ready_for_calculation": 16,
     }
     assert manifest.artifacts["market_instruments"].sha256 == (
-        "0aad42b7f87ae2dea63977a1b005eb149724eefd5b17f4905c9016ba0a4a7613"
+        "1f81af2bcb32fd94814a176ab03a8c3f755ce2b9e02372e167e41f2143295307"
     )
     zeus = next(
         row for row in bundle.market_instruments if row["event_key"] == "terminal_ZEUS_20260213"
@@ -153,6 +154,33 @@ def test_market_contract_is_exact_and_uses_stable_provider_ids() -> None:
     assert zeus["provider_symbol"] == "RYZ"
     assert zeus["provider_asset_id"] == "1606887"
     assert policy.expected_unique_instruments == 158
+
+
+def test_current_contract_uses_active_major_exchange_listing_windows() -> None:
+    *_, bundle = _contracts()
+    current = {
+        row["model_ticker"]: row
+        for row in bundle.market_instruments
+        if row["instrument_role"] == "current_universe"
+    }
+    assert len(current) == 134
+    assert all(row["provider_database"] == "US Equities" for row in current.values())
+    assert all(not row["provider_last_quoted_date"] for row in current.values())
+    assert all(
+        row["security_scope"] == "current_major_exchange_listing"
+        for row in current.values()
+    )
+    expected_starts = {
+        "ARIS": "2023-09-14",
+        "AUGO": "2025-07-16",
+        "CRH": "2023-09-25",
+        "MTA": "2020-01-08",
+        "TII": "2025-11-21",
+    }
+    assert {
+        ticker: current[ticker]["expected_start_date"]
+        for ticker in expected_starts
+    } == expected_starts
 
 
 def test_market_contract_loader_is_atomic_and_idempotent(tmp_path: Path) -> None:
@@ -255,6 +283,160 @@ def _insert_price(
         """,
         (instrument_id, bar_date, close, close, snapshot_key, "f" * 64, now, now, now),
     )
+
+
+def test_listing_window_controls_recent_coverage_and_feature_history(tmp_path: Path) -> None:
+    conn, contracts = _loaded_contract(tmp_path)
+    market_policy = contracts[6]
+    market_manifest = contracts[7]
+    snapshot_key = "fixture:major-listing-window"
+    as_of = "2026-09-05"
+    last_session = "2026-09-04"
+    now = utc_now()
+    try:
+        conn.execute(
+            """
+            INSERT INTO fact_market_provider_snapshot (
+                snapshot_key, provider_source_id, extraction_asof_date,
+                database_fingerprint_json, contract_manifest_sha256,
+                raw_manifest_sha256, instrument_count, bar_count, cache_root,
+                status, created_at_utc
+            ) VALUES (?, 'norgate_us_equities_total_return', ?, '{}', ?, ?, 158, 0, ?,
+                      'loaded', ?)
+            """,
+            (
+                snapshot_key,
+                as_of,
+                market_manifest.checksum,
+                "d" * 64,
+                str(tmp_path),
+                now,
+            ),
+        )
+        current_roles = conn.execute(
+            """
+            SELECT instrument_id, model_ticker
+            FROM bridge_market_instrument_role
+            WHERE role_type = 'current_universe'
+            """
+        ).fetchall()
+        for role in current_roles:
+            _insert_price(
+                conn,
+                instrument_id=int(role["instrument_id"]),
+                bar_date=last_session,
+                close=10,
+                snapshot_key=snapshot_key,
+            )
+        benchmark_ids = {
+            str(row["role_type"]): int(row["instrument_id"])
+            for row in conn.execute(
+                """
+                SELECT role_type, instrument_id
+                FROM bridge_market_instrument_role
+                WHERE role_type IN ('sector_benchmark', 'broad_benchmark')
+                """
+            ).fetchall()
+        }
+        for instrument_id in benchmark_ids.values():
+            _insert_price(
+                conn,
+                instrument_id=instrument_id,
+                bar_date=last_session,
+                close=10,
+                snapshot_key=snapshot_key,
+            )
+        tii = conn.execute(
+            """
+            SELECT instrument_id, expected_start_date
+            FROM bridge_market_instrument_role
+            WHERE role_key = 'current:TII'
+            """
+        ).fetchone()
+        assert str(tii["expected_start_date"]) == "2025-11-21"
+        _insert_price(
+            conn,
+            instrument_id=int(tii["instrument_id"]),
+            bar_date="2025-11-20",
+            close=8,
+            snapshot_key=snapshot_key,
+        )
+        _insert_price(
+            conn,
+            instrument_id=int(tii["instrument_id"]),
+            bar_date="2025-11-21",
+            close=9,
+            snapshot_key=snapshot_key,
+        )
+        conn.execute("UPDATE bridge_market_instrument_role SET required_for_stage3 = 0")
+        conn.execute(
+            """
+            UPDATE bridge_market_instrument_role
+            SET required_for_stage3 = 1
+            WHERE role_key = 'current:TII'
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO dim_trading_calendar_session (
+                calendar_code, session_date, source_instrument_id, provider_source_id,
+                snapshot_key, created_at_utc, updated_at_utc
+            ) VALUES ('XNYS_PROXY_SPY', ?, ?, 'norgate_us_equities_total_return',
+                      ?, ?, ?)
+            """,
+            [
+                (
+                    session,
+                    benchmark_ids["broad_benchmark"],
+                    snapshot_key,
+                    now,
+                    now,
+                )
+                for session in ("2025-11-21", last_session)
+            ],
+        )
+        conn.commit()
+
+        coverage = build_market_coverage(
+            conn,
+            policy=market_policy,
+            as_of=as_of,
+            snapshot_key=snapshot_key,
+        )
+        assert coverage["current_gate_ready_rows"] == 1
+        coverage_row = conn.execute(
+            """
+            SELECT coverage_status, rank_ready, first_bar_date, bar_count
+            FROM fact_market_data_coverage
+            WHERE audit_asof_date = ? AND role_key = 'current:TII'
+            """,
+            (as_of,),
+        ).fetchone()
+        assert tuple(coverage_row) == (
+            "recent_listing_short_history",
+            1,
+            "2025-11-21",
+            2,
+        )
+
+        features = build_market_features(
+            conn,
+            policy=market_policy,
+            as_of=as_of,
+            snapshot_key=snapshot_key,
+        )
+        assert features["feature_definition_version"] == "basic_materials_market_features_v2"
+        feature_row = conn.execute(
+            """
+            SELECT history_start_date, history_days, quality_status
+            FROM feature_market_technical
+            WHERE ticker = 'TII' AND asof_date = ?
+            """,
+            (as_of,),
+        ).fetchone()
+        assert tuple(feature_row) == ("2025-11-21", 2, "insufficient_history")
+    finally:
+        conn.close()
 
 
 def test_terminal_reconciliation_resolves_calculable_events_without_lookahead(tmp_path: Path) -> None:
@@ -501,7 +683,7 @@ def test_norgate_adapter_fences_caches_and_publishes_atomically(tmp_path: Path) 
         conn.close()
 
 
-def test_schema_v2_database_migrates_to_v3(tmp_path: Path) -> None:
+def test_schema_v2_database_migrates_to_v4(tmp_path: Path) -> None:
     conn = connect(tmp_path / "basic_materials.sqlite")
     try:
         conn.executescript(FOUNDATION_SQL)
@@ -529,8 +711,8 @@ def test_schema_v2_database_migrates_to_v3(tmp_path: Path) -> None:
         )
         conn.commit()
         result = init_db(conn)
-        assert result["schema_version"] == 3
-        assert result["migrations_applied"] == [3]
+        assert result["schema_version"] == 4
+        assert result["migrations_applied"] == [3, 4]
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='feature_market_technical'"
         ).fetchone()[0] == 1

@@ -4,7 +4,7 @@ model:
   family: basic_materials
   sector: Basic Materials
   schema_owner: basic_materials
-  implemented_stage: 3
+  implemented_stage: 4
   promotion_state: shadow_monitor
   portfolio_candidate_gate: false
   oos_score_valid_flag: false
@@ -30,6 +30,20 @@ paths:
   market_data_manifest: data/basic_materials_market_data_manifest.yaml
   market_instruments_csv: system_csvs/basic_materials_market_instruments.csv
   terminal_return_rules_csv: system_csvs/basic_materials_terminal_return_rules.csv
+  financial_data_policy: data/basic_materials_financial_data_policy.yaml
+  financial_data_manifest: data/basic_materials_financial_data_manifest.yaml
+  financial_concept_map: data/basic_materials_financial_concept_map.yaml
+  reporting_profiles_csv: system_csvs/basic_materials_reporting_profiles.csv
+  reporting_overrides_csv: system_csvs/basic_materials_reporting_overrides.csv
+
+sec_fundamentals:
+  submissions_url_template: 'https://data.sec.gov/submissions/CIK{cik}.json'
+  submissions_archive_url_template: 'https://data.sec.gov/submissions/{file_name}'
+  companyfacts_url_template: 'https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json'
+  user_agent: '${BASIC_MATERIALS_SEC_USER_AGENT:-JL, Independent Research, jm.357@hotmail.com}'
+  request_interval_seconds: 0.12
+  timeout_seconds: 30
+  max_retries: 4
 
 runtime:
   sqlite_timeout_seconds: 30

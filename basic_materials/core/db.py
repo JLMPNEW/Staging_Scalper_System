@@ -14,7 +14,7 @@ from basic_materials import MODEL_FAMILY, SECTOR
 
 
 SCHEMA_OWNER = MODEL_FAMILY
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class DatabaseIdentityError(RuntimeError):
@@ -585,10 +585,355 @@ CREATE INDEX IF NOT EXISTS idx_market_feature_asof
 """
 
 
+FINANCIAL_CONTRACT_SQL = r"""
+CREATE TABLE IF NOT EXISTS dim_financial_metric (
+    metric_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_metric TEXT NOT NULL UNIQUE,
+    statement_type TEXT NOT NULL CHECK (
+        statement_type IN ('income', 'balance_sheet', 'cash_flow')
+    ),
+    period_type TEXT NOT NULL CHECK (period_type IN ('duration', 'instant')),
+    sign_policy TEXT NOT NULL CHECK (
+        sign_policy IN ('preserve', 'positive_expense', 'positive_outflow', 'positive_liability')
+    ),
+    definition_version TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    contract_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id)
+);
+
+CREATE TABLE IF NOT EXISTS bridge_financial_metric_concept (
+    metric_id INTEGER NOT NULL,
+    taxonomy TEXT NOT NULL CHECK (taxonomy IN ('us-gaap', 'ifrs-full')),
+    concept TEXT NOT NULL,
+    priority INTEGER NOT NULL CHECK (priority >= 1),
+    source_id TEXT NOT NULL,
+    contract_version TEXT NOT NULL,
+    contract_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY (metric_id, taxonomy, concept),
+    UNIQUE (metric_id, taxonomy, priority),
+    FOREIGN KEY (metric_id) REFERENCES dim_financial_metric(metric_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id)
+);
+
+CREATE TABLE IF NOT EXISTS dim_issuer_reporting_profile (
+    profile_key TEXT PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    security_id INTEGER NOT NULL UNIQUE,
+    ticker TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    role_type TEXT NOT NULL CHECK (role_type IN ('current_universe', 'historical_pilot')),
+    profile_asof_date TEXT NOT NULL,
+    source_cutoff_date TEXT NOT NULL,
+    cik TEXT NOT NULL CHECK (length(cik) = 10 AND cik NOT GLOB '*[^0-9]*'),
+    sec_entity_name TEXT NOT NULL,
+    domicile_country TEXT NOT NULL,
+    primary_annual_form TEXT NOT NULL CHECK (
+        primary_annual_form IN ('10-K', '20-F', '40-F', 'UNKNOWN')
+    ),
+    filing_regime TEXT NOT NULL CHECK (
+        filing_regime IN ('domestic_sec', 'foreign_private_issuer', 'canadian_mjds', 'unknown')
+    ),
+    accounting_basis TEXT NOT NULL CHECK (
+        accounting_basis IN ('US_GAAP', 'IFRS', 'MIXED_REVIEW', 'UNKNOWN')
+    ),
+    primary_taxonomy TEXT NOT NULL CHECK (
+        primary_taxonomy IN ('us-gaap', 'ifrs-full', 'mixed', 'unknown')
+    ),
+    fiscal_year_end TEXT NOT NULL,
+    reporting_currency TEXT NOT NULL,
+    reporting_currency_method TEXT NOT NULL CHECK (
+        reporting_currency_method IN (
+            'latest_annual_anchor_concepts',
+            'latest_annual_all_monetary_facts',
+            'eligible_companyfacts_plurality',
+            'reviewed_override',
+            'unresolved'
+        )
+    ),
+    trading_currency TEXT NOT NULL,
+    expected_cadence TEXT NOT NULL CHECK (
+        expected_cadence IN ('quarterly', 'annual_or_interim_6k', 'unknown')
+    ),
+    latest_financial_form TEXT NOT NULL,
+    latest_financial_accession TEXT NOT NULL,
+    latest_financial_accepted_at TEXT NOT NULL,
+    latest_annual_accession TEXT NOT NULL,
+    latest_annual_accepted_at TEXT NOT NULL,
+    latest_companyfacts_accepted_at TEXT NOT NULL,
+    companyfacts_lag_days INTEGER,
+    inline_xbrl_fallback_expected INTEGER NOT NULL CHECK (
+        inline_xbrl_fallback_expected IN (0, 1)
+    ),
+    submissions_source_id TEXT NOT NULL,
+    companyfacts_source_id TEXT NOT NULL,
+    submissions_sha256 TEXT NOT NULL,
+    companyfacts_sha256 TEXT NOT NULL,
+    profile_status TEXT NOT NULL CHECK (
+        profile_status IN (
+            'ready_for_ingestion',
+            'companyfacts_fallback_required',
+            'taxonomy_review_required',
+            'currency_review_required',
+            'profile_metadata_review_required',
+            'annual_form_review_required',
+            'legacy_archive_required'
+        )
+    ),
+    review_reason TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    calibration_eligible INTEGER NOT NULL CHECK (calibration_eligible = 0),
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    contract_version TEXT NOT NULL,
+    profile_sha256 TEXT NOT NULL,
+    contract_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (submissions_source_id) REFERENCES source_registry(source_id),
+    FOREIGN KEY (companyfacts_source_id) REFERENCES source_registry(source_id),
+    CHECK (source_cutoff_date <= profile_asof_date),
+    CHECK (reporting_currency = '' OR (
+        length(reporting_currency) = 3
+        AND reporting_currency NOT GLOB '*[^A-Z]*'
+    ))
+);
+
+CREATE TABLE IF NOT EXISTS fact_financial_ingestion_snapshot (
+    snapshot_key TEXT PRIMARY KEY,
+    extraction_asof_date TEXT NOT NULL,
+    contract_manifest_sha256 TEXT NOT NULL,
+    cache_manifest_sha256 TEXT NOT NULL,
+    issuer_count INTEGER NOT NULL CHECK (issuer_count >= 0),
+    filing_count INTEGER NOT NULL CHECK (filing_count >= 0),
+    raw_fact_count INTEGER NOT NULL CHECK (raw_fact_count >= 0),
+    fx_observation_count INTEGER NOT NULL CHECK (fx_observation_count >= 0),
+    cache_root TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('loaded', 'partial', 'failed')),
+    created_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fact_sec_filing (
+    filing_key TEXT PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    cik TEXT NOT NULL,
+    accession_number TEXT NOT NULL,
+    form_type TEXT NOT NULL,
+    form_family TEXT NOT NULL,
+    filing_date TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    primary_document TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    snapshot_key TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    UNIQUE (company_id, accession_number),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id),
+    FOREIGN KEY (snapshot_key) REFERENCES fact_financial_ingestion_snapshot(snapshot_key)
+);
+
+CREATE TABLE IF NOT EXISTS fact_sec_xbrl_fact_raw (
+    source_observation_id TEXT PRIMARY KEY,
+    filing_key TEXT,
+    company_id INTEGER NOT NULL,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    cik TEXT NOT NULL,
+    accession_number TEXT NOT NULL,
+    taxonomy TEXT NOT NULL,
+    concept TEXT NOT NULL,
+    value_text TEXT NOT NULL,
+    numeric_value REAL,
+    unit TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    filed_date TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    form_type TEXT NOT NULL,
+    frame TEXT NOT NULL,
+    dimensions_json TEXT NOT NULL DEFAULT '{}',
+    source_id TEXT NOT NULL,
+    source_detail TEXT NOT NULL,
+    snapshot_key TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    FOREIGN KEY (filing_key) REFERENCES fact_sec_filing(filing_key),
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id),
+    FOREIGN KEY (snapshot_key) REFERENCES fact_financial_ingestion_snapshot(snapshot_key)
+);
+
+CREATE TABLE IF NOT EXISTS fact_fx_rate (
+    base_currency TEXT NOT NULL,
+    quote_currency TEXT NOT NULL CHECK (quote_currency = 'USD'),
+    rate_date TEXT NOT NULL,
+    rate REAL NOT NULL CHECK (rate > 0),
+    source_id TEXT NOT NULL,
+    source_timestamp_utc TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    snapshot_key TEXT NOT NULL,
+    quality_status TEXT NOT NULL CHECK (quality_status IN ('usable', 'stale', 'quarantined')),
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY (base_currency, quote_currency, rate_date, source_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id),
+    FOREIGN KEY (snapshot_key) REFERENCES fact_financial_ingestion_snapshot(snapshot_key)
+);
+
+CREATE TABLE IF NOT EXISTS fact_financial_statement_canonical (
+    canonical_fact_id TEXT PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    canonical_metric TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    period_type TEXT NOT NULL CHECK (period_type IN ('duration', 'instant')),
+    accepted_at TEXT NOT NULL,
+    filing_key TEXT NOT NULL,
+    accession_number TEXT NOT NULL,
+    taxonomy TEXT NOT NULL,
+    concept TEXT NOT NULL,
+    reported_value REAL NOT NULL,
+    reported_currency TEXT NOT NULL,
+    usd_value REAL,
+    fx_rate_date TEXT,
+    fx_rate REAL,
+    source_observation_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    selection_rank INTEGER NOT NULL CHECK (selection_rank >= 1),
+    amendment_sequence INTEGER NOT NULL CHECK (amendment_sequence >= 0),
+    superseded_by_fact_id TEXT,
+    quality_status TEXT NOT NULL CHECK (
+        quality_status IN ('usable', 'fx_missing', 'conflicted', 'superseded', 'quarantined')
+    ),
+    quality_reasons_json TEXT NOT NULL DEFAULT '[]',
+    definition_version TEXT NOT NULL,
+    snapshot_key TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES dim_company(company_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (canonical_metric) REFERENCES dim_financial_metric(canonical_metric),
+    FOREIGN KEY (filing_key) REFERENCES fact_sec_filing(filing_key),
+    FOREIGN KEY (source_observation_id) REFERENCES fact_sec_xbrl_fact_raw(source_observation_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id),
+    FOREIGN KEY (superseded_by_fact_id) REFERENCES fact_financial_statement_canonical(canonical_fact_id),
+    FOREIGN KEY (snapshot_key) REFERENCES fact_financial_ingestion_snapshot(snapshot_key),
+    CHECK (accepted_at >= period_end)
+);
+
+CREATE TABLE IF NOT EXISTS feature_financial_statement (
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    asof_date TEXT NOT NULL,
+    reporting_currency TEXT NOT NULL,
+    latest_period_end TEXT NOT NULL,
+    latest_accepted_at TEXT NOT NULL,
+    revenue_ttm_usd REAL,
+    gross_profit_ttm_usd REAL,
+    operating_income_ttm_usd REAL,
+    net_income_ttm_usd REAL,
+    operating_cash_flow_ttm_usd REAL,
+    capital_expenditures_ttm_usd REAL,
+    free_cash_flow_ttm_usd REAL,
+    cash_usd REAL,
+    debt_usd REAL,
+    assets_usd REAL,
+    equity_usd REAL,
+    inventory_usd REAL,
+    diluted_shares REAL,
+    gross_margin REAL,
+    operating_margin REAL,
+    free_cash_flow_margin REAL,
+    return_on_invested_capital REAL,
+    asset_turnover REAL,
+    net_debt_to_ebitda REAL,
+    interest_coverage REAL,
+    inventory_days REAL,
+    inventory_turnover REAL,
+    cash_conversion_cycle REAL,
+    revenue_growth REAL,
+    operating_income_growth REAL,
+    free_cash_flow_growth REAL,
+    incremental_operating_margin REAL,
+    inventory_sales_growth_spread REAL,
+    capex_to_revenue REAL,
+    free_cash_flow_yield REAL,
+    enterprise_value_to_ebitda REAL,
+    enterprise_value_to_ebit REAL,
+    enterprise_value_to_gross_profit REAL,
+    dilution REAL,
+    data_confidence REAL CHECK (data_confidence IS NULL OR (
+        data_confidence >= 0 AND data_confidence <= 1
+    )),
+    quality_status TEXT NOT NULL CHECK (
+        quality_status IN ('full', 'partial', 'insufficient', 'stale', 'blocked')
+    ),
+    quality_reasons_json TEXT NOT NULL DEFAULT '[]',
+    feature_definition_version TEXT NOT NULL,
+    market_snapshot_key TEXT NOT NULL,
+    financial_snapshot_key TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY (security_id, asof_date),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (market_snapshot_key) REFERENCES fact_market_provider_snapshot(snapshot_key),
+    FOREIGN KEY (financial_snapshot_key) REFERENCES fact_financial_ingestion_snapshot(snapshot_key)
+);
+
+CREATE TABLE IF NOT EXISTS fact_financial_data_coverage (
+    audit_asof_date TEXT NOT NULL,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    profile_status TEXT NOT NULL,
+    expected_metric_count INTEGER NOT NULL CHECK (expected_metric_count >= 0),
+    available_metric_count INTEGER NOT NULL CHECK (available_metric_count >= 0),
+    stale_metric_count INTEGER NOT NULL CHECK (stale_metric_count >= 0),
+    conflict_metric_count INTEGER NOT NULL CHECK (conflict_metric_count >= 0),
+    coverage_ratio REAL NOT NULL CHECK (coverage_ratio >= 0 AND coverage_ratio <= 1),
+    rank_ready INTEGER NOT NULL CHECK (rank_ready IN (0, 1)),
+    issue_detail TEXT NOT NULL,
+    snapshot_key TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    PRIMARY KEY (audit_asof_date, security_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (snapshot_key) REFERENCES fact_financial_ingestion_snapshot(snapshot_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reporting_profile_role
+    ON dim_issuer_reporting_profile(role_type, profile_status, ticker);
+CREATE INDEX IF NOT EXISTS idx_financial_concept_lookup
+    ON bridge_financial_metric_concept(taxonomy, concept, priority);
+CREATE INDEX IF NOT EXISTS idx_sec_filing_acceptance
+    ON fact_sec_filing(ticker, accepted_at, form_family);
+CREATE INDEX IF NOT EXISTS idx_raw_financial_fact_lookup
+    ON fact_sec_xbrl_fact_raw(ticker, accepted_at, taxonomy, concept);
+CREATE INDEX IF NOT EXISTS idx_canonical_financial_fact_lookup
+    ON fact_financial_statement_canonical(ticker, accepted_at, canonical_metric, period_end);
+CREATE INDEX IF NOT EXISTS idx_financial_feature_asof
+    ON feature_financial_statement(asof_date, quality_status, ticker);
+CREATE INDEX IF NOT EXISTS idx_financial_coverage_status
+    ON fact_financial_data_coverage(audit_asof_date, rank_ready, ticker);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "basic_materials_foundation", FOUNDATION_SQL),
     (2, "basic_materials_historical_reconciliation", HISTORICAL_RECONCILIATION_SQL),
     (3, "basic_materials_adjusted_market_data", MARKET_DATA_SQL),
+    (4, "basic_materials_financial_contract", FINANCIAL_CONTRACT_SQL),
 )
 
 
@@ -866,5 +1211,15 @@ def database_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "dim_terminal_return_rule",
         "fact_terminal_return_calculation",
         "feature_market_technical",
+        "dim_financial_metric",
+        "bridge_financial_metric_concept",
+        "dim_issuer_reporting_profile",
+        "fact_financial_ingestion_snapshot",
+        "fact_sec_filing",
+        "fact_sec_xbrl_fact_raw",
+        "fact_fx_rate",
+        "fact_financial_statement_canonical",
+        "feature_financial_statement",
+        "fact_financial_data_coverage",
     )
     return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in tables}

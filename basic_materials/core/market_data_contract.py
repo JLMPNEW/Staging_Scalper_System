@@ -261,6 +261,7 @@ def load_market_data_policy(path: str | Path) -> MarketDataPolicy:
         "expected_unique_instruments",
         "provider",
         "history",
+        "current_listing_window",
         "benchmarks",
         "coverage",
         "features",
@@ -269,7 +270,7 @@ def load_market_data_policy(path: str | Path) -> MarketDataPolicy:
         "required_flags",
     }
     _exact_keys(root, expected_root, "market policy")
-    if root["policy_version"] != "basic_materials_market_data_policy_v1":
+    if root["policy_version"] != "basic_materials_market_data_policy_v2":
         raise MarketDataContractError("Unsupported market-data policy_version")
     if root["model_family"] != MODEL_FAMILY or root["sector"] != SECTOR:
         raise MarketDataContractError("Market-data model family or sector is invalid")
@@ -340,6 +341,17 @@ def load_market_data_policy(path: str | Path) -> MarketDataPolicy:
     _iso_date(str(history.get("first_scoring_date", "")), "history.first_scoring_date")
     if history.get("current_end_is_run_asof") is not True:
         raise MarketDataContractError("Current market coverage must end at the run as-of date")
+    listing_window = _mapping(root["current_listing_window"], "current_listing_window")
+    if listing_window != {
+        "expected_start_basis": (
+            "first_norgate_major_exchange_session_on_or_after_history_start"
+        ),
+        "required_provider_database": "US Equities",
+        "require_open_ended_provider_history": True,
+        "require_major_exchange_listed_at_contract_asof": True,
+        "exclude_pre_major_exchange_bars_from_features": True,
+    }:
+        raise MarketDataContractError("Current listing-window contract is invalid")
     benchmarks = _mapping(root["benchmarks"], "benchmarks")
     _exact_keys(
         benchmarks,
@@ -424,7 +436,7 @@ def load_market_data_policy(path: str | Path) -> MarketDataPolicy:
     )
     if (
         tuple(features["return_windows"]) != (21, 63, 126, 252)
-        or features["feature_definition_version"] != "basic_materials_market_features_v1"
+        or features["feature_definition_version"] != "basic_materials_market_features_v2"
     ):
         raise MarketDataContractError("Market feature definition contract is invalid")
     terminal = _mapping(root["terminal_returns"], "terminal_returns")
@@ -510,7 +522,7 @@ def validate_market_data_manifest(
     )
     if root["manifest_version"] != 1:
         raise MarketDataContractError("Unsupported market manifest_version")
-    if root["artifact_id"] != "basic_materials_market_data_contract_v1":
+    if root["artifact_id"] != "basic_materials_market_data_contract_v2":
         raise MarketDataContractError("Unexpected market manifest artifact_id")
     if root["policy_version"] != policy.policy_version or root["contract_as_of_date"] != policy.contract_as_of_date:
         raise MarketDataContractError("Market manifest does not match policy")
@@ -703,6 +715,19 @@ def _validate_market_instruments(
         if role == "current_universe":
             if ticker not in current_tickers or row["role_key"] != f"current:{ticker}" or event_key:
                 raise MarketDataContractError(f"{context} does not match the current universe")
+            listing_window = _mapping(
+                policy.payload["current_listing_window"],
+                "current_listing_window",
+            )
+            if (
+                row["security_scope"] != "current_major_exchange_listing"
+                or row["provider_database"]
+                != str(listing_window["required_provider_database"])
+                or last
+            ):
+                raise MarketDataContractError(
+                    f"{context} is not an active current major-exchange instrument"
+                )
             seen_current.add(ticker)
         elif role == "historical_pilot":
             source = historical_by_ticker.get(ticker)

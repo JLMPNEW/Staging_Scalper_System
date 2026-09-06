@@ -177,7 +177,8 @@ def build_market_coverage(
                 reasons.append(f"invalid_bars:{invalid}")
             recent_listing = (
                 role["role_type"] == "current_universe"
-                and first == str(role["provider_first_quoted_date"])
+                and role["security_scope"] == "current_major_exchange_listing"
+                and first == expected_start
                 and len(price_rows) < int(coverage_policy["minimum_rows_full"])
             )
             if invalid:
@@ -274,16 +275,34 @@ def build_market_coverage(
     }
 
 
-def _price_frame(conn: sqlite3.Connection, instrument_id: int, as_of: str) -> pd.DataFrame:
-    rows = conn.execute(
-        """
-        SELECT bar_date, close, adjusted_close, volume
-        FROM fact_adjusted_price_bar
-        WHERE instrument_id = ? AND bar_date <= ?
-        ORDER BY bar_date
-        """,
-        (instrument_id, as_of),
-    ).fetchall()
+def _price_frame(
+    conn: sqlite3.Connection,
+    instrument_id: int,
+    as_of: str,
+    *,
+    start: str | None = None,
+) -> pd.DataFrame:
+    if start is not None:
+        date.fromisoformat(start)
+        rows = conn.execute(
+            """
+            SELECT bar_date, close, adjusted_close, volume
+            FROM fact_adjusted_price_bar
+            WHERE instrument_id = ? AND bar_date BETWEEN ? AND ?
+            ORDER BY bar_date
+            """,
+            (instrument_id, start, as_of),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT bar_date, close, adjusted_close, volume
+            FROM fact_adjusted_price_bar
+            WHERE instrument_id = ? AND bar_date <= ?
+            ORDER BY bar_date
+            """,
+            (instrument_id, as_of),
+        ).fetchall()
     if not rows:
         return pd.DataFrame(columns=["close", "adjusted_close", "volume"])
     frame = pd.DataFrame([dict(row) for row in rows])
@@ -334,7 +353,8 @@ def build_market_features(
 
     roles = conn.execute(
         """
-        SELECT r.security_id, r.instrument_id, r.model_ticker, i.provider_source_id
+        SELECT r.security_id, r.instrument_id, r.model_ticker,
+               r.expected_start_date, i.provider_source_id
         FROM bridge_market_instrument_role AS r
         JOIN dim_market_instrument AS i ON i.instrument_id = r.instrument_id
         WHERE r.role_type = 'current_universe'
@@ -344,7 +364,12 @@ def build_market_features(
     now = utc_now()
     output: list[dict[str, Any]] = []
     for role in roles:
-        frame = _price_frame(conn, int(role["instrument_id"]), as_of)
+        frame = _price_frame(
+            conn,
+            int(role["instrument_id"]),
+            as_of,
+            start=str(role["expected_start_date"]),
+        )
         if frame.empty:
             raise RuntimeError(f"No market history for current ticker {role['model_ticker']}")
         adjusted = frame["adjusted_close"].astype(float)

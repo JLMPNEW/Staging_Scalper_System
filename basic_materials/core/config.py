@@ -53,6 +53,22 @@ class PathConfig:
     market_data_manifest: Path
     market_instruments_csv: Path
     terminal_return_rules_csv: Path
+    financial_data_policy: Path
+    financial_data_manifest: Path
+    financial_concept_map: Path
+    reporting_profiles_csv: Path
+    reporting_overrides_csv: Path
+
+
+@dataclass(frozen=True)
+class SecFundamentalsConfig:
+    submissions_url_template: str
+    submissions_archive_url_template: str
+    companyfacts_url_template: str
+    user_agent: str
+    request_interval_seconds: float
+    timeout_seconds: float
+    max_retries: int
 
 
 @dataclass(frozen=True)
@@ -79,6 +95,7 @@ class BasicMaterialsConfig:
     repository_root: Path
     model: ModelConfig
     paths: PathConfig
+    sec_fundamentals: SecFundamentalsConfig
     runtime: RuntimeConfig
     historical_contract: HistoricalContract
 
@@ -146,7 +163,18 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     root = _require_mapping(raw, "configuration")
-    _strict_keys(root, {"config_version", "model", "paths", "runtime", "historical_contract"}, "configuration")
+    _strict_keys(
+        root,
+        {
+            "config_version",
+            "model",
+            "paths",
+            "sec_fundamentals",
+            "runtime",
+            "historical_contract",
+        },
+        "configuration",
+    )
 
     if root["config_version"] != 1:
         raise ConfigError("config_version must be 1")
@@ -199,6 +227,11 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             "market_data_manifest",
             "market_instruments_csv",
             "terminal_return_rules_csv",
+            "financial_data_policy",
+            "financial_data_manifest",
+            "financial_concept_map",
+            "reporting_profiles_csv",
+            "reporting_overrides_csv",
         },
         "paths",
     )
@@ -248,6 +281,47 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
         terminal_return_rules_csv=_resolve_path(
             paths_raw["terminal_return_rules_csv"], base, "paths.terminal_return_rules_csv"
         ),
+        financial_data_policy=_resolve_path(
+            paths_raw["financial_data_policy"], base, "paths.financial_data_policy"
+        ),
+        financial_data_manifest=_resolve_path(
+            paths_raw["financial_data_manifest"], base, "paths.financial_data_manifest"
+        ),
+        financial_concept_map=_resolve_path(
+            paths_raw["financial_concept_map"], base, "paths.financial_concept_map"
+        ),
+        reporting_profiles_csv=_resolve_path(
+            paths_raw["reporting_profiles_csv"], base, "paths.reporting_profiles_csv"
+        ),
+        reporting_overrides_csv=_resolve_path(
+            paths_raw["reporting_overrides_csv"], base, "paths.reporting_overrides_csv"
+        ),
+    )
+
+    sec_raw = _require_mapping(root["sec_fundamentals"], "sec_fundamentals")
+    _strict_keys(
+        sec_raw,
+        {
+            "submissions_url_template",
+            "submissions_archive_url_template",
+            "companyfacts_url_template",
+            "user_agent",
+            "request_interval_seconds",
+            "timeout_seconds",
+            "max_retries",
+        },
+        "sec_fundamentals",
+    )
+    sec_fundamentals = SecFundamentalsConfig(
+        submissions_url_template=str(sec_raw["submissions_url_template"]).strip(),
+        submissions_archive_url_template=str(
+            sec_raw["submissions_archive_url_template"]
+        ).strip(),
+        companyfacts_url_template=str(sec_raw["companyfacts_url_template"]).strip(),
+        user_agent=_expand_environment(str(sec_raw["user_agent"])).strip(),
+        request_interval_seconds=float(sec_raw["request_interval_seconds"]),
+        timeout_seconds=float(sec_raw["timeout_seconds"]),
+        max_retries=int(sec_raw["max_retries"]),
     )
 
     runtime_raw = _require_mapping(root["runtime"], "runtime")
@@ -310,6 +384,7 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
         repository_root=repository_root,
         model=model,
         paths=paths,
+        sec_fundamentals=sec_fundamentals,
         runtime=runtime,
         historical_contract=historical,
     )
@@ -326,8 +401,8 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         raise ConfigError(f"model.sector must be {SECTOR!r}")
     if config.model.schema_owner != MODEL_FAMILY:
         raise ConfigError(f"model.schema_owner must be {MODEL_FAMILY!r}")
-    if config.model.implemented_stage != 3:
-        raise ConfigError("model.implemented_stage must be 3 for the adjusted-market-data release")
+    if config.model.implemented_stage != 4:
+        raise ConfigError("model.implemented_stage must be 4 for the Stage 4A financial-contract release")
     if config.model.promotion_state != "shadow_monitor":
         raise ConfigError("model.promotion_state must remain 'shadow_monitor'")
     if config.model.portfolio_candidate_gate or config.model.oos_score_valid_flag:
@@ -342,6 +417,24 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         raise ConfigError("runtime.require_database_identity must be true")
     if config.runtime.sqlite_timeout_seconds <= 0:
         raise ConfigError("runtime.sqlite_timeout_seconds must be positive")
+    sec = config.sec_fundamentals
+    if (
+        not sec.submissions_url_template.startswith("https://data.sec.gov/")
+        or "{cik}" not in sec.submissions_url_template
+        or not sec.submissions_archive_url_template.startswith(
+            "https://data.sec.gov/submissions/"
+        )
+        or "{file_name}" not in sec.submissions_archive_url_template
+        or not sec.companyfacts_url_template.startswith("https://data.sec.gov/")
+        or "{cik}" not in sec.companyfacts_url_template
+    ):
+        raise ConfigError("SEC endpoint templates must be scoped data.sec.gov URLs containing {cik}")
+    if "@" not in sec.user_agent or "${" in sec.user_agent:
+        raise ConfigError("sec_fundamentals.user_agent must resolve to an identity with contact email")
+    if sec.request_interval_seconds < 0.1:
+        raise ConfigError("SEC request_interval_seconds must be at least 0.1")
+    if sec.timeout_seconds <= 0 or sec.max_retries < 1:
+        raise ConfigError("SEC timeout_seconds and max_retries must be positive")
     if not config.historical_contract.point_in_time_membership_required_for_calibration:
         raise ConfigError("point-in-time membership must be required for calibration")
     if config.historical_contract.current_universe_is_survivorship_corrected:
@@ -368,6 +461,9 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         ("historical_reconciliation_manifest", config.paths.historical_reconciliation_manifest),
         ("market_data_policy", config.paths.market_data_policy),
         ("market_data_manifest", config.paths.market_data_manifest),
+        ("financial_data_policy", config.paths.financial_data_policy),
+        ("financial_data_manifest", config.paths.financial_data_manifest),
+        ("financial_concept_map", config.paths.financial_concept_map),
     ):
         if not _is_within(path, expected_data_root):
             raise ConfigError(f"paths.{label} must be owned by basic_materials/data")
@@ -385,6 +481,8 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         "terminal_events_csv": "basic_materials_terminal_events.csv",
         "market_instruments_csv": "basic_materials_market_instruments.csv",
         "terminal_return_rules_csv": "basic_materials_terminal_return_rules.csv",
+        "reporting_profiles_csv": "basic_materials_reporting_profiles.csv",
+        "reporting_overrides_csv": "basic_materials_reporting_overrides.csv",
     }
     for label, filename in expected_system_files.items():
         path = getattr(config.paths, label)

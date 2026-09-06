@@ -1,4 +1,4 @@
-registry_version: basic_materials_source_registry_v2
+registry_version: basic_materials_source_registry_v3
 sources:
   - source_id: basic_materials_current_universe
     stage: universe
@@ -60,8 +60,50 @@ sources:
     stage: stage_3_adjusted_market_data
     provider: norgate_data_local
     category: adjusted_market_data
-    description: Local Norgate US Equities and US Equities Delisted total-return price history.
-    point_in_time_role: adjusted_price_and_corporate_action_history
+    description: Local Norgate current/delisted equity prices, corporate actions, and major-exchange listing history.
+    point_in_time_role: adjusted_price_corporate_action_and_listing_regime_history
+    active: true
+  - source_id: basic_materials_reporting_profile_review
+    stage: stage_4a_financial_contract
+    provider: basic_materials_package
+    category: issuer_reporting_profile
+    description: Hash-sealed SEC reporting-regime census for current and historical-pilot issuers.
+    point_in_time_role: effective_dated_reporting_profile_contract
+    active: true
+  - source_id: basic_materials_financial_metric_policy
+    stage: stage_4a_financial_contract
+    provider: basic_materials_package
+    category: financial_metric_policy
+    description: Versioned canonical financial metric and SEC taxonomy mapping contract.
+    point_in_time_role: versioned_financial_definition_contract
+    active: true
+  - source_id: sec_submissions
+    stage: stage_4_financial_data
+    provider: sec_edgar
+    category: filing_metadata
+    description: SEC submissions metadata including accession, form, report date, and acceptance timestamp.
+    point_in_time_role: filing_acceptance_and_availability_history
+    active: true
+  - source_id: sec_companyfacts
+    stage: stage_4_financial_data
+    provider: sec_edgar
+    category: reported_financial_facts
+    description: SEC Company Facts observations for US-GAAP and IFRS taxonomies.
+    point_in_time_role: acceptance_bounded_reported_financial_history
+    active: true
+  - source_id: sec_inline_xbrl_fallback
+    stage: stage_4_financial_data
+    provider: sec_edgar
+    category: filing_document_fallback
+    description: Filing-document and inline-XBRL fallback for gaps not covered by Company Facts.
+    point_in_time_role: acceptance_bounded_filing_document_fallback
+    active: true
+  - source_id: yahoo_fx_rates
+    stage: stage_4_financial_data
+    provider: yahoo_finance_chart
+    category: foreign_exchange
+    description: Daily reporting-currency to USD observations retained with source date and quality state.
+    point_in_time_role: effective_dated_fx_conversion
     active: true
   - source_id: basic_materials_manual_override
     stage: future_data_quality

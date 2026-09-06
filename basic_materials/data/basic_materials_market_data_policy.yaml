@@ -1,4 +1,4 @@
-policy_version: basic_materials_market_data_policy_v1
+policy_version: basic_materials_market_data_policy_v2
 contract_as_of_date: '2026-09-05'
 model_family: basic_materials
 sector: Basic Materials
@@ -41,6 +41,13 @@ history:
   first_scoring_date: '2010-01-04'
   current_end_is_run_asof: true
 
+current_listing_window:
+  expected_start_basis: first_norgate_major_exchange_session_on_or_after_history_start
+  required_provider_database: US Equities
+  require_open_ended_provider_history: true
+  require_major_exchange_listed_at_contract_asof: true
+  exclude_pre_major_exchange_bars_from_features: true
+
 benchmarks:
   sector:
     ticker: XLB
@@ -82,7 +89,7 @@ features:
   average_dollar_volume_days: 63
   beta_days: 252
   beta_residual_momentum_days: 126
-  feature_definition_version: basic_materials_market_features_v1
+  feature_definition_version: basic_materials_market_features_v2
 
 terminal_returns:
   required_event_count: 20

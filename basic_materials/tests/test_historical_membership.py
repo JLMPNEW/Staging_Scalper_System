@@ -192,7 +192,7 @@ def test_stage2b_loader_rolls_back_on_unresolved_canonical_security(tmp_path: Pa
         conn.close()
 
 
-def test_schema_v1_database_migrates_to_v3(tmp_path: Path) -> None:
+def test_schema_v1_database_migrates_to_v4(tmp_path: Path) -> None:
     database_path = tmp_path / "basic_materials.sqlite"
     conn = connect(database_path)
     try:
@@ -213,9 +213,9 @@ def test_schema_v1_database_migrates_to_v3(tmp_path: Path) -> None:
         conn.commit()
 
         result = init_db(conn)
-        assert result["schema_version"] == 3
-        assert result["migrations_applied"] == [2, 3]
-        assert conn.execute("SELECT schema_version FROM sector_database_identity").fetchone()[0] == 3
+        assert result["schema_version"] == 4
+        assert result["migrations_applied"] == [2, 3, 4]
+        assert conn.execute("SELECT schema_version FROM sector_database_identity").fetchone()[0] == 4
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'dim_ticker_alias'"
         ).fetchone()[0] == 1

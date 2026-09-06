@@ -29,7 +29,7 @@ def _run(script: str, *arguments: str) -> dict:
     return json.loads(completed.stdout)
 
 
-def test_cli_stage_zero_through_market_contract(tmp_path: Path) -> None:
+def test_cli_stage_zero_through_financial_contract(tmp_path: Path) -> None:
     database = tmp_path / "basic_materials.sqlite"
     reports = tmp_path / "reports"
 
@@ -60,9 +60,21 @@ def test_cli_stage_zero_through_market_contract(tmp_path: Path) -> None:
         "--db",
         str(database),
     )
+    financial_contract = _run(
+        "05_load_basic_materials_financial_contract.py",
+        "--db",
+        str(database),
+    )
+    financial_validated = _run(
+        "06_validate_basic_materials_financial_contract.py",
+        "--db",
+        str(database),
+        "--report-dir",
+        str(reports / "financial_contract"),
+    )
 
     assert independence["passed"] is True
-    assert initialized["schema_version"] == 3
+    assert initialized["schema_version"] == 4
     assert loaded["rows_loaded"] == 134
     assert loaded["calibration_groups_derived"] == 134
     assert validated["passed"] is True
@@ -77,3 +89,10 @@ def test_cli_stage_zero_through_market_contract(tmp_path: Path) -> None:
     assert market_contract["unique_instruments"] == 158
     assert market_contract["role_rows"] == 162
     assert market_contract["terminal_rules"] == 20
+    assert financial_contract["profiles"] == 154
+    assert financial_contract["metrics"] == 22
+    assert financial_contract["concept_links"] == 66
+    assert financial_validated["passed"] is True
+    assert financial_validated["error_count"] == 0
+    assert financial_validated["actual_counts"]["profiles"] == 154
+    assert Path(financial_validated["artifacts"]["artifact_manifest"]).is_file()

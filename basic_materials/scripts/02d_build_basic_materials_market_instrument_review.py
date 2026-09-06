@@ -71,6 +71,51 @@ def _maximum_date(left: str, right: str) -> str:
     return max(left, right)
 
 
+def _major_exchange_listing_start(
+    provider: Any,
+    symbol: str,
+    *,
+    history_start: str,
+    contract_as_of: str,
+) -> str:
+    frame = provider.major_exchange_listed_timeseries(
+        symbol,
+        start_date=history_start,
+        end_date=contract_as_of,
+        timeseriesformat="pandas-dataframe",
+    )
+    if frame is None or len(frame) == 0:
+        raise RuntimeError(f"Provider returned no major-exchange history for {symbol}")
+    columns = {
+        str(column).strip().casefold(): column
+        for column in frame.columns
+    }
+    column = columns.get("major exchange listed")
+    if column is None:
+        raise RuntimeError(f"Provider major-exchange field is missing for {symbol}")
+    observations: list[tuple[str, int]] = []
+    for index, value in frame[column].items():
+        flag = int(value)
+        if flag not in {0, 1}:
+            raise RuntimeError(f"Provider returned an invalid major-exchange flag for {symbol}")
+        observations.append(
+            (
+                _iso_provider_date(
+                    index,
+                    f"major-exchange date for {symbol}",
+                    required=True,
+                ),
+                flag,
+            )
+        )
+    if observations[-1][1] != 1:
+        raise RuntimeError(f"Current ticker {symbol} is not major-exchange listed")
+    listed_dates = [observed_on for observed_on, flag in observations if flag == 1]
+    if not listed_dates:
+        raise RuntimeError(f"Current ticker {symbol} has no major-exchange listing window")
+    return listed_dates[0]
+
+
 def _provider_catalog(provider: Any) -> dict[tuple[str, str], str]:
     catalog: dict[tuple[str, str], str] = {}
     for database_name in NORGATE_EQUITY_DATABASES:
@@ -165,6 +210,7 @@ def build_rows(config: Any, provider: Any) -> tuple[list[dict[str, str]], dict[s
     )
     history_start = str(policy["history"]["history_start"])
     reviewed_on = str(policy["contract_as_of_date"])
+    listing_window = policy["current_listing_window"]
     overrides = policy["provider_symbol_overrides"]
     current = _read_csv(config.paths.universe_csv)
     historical = _read_csv(config.paths.historical_membership_csv)
@@ -180,20 +226,43 @@ def build_rows(config: Any, provider: Any) -> tuple[list[dict[str, str]], dict[s
     for item in current:
         ticker = item["ticker"].upper()
         identity = _identity(provider, catalog, ticker)
+        if (
+            item["listing_status"].casefold() != "active"
+            or item["investability_status"].casefold() != "investable"
+            or item["is_primary_listing"].upper() != "TRUE"
+        ):
+            raise RuntimeError(f"Current universe status is invalid for {ticker}")
+        if (
+            identity["provider_database"] != listing_window["required_provider_database"]
+            or (
+                listing_window["require_open_ended_provider_history"]
+                and identity["provider_last_quoted_date"]
+            )
+        ):
+            raise RuntimeError(f"Provider does not identify {ticker} as an active current security")
+        listing_start = _major_exchange_listing_start(
+            provider,
+            ticker,
+            history_start=history_start,
+            contract_as_of=reviewed_on,
+        )
         rows.append(
             _role(
                 identity,
                 role_key=f"current:{ticker}",
                 role_type="current_universe",
                 model_ticker=ticker,
-                security_scope="current_primary_listing",
+                security_scope="current_major_exchange_listing",
                 event_key="",
-                expected_start_date=_maximum_date(history_start, identity["provider_first_quoted_date"]),
+                expected_start_date=listing_start,
                 expected_end_date="",
                 trading_currency=item["currency"],
                 current_gate=True,
                 reviewed_on=reviewed_on,
-                notes="Current reviewed Basic Materials security",
+                notes=(
+                    "Current major-exchange listing window; pre-major-exchange "
+                    "quote history is excluded from coverage and features"
+                ),
             )
         )
 
