@@ -47,6 +47,9 @@ paths:
   f0_closure_policy: data/basic_materials_f0_closure_policy.yaml
   specialized_parser_policy: data/basic_materials_specialized_parser_policy.yaml
   specialized_parser_fixtures: data/basic_materials_specialized_parser_fixtures.yaml
+  specialized_parser_pilot_policy: data/basic_materials_specialized_parser_pilot_policy.yaml
+  specialized_parser_pilot_documents: system_csvs/basic_materials_specialized_parser_pilot_documents.csv
+  specialized_parser_golden_expectations: system_csvs/basic_materials_specialized_parser_golden_expectations.csv
 
 sec_fundamentals:
   submissions_url_template: 'https://data.sec.gov/submissions/CIK{cik}.json'

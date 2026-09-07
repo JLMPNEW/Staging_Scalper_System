@@ -1,6 +1,6 @@
 # Basic Materials Scoring and Ranking Model — Implementation Plan
 
-Status: living implementation authority; Stage 4C and Stage 4D/5A F0 candidates implemented; F0.1/F1A control plane and F0.2 terminal-distribution closure implemented; source hydration, live promotion, PIT, and calibration blocked
+Status: living implementation authority; Stage 4C and Stage 4D/5A F0 candidates implemented; F0.1/F1A control plane, F0.2 terminal-distribution closure, and F1A.1 real-document parser pilot implemented; source hydration, live promotion, PIT, and calibration blocked
 Prepared: 2026-09-05  
 Last implementation update: 2026-09-07
 Authoritative current universe: ticker_mapping/basic_materials.csv
@@ -35,6 +35,7 @@ Implementation ledger:
 | 2026-09-06 | Stage 4D/5A F0 extraction-contract candidate | Schema v8; source registry v5; 64 specialized metrics; 16 operand links; 9,856-row exact identity-metric accounting matrix; 5,640-row SEC/IR/local-exchange/archive/technical/reserve/commodity/positioning census; content-addressed document and resumable parser ledgers; 93-date read-only PIT feasibility audit | Registry and source policies strict-load; Stage 5A has zero structural errors; every identity is accounted for across all 64 metrics and eight source families; Stage 4D feasibility passed with deterministic hashes and no database mutation; 41 tests, Ruff, and independence pass | Stage 5A is not sealed: 52 historical decisions, four terminal distributions, 134 current-name histories, 980 applicability reviews, 5,163 source rows, parser execution, and specialized coverage remain open; live database and all scoring/calibration/portfolio gates unchanged |
 | 2026-09-06 | F0.1 closure workbench and F1A fixture-first parser contract | Strict query-only closure policy; evidence review queues; content/source de-duplication plan; exact contiguous regime-block validation; four parser adapters covering 32 table families; eight synthetic positive/prohibited/context/unit/period/scope/amendment/after-close fixtures; bounded parse scheduler | Workbench is structurally valid and byte-preserving; 5,163 source rows collapse to 4,244 acquisition units before content hashing; all 8 fixtures pass; maximum physical passes are frozen at one full plus one changed-evidence residual per parser-contract version; 45 tests and Ruff pass | No review decision is inferred; 52 historical decisions, four distributions, 134 histories, 980 applicability reviews, 5,163 source rows, source hydration, production extraction, accepted observations, coverage, PIT, scoring, and promotion remain open |
 | 2026-09-07 | F0.2 terminal-distribution closure | Additive policy/CSV/manifest bound to the immutable Stage 3 contract; schema v9 review ledger; source registry v6; five exact SEC payloads; four reviewed zero distributions; isolated apply and read-only replay commands; overlay-aware Stage 3 refresh/validation | ANV, MCP, GMO, and BIOA have evidence-backed value 0; 20/20 terminal events resolve; terminal F0 and Stage 4D blockers fall to zero; cache replay, idempotence, integrity, foreign keys, 49 tests, Ruff, and independence pass | 52 historical decisions, 134 histories, 980 applicability reviews, 5,163 source rows, production parsing, accepted observations, specialized coverage, PIT, scoring, calibration, and promotion remain open |
+| 2026-09-07 | F1A.1 real-document semantic compiler pilot | Basic Materials-owned adapter to shared `dedicated_parser`; strict pilot policy; 10 hash-sealed local SEC documents spanning all eight cohorts, one historical issuer, and HTML/XML/JSON; content-addressed semantic cache; evidence-funnel diagnostics; real-document candidate and golden-review reports; cache-only replay command | 10/10 documents and all media/cohort requirements compile; 75,715 semantic blocks are compiled once; terminology replay increases review-candidate coverage from 21/29 to 26/29 physical families and emits 295 candidates; three remaining families are classified `source_term_absent`; cache-only replay opens zero raw documents and performs zero physical compiles; no database mutation | Reviewed golden positives/hard negatives, source expansion for channel inventory/end-market mix/outage-turnaround, F0.3 seals, full hydration, accepted observations, coverage, PIT, scoring, calibration, and promotion remain open |
 
 ### Reusable sector-repository build sequence
 
@@ -53,7 +54,7 @@ The following sequence is the portable part of this implementation. A future sec
 | 9 | Ingest adjusted prices and reconcile cash, stock, mixed, bankruptcy, OTC, and successor returns | Every terminal event has an auditable final-return treatment before calibration eligibility can change |
 | 10 | Add acceptance-bounded fundamentals, reporting profiles, FX, security-unit ratios, and current common features | Filing timing, units, currencies, cadence, amendments, listed-security basis, and current features validated |
 | 11 | Freeze the complete specialized-metric, supporting-operand, applicability, and all-source census before historical materialization | Every governed identity/metric pair has an applicability and source-lane disposition; no PIT feature rows are written |
-| 12 | Hydrate all selected sources, compile each unique document once, execute one resumable all-metric parse, and close coverage through parse-free review | Exact source seals; content-addressed cache; zero missing planned work; explicit accepted/missing/not-applicable states; zero specialized weight |
+| 12 | Prove the decoder and terminology on a hash-sealed real-document pilot; then hydrate all selected sources, compile each unique document once, execute one resumable all-metric parse, and close coverage through parse-free review | Pilot document/compiler gates and reviewed golden fixtures first; then exact source seals, content-addressed cache, zero missing planned work, explicit accepted/missing/not-applicable states, and zero specialized weight |
 | 13 | Materialize one unified common, cycle, positioning, and specialized point-in-time panel | Scheduled-date hashes, historical membership, contemporaneous ratios, source birthdates, accepted-at rules, and no-lookahead pass |
 | 14 | Build diagnostics, shadow scores, constrained calibration, and backtests | Leakage tests, walk-forward evidence, untouched outer test, costs, capacity, and explicit no-promotion outcomes |
 | 15 | Publish governed outputs and integrate downstream by file only | Dated hash-sealed contract; independent orchestration; rollback and last-success preservation |
@@ -1143,6 +1144,37 @@ accepted operands. Review decisions use policy-only replay with zero document
 opens, provider calls, or OCR. A parser term, mapping, or policy correction
 first re-evaluates stored semantic records; it does not physically decode the
 source again.
+
+#### 11.5.1 Implemented real-document pilot boundary
+
+F1A.1 implements that boundary before broad hydration. Ten exact local SEC
+objects cover every current cohort, one historical/deactivated issuer, and
+HTML, XML, and structured JSON. The owned adapter compiles markup through the
+sector-neutral `dedicated_parser` runtime and flattens SEC Company Facts into
+the same immutable semantic-block contract. Cache identity is the full source
+SHA-256 plus full decoder-contract SHA-256 stored inside each payload; a
+shortened decoder-hash directory prefix keeps Windows atomic writes below the
+legacy path limit without weakening full-hash validation.
+
+The pilot separates source decoding from metric evaluation. Its evidence
+funnel records uncapped lexical hits, numeric-eligible hits, prohibited
+contexts, capped review candidates, exact block/evidence hashes, source
+availability, and decoder lineage. A rule-only replay therefore distinguishes
+`source_term_absent`, `numeric_evidence_absent`, `prohibited_context_only`, and
+`candidates_found_review_required` without reopening raw documents. The first
+real-document compile produced 75,715 semantic blocks from 10 unique hashes.
+A cache-only terminology replay performed zero physical compiles and zero raw
+opens while increasing physical-family candidate coverage from 21/29 to 26/29
+and emitting 295 review rows.
+
+The three remaining pilot gaps are evidence-acquisition targets, not decoder
+retry targets: channel-inventory value evidence requires an agricultural
+earnings/operating source, specialty end-market mix requires narrative
+10-K/issuer material beyond Company Facts, and commodity-chemical
+outage/turnaround evidence requires the annual-report exhibit or operating
+release rather than a 40-F wrapper. The pilot writes no accepted observation,
+SQLite row, PIT row, score, calibration input, or promotion receipt. The
+reviewed golden gate and production-execution flag remain false.
 
 ### 11.6 Bounded retry and residual policy
 
@@ -2893,8 +2925,39 @@ Implemented slice F1A - fixture-first parser contract and scheduler:
   full target-window span, and contiguous non-overlapping dates. The read-only
   pre-F0.2 rerun retained 93 dates and seven expected downstream blockers.
 
-F0.1/F1A exit condition result: passed as an engineering control plane. It
-does not claim specialized data coverage: accepted specialized observations
+Implemented slice F1A.1 - real-document compiler and parser-recall pilot:
+
+- `adapters/dedicated_parser_adapter.py` is the sole Basic Materials boundary
+  to the shared semantic parser. It preserves stable block, table, section,
+  unit, period, and source-content identity and emits review candidates only.
+- `data/basic_materials_specialized_parser_pilot_policy.yaml` freezes the
+  decoder contract, exact real-document gates, all 29 physical family rules,
+  three derived-only families, production golden targets, and every no-write
+  flag. The committed document manifest seals 10 local SEC files by URL,
+  accession, availability timestamp, byte size, and SHA-256.
+- `core/specialized_parser_pilot.py` compiles unique content into deterministic
+  gzip semantic objects, validates cache contracts, supports raw-free replay,
+  reports the lexical/numeric/prohibited/review funnel, validates approved
+  golden cases, and has no database parameter.
+- `scripts/14b_build_basic_materials_real_document_parser_pilot.py` exposes
+  explicit compile and `--cache-only` modes. `--allow-open` permits the
+  measurement report to return zero while the reviewed golden gate remains
+  open; it does not authorize production execution.
+- The final replay covers all eight cohorts and HTML/XML/JSON, reports 10/10
+  successful documents, 75,715 blocks, 16,138 table rows, 26,143 structured
+  facts, 295 review candidates, and candidates for 26/29 physical families.
+  The three uncovered families are `channel_inventory`, `end_market_mix`, and
+  `outage_turnaround`, each classified `source_term_absent` for targeted source
+  expansion. Cache-only replay records 10 cache hits, zero raw opens, and zero
+  physical compiles.
+- Tests cover strict committed contracts, each evidence-funnel stage, all-
+  family fixture compilation, removal of raw fixtures followed by cache-only
+  deterministic replay, and zero database/PIT writes. The full package passes
+  52 tests, Ruff, and independence across 75 Python files.
+
+F0.1/F1A/F1A.1 exit condition result: passed as an engineering control plane
+and a real-document decoder/recall pilot. It does not claim specialized data
+coverage: accepted specialized observations
 remain zero, so current-breadth and historical-depth coverage are not yet
 measurable. The isolated database SHA-256 remained
 `494d906ac1b968f6c50ff5248998db387ae199d7ad45d3e101b99934a8fa0605`.
@@ -2975,14 +3038,20 @@ Remaining slice F1B - evidence closure, sealed hydration, and document compiler:
    without automated promotion or fabricated values.
 2. Hash-seal the resulting universe, applicability, source, commodity,
    positioning, and exposure contracts, then rerun Stage 4D.
-3. Expand the synthetic contract into reviewed golden fixtures for each table
-   family using captured documents; production execution remains disabled
-   until those family minimums pass.
-4. Hydrate the entire approved source manifest once into Basic Materials-owned
+3. Adjudicate the F1A.1 real-document review queue: approve exact positives and
+   hard negatives for the 26 surfaced families, and add targeted annual-report,
+   earnings/operating, or issuer-IR documents for `channel_inventory`,
+   `end_market_mix`, and `outage_turnaround`. Reuse the semantic cache for all
+   policy/terminology changes; production execution remains disabled until
+   every pilot golden minimum passes.
+4. Expand the reviewed pilot into the production golden corpus: at least 20
+   positives, 10 hard negatives, and three historical/deactivated examples per
+   physical family where the source population permits.
+5. Hydrate the entire approved source manifest once into Basic Materials-owned
    content-addressed storage, reusing SEC accessions and shared drivers.
-5. Compile every unique content hash once into immutable XBRL/table/text
+6. Compile every unique content hash once into immutable XBRL/table/text
    semantic records and seal the decoder contract.
-6. Pass the offline exact plan with all metrics, all issuers, zero unexplained
+7. Pass the offline exact plan with all metrics, all issuers, zero unexplained
    documents, and a deterministic work ledger before enabling F2 extraction.
 
 Following slice F2 - one-pass extraction and coverage closure:

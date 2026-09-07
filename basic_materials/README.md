@@ -5,7 +5,7 @@ and ranking package. It owns its configuration, policies, source registry,
 SQLite schema, caches, reports, commands, and tests. It neither imports another
 sector implementation nor writes to another sector's database or output tree.
 
-## Implemented Stage 4C, F0.2, and F1A control-plane candidates
+## Implemented Stage 4C, F0.2, and F1A/F1A.1 parser-control candidates
 
 The package currently provides:
 
@@ -41,11 +41,15 @@ The package currently provides:
 - a fixture-first parser contract with four adapters, all 32 table families,
   eight passing guard cases, parse-free policy replay, and a one-full-plus-one-
   residual physical-pass ceiling per contract version;
+- a real-document parser pilot over 10 hash-sealed local SEC files covering all
+  eight cohorts, one historical issuer, and HTML/XML/JSON; 75,715 immutable
+  semantic blocks and 295 review candidates cover 26/29 physical families,
+  while three gaps are explicitly classified as source-term gaps;
 - a sealed four-row F0.2 bankruptcy-distribution overlay backed by five exact
   SEC documents, with all 20 terminal events now resolved in the isolated
   candidate; and
 - atomic loaders, independent validators, machine-readable evidence reports,
-  49 regression tests, and a clean static check.
+  52 regression tests, and a clean static check.
 
 The validated acceptance snapshot is
 `basic_materials_sec:2026-09-05:2cf5219d8855588066ba`. Stage 4C resolves all
@@ -111,6 +115,8 @@ python basic_materials/scripts/12_load_basic_materials_specialized_contract.py -
 python basic_materials/scripts/12a_validate_basic_materials_specialized_contract.py --db <isolated-basic_materials.sqlite> --allow-open
 python basic_materials/scripts/13_build_basic_materials_f0_closure_workbench.py --db ISOLATED_BASIC_MATERIALS_DB --allow-open
 python basic_materials/scripts/14_validate_basic_materials_specialized_parser_contract.py
+python basic_materials/scripts/14b_build_basic_materials_real_document_parser_pilot.py --allow-open
+python basic_materials/scripts/14b_build_basic_materials_real_document_parser_pilot.py --cache-only --allow-open
 python basic_materials/scripts/15_apply_basic_materials_terminal_distribution_reviews.py --db ISOLATED_BASIC_MATERIALS_DB
 python basic_materials/scripts/15a_validate_basic_materials_terminal_distribution_reviews.py --db ISOLATED_BASIC_MATERIALS_DB
 python basic_materials/scripts/13_build_basic_materials_f0_closure_workbench.py --db ISOLATED_BASIC_MATERIALS_DB --allow-open
@@ -149,6 +155,11 @@ open blockers remain.
 Command `13` is query-only and command `14` evaluates synthetic fixtures only;
 neither hydrates a source, invokes the production parser, writes accepted
 observations, or changes the database.
+Command `14b` compiles only the exact hash-sealed pilot manifest or replays its
+immutable semantic cache. `--allow-open` acknowledges that reviewed golden
+minimums remain open; it does not enable production execution. The command has
+no database target and always reports zero accepted-observation, database,
+PIT, scoring, calibration, and promotion writes.
 Command `15` is a narrow F0.2 mutation and requires an explicit database path.
 It rejects the configured live database unless `--allow-live-database` is
 given, verifies the Stage 3 base hash, replays or downloads exact SEC bytes,
@@ -201,6 +212,11 @@ commands that enforce the filename boundary.
 - `output/basic_materials/verification_f1a_20260906/parser_contract` contains
   the adapter matrix, fixture outcomes, physical-pass strategy, summary, and
   hashes.
+- `output/basic_materials/verification_f1a1_20260907/compile` contains the
+  10-document physical-compile baseline (251 candidates across 21 families);
+  `cache_replay` contains the final terminology-only result (295 candidates
+  across 26 families), immutable-cache status, evidence-funnel coverage, open
+  golden results, issues, summaries, and artifact hashes.
 - `output/basic_materials/verification_f02_20260907/terminal_distribution`
   contains the F0.2 decisions, source-document seals, zero-value calculations,
   overlay-aware Stage 3 validation, summary, and artifact manifest.
@@ -210,8 +226,10 @@ commands that enforce the filename boundary.
 
 Next: close F0.3 in dependency order—52 deactivated-candidate decisions,
 effective-dated history for 134 current-snapshot names, 980 issuer-selective
-applicability reviews, and the de-duplicated source plan. F1B then hydrates
-approved sources into content-addressed storage and compiles each unique
+applicability reviews, and the de-duplicated source plan. Concurrently review
+the 26-family F1A.1 golden queue and select the missing channel-inventory,
+specialty end-market, and chemical outage sources. F1B then hydrates approved
+sources into content-addressed storage and compiles only each new unique
 document once. F2 executes one resumable all-metric pass, uses parse-free
 review, and permits only one changed-evidence residual pass. Stage 6C
 materializes the common, cycle, positioning, and specialized PIT panel once.

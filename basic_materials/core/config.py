@@ -70,6 +70,9 @@ class PathConfig:
     f0_closure_policy: Path
     specialized_parser_policy: Path
     specialized_parser_fixtures: Path
+    specialized_parser_pilot_policy: Path
+    specialized_parser_pilot_documents: Path
+    specialized_parser_golden_expectations: Path
 
 
 @dataclass(frozen=True)
@@ -256,6 +259,9 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             "f0_closure_policy",
             "specialized_parser_policy",
             "specialized_parser_fixtures",
+            "specialized_parser_pilot_policy",
+            "specialized_parser_pilot_documents",
+            "specialized_parser_golden_expectations",
         },
         "paths",
     )
@@ -365,6 +371,21 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             paths_raw["specialized_parser_fixtures"],
             base,
             "paths.specialized_parser_fixtures",
+        ),
+        specialized_parser_pilot_policy=_resolve_path(
+            paths_raw["specialized_parser_pilot_policy"],
+            base,
+            "paths.specialized_parser_pilot_policy",
+        ),
+        specialized_parser_pilot_documents=_resolve_path(
+            paths_raw["specialized_parser_pilot_documents"],
+            base,
+            "paths.specialized_parser_pilot_documents",
+        ),
+        specialized_parser_golden_expectations=_resolve_path(
+            paths_raw["specialized_parser_golden_expectations"],
+            base,
+            "paths.specialized_parser_golden_expectations",
         ),
     )
 
@@ -542,6 +563,7 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         ("f0_closure_policy", config.paths.f0_closure_policy),
         ("specialized_parser_policy", config.paths.specialized_parser_policy),
         ("specialized_parser_fixtures", config.paths.specialized_parser_fixtures),
+        ("specialized_parser_pilot_policy", config.paths.specialized_parser_pilot_policy),
     ):
         if not _is_within(path, expected_data_root):
             raise ConfigError(f"paths.{label} must be owned by basic_materials/data")
@@ -562,6 +584,8 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         "reporting_profiles_csv": "basic_materials_reporting_profiles.csv",
         "reporting_overrides_csv": "basic_materials_reporting_overrides.csv",
         "security_share_ratios_csv": "basic_materials_security_share_ratios.csv",
+        "specialized_parser_pilot_documents": "basic_materials_specialized_parser_pilot_documents.csv",
+        "specialized_parser_golden_expectations": "basic_materials_specialized_parser_golden_expectations.csv",
     }
     for label, filename in expected_system_files.items():
         path = getattr(config.paths, label)

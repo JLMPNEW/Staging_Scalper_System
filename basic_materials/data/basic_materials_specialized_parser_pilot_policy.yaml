@@ -1,0 +1,202 @@
+pilot_policy_version: basic_materials_specialized_parser_real_document_pilot_v1
+contract_as_of_date: '2026-09-07'
+model_family: basic_materials
+sector: Basic Materials
+parser_policy_version: basic_materials_specialized_parser_contract_v1
+state: f1a1_real_document_measurement_only
+decoder_contract:
+  decoder_version: basic_materials_semantic_decoder_v1
+  shared_parser_release: '0.4.6'
+  html_xml_compiler: dedicated_parser.semantic.parse_semantic_document
+  structured_json_compiler: sec_companyfacts_flatten_v1
+  content_address_algorithm: sha256
+  immutable_cache: true
+  compile_unique_content_once: true
+  cache_only_replay: true
+pilot_controls:
+  required_current_cohorts:
+    - steel_producers_processors
+    - specialty_chemicals_materials
+    - mining_royalty_streaming
+    - precious_metals_producers
+    - industrial_metals_mining
+    - commodity_chemicals
+    - building_materials
+    - agricultural_inputs_crop_science
+  minimum_current_documents_per_cohort: 1
+  minimum_historical_documents: 1
+  required_media_types: [text/html, application/xml, application/json]
+  maximum_candidates_per_document_table_family: 8
+  verify_manifest_sha256_and_size: true
+  require_https_source_url: true
+  raw_download_allowed: false
+  raw_cache_read_allowed: true
+  semantic_compile_allowed: true
+  cache_only_replay_opens_raw_documents: false
+golden_controls:
+  derived_only_table_families:
+    - derived_margin
+    - derived_reserve_life
+    - derived_unit_economics
+  minimum_reviewed_positive_per_physical_table_family: 1
+  minimum_reviewed_hard_negative_per_adapter: 1
+  production_target_positive_per_table_family: 20
+  production_target_hard_negative_per_table_family: 10
+  production_target_historical_per_table_family: 3
+  every_approved_expectation_must_pass: true
+  empty_or_draft_expectations_pass: false
+required_flags:
+  production_source_hydration_allowed: false
+  production_parser_execution_allowed: false
+  accepted_observation_write_allowed: false
+  database_write_allowed: false
+  historical_pit_materialization_allowed: false
+  scoring_allowed: false
+  calibration_allowed: false
+  portfolio_promotion_allowed: false
+table_family_rules:
+  - table_family: asset_concentration
+    match_terms: [top five, largest asset, revenue concentration, asset concentration, share of production, production across our operations]
+    prohibited_terms: [market concentration, customer concentration]
+    preferred_block_kinds: [table_row, structured_fact]
+    minimum_numeric_tokens: 1
+  - table_family: asset_inventory
+    match_terms: [producing assets, operating assets, development assets, asset portfolio]
+    prohibited_terms: [total assets, right-of-use assets]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 0
+  - table_family: asset_revenue
+    match_terms: [revenue by asset, royalty revenue, stream revenue, revenue from operations]
+    prohibited_terms: [right-of-use asset, deferred tax asset]
+    preferred_block_kinds: [table_row, structured_fact]
+    minimum_numeric_tokens: 1
+  - table_family: attributable_production
+    match_terms: [attributable production, gold equivalent ounce, attributable ounces, attributable sales, attributable geos, total attributable geos]
+    prohibited_terms: [industry production, forecast production]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: capacity_utilization
+    match_terms: [capacity utilization, operating rate, utilization rate, production capacity]
+    prohibited_terms: [industry capacity, market capacity]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: channel_inventory
+    match_terms: [channel inventory, distributor inventory, dealer inventory]
+    prohibited_terms: [company inventory, inventories consisted]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: commodity_mix
+    match_terms: [revenue by commodity, sales by commodity, commodity mix, product mix]
+    prohibited_terms: [commodity market, commodity prices]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: cost_bridge
+    match_terms: [cost impact, cost variance, raw material cost, energy cost, freight cost]
+    prohibited_terms: [may impact costs, could adversely affect]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: end_market_mix
+    match_terms: [end market, end-market, sales mix, revenue mix]
+    prohibited_terms: [total addressable market, market size]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: management_kpi
+    match_terms: [organic sales, comparable sales, key performance indicator, operational performance]
+    prohibited_terms: [forward-looking, outlook]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: non_gaap_reconciliation
+    match_terms: [reconciliation of, adjusted ebitda, non-gaap, non-ifrs]
+    prohibited_terms: [cannot be reconciled, forward-looking measure]
+    preferred_block_kinds: [table_row]
+    minimum_numeric_tokens: 1
+  - table_family: operating_statistics
+    match_terms: [operating statistics, production statistics, operating data, statistical information]
+    prohibited_terms: [industry statistics, market statistics]
+    preferred_block_kinds: [table_row]
+    minimum_numeric_tokens: 1
+  - table_family: portfolio_statistics
+    match_terms: [portfolio statistics, producing assets, portfolio of royalties, portfolio of streams]
+    prohibited_terms: [investment portfolio, securities portfolio]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 0
+  - table_family: price_volume_bridge
+    match_terms: [price/mix, price and volume, pricing and volume, volume contribution, price contribution, average selling price, average realised price, average realized price, sales volumes, change in volumes, price impacts]
+    prohibited_terms: [market price, share price, trading volume]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: production
+    match_terms: [production, produced, payable metal, output]
+    prohibited_terms: [industry production, production forecast, expected production]
+    preferred_block_kinds: [table_row]
+    minimum_numeric_tokens: 1
+  - table_family: segment_profitability
+    match_terms: [segment profit, segment adjusted ebitda, segment ebitda, segment operating income]
+    prohibited_terms: [corporate ebitda target, forecast ebitda]
+    preferred_block_kinds: [table_row, structured_fact]
+    minimum_numeric_tokens: 1
+  - table_family: segment_revenue
+    match_terms: [segment revenue, revenue by segment, net sales by segment, external revenue]
+    prohibited_terms: [segment assets, segment liabilities]
+    preferred_block_kinds: [table_row, structured_fact]
+    minimum_numeric_tokens: 1
+  - table_family: shipment_volume
+    match_terms: [shipments, tons shipped, tonnes shipped, sales volume]
+    prohibited_terms: [shipping costs, shipment delay]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: unit_cost
+    match_terms: [cost per ton, cost per tonne, cash cost per ounce, all-in sustaining cost]
+    prohibited_terms: [estimated cost, forecast cost]
+    preferred_block_kinds: [table_row]
+    minimum_numeric_tokens: 1
+  - table_family: aisc_reconciliation
+    match_terms: [all-in sustaining cost, aisc reconciliation, sustaining cost per ounce, aisc per ounce]
+    prohibited_terms: [guidance, outlook]
+    preferred_block_kinds: [table_row]
+    minimum_numeric_tokens: 1
+  - table_family: mine_operating_statistics
+    match_terms: [tonnes milled, ore processed, head grade, recovery rate, mine operating statistics]
+    prohibited_terms: [industry recovery, market grade]
+    preferred_block_kinds: [table_row]
+    minimum_numeric_tokens: 1
+  - table_family: reserve_resource
+    match_terms: [mineral reserves, mineral resources, proven and probable, measured and indicated]
+    prohibited_terms: [cash reserves, liquidity resources]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: technical_report
+    match_terms: [technical report, ni 43-101, competent persons report, feasibility study]
+    prohibited_terms: [technical accounting, technical support]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 0
+  - table_family: capital_expenditure
+    match_terms: [capital expenditures, capital expenditure, sustaining capital, maintenance capital]
+    prohibited_terms: [capital structure, capital stock]
+    preferred_block_kinds: [table_row, paragraph, structured_fact]
+    minimum_numeric_tokens: 1
+  - table_family: commitments
+    match_terms: [capital commitments, purchase commitments, remaining commitments, contractual commitments, commitments and contractual obligations, commitments for capital expenditures]
+    prohibited_terms: [committee, committed to safety]
+    preferred_block_kinds: [table_row]
+    minimum_numeric_tokens: 1
+  - table_family: feedstock
+    match_terms: [feedstock, natural gas cost, ammonia cost, raw material input]
+    prohibited_terms: [gas reserves, natural gas market]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: liquidity
+    match_terms: [liquidity, available credit, undrawn, revolving credit facility]
+    prohibited_terms: [liquidity risk only, market liquidity]
+    preferred_block_kinds: [table_row, paragraph, structured_fact]
+    minimum_numeric_tokens: 1
+  - table_family: outage_turnaround
+    match_terms: [planned outage, unplanned outage, turnaround, outage days]
+    prohibited_terms: [power outage risk, could experience outages]
+    preferred_block_kinds: [table_row, paragraph]
+    minimum_numeric_tokens: 1
+  - table_family: research_development
+    match_terms: [research and development, research & development, r&d expense, technology expense]
+    prohibited_terms: [research report, development asset]
+    preferred_block_kinds: [table_row, structured_fact]
+    minimum_numeric_tokens: 1

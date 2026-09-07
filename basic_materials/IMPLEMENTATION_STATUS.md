@@ -3,7 +3,8 @@
 As of 2026-09-07, the independent implementation has a fully validated Stage
 4C acceptance candidate, a separate Stage 4D/5A F0 extraction-contract
 candidate, a query-only F0 closure workbench, a fixture-first F1A parser
-contract, and a sealed F0.2 terminal-distribution overlay. All four historical
+contract, a real-document F1A.1 semantic-compiler pilot, and a sealed F0.2
+terminal-distribution overlay. All four historical
 bankruptcy/liquidation reviews are now supported by hash-sealed SEC evidence
 and calculate to explicit zero recoveries. Source hydration, specialized
 coverage, and historical materialization remain intentionally blocked by the
@@ -15,7 +16,7 @@ change.
 
 | Stage | Status | Evidence |
 |---|---|---|
-| 0 - independence | Implemented | Strict config, forbidden-import scan across 70 Python files, owned database/output/cache paths, closed promotion flags |
+| 0 - independence | Implemented | Strict config, forbidden-import scan across 75 Python files, owned database/output/cache paths, closed promotion flags |
 | 1 - storage and sources | F0.2 candidate implemented | Checksummed schema v9 ledger; 27-row package source registry; owned specialized metric/source, content-addressed document, resumable parser, and terminal-distribution review ledgers |
 | 2 - current universe | Implemented | Atomic 134-row loader, eight exact cohorts, normalized identifiers, policy-derived calibration groups, validation reports |
 | 2B - deactivated candidate intake | Implemented as a review queue | 72 candidates across all eight cohorts; checksummed manifest; 71 provider assets; 16 event URLs; all promotion/calibration flags remain 0 |
@@ -26,7 +27,7 @@ change.
 | 4C - OGC and listed-security-unit remediation | Implemented and independently validated; live promotion pending | OGC audited HTML route; 47 effective-dated ratios; five exact ADS conversions; schema v7; zero validation errors/warnings; deterministic cache-only replay |
 | 4D - historical PIT feasibility preflight | Implemented; feasibility passed; PIT write blocked | 93 monthly last-session dates from 2019-01-31 through 2026-09-04; three fixed chronological blocks; deterministic input seals; database unchanged; six explicit blockers |
 | 5A - specialized metric, applicability, and all-source census | Structurally implemented; F0.2 terminal queue closed; other review/source seals open | 64 metrics, 16 operand links, exact 9,856-row identity-metric matrix, 5,640-row eight-family source census; query-only queues now show 52 candidate, 0 distribution, 134 membership, and 980 applicability reviews; 5,163 source rows de-duplicated to 4,244 acquisition units |
-| 6B - one-pass specialized capture and coverage closure | F1A parser contract/fixture gate implemented; production capture not started | Four adapters cover all 32 table families; 8/8 synthetic guards pass; one full plus one changed-evidence residual is the maximum per contract version; production execution, accepted observations, and coverage remain closed |
+| 6B - one-pass specialized capture and coverage closure | F1A/F1A.1 parser contract and real-document pilot implemented; production capture not started | Four adapters cover all 32 table families; 8/8 synthetic guards pass; 10/10 pilot SEC documents compile into 75,715 cached blocks; cache-only rule replay yields 295 candidates across 26/29 physical families with three explicit source gaps; production execution, accepted observations, and coverage remain closed |
 | 6C - unified historical point-in-time panel | Blocked by Stage 6B coverage | Materialize common, cycle, positioning, and specialized features together once from 2019-01-01 |
 | 7+ - diagnostics, calibration, scoring, ranking | Not started | No calibrated score, published rank, or portfolio output exists |
 
@@ -162,6 +163,21 @@ version. A residual pass requires a new source hash or parser-rule version;
 policy-only changes use stored evidence and perform no source, decoder, or OCR
 calls. Production execution remains false.
 
+The F1A.1 real-document evidence at
+`output/basic_materials/verification_f1a1_20260907` validates the decoder and
+candidate-recall boundary before broad source hydration. Its hash-sealed
+10-document SEC corpus covers all eight cohorts, one historical issuer, and
+HTML, XML, and Company Facts JSON. The document and compiler gates pass with
+10/10 documents, 75,715 semantic blocks, 16,138 table rows, and 26,143
+structured facts. A terminology-only cache replay opens no raw files, performs
+no physical compiles, and emits 295 review candidates across 26 of 29 physical
+families. `channel_inventory`, `end_market_mix`, and `outage_turnaround` are
+classified `source_term_absent`; they require targeted source expansion rather
+than another parse of unchanged documents. Reviewed golden minima remain open,
+so the pilot gate and production-execution flag remain false. The pilot has no
+database argument and writes zero accepted observations, PIT rows, scoring
+rows, or database rows.
+
 Specialized observation coverage is still unmeasured, not low-but-acceptable:
 there are zero accepted specialized observations. The applicable-pair current
 breadth and 2019-forward historical-depth ratios can be calculated only after
@@ -222,13 +238,17 @@ calibration, score, rank, and portfolio flags remain closed.
   candidate. Stage 5A is structurally valid but not sealed; measurement-only
   extraction and high-coverage closure remain Stage 6B work. Stage 6C
   historical materialization remains blocked until all F0-F2 gates pass.
+- The F1A.1 pilot proves 26/29 physical-family candidate recall from immutable
+  semantic cache. It is not production coverage: all 295 rows are review-only,
+  all golden approvals remain open, and the three source-term gaps must be
+  hydrated with suitable narrative/operating documents.
 - All 154 memberships remain calibration-ineligible.
   `portfolio_candidate_gate` and `oos_score_valid_flag` remain false.
 
 ## Quality, recovery, and deployment state
 
-- The full package suite passes 49 tests and Ruff is clean.
-- The independence validator passes across 70 Python files and reports source
+- The full package suite passes 52 tests and Ruff is clean.
+- The independence validator passes across 75 Python files and reports source
   registry v6 with 27 sources.
 - The fresh Stage 0-4C build and cache-only replay reproduce snapshot
   `basic_materials_sec:2026-09-05:2cf5219d8855588066ba`; Stage 4C validation
@@ -253,12 +273,16 @@ calibration, score, rank, and portfolio flags remain closed.
   authorization. No Stage 4C claim in this document implies that the current
   live file has already been replaced.
 
-The next bounded execution slice is evidence-backed F0.3 closure, not a
+The next bounded execution slice is evidence-backed F0.3 closure plus review
+of the already-generated F1A.1 candidate queue, not a
 historical build or scoring. Use the generated queues to resolve/reject the 52
 historical candidates, reconstruct effective-dated history for the 134 current
-names, and complete the 980 applicability reviews; then approve and hydrate
-the de-duplicated source plan. After those inputs are hash-sealed, F1B compiles
-each unique content hash once and expands reviewed golden fixtures. F2 then
+names, and complete the 980 applicability reviews. In parallel, review exact
+golden cases for the 26 surfaced parser families and select targeted sources
+for channel inventory, specialty end-market mix, and chemical outages. Then
+approve and hydrate the de-duplicated source plan. After those inputs are
+hash-sealed, F1B compiles each new unique content hash once and expands the
+reviewed production golden corpus. F2 then
 performs one resumable all-metric pass, parse-free review, and at most one
 changed-evidence residual pass. Only Stage 6C may build the unified historical
 PIT panel.

@@ -269,6 +269,19 @@ pass per parser-contract version. This passes the control-plane fixture gate
 only; production execution is false and zero accepted observations means
 breadth/depth coverage is not yet measurable.
 
+F1A.1 implementation evidence (2026-09-07): a Basic Materials-owned adapter
+compiled a hash-sealed 10-document local SEC pilot spanning all eight cohorts,
+one historical issuer, and HTML/XML/JSON. The document and compiler gates pass
+with 75,715 semantic blocks. The semantic cache is keyed by source and decoder
+contract; a rule-only replay records 10 cache hits, zero raw opens, and zero
+physical compiles. Terminology refinement raised candidate coverage from
+21/29 to 26/29 physical families and emitted 295 review-only candidates. The
+evidence funnel classifies `channel_inventory`, `end_market_mix`, and
+`outage_turnaround` as `source_term_absent`, requiring targeted source
+hydration rather than blind reparsing. The reviewed golden gate remains open,
+production execution is false, and accepted observation/database/PIT/score
+writes are all zero.
+
 F0.2 implementation evidence (2026-09-07): the terminal queue is closed from
 five hash-sealed SEC documents. The query-only F0 rerun has four blockers and
 `terminal_distributions_open=0`. The Stage 4D rerun has six blockers and
