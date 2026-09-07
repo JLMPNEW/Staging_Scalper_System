@@ -1,11 +1,12 @@
 # Basic Materials implementation status
 
 As of 2026-09-06, the independent implementation has a fully validated Stage
-4C acceptance candidate and a separate Stage 4D/5A F0 extraction-contract
-candidate. The F0 candidate passed structural and no-write feasibility checks,
-but remains intentionally blocked from historical materialization by seven
-open evidence gates. The installed live database remains on the prior Stage 4B
-snapshot until replacement is explicitly authorized.
+4C acceptance candidate, a separate Stage 4D/5A F0 extraction-contract
+candidate, a query-only F0 closure workbench, and a fixture-first F1A parser
+contract. The workbench and fixture gate pass, but source hydration,
+specialized coverage, and historical materialization remain intentionally
+blocked by open evidence gates. The installed live database remains on the
+prior Stage 4B snapshot until replacement is explicitly authorized.
 `BASIC_MATERIALS_IMPLEMENTATION_PLAN.md` remains the living design authority
 and must be updated with every code, schema, data-contract, command, or gate
 change.
@@ -22,8 +23,8 @@ change.
 | 4B - SEC facts, FX, and one-cutoff common features | Implemented; engineering gate passed | Exact acceptance-time history; 5,754 filings; 310,109 raw facts; 239,747 canonical facts; 22,851 FX rows; 134 current feature/coverage rows |
 | 4C - OGC and listed-security-unit remediation | Implemented and independently validated; live promotion pending | OGC audited HTML route; 47 effective-dated ratios; five exact ADS conversions; schema v7; zero validation errors/warnings; deterministic cache-only replay |
 | 4D - historical PIT feasibility preflight | Implemented; feasibility passed; PIT write blocked | 93 monthly last-session dates from 2019-01-31 through 2026-09-04; three fixed chronological blocks; deterministic input seals; database unchanged; seven explicit blockers |
-| 5A - specialized metric, applicability, and all-source census | Structurally implemented; review/source seal open | 64 metrics, 16 operand links, exact 9,856-row identity-metric matrix, 5,640-row eight-family source census; zero structural errors; 980 applicability reviews and 5,163 source rows remain open |
-| 6B - one-pass specialized capture and coverage closure | Not started | Content-address all sources, compile each unique document once, run one resumable all-metric parse, use parse-free review, and meet the high-coverage gate with all weights zero |
+| 5A - specialized metric, applicability, and all-source census | Structurally implemented; F0.1 workbench operational; review/source seal open | 64 metrics, 16 operand links, exact 9,856-row identity-metric matrix, 5,640-row eight-family source census; query-only queues for 52 candidate, 4 distribution, 134 membership, and 980 applicability reviews; 5,163 source rows de-duplicated to 4,244 acquisition units |
+| 6B - one-pass specialized capture and coverage closure | F1A parser contract/fixture gate implemented; production capture not started | Four adapters cover all 32 table families; 8/8 synthetic guards pass; one full plus one changed-evidence residual is the maximum per contract version; production execution, accepted observations, and coverage remain closed |
 | 6C - unified historical point-in-time panel | Blocked by Stage 6B coverage | Materialize common, cycle, positioning, and specialized features together once from 2019-01-01 |
 | 7+ - diagnostics, calibration, scoring, ranking | Not started | No calibrated score, published rank, or portfolio output exists |
 
@@ -137,6 +138,34 @@ The full evidence packs are under
 `output/basic_materials/verification_f0_20260906/stage5a_contract` and
 `output/basic_materials/verification_f0_20260906/stage4d_preflight`.
 
+## F0.1 closure workbench and F1A parser contract
+
+The query-only workbench at
+`output/basic_materials/verification_f1a_20260906/f0_closure` converted every
+remaining F0 blocker into an explicit review queue and built a de-duplicated
+source plan. It contains 52 unresolved historical-candidate decisions, four
+terminal-distribution reviews, 134 current-membership histories, 980
+issuer-selective applicability reviews, and 5,163 open source rows. Grouping
+shared commodity/positioning drivers, SEC accessions, and issuer/family
+discoveries reduced acquisition work to 4,244 units, avoiding 919 duplicate
+attempts before content hashing. It made no review decisions and left the
+candidate database byte-identical.
+
+The parser-contract evidence at
+`output/basic_materials/verification_f1a_20260906/parser_contract` assigns all
+32 declared table families to four Basic Materials-owned adapters and passes
+all eight synthetic guard types with zero issues. It freezes 64 metrics, 40
+core metrics, 98 metric-to-table-family links, immutable semantic-cache replay,
+and a maximum of one full plus one residual physical pass per parser-contract
+version. A residual pass requires a new source hash or parser-rule version;
+policy-only changes use stored evidence and perform no source, decoder, or OCR
+calls. Production execution remains false.
+
+Specialized observation coverage is still unmeasured, not low-but-acceptable:
+there are zero accepted specialized observations. The applicable-pair current
+breadth and 2019-forward historical-depth ratios can be calculated only after
+F0 seals, source hydration, document compilation, and F2 extraction.
+
 ## Controlled limitations and next gates
 
 - ARIS and MTA now have governed direct-share ratios but remain non-rank-ready
@@ -158,8 +187,8 @@ The full evidence packs are under
 
 ## Quality, recovery, and deployment state
 
-- The full package suite passes 41 tests and Ruff is clean.
-- The independence validator passes across 60 Python files.
+- The full package suite passes 45 tests and Ruff is clean.
+- The independence validator passes across 65 Python files.
 - The fresh Stage 0-4C build and cache-only replay reproduce snapshot
   `basic_materials_sec:2026-09-05:2cf5219d8855588066ba`; Stage 4C validation
   reports zero errors and zero warnings.
@@ -179,10 +208,12 @@ The full evidence packs are under
   authorization. No Stage 4C claim in this document implies that the current
   live file has already been replaced.
 
-The next bounded implementation slice is F0 closure, not a historical build or
-scoring. Resolve/reject the 52 historical candidates and four terminal
-distributions first; reconstruct effective-dated history for the 134 current
-names; complete the 980 applicability reviews; then discover and hydrate the
-5,163 open source rows. Only after those inputs are hash-sealed should F1
-compile each unique content hash once and F2 execute one resumable all-metric
-parse. Only Stage 6C may build the unified historical PIT panel.
+The next bounded execution slice is evidence-backed F0 closure, not a
+historical build or scoring. Use the generated queues to resolve/reject the 52
+historical candidates and four terminal distributions first; reconstruct
+effective-dated history for the 134 current names; complete the 980
+applicability reviews; then approve and hydrate the de-duplicated source plan.
+After those inputs are hash-sealed, F1B compiles each unique content hash once
+and expands reviewed golden fixtures. F2 then performs one resumable
+all-metric pass, parse-free review, and at most one changed-evidence residual
+pass. Only Stage 6C may build the unified historical PIT panel.

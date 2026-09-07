@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -174,6 +174,17 @@ def load_historical_pit_preflight_policy(path: str | Path) -> HistoricalPitPrefl
         if start > end:
             raise PitPreflightError(f"Chronological block {block['block_id']} is reversed")
         blocks.append(ChronologicalBlock(str(block["block_id"]), start, end))
+    expected_block_ids = ("block_2019_2020", "block_2021_2022", "block_2023_forward")
+    if tuple(block.block_id for block in blocks) != expected_block_ids:
+        raise PitPreflightError("Chronological block identifiers differ from the frozen regime contract")
+    target_start = _iso_date(root["target_history_start_date"], "target_history_start_date")
+    as_of_date = _iso_date(root["contract_as_of_date"], "contract_as_of_date")
+    if blocks[0].start_date != target_start or blocks[-1].end_date != as_of_date:
+        raise PitPreflightError("Chronological blocks must span the complete target window")
+    for previous, current in zip(blocks, blocks[1:]):
+        expected_start = (date.fromisoformat(previous.end_date) + timedelta(days=1)).isoformat()
+        if current.start_date != expected_start:
+            raise PitPreflightError("Chronological blocks must be contiguous and non-overlapping")
     financial = _mapping(root["financial_feasibility"], "financial_feasibility")
     _exact_keys(
         financial,
@@ -229,8 +240,8 @@ def load_historical_pit_preflight_policy(path: str | Path) -> HistoricalPitPrefl
         path=policy_path,
         checksum=hashlib.sha256(raw).hexdigest(),
         version=str(root["policy_version"]),
-        as_of_date=_iso_date(root["contract_as_of_date"], "contract_as_of_date"),
-        target_history_start_date=_iso_date(root["target_history_start_date"], "target_history_start_date"),
+        as_of_date=as_of_date,
+        target_history_start_date=target_start,
         calendar_code=str(schedule["calendar_code"]),
         cadence=str(schedule["cadence"]),
         blocks=tuple(blocks),

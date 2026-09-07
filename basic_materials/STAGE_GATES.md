@@ -204,7 +204,11 @@ Stage 6B hydrates the sealed source manifest into Basic Materials-owned
 content-addressed storage, compiles each unique document once, and executes one
 resumable all-issuer/all-metric parse. Review and policy changes replay stored
 evidence without opening documents. At most one consolidated residual source
-batch may run, excluding completed content hashes.
+batch may run, excluding completed content hashes. The residual is permitted
+only for a new source hash or frozen parser-rule version; unchanged evidence is
+policy-review-only, and further physical work requires a new versioned
+contract. Blind retries and separate current, historical, or cohort parsing
+waves fail the gate.
 
 Pass requires 100% applicability and source-manifest accounting, 100% completed
 or resume-linked parser work, zero unexplained failures, at least 80% current
@@ -221,6 +225,16 @@ The gate is not sealed because 980 applicability rows require issuer review and
 5,163 applicable source rows remain unhydrated or undiscovered. Parser work and
 accepted observation ledgers remain empty by design. These are hard blockers,
 not warnings and not permission to reduce coverage denominators.
+
+F0.1/F1A implementation evidence (2026-09-06): the query-only closure
+workbench produces all five dependency-ordered review/acquisition queues,
+proves the database is unchanged, and reduces 5,163 source rows to 4,244
+acquisition units before content hashing. The parser policy assigns all 32
+table families to four adapters and passes 8/8 synthetic positive and guard
+fixtures. The maximum is one full plus one changed-evidence residual physical
+pass per parser-contract version. This passes the control-plane fixture gate
+only; production execution is false and zero accepted observations means
+breadth/depth coverage is not yet measurable.
 
 ## Stage 6C - single unified historical PIT panel
 

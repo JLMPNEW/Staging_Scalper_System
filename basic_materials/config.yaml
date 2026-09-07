@@ -41,6 +41,9 @@ paths:
   specialized_metric_registry: data/basic_materials_specialized_metric_registry.yaml
   specialized_source_policy: data/basic_materials_specialized_source_policy.yaml
   historical_pit_preflight_policy: data/basic_materials_historical_pit_preflight_policy.yaml
+  f0_closure_policy: data/basic_materials_f0_closure_policy.yaml
+  specialized_parser_policy: data/basic_materials_specialized_parser_policy.yaml
+  specialized_parser_fixtures: data/basic_materials_specialized_parser_fixtures.yaml
 
 sec_fundamentals:
   submissions_url_template: 'https://data.sec.gov/submissions/CIK{cik}.json'

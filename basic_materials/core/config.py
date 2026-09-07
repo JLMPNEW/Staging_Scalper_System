@@ -64,6 +64,9 @@ class PathConfig:
     specialized_metric_registry: Path
     specialized_source_policy: Path
     historical_pit_preflight_policy: Path
+    f0_closure_policy: Path
+    specialized_parser_policy: Path
+    specialized_parser_fixtures: Path
 
 
 @dataclass(frozen=True)
@@ -244,6 +247,9 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             "specialized_metric_registry",
             "specialized_source_policy",
             "historical_pit_preflight_policy",
+            "f0_closure_policy",
+            "specialized_parser_policy",
+            "specialized_parser_fixtures",
         },
         "paths",
     )
@@ -327,6 +333,17 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             paths_raw["historical_pit_preflight_policy"],
             base,
             "paths.historical_pit_preflight_policy",
+        ),
+        f0_closure_policy=_resolve_path(
+            paths_raw["f0_closure_policy"], base, "paths.f0_closure_policy"
+        ),
+        specialized_parser_policy=_resolve_path(
+            paths_raw["specialized_parser_policy"], base, "paths.specialized_parser_policy"
+        ),
+        specialized_parser_fixtures=_resolve_path(
+            paths_raw["specialized_parser_fixtures"],
+            base,
+            "paths.specialized_parser_fixtures",
         ),
     )
 
@@ -501,6 +518,9 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         ("specialized_metric_registry", config.paths.specialized_metric_registry),
         ("specialized_source_policy", config.paths.specialized_source_policy),
         ("historical_pit_preflight_policy", config.paths.historical_pit_preflight_policy),
+        ("f0_closure_policy", config.paths.f0_closure_policy),
+        ("specialized_parser_policy", config.paths.specialized_parser_policy),
+        ("specialized_parser_fixtures", config.paths.specialized_parser_fixtures),
     ):
         if not _is_within(path, expected_data_root):
             raise ConfigError(f"paths.{label} must be owned by basic_materials/data")

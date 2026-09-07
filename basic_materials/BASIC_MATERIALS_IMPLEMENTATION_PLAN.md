@@ -1,10 +1,10 @@
 # Basic Materials Scoring and Ranking Model — Implementation Plan
 
-Status: living implementation authority; Stage 4C acceptance candidate implemented; extraction-first Stage 5A contract is next; live promotion and calibration blocked
+Status: living implementation authority; Stage 4C and Stage 4D/5A F0 candidates implemented; F0.1 closure workbench and F1A fixture-first parser contract implemented; source hydration, live promotion, and calibration blocked
 Prepared: 2026-09-05  
 Last implementation update: 2026-09-06
 Authoritative current universe: ticker_mapping/basic_materials.csv
-Current schema version: 7
+Current schema version: 8
 
 ## Document control and reuse contract
 
@@ -33,6 +33,7 @@ Implementation ledger:
 | 2026-09-06 | Stage 4C OGC and listed-security-unit remediation | Financial policy v2; schema v7; deterministic audited-HTML parser; exact 47-row SEC-evidenced ratio contract; 42 direct-share and five ADS rows; ratio-aware market-cap lineage; hard OGC/ratio/formula gates; fresh Stage 0-4C acceptance build and cache-only replay | OGC has 42 usable raw and canonical facts and a full current row; zero unresolved ratio-required foreign listings; exact ADS ratios; zero Stage 4C validation errors/warnings; 38 tests and independence/Ruff pass | Live database replacement requires explicit authorization; longitudinal 2019-forward feature panel, specialized metrics, calibration, scoring, ranking, and portfolio gates remain closed |
 | 2026-09-06 | Extraction-first parser and PIT sequence revision | Cross-repository review of the shared parser, Transportation, Consumer Defensive, Technology, Medical Devices, and Biotech; high-coverage gates; all-source census; content-addressed semantic cache; one resumable all-metric run; parse-free review; one unified PIT build | The former common-PIT-before-specialized plan is retired; historical materialization is blocked until specialized source and coverage closure | Stage 5A/6B code and data are not yet implemented; Stage 6C PIT and all calibration/promotion gates remain closed |
 | 2026-09-06 | Stage 4D/5A F0 extraction-contract candidate | Schema v8; source registry v5; 64 specialized metrics; 16 operand links; 9,856-row exact identity-metric accounting matrix; 5,640-row SEC/IR/local-exchange/archive/technical/reserve/commodity/positioning census; content-addressed document and resumable parser ledgers; 93-date read-only PIT feasibility audit | Registry and source policies strict-load; Stage 5A has zero structural errors; every identity is accounted for across all 64 metrics and eight source families; Stage 4D feasibility passed with deterministic hashes and no database mutation; 41 tests, Ruff, and independence pass | Stage 5A is not sealed: 52 historical decisions, four terminal distributions, 134 current-name histories, 980 applicability reviews, 5,163 source rows, parser execution, and specialized coverage remain open; live database and all scoring/calibration/portfolio gates unchanged |
+| 2026-09-06 | F0.1 closure workbench and F1A fixture-first parser contract | Strict query-only closure policy; evidence review queues; content/source de-duplication plan; exact contiguous regime-block validation; four parser adapters covering 32 table families; eight synthetic positive/prohibited/context/unit/period/scope/amendment/after-close fixtures; bounded parse scheduler | Workbench is structurally valid and byte-preserving; 5,163 source rows collapse to 4,244 acquisition units before content hashing; all 8 fixtures pass; maximum physical passes are frozen at one full plus one changed-evidence residual per parser-contract version; 45 tests and Ruff pass | No review decision is inferred; 52 historical decisions, four distributions, 134 histories, 980 applicability reviews, 5,163 source rows, source hydration, production extraction, accepted observations, coverage, PIT, scoring, and promotion remain open |
 
 ### Reusable sector-repository build sequence
 
@@ -1162,6 +1163,22 @@ applicable metrics, excludes previously completed content hashes, and reuses
 the semantic cache. Further work requires a new parser/source contract version
 and must not mutate the original evidence.
 
+The executable scheduler interprets that limit as two physical passes per
+content hash and parser-contract version, not as repeated full-corpus retries:
+
+- the first eligible execution is one complete all-metric pass;
+- a policy, terminology, mapping, or adjudication change replays immutable
+  semantic/candidate evidence with zero source opens, decoder calls, or OCR;
+- one residual pass is eligible only for unresolved work with a new content
+  hash or a frozen parser-rule version change;
+- unchanged unresolved work remains `policy_review_only`; and
+- new evidence after the residual pass requires a new versioned contract and
+  delta plan instead of a third physical pass or mutation of prior evidence.
+
+This is the required meaning of "multiple parsing" for Basic Materials:
+targeted, evidence-triggered, and versioned. Blind retries, completed-content
+reparsing, and separate current/historical/cohort parsing waves are prohibited.
+
 ### 11.7 Coverage gates before PIT materialization
 
 Coverage is reported by cohort, metric, definition variant, source lane,
@@ -1176,7 +1193,7 @@ gates for the first unified historical panel:
   in every cohort;
 - core historical depth: at least 70% of expected applicable issuer-period
   observations from 2019 forward and at least 60% in each fixed chronological
-  block (2019-2021, 2022-2023, and 2024-current);
+  block (2019-2020, 2021-2022, and 2023-current);
 - PIT feasibility: at least eight comparable issuers on at least 36 scheduled
   dates for any cohort metric admitted to calibration research; and
 - evidence quality: zero unresolved conflicts, future-availability errors,
@@ -2829,18 +2846,65 @@ current-snapshot names, (4) adjudicate 980 issuer-selective applicability
 pairs, and (5) discover/freeze every non-SEC, commodity, and positioning source
 plus issuer exposure contract. Re-run Stage 4D after each input seal changes.
 
-Following slice F1 - adapter fixtures, sealed hydration, and document compiler:
+Implemented slice F0.1 - read-only closure workbench:
 
-1. Implement the Basic Materials-owned adapter and table-family extractors
-   against synthetic and reviewed golden fixtures.
-2. Require positive, prohibited, cross-cohort, unit, period, scope, amendment,
-   and after-close cases before production-document execution.
-3. Hydrate the entire approved source manifest once into Basic Materials-owned
-   content-addressed storage.
-4. Compile every unique content hash once into immutable XBRL/table/text
+- `data/basic_materials_f0_closure_policy.yaml` freezes queue order, no-write
+  controls, shared-driver grouping, accession/cache reuse, and the prohibition
+  on inferred decisions, zero bankruptcy distributions, snapshot backfill, or
+  source acquisition before the applicable F0 seal.
+- `core/f0_closure.py` and
+  `scripts/13_build_basic_materials_f0_closure_workbench.py` generate the
+  historical-candidate, terminal-distribution, current-membership,
+  applicability, blocker, and source-acquisition workbooks from query-only
+  SQLite access and prove that the database is unchanged.
+- The isolated F0 candidate produced 52 open candidate decisions, four open
+  terminal distributions, 134 membership-history reviews, 980 applicability
+  reviews, and 5,163 source rows. Grouping by accession, issuer/family, and
+  shared commodity/positioning driver reduced those rows to 4,244 acquisition
+  units, avoiding 919 duplicate acquisition attempts before content hashing.
+- The workbench remains intentionally open. Blank review fields are not
+  decisions, listing dates are lower bounds rather than membership proof, and
+  every acquisition row is blocked until the upstream F0 contracts seal.
+
+Implemented slice F1A - fixture-first parser contract and scheduler:
+
+- `data/basic_materials_specialized_parser_policy.yaml` freezes four owned
+  adapters, all 32 registry table families, immutable semantic-cache behavior,
+  source/rule change detection, and the one-full-plus-one-residual ceiling.
+- `data/basic_materials_specialized_parser_fixtures.yaml`,
+  `core/specialized_parser_contract.py`, and
+  `scripts/14_validate_basic_materials_specialized_parser_contract.py`
+  validate eight synthetic guard types before any production document may be
+  opened: positive, prohibited context, cross-cohort, unit, period, scope,
+  amendment precedence, and after-close availability.
+- The F1A gate passed 8 of 8 cases with all 32 table families assigned, 64
+  metrics and 40 core metrics accounted for, zero issues, and production
+  execution still explicitly false.
+- The stricter Stage 4D loader now requires exact regime block identifiers,
+  full target-window span, and contiguous non-overlapping dates. The read-only
+  rerun retained 93 dates and seven expected downstream blockers.
+
+F0.1/F1A exit condition result: passed as an engineering control plane. It
+does not claim specialized data coverage: accepted specialized observations
+remain zero, so current-breadth and historical-depth coverage are not yet
+measurable. The isolated database SHA-256 remained
+`494d906ac1b968f6c50ff5248998db387ae199d7ad45d3e101b99934a8fa0605`.
+
+Remaining slice F1B - evidence closure, sealed hydration, and document compiler:
+
+1. Resolve the F0 queues in their dependency order without automated
+   promotion or fabricated values.
+2. Hash-seal the resulting universe, applicability, source, commodity,
+   positioning, and exposure contracts, then rerun Stage 4D.
+3. Expand the synthetic contract into reviewed golden fixtures for each table
+   family using captured documents; production execution remains disabled
+   until those family minimums pass.
+4. Hydrate the entire approved source manifest once into Basic Materials-owned
+   content-addressed storage, reusing SEC accessions and shared drivers.
+5. Compile every unique content hash once into immutable XBRL/table/text
    semantic records and seal the decoder contract.
-5. Pass the offline exact plan with all metrics, all issuers, zero missing
-   unexplained documents, and parser execution still disabled.
+6. Pass the offline exact plan with all metrics, all issuers, zero unexplained
+   documents, and a deterministic work ledger before enabling F2 extraction.
 
 Following slice F2 - one-pass extraction and coverage closure:
 

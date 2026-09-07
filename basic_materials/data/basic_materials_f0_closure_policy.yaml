@@ -1,0 +1,34 @@
+policy_version: basic_materials_f0_closure_workbench_v1
+contract_as_of_date: '2026-09-06'
+model_family: basic_materials
+sector: Basic Materials
+state: f0_review_workbench_open_no_automatic_decisions
+canonical_chronological_blocks:
+  - {block_id: block_2019_2020, start_date: '2019-01-01', end_date: '2020-12-31'}
+  - {block_id: block_2021_2022, start_date: '2021-01-01', end_date: '2022-12-31'}
+  - {block_id: block_2023_forward, start_date: '2023-01-01', end_date: '2026-09-06'}
+queue_order:
+  - historical_candidate_decisions
+  - terminal_distributions
+  - current_membership_history
+  - specialized_metric_applicability
+  - specialized_source_acquisition
+decision_controls:
+  query_only_database: true
+  automatic_candidate_inclusion_or_exclusion: false
+  infer_zero_bankruptcy_distribution: false
+  current_snapshot_backfill: false
+  automatic_metric_applicability: false
+  source_acquisition_before_applicability_seal: false
+  production_parser_execution: false
+source_planning:
+  shared_source_families: [commodity_market, positioning_market]
+  sec_cache_reuse_first: true
+  group_shared_driver_once: true
+  content_address_algorithm: sha256
+  execute_acquisition: false
+required_flags:
+  historical_pit_materialization_allowed: false
+  calibration_allowed: false
+  scoring_allowed: false
+  portfolio_allowed: false

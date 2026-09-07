@@ -5,7 +5,7 @@ and ranking package. It owns its configuration, policies, source registry,
 SQLite schema, caches, reports, commands, and tests. It neither imports another
 sector implementation nor writes to another sector's database or output tree.
 
-## Implemented Stage 4C and F0 extraction-contract candidates
+## Implemented Stage 4C, F0, and F1A control-plane candidates
 
 The package currently provides:
 
@@ -36,9 +36,14 @@ The package currently provides:
 - 134 current common financial feature rows and 134 coverage/readiness rows;
   and
 - a 64-metric Stage 5A registry, 16 explicit operand links, an exact 9,856-row
-  identity-metric applicability matrix, and a 5,640-row all-source census; and
+  identity-metric applicability matrix, and a 5,640-row all-source census;
+- a query-only F0 closure workbench that converts all open decisions into
+  explicit queues and reduces 5,163 source rows to 4,244 acquisition units;
+- a fixture-first parser contract with four adapters, all 32 table families,
+  eight passing guard cases, parse-free policy replay, and a one-full-plus-one-
+  residual physical-pass ceiling per contract version; and
 - atomic loaders, independent validators, machine-readable evidence reports,
-  41 regression tests, and a clean static check.
+  45 regression tests, and a clean static check.
 
 The validated acceptance snapshot is
 `basic_materials_sec:2026-09-05:2cf5219d8855588066ba`. Stage 4C resolves all
@@ -99,6 +104,8 @@ python basic_materials/scripts/12a_validate_basic_materials_specialized_contract
 python basic_materials/scripts/11a_preflight_basic_materials_historical_pit.py --db <isolated-basic_materials.sqlite> --allow-blocked
 python basic_materials/scripts/02_validate_basic_materials_universe.py
 python basic_materials/scripts/02c_validate_basic_materials_historical_membership.py
+python basic_materials/scripts/13_build_basic_materials_f0_closure_workbench.py --db ISOLATED_BASIC_MATERIALS_DB --allow-open
+python basic_materials/scripts/14_validate_basic_materials_specialized_parser_contract.py
 python -m pytest basic_materials/tests -q
 python -m ruff check basic_materials
 ```
@@ -130,6 +137,9 @@ zero after writing an evidence pack; they do not seal Stage 5A, authorize a
 historical feature write, or change any model-control flag. Omit those switches
 when testing the hard gate itself; the commands then return exit code 2 while
 open blockers remain.
+Command `13` is query-only and command `14` evaluates synthetic fixtures only;
+neither hydrates a source, invokes the production parser, writes accepted
+observations, or changes the database.
 
 `02d_build_basic_materials_market_instrument_review.py` and
 `04a_build_basic_materials_reporting_profiles.py` are deliberate contract-build
@@ -171,12 +181,18 @@ commands that enforce the filename boundary.
 - `output/basic_materials/verification_f0_20260906/stage4d_preflight` contains
   the frozen 93-date schedule, date and chronological-block feasibility,
   blocker ledger, input seals, no-write result, and artifact hashes.
+- `output/basic_materials/verification_f1a_20260906/f0_closure` contains the
+  five F0 review/acquisition queues, blocker ledger, summary, and hashes.
+- `output/basic_materials/verification_f1a_20260906/parser_contract` contains
+  the adapter matrix, fixture outcomes, physical-pass strategy, summary, and
+  hashes.
 
 Next: close F0 in dependency order—52 deactivated-candidate decisions, four
 terminal distributions, effective-dated history for 134 current-snapshot
-names, 980 issuer-selective applicability reviews, and 5,163 open source rows.
-F1 then hydrates approved sources into content-addressed storage and compiles
-each unique document once. F2 executes one resumable all-metric parse and
-closes high-coverage evidence through parse-free review. Stage 6C materializes
-the common, cycle, positioning, and specialized PIT panel once. Every
-specialized score weight remains zero until separate promotion evidence exists.
+names, 980 issuer-selective applicability reviews, and the de-duplicated source
+plan. F1B then hydrates approved sources into content-addressed storage and
+compiles each unique document once. F2 executes one resumable all-metric pass,
+uses parse-free review, and permits only one changed-evidence residual pass.
+Stage 6C materializes the common, cycle, positioning, and specialized PIT
+panel once. Every specialized score weight remains zero until separate
+promotion evidence exists.

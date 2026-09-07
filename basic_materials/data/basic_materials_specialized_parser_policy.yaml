@@ -1,0 +1,76 @@
+policy_version: basic_materials_specialized_parser_contract_v1
+contract_as_of_date: '2026-09-06'
+model_family: basic_materials
+sector: Basic Materials
+metric_contract_version: basic_materials_specialized_metrics_v1
+source_contract_version: basic_materials_specialized_source_policy_v1
+state: f1_fixture_only_production_disabled
+pass_budget:
+  maximum_full_passes_per_content_hash: 1
+  maximum_residual_passes_per_content_hash: 1
+  blind_reparse_allowed: false
+  completed_content_reparse_allowed: false
+  residual_requires_new_source_hash_or_rule_version: true
+  later_improvement_requires_new_contract_version: true
+content_controls:
+  content_address_algorithm: sha256
+  compile_unique_content_once: true
+  semantic_cache_immutable: true
+  cache_only_policy_replay: true
+  source_calls_during_policy_replay: false
+adapter_sequence:
+  - adapter_id: operating_tables_v1
+    order: 1
+    table_families:
+      - asset_concentration
+      - asset_inventory
+      - asset_revenue
+      - attributable_production
+      - capacity_utilization
+      - channel_inventory
+      - commodity_mix
+      - cost_bridge
+      - end_market_mix
+      - management_kpi
+      - non_gaap_reconciliation
+      - operating_statistics
+      - portfolio_statistics
+      - price_volume_bridge
+      - production
+      - segment_profitability
+      - segment_revenue
+      - shipment_volume
+      - unit_cost
+  - adapter_id: mining_technical_v1
+    order: 2
+    table_families:
+      - aisc_reconciliation
+      - mine_operating_statistics
+      - reserve_resource
+      - technical_report
+  - adapter_id: capital_projects_v1
+    order: 3
+    table_families:
+      - capital_expenditure
+      - commitments
+      - feedstock
+      - liquidity
+      - outage_turnaround
+      - research_development
+  - adapter_id: derived_metrics_v1
+    order: 4
+    table_families:
+      - derived_margin
+      - derived_reserve_life
+      - derived_unit_economics
+fixture_controls:
+  required_case_types: [positive, prohibited, cross_cohort, unit, period, scope, amendment, after_close]
+  every_case_must_match_expected_disposition: true
+  production_document_execution_allowed: false
+required_flags:
+  source_hydration_allowed: false
+  parser_execution_allowed: false
+  accepted_observation_write_allowed: false
+  historical_pit_materialization_allowed: false
+  scoring_allowed: false
+  calibration_allowed: false
