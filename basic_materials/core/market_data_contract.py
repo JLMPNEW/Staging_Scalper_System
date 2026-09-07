@@ -1105,16 +1105,100 @@ def load_market_data_contract(
                     outcome_class = excluded.outcome_class,
                     cash_weight = excluded.cash_weight,
                     stock_weight = excluded.stock_weight,
-                    bankruptcy_distribution_value = excluded.bankruptcy_distribution_value,
-                    distribution_currency = excluded.distribution_currency,
+                    bankruptcy_distribution_value = CASE
+                        WHEN dim_terminal_return_rule.source_id =
+                             'basic_materials_terminal_distribution_review'
+                         AND EXISTS (
+                            SELECT 1 FROM fact_terminal_distribution_review AS d
+                            WHERE d.event_key = excluded.event_key
+                              AND d.base_terminal_rules_sha256 = excluded.contract_sha256
+                              AND d.review_row_sha256 =
+                                  dim_terminal_return_rule.contract_sha256
+                         )
+                        THEN dim_terminal_return_rule.bankruptcy_distribution_value
+                        ELSE excluded.bankruptcy_distribution_value
+                    END,
+                    distribution_currency = CASE
+                        WHEN dim_terminal_return_rule.source_id =
+                             'basic_materials_terminal_distribution_review'
+                         AND EXISTS (
+                            SELECT 1 FROM fact_terminal_distribution_review AS d
+                            WHERE d.event_key = excluded.event_key
+                              AND d.base_terminal_rules_sha256 = excluded.contract_sha256
+                              AND d.review_row_sha256 =
+                                  dim_terminal_return_rule.contract_sha256
+                         )
+                        THEN dim_terminal_return_rule.distribution_currency
+                        ELSE excluded.distribution_currency
+                    END,
                     otc_continuation_symbol = excluded.otc_continuation_symbol,
                     fractional_share_treatment = excluded.fractional_share_treatment,
                     max_reference_lag_calendar_days = excluded.max_reference_lag_calendar_days,
-                    rule_status = excluded.rule_status,
-                    source_id = excluded.source_id,
-                    evidence_json = excluded.evidence_json,
-                    contract_version = excluded.contract_version,
-                    contract_sha256 = excluded.contract_sha256,
+                    rule_status = CASE
+                        WHEN dim_terminal_return_rule.source_id =
+                             'basic_materials_terminal_distribution_review'
+                         AND EXISTS (
+                            SELECT 1 FROM fact_terminal_distribution_review AS d
+                            WHERE d.event_key = excluded.event_key
+                              AND d.base_terminal_rules_sha256 = excluded.contract_sha256
+                              AND d.review_row_sha256 =
+                                  dim_terminal_return_rule.contract_sha256
+                         )
+                        THEN dim_terminal_return_rule.rule_status
+                        ELSE excluded.rule_status
+                    END,
+                    source_id = CASE
+                        WHEN dim_terminal_return_rule.source_id =
+                             'basic_materials_terminal_distribution_review'
+                         AND EXISTS (
+                            SELECT 1 FROM fact_terminal_distribution_review AS d
+                            WHERE d.event_key = excluded.event_key
+                              AND d.base_terminal_rules_sha256 = excluded.contract_sha256
+                              AND d.review_row_sha256 =
+                                  dim_terminal_return_rule.contract_sha256
+                         )
+                        THEN dim_terminal_return_rule.source_id
+                        ELSE excluded.source_id
+                    END,
+                    evidence_json = CASE
+                        WHEN dim_terminal_return_rule.source_id =
+                             'basic_materials_terminal_distribution_review'
+                         AND EXISTS (
+                            SELECT 1 FROM fact_terminal_distribution_review AS d
+                            WHERE d.event_key = excluded.event_key
+                              AND d.base_terminal_rules_sha256 = excluded.contract_sha256
+                              AND d.review_row_sha256 =
+                                  dim_terminal_return_rule.contract_sha256
+                         )
+                        THEN dim_terminal_return_rule.evidence_json
+                        ELSE excluded.evidence_json
+                    END,
+                    contract_version = CASE
+                        WHEN dim_terminal_return_rule.source_id =
+                             'basic_materials_terminal_distribution_review'
+                         AND EXISTS (
+                            SELECT 1 FROM fact_terminal_distribution_review AS d
+                            WHERE d.event_key = excluded.event_key
+                              AND d.base_terminal_rules_sha256 = excluded.contract_sha256
+                              AND d.review_row_sha256 =
+                                  dim_terminal_return_rule.contract_sha256
+                         )
+                        THEN dim_terminal_return_rule.contract_version
+                        ELSE excluded.contract_version
+                    END,
+                    contract_sha256 = CASE
+                        WHEN dim_terminal_return_rule.source_id =
+                             'basic_materials_terminal_distribution_review'
+                         AND EXISTS (
+                            SELECT 1 FROM fact_terminal_distribution_review AS d
+                            WHERE d.event_key = excluded.event_key
+                              AND d.base_terminal_rules_sha256 = excluded.contract_sha256
+                              AND d.review_row_sha256 =
+                                  dim_terminal_return_rule.contract_sha256
+                         )
+                        THEN dim_terminal_return_rule.contract_sha256
+                        ELSE excluded.contract_sha256
+                    END,
                     updated_at_utc = excluded.updated_at_utc
                 """,
                 (

@@ -1,0 +1,63 @@
+policy_version: basic_materials_terminal_distribution_policy_v1
+contract_as_of_date: '2026-09-07'
+model_family: basic_materials
+sector: Basic Materials
+review_status: approved_f0_2_terminal_distribution_review
+calibration_eligible: false
+
+base_contract:
+  market_policy_version: basic_materials_market_data_policy_v2
+  market_manifest_sha256: bf6af580f27dc07afdf23b5a74058bf5aac62da41bed82661a6b835905e9f4fc
+  terminal_return_rules_sha256: 4abe94dcd7c5ad9662b1f10e944bee76fd54bca67c1c1f0c8a98a10f916aee44
+  expected_pending_events:
+    terminal_ANV_20150310: ANV
+    terminal_MCP_20150625: MCP
+    terminal_GMO_20201118: GMO
+    terminal_BIOA_20181022: BIOA
+
+review_contract:
+  path: system_csvs/basic_materials_terminal_distribution_reviews.csv
+  source_id: basic_materials_terminal_distribution_review
+  expected_rows: 4
+  unique_key: event_key
+  required_outcome_class: bankruptcy_distribution
+  allowed_review_statuses:
+    - zero_distribution_verified
+    - distribution_value_verified
+    - noncash_recovery_unresolved
+  expected_status_counts:
+    zero_distribution_verified: 4
+
+evidence_contract:
+  provider: sec_edgar
+  allowed_hosts:
+    - www.sec.gov
+  expected_document_keys:
+    - anv_confirmed_plan
+    - mcp_effective_plan
+    - bioa_monitor_update
+    - gmo_confirmation_release
+    - gmo_restructuring_support
+  expected_document_count: 5
+  cache_root_relative_path: terminal_distribution_reviews/2026-09-07
+  require_exact_payload_sha256: true
+  require_exact_byte_size: true
+  require_evidence_text_match: true
+  allow_cache_only_replay: true
+
+application_contract:
+  preserve_stage3_base_contract: true
+  update_only_pending_bankruptcy_rules: true
+  verified_review_rule_status: ready_for_calculation
+  unresolved_review_rule_status: pending_distribution_evidence
+  terminal_reconciliation_required: true
+  isolated_database_required_by_default: true
+
+gates:
+  current_universe_is_survivorship_corrected: false
+  current_universe_calibration_eligible: false
+  historical_pit_materialization_enabled: false
+  historical_calibration_activated: false
+  specialized_metric_weighting_activated: false
+  portfolio_candidate_gate: false
+  oos_score_valid_flag: false

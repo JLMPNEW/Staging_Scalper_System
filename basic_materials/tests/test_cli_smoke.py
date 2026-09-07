@@ -74,7 +74,7 @@ def test_cli_stage_zero_through_financial_contract(tmp_path: Path) -> None:
     )
 
     assert independence["passed"] is True
-    assert initialized["schema_version"] == 8
+    assert initialized["schema_version"] == 9
     assert loaded["rows_loaded"] == 134
     assert loaded["calibration_groups_derived"] == 134
     assert validated["passed"] is True

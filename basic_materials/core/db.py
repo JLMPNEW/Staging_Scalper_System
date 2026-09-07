@@ -14,7 +14,7 @@ from basic_materials import MODEL_FAMILY, SECTOR
 
 
 SCHEMA_OWNER = MODEL_FAMILY
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class DatabaseIdentityError(RuntimeError):
@@ -1442,6 +1442,85 @@ SPECIALIZED_EXTRACTION_CONTRACT_SQL = (
 )
 
 
+TERMINAL_DISTRIBUTION_REVIEW_SQL = r"""
+CREATE TABLE IF NOT EXISTS fact_terminal_distribution_review (
+    event_key TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    review_status TEXT NOT NULL CHECK (
+        review_status IN (
+            'zero_distribution_verified',
+            'distribution_value_verified',
+            'noncash_recovery_unresolved'
+        )
+    ),
+    bankruptcy_distribution_value REAL CHECK (
+        bankruptcy_distribution_value IS NULL OR bankruptcy_distribution_value >= 0
+    ),
+    distribution_currency TEXT,
+    source_id TEXT NOT NULL,
+    primary_document_key TEXT NOT NULL,
+    primary_source_url TEXT NOT NULL,
+    primary_source_document_date TEXT NOT NULL,
+    primary_source_sha256 TEXT NOT NULL CHECK (length(primary_source_sha256) = 64),
+    primary_cache_relative_path TEXT NOT NULL,
+    primary_evidence_locator TEXT NOT NULL,
+    primary_evidence_text TEXT NOT NULL,
+    supporting_document_key TEXT,
+    supporting_source_url TEXT,
+    supporting_source_document_date TEXT,
+    supporting_source_sha256 TEXT CHECK (
+        supporting_source_sha256 IS NULL OR length(supporting_source_sha256) = 64
+    ),
+    supporting_cache_relative_path TEXT,
+    supporting_evidence_locator TEXT,
+    supporting_evidence_text TEXT,
+    reviewed_on TEXT NOT NULL,
+    notes TEXT NOT NULL,
+    base_terminal_rules_sha256 TEXT NOT NULL CHECK (length(base_terminal_rules_sha256) = 64),
+    overlay_policy_version TEXT NOT NULL,
+    overlay_policy_sha256 TEXT NOT NULL CHECK (length(overlay_policy_sha256) = 64),
+    overlay_manifest_sha256 TEXT NOT NULL CHECK (length(overlay_manifest_sha256) = 64),
+    review_row_sha256 TEXT NOT NULL CHECK (length(review_row_sha256) = 64),
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (event_key) REFERENCES fact_terminal_event_reconciliation(event_key),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id),
+    CHECK (
+        (review_status = 'zero_distribution_verified'
+         AND bankruptcy_distribution_value = 0
+         AND distribution_currency IS NOT NULL)
+        OR
+        (review_status = 'distribution_value_verified'
+         AND bankruptcy_distribution_value > 0
+         AND distribution_currency IS NOT NULL)
+        OR
+        (review_status = 'noncash_recovery_unresolved'
+         AND bankruptcy_distribution_value IS NULL)
+    ),
+    CHECK (
+        (supporting_document_key IS NULL
+         AND supporting_source_url IS NULL
+         AND supporting_source_document_date IS NULL
+         AND supporting_source_sha256 IS NULL
+         AND supporting_cache_relative_path IS NULL
+         AND supporting_evidence_locator IS NULL
+         AND supporting_evidence_text IS NULL)
+        OR
+        (supporting_document_key IS NOT NULL
+         AND supporting_source_url IS NOT NULL
+         AND supporting_source_document_date IS NOT NULL
+         AND supporting_source_sha256 IS NOT NULL
+         AND supporting_cache_relative_path IS NOT NULL
+         AND supporting_evidence_locator IS NOT NULL
+         AND supporting_evidence_text IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_terminal_distribution_review_status
+    ON fact_terminal_distribution_review(review_status, ticker);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "basic_materials_foundation", FOUNDATION_SQL),
     (2, "basic_materials_historical_reconciliation", HISTORICAL_RECONCILIATION_SQL),
@@ -1451,6 +1530,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (6, "basic_materials_financial_performance_indexes", FINANCIAL_PERFORMANCE_SQL),
     (7, "basic_materials_financial_source_and_security_ratio_remediation", FINANCIAL_REMEDIATION_SQL),
     (8, "basic_materials_specialized_extraction_contract", SPECIALIZED_EXTRACTION_CONTRACT_SQL),
+    (9, "basic_materials_terminal_distribution_review", TERMINAL_DISTRIBUTION_REVIEW_SQL),
 )
 
 
@@ -1718,6 +1798,7 @@ def database_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "dim_universe_membership",
         "fact_security_event",
         "fact_terminal_event_reconciliation",
+        "fact_terminal_distribution_review",
         "dim_market_instrument",
         "bridge_market_instrument_role",
         "fact_market_provider_snapshot",

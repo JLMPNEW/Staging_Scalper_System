@@ -53,6 +53,9 @@ class PathConfig:
     market_data_manifest: Path
     market_instruments_csv: Path
     terminal_return_rules_csv: Path
+    terminal_distribution_policy: Path
+    terminal_distribution_manifest: Path
+    terminal_distribution_reviews_csv: Path
     financial_data_policy: Path
     financial_data_manifest: Path
     financial_concept_map: Path
@@ -236,6 +239,9 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             "market_data_manifest",
             "market_instruments_csv",
             "terminal_return_rules_csv",
+            "terminal_distribution_policy",
+            "terminal_distribution_manifest",
+            "terminal_distribution_reviews_csv",
             "financial_data_policy",
             "financial_data_manifest",
             "financial_concept_map",
@@ -298,6 +304,21 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
         ),
         terminal_return_rules_csv=_resolve_path(
             paths_raw["terminal_return_rules_csv"], base, "paths.terminal_return_rules_csv"
+        ),
+        terminal_distribution_policy=_resolve_path(
+            paths_raw["terminal_distribution_policy"],
+            base,
+            "paths.terminal_distribution_policy",
+        ),
+        terminal_distribution_manifest=_resolve_path(
+            paths_raw["terminal_distribution_manifest"],
+            base,
+            "paths.terminal_distribution_manifest",
+        ),
+        terminal_distribution_reviews_csv=_resolve_path(
+            paths_raw["terminal_distribution_reviews_csv"],
+            base,
+            "paths.terminal_distribution_reviews_csv",
         ),
         financial_data_policy=_resolve_path(
             paths_raw["financial_data_policy"], base, "paths.financial_data_policy"

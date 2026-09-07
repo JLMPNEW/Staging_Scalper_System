@@ -5,7 +5,7 @@ and ranking package. It owns its configuration, policies, source registry,
 SQLite schema, caches, reports, commands, and tests. It neither imports another
 sector implementation nor writes to another sector's database or output tree.
 
-## Implemented Stage 4C, F0, and F1A control-plane candidates
+## Implemented Stage 4C, F0.2, and F1A control-plane candidates
 
 The package currently provides:
 
@@ -17,10 +17,10 @@ The package currently provides:
 - a v2 market contract over 158 Norgate assets and 162 roles, with 492,653
   adjusted bars, 5,388 actions, XLB/SPY, 4,446 calendar sessions, and 134
   technical feature rows in the clean acceptance build;
-- schema v8 and a 26-source registry in the dedicated
+- schema v9 and a 27-source registry in the dedicated
   `basic_materials.sqlite` database design, including package-owned
   specialized metric, source census, content-addressed document, and parser
-  work/evidence ledgers;
+  work/evidence ledgers plus the terminal-distribution review ledger;
 - an immutable 154-profile SEC reporting census, 22 canonical financial
   metrics, and 66 reviewed US-GAAP/IFRS concept mappings;
 - immutable SEC filing/package, audited-HTML, security-ratio, and FX caches
@@ -34,16 +34,18 @@ The package currently provides:
 - a 47-row current security-unit contract: 42 direct shares and five ADSs;
 - an OGC audited IFRS fallback with 42 tied-out 2024/2025 observations;
 - 134 current common financial feature rows and 134 coverage/readiness rows;
-  and
 - a 64-metric Stage 5A registry, 16 explicit operand links, an exact 9,856-row
   identity-metric applicability matrix, and a 5,640-row all-source census;
 - a query-only F0 closure workbench that converts all open decisions into
   explicit queues and reduces 5,163 source rows to 4,244 acquisition units;
 - a fixture-first parser contract with four adapters, all 32 table families,
   eight passing guard cases, parse-free policy replay, and a one-full-plus-one-
-  residual physical-pass ceiling per contract version; and
+  residual physical-pass ceiling per contract version;
+- a sealed four-row F0.2 bankruptcy-distribution overlay backed by five exact
+  SEC documents, with all 20 terminal events now resolved in the isolated
+  candidate; and
 - atomic loaders, independent validators, machine-readable evidence reports,
-  45 regression tests, and a clean static check.
+  49 regression tests, and a clean static check.
 
 The validated acceptance snapshot is
 `basic_materials_sec:2026-09-05:2cf5219d8855588066ba`. Stage 4C resolves all
@@ -65,8 +67,8 @@ as-of date, 2026-09-05. A 2019-forward longitudinal point-in-time feature panel
 is therefore not yet implemented. Stage 4D has frozen and audited 93 monthly
 last-session dates from 2019-01-31 through 2026-09-04 without writing feature
 history. Source history is feasible, but specialized, commodity, positioning,
-membership, and terminal-event data must reach the frozen coverage gates
-before Stage 6C writes the first unified historical panel.
+and membership data must reach the frozen coverage gates before Stage 6C
+writes the first unified historical panel.
 
 No company score, calibrated ranking, or portfolio candidate is produced yet.
 All memberships remain `calibration_eligible=0`, and both
@@ -76,8 +78,12 @@ The installed live database remains on the previous Stage 4B file until an
 explicit live-replacement authorization is given. The fully validated Stage 4C
 candidate is at
 `output/basic_materials/verification_stage4c_20260906/basic_materials.sqlite`.
-The schema-v8 F0 candidate and its Stage 4D/5A evidence packs are under
-`output/basic_materials/verification_f0_20260906`.
+The schema-v8 F0 baseline and its Stage 4D/5A evidence packs are under
+`output/basic_materials/verification_f0_20260906`. The schema-v9 F0.2
+terminal-closure candidate is under
+`output/basic_materials/verification_f02_20260907`. The latter has 4/4
+evidence-backed zero bankruptcy recoveries, 20/20 resolved terminal events,
+and no open terminal-distribution blocker.
 
 ## Standard run order
 
@@ -99,13 +105,16 @@ python basic_materials/scripts/06_validate_basic_materials_financial_contract.py
 python basic_materials/scripts/08a_load_basic_materials_security_ratios.py
 python basic_materials/scripts/11_run_basic_materials_stage4.py
 python basic_materials/scripts/10_validate_basic_materials_financial_stage.py
-python basic_materials/scripts/12_load_basic_materials_specialized_contract.py --db <isolated-basic_materials.sqlite>
-python basic_materials/scripts/12a_validate_basic_materials_specialized_contract.py --db <isolated-basic_materials.sqlite> --allow-open
-python basic_materials/scripts/11a_preflight_basic_materials_historical_pit.py --db <isolated-basic_materials.sqlite> --allow-blocked
 python basic_materials/scripts/02_validate_basic_materials_universe.py
 python basic_materials/scripts/02c_validate_basic_materials_historical_membership.py
+python basic_materials/scripts/12_load_basic_materials_specialized_contract.py --db <isolated-basic_materials.sqlite>
+python basic_materials/scripts/12a_validate_basic_materials_specialized_contract.py --db <isolated-basic_materials.sqlite> --allow-open
 python basic_materials/scripts/13_build_basic_materials_f0_closure_workbench.py --db ISOLATED_BASIC_MATERIALS_DB --allow-open
 python basic_materials/scripts/14_validate_basic_materials_specialized_parser_contract.py
+python basic_materials/scripts/15_apply_basic_materials_terminal_distribution_reviews.py --db ISOLATED_BASIC_MATERIALS_DB
+python basic_materials/scripts/15a_validate_basic_materials_terminal_distribution_reviews.py --db ISOLATED_BASIC_MATERIALS_DB
+python basic_materials/scripts/13_build_basic_materials_f0_closure_workbench.py --db ISOLATED_BASIC_MATERIALS_DB --allow-open
+python basic_materials/scripts/11a_preflight_basic_materials_historical_pit.py --db <isolated-basic_materials.sqlite> --allow-blocked
 python -m pytest basic_materials/tests -q
 python -m ruff check basic_materials
 ```
@@ -140,6 +149,12 @@ open blockers remain.
 Command `13` is query-only and command `14` evaluates synthetic fixtures only;
 neither hydrates a source, invokes the production parser, writes accepted
 observations, or changes the database.
+Command `15` is a narrow F0.2 mutation and requires an explicit database path.
+It rejects the configured live database unless `--allow-live-database` is
+given, verifies the Stage 3 base hash, replays or downloads exact SEC bytes,
+records the review/source lineage atomically, and reruns terminal calculations.
+Command `15a` is the cache-only, read-only database validator. Neither command
+opens calibration, scoring, PIT, or portfolio gates.
 
 `02d_build_basic_materials_market_instrument_review.py` and
 `04a_build_basic_materials_reporting_profiles.py` are deliberate contract-build
@@ -186,13 +201,19 @@ commands that enforce the filename boundary.
 - `output/basic_materials/verification_f1a_20260906/parser_contract` contains
   the adapter matrix, fixture outcomes, physical-pass strategy, summary, and
   hashes.
+- `output/basic_materials/verification_f02_20260907/terminal_distribution`
+  contains the F0.2 decisions, source-document seals, zero-value calculations,
+  overlay-aware Stage 3 validation, summary, and artifact manifest.
+- `output/basic_materials/verification_f02_20260907/f0_closure` and
+  `stage4d_preflight` contain the post-F0.2 query-only reruns: four F0 blockers,
+  six PIT blockers, and zero open terminal distributions.
 
-Next: close F0 in dependency order—52 deactivated-candidate decisions, four
-terminal distributions, effective-dated history for 134 current-snapshot
-names, 980 issuer-selective applicability reviews, and the de-duplicated source
-plan. F1B then hydrates approved sources into content-addressed storage and
-compiles each unique document once. F2 executes one resumable all-metric pass,
-uses parse-free review, and permits only one changed-evidence residual pass.
-Stage 6C materializes the common, cycle, positioning, and specialized PIT
-panel once. Every specialized score weight remains zero until separate
-promotion evidence exists.
+Next: close F0.3 in dependency order—52 deactivated-candidate decisions,
+effective-dated history for 134 current-snapshot names, 980 issuer-selective
+applicability reviews, and the de-duplicated source plan. F1B then hydrates
+approved sources into content-addressed storage and compiles each unique
+document once. F2 executes one resumable all-metric pass, uses parse-free
+review, and permits only one changed-evidence residual pass. Stage 6C
+materializes the common, cycle, positioning, and specialized PIT panel once.
+Every specialized score weight remains zero until separate promotion evidence
+exists.

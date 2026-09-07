@@ -730,11 +730,32 @@ def validate_market_stage(
             SELECT
               (SELECT COUNT(*) FROM dim_market_instrument WHERE contract_sha256 <> ?) +
               (SELECT COUNT(*) FROM bridge_market_instrument_role WHERE contract_sha256 <> ?) +
-              (SELECT COUNT(*) FROM dim_terminal_return_rule WHERE contract_sha256 <> ?)
+              (
+                SELECT COUNT(*)
+                FROM dim_terminal_return_rule AS r
+                WHERE r.contract_sha256 <> ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM fact_terminal_distribution_review AS d
+                    WHERE d.event_key = r.event_key
+                      AND d.base_terminal_rules_sha256 = ?
+                      AND d.review_row_sha256 = r.contract_sha256
+                      AND d.overlay_policy_version =
+                          'basic_materials_terminal_distribution_policy_v1'
+                      AND d.source_id =
+                          'basic_materials_terminal_distribution_review'
+                      AND r.source_id = d.source_id
+                      AND d.review_status = 'zero_distribution_verified'
+                      AND d.bankruptcy_distribution_value = 0
+                      AND r.bankruptcy_distribution_value = 0
+                      AND r.rule_status = 'ready_for_calculation'
+                  )
+              )
             """,
             (
                 manifest.artifacts["market_instruments"].sha256,
                 manifest.artifacts["market_instruments"].sha256,
+                manifest.artifacts["terminal_return_rules"].sha256,
                 manifest.artifacts["terminal_return_rules"].sha256,
             ),
         ).fetchone()[0]

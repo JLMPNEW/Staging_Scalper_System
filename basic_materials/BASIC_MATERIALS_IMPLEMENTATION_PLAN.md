@@ -1,10 +1,10 @@
 # Basic Materials Scoring and Ranking Model — Implementation Plan
 
-Status: living implementation authority; Stage 4C and Stage 4D/5A F0 candidates implemented; F0.1 closure workbench and F1A fixture-first parser contract implemented; source hydration, live promotion, and calibration blocked
+Status: living implementation authority; Stage 4C and Stage 4D/5A F0 candidates implemented; F0.1/F1A control plane and F0.2 terminal-distribution closure implemented; source hydration, live promotion, PIT, and calibration blocked
 Prepared: 2026-09-05  
-Last implementation update: 2026-09-06
+Last implementation update: 2026-09-07
 Authoritative current universe: ticker_mapping/basic_materials.csv
-Current schema version: 8
+Current schema version: 9
 
 ## Document control and reuse contract
 
@@ -34,6 +34,7 @@ Implementation ledger:
 | 2026-09-06 | Extraction-first parser and PIT sequence revision | Cross-repository review of the shared parser, Transportation, Consumer Defensive, Technology, Medical Devices, and Biotech; high-coverage gates; all-source census; content-addressed semantic cache; one resumable all-metric run; parse-free review; one unified PIT build | The former common-PIT-before-specialized plan is retired; historical materialization is blocked until specialized source and coverage closure | Stage 5A/6B code and data are not yet implemented; Stage 6C PIT and all calibration/promotion gates remain closed |
 | 2026-09-06 | Stage 4D/5A F0 extraction-contract candidate | Schema v8; source registry v5; 64 specialized metrics; 16 operand links; 9,856-row exact identity-metric accounting matrix; 5,640-row SEC/IR/local-exchange/archive/technical/reserve/commodity/positioning census; content-addressed document and resumable parser ledgers; 93-date read-only PIT feasibility audit | Registry and source policies strict-load; Stage 5A has zero structural errors; every identity is accounted for across all 64 metrics and eight source families; Stage 4D feasibility passed with deterministic hashes and no database mutation; 41 tests, Ruff, and independence pass | Stage 5A is not sealed: 52 historical decisions, four terminal distributions, 134 current-name histories, 980 applicability reviews, 5,163 source rows, parser execution, and specialized coverage remain open; live database and all scoring/calibration/portfolio gates unchanged |
 | 2026-09-06 | F0.1 closure workbench and F1A fixture-first parser contract | Strict query-only closure policy; evidence review queues; content/source de-duplication plan; exact contiguous regime-block validation; four parser adapters covering 32 table families; eight synthetic positive/prohibited/context/unit/period/scope/amendment/after-close fixtures; bounded parse scheduler | Workbench is structurally valid and byte-preserving; 5,163 source rows collapse to 4,244 acquisition units before content hashing; all 8 fixtures pass; maximum physical passes are frozen at one full plus one changed-evidence residual per parser-contract version; 45 tests and Ruff pass | No review decision is inferred; 52 historical decisions, four distributions, 134 histories, 980 applicability reviews, 5,163 source rows, source hydration, production extraction, accepted observations, coverage, PIT, scoring, and promotion remain open |
+| 2026-09-07 | F0.2 terminal-distribution closure | Additive policy/CSV/manifest bound to the immutable Stage 3 contract; schema v9 review ledger; source registry v6; five exact SEC payloads; four reviewed zero distributions; isolated apply and read-only replay commands; overlay-aware Stage 3 refresh/validation | ANV, MCP, GMO, and BIOA have evidence-backed value 0; 20/20 terminal events resolve; terminal F0 and Stage 4D blockers fall to zero; cache replay, idempotence, integrity, foreign keys, 49 tests, Ruff, and independence pass | 52 historical decisions, 134 histories, 980 applicability reviews, 5,163 source rows, production parsing, accepted observations, specialized coverage, PIT, scoring, calibration, and promotion remain open |
 
 ### Reusable sector-repository build sequence
 
@@ -336,6 +337,8 @@ basic_materials/
         norgate_prices.py
         market_data.py
         terminal_returns.py
+        terminal_distribution_contract.py
+        terminal_distribution_reviews.py
         sec_fundamentals.py
         inline_xbrl.py
         financial_semantics.py
@@ -367,6 +370,8 @@ basic_materials/
         basic_materials_historical_reconciliation_manifest.yaml
         basic_materials_market_data_policy.yaml
         basic_materials_market_data_manifest.yaml
+        basic_materials_terminal_distribution_policy.yaml
+        basic_materials_terminal_distribution_manifest.yaml
         basic_materials_financial_concept_map.yaml
         basic_materials_scoring_policy.yaml
         basic_materials_calibration_policy.yaml
@@ -384,6 +389,7 @@ basic_materials/
         basic_materials_terminal_events.csv
         basic_materials_market_instruments.csv
         basic_materials_terminal_return_rules.csv
+        basic_materials_terminal_distribution_reviews.csv
         basic_materials_lifecycle_overrides.csv
         basic_materials_reporting_overrides.csv
     review/
@@ -416,8 +422,10 @@ basic_materials/
         13a_validate_basic_materials_pit_panel.py
         14_run_basic_materials_factor_validation.py
         14a_validate_basic_materials_factor_validation.py
-        15_build_basic_materials_shadow_scores.py
-        15a_validate_basic_materials_shadow_scores.py
+        15_apply_basic_materials_terminal_distribution_reviews.py
+        15a_validate_basic_materials_terminal_distribution_reviews.py
+        16_build_basic_materials_shadow_scores.py
+        16a_validate_basic_materials_shadow_scores.py
         16_run_basic_materials_calibration.py
         16a_validate_basic_materials_calibration.py
         17_run_basic_materials_backtest.py
@@ -2787,11 +2795,12 @@ Slice E3 exit condition result: passed as an engineering acceptance candidate.
 The installed live database remains unchanged until explicit replacement
 authorization is provided.
 
-Implemented F0 foundation and remaining closure order - Stage 4D/5A:
+Implemented F0 foundation and original closure order - Stage 4D/5A:
 
 1. Resolve or reject the remaining 52 deactivated candidates and finish the
    four pending terminal-distribution treatments so the historical parser
-   universe will not change after extraction.
+   universe will not change after extraction. F0.2 has now completed the
+   terminal-distribution part; the 52 candidate decisions remain open.
 2. Freeze candidate monthly/21-session dates from 2019-01-01 and run the
    Stage 4D read-only source/partition feasibility audit; write no feature
    history.
@@ -2839,11 +2848,11 @@ F0 implementation result on 2026-09-06:
   `output/basic_materials/verification_f0_20260906/basic_materials.sqlite`;
   the installed live database was not changed.
 
-F0 is not complete. Close its dependencies in this order before F1 production
-hydration: (1) resolve/reject 52 historical candidates, (2) resolve four
-terminal distributions, (3) reconstruct effective-dated history for the 134
-current-snapshot names, (4) adjudicate 980 issuer-selective applicability
-pairs, and (5) discover/freeze every non-SEC, commodity, and positioning source
+F0 is not complete. After the F0.2 terminal gate closed, finish its remaining
+dependencies in this order before F1 production hydration: (1) resolve/reject
+52 historical candidates, (2) reconstruct effective-dated history for the 134
+current-snapshot names, (3) adjudicate 980 issuer-selective applicability
+pairs, and (4) discover/freeze every non-SEC, commodity, and positioning source
 plus issuer exposure contract. Re-run Stage 4D after each input seal changes.
 
 Implemented slice F0.1 - read-only closure workbench:
@@ -2882,7 +2891,7 @@ Implemented slice F1A - fixture-first parser contract and scheduler:
   execution still explicitly false.
 - The stricter Stage 4D loader now requires exact regime block identifiers,
   full target-window span, and contiguous non-overlapping dates. The read-only
-  rerun retained 93 dates and seven expected downstream blockers.
+  pre-F0.2 rerun retained 93 dates and seven expected downstream blockers.
 
 F0.1/F1A exit condition result: passed as an engineering control plane. It
 does not claim specialized data coverage: accepted specialized observations
@@ -2890,10 +2899,80 @@ remain zero, so current-breadth and historical-depth coverage are not yet
 measurable. The isolated database SHA-256 remained
 `494d906ac1b968f6c50ff5248998db387ae199d7ad45d3e101b99934a8fa0605`.
 
+Implemented slice F0.2 - terminal-distribution evidence closure:
+
+- `data/basic_materials_terminal_distribution_policy.yaml` freezes the exact
+  four-event scope, allowed review states, value semantics, Stage 3 base hashes,
+  source rules, cache-only replay, isolated-database default, and closed gates.
+- `system_csvs/basic_materials_terminal_distribution_reviews.csv` records four
+  explicit `zero_distribution_verified` decisions. The separate manifest binds
+  the CSV and five SEC documents by URL, document date, relative cache path,
+  byte size, and SHA-256.
+- ANV's confirmed plan states that existing equity receives no recovery; MCP's
+  confirmed/effective plan cancels equity with no distributions; BioAmber's
+  court-appointed Monitor states that liquidation leaves no residual value for
+  equity; and General Moly's confirmation release and filed restructuring term
+  sheet cancel existing common equity.
+- Schema v9 adds `fact_terminal_distribution_review` without changing prior
+  migration checksums. Source registry v6 adds only the owned terminal-review
+  source. All five exact source payloads are retained in
+  `raw_source_payloads` as well as the content cache.
+- `core/terminal_distribution_contract.py` rejects policy, manifest, row,
+  source-link, date, host, hash, byte-size, status/value, and evidence-scope
+  drift before mutation.
+- `core/terminal_distribution_reviews.py` verifies each short evidence phrase
+  in the sealed HTML, rejects conflicting loaded rules, writes reviews and
+  source bytes atomically, overlays only the four pending bankruptcy rules, and
+  preserves the base evidence inside each overlay row.
+- Stage 3 contract reloads preserve only a matching reviewed overlay whose
+  stored base hash equals the incoming immutable terminal-rule hash. Stage 3
+  validation accepts only that exact row-level overlay lineage; unrelated stale
+  rule hashes still fail.
+- `scripts/15_apply_basic_materials_terminal_distribution_reviews.py` requires
+  an explicit database path and rejects the configured live database by
+  default. `15a_validate_basic_materials_terminal_distribution_reviews.py`
+  performs cache-only, read-only replay.
+- Regression tests cover exact contracts, source-byte tampering, no partial
+  database write on conflict, idempotence, preservation through Stage 3 reload,
+  zero-value terminal math, schema migration, and closed model gates.
+
+F0.2 execution result on 2026-09-07:
+
+- The schema-v8 source candidate was copied only after SHA-256
+  `494d906ac1b968f6c50ff5248998db387ae199d7ad45d3e101b99934a8fa0605`
+  matched. Only
+  `output/basic_materials/verification_f02_20260907/basic_materials.sqlite`
+  was migrated and mutated.
+- The new schema-v9 candidate SHA-256 is
+  `98eb3facaf2efb96263821147db668411a100cd064b92e61d90009ea4eb9a25e`.
+  The installed live database remains schema v6 with four pending events and
+  no terminal-review rows.
+- Cache-only application and independent read-only validation pass. All five
+  payload hashes match manifest SHA-256
+  `8edf81724a052a93ee890844772b6f53645dd9d8b44a8014b4f5128dee4549d4`.
+- Terminal reconciliation is 20/20 resolved: nine fixed cash, six stock
+  conversion, one mixed prorated, and four zero bankruptcy distributions.
+  Overlay-aware Stage 3 validation has zero errors and a 100% current-market
+  gate.
+- The query-only F0 rerun reports four blockers and
+  `terminal_distributions_open=0`. Stage 4D reports six blockers and
+  `unresolved_terminal_distributions=0`; PIT materialization remains false.
+- SQLite integrity and foreign keys pass; all memberships remain
+  calibration-ineligible; `portfolio_candidate_gate` and
+  `oos_score_valid_flag` remain false; 49 tests, Ruff, and independence across
+  70 Python files pass.
+
+F0.2 exit condition result: passed. It closes only terminal-distribution
+evidence. It does not authorize source hydration, production parsing,
+historical PIT creation, calibration, ranking, portfolio use, or live database
+replacement.
+
 Remaining slice F1B - evidence closure, sealed hydration, and document compiler:
 
-1. Resolve the F0 queues in their dependency order without automated
-   promotion or fabricated values.
+1. Complete F0.3 by resolving the 52 historical-candidate decisions,
+   reconstructing 134 current-name membership histories, adjudicating 980
+   applicability reviews, and sealing the resulting source/exposure scope
+   without automated promotion or fabricated values.
 2. Hash-seal the resulting universe, applicability, source, commodity,
    positioning, and exposure contracts, then rerun Stage 4D.
 3. Expand the synthetic contract into reviewed golden fixtures for each table

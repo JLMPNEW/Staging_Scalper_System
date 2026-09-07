@@ -1,0 +1,63 @@
+manifest_version: 1
+artifact_id: basic_materials_terminal_distribution_review_v1
+policy_version: basic_materials_terminal_distribution_policy_v1
+policy_sha256: 589b6e7c8cd55a55de73c1e4ed58f29c2a0cc35f37b505e85ba09c768474f672
+contract_as_of_date: '2026-09-07'
+base_market_manifest_sha256: bf6af580f27dc07afdf23b5a74058bf5aac62da41bed82661a6b835905e9f4fc
+state: approved_f0_2_terminal_distribution_review
+calibration_eligible: false
+
+review_csv:
+  path: ../system_csvs/basic_materials_terminal_distribution_reviews.csv
+  source_id: basic_materials_terminal_distribution_review
+  sha256: a550375f647bdfeabc5244a3d5e7f185519c6bf33b63452efb6273dca83f6447
+  byte_size: 1827
+  row_count: 4
+  unique_key: event_key
+
+source_documents:
+  anv_confirmed_plan:
+    event_key: terminal_ANV_20150310
+    document_role: primary
+    url: https://www.sec.gov/Archives/edgar/data/1376610/000119312515267014/d17013dex992.htm
+    document_date: '2015-07-23'
+    cache_relative_path: terminal_distribution_reviews/2026-09-07/terminal_ANV_20150310_primary.html
+    sha256: ebf90208e4f113336e0c916cfe8c812f65b9b221abbf551d3384d362f10cb56a
+    byte_size: 542807
+    media_type: text/html
+  mcp_effective_plan:
+    event_key: terminal_MCP_20150625
+    document_role: primary
+    url: https://www.sec.gov/Archives/edgar/data/1489137/000110465916120339/a16-11036_18k.htm
+    document_date: '2016-05-12'
+    cache_relative_path: terminal_distribution_reviews/2026-09-07/terminal_MCP_20150625_primary.html
+    sha256: 049398c6f993d6e0b8138b49eeaef6eab2ab2287d48a6a6959935f3b55ebb656
+    byte_size: 68887
+    media_type: text/html
+  bioa_monitor_update:
+    event_key: terminal_BIOA_20181022
+    document_role: primary
+    url: https://www.sec.gov/Archives/edgar/data/1534287/000119312518309191/d645901dex991.htm
+    document_date: '2018-10-25'
+    cache_relative_path: terminal_distribution_reviews/2026-09-07/terminal_BIOA_20181022_primary.html
+    sha256: 1f310f0144d2b4619ef29aa547b2518efbf8a293c78c4315d8b93b2ef0914447
+    byte_size: 5527
+    media_type: text/html
+  gmo_confirmation_release:
+    event_key: terminal_GMO_20201118
+    document_role: primary
+    url: https://www.sec.gov/Archives/edgar/data/1275229/000165495421003671/gmo_ex991.htm
+    document_date: '2021-03-31'
+    cache_relative_path: terminal_distribution_reviews/2026-09-07/terminal_GMO_20201118_primary.html
+    sha256: 76c4bc491868f7dfe52d59d5fabfe5a8122806a8cb6c212f81f901f55b0d0b10
+    byte_size: 13963
+    media_type: text/html
+  gmo_restructuring_support:
+    event_key: terminal_GMO_20201118
+    document_role: supporting
+    url: https://www.sec.gov/Archives/edgar/data/1275229/000165495420012741/gmo_ex102.htm
+    document_date: '2020-11-16'
+    cache_relative_path: terminal_distribution_reviews/2026-09-07/terminal_GMO_20201118_supporting.html
+    sha256: 572c9d29c8534d78a3ab7abcb9e6f6e602c08e8df8bc1d450f6be32ee94ab292
+    byte_size: 408553
+    media_type: text/html

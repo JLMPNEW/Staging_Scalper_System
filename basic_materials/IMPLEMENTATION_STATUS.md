@@ -1,29 +1,31 @@
 # Basic Materials implementation status
 
-As of 2026-09-06, the independent implementation has a fully validated Stage
+As of 2026-09-07, the independent implementation has a fully validated Stage
 4C acceptance candidate, a separate Stage 4D/5A F0 extraction-contract
-candidate, a query-only F0 closure workbench, and a fixture-first F1A parser
-contract. The workbench and fixture gate pass, but source hydration,
-specialized coverage, and historical materialization remain intentionally
-blocked by open evidence gates. The installed live database remains on the
-prior Stage 4B snapshot until replacement is explicitly authorized.
+candidate, a query-only F0 closure workbench, a fixture-first F1A parser
+contract, and a sealed F0.2 terminal-distribution overlay. All four historical
+bankruptcy/liquidation reviews are now supported by hash-sealed SEC evidence
+and calculate to explicit zero recoveries. Source hydration, specialized
+coverage, and historical materialization remain intentionally blocked by the
+other open evidence gates. The installed live database remains on the prior
+Stage 4B snapshot until replacement is explicitly authorized.
 `BASIC_MATERIALS_IMPLEMENTATION_PLAN.md` remains the living design authority
 and must be updated with every code, schema, data-contract, command, or gate
 change.
 
 | Stage | Status | Evidence |
 |---|---|---|
-| 0 - independence | Implemented | Strict config, forbidden-import scan across 60 Python files, owned database/output/cache paths, closed promotion flags |
-| 1 - storage and sources | F0 candidate implemented | Checksummed schema v8 ledger; 26-row package source registry; owned specialized metric/source, content-addressed document, and resumable parser ledgers |
+| 0 - independence | Implemented | Strict config, forbidden-import scan across 70 Python files, owned database/output/cache paths, closed promotion flags |
+| 1 - storage and sources | F0.2 candidate implemented | Checksummed schema v9 ledger; 27-row package source registry; owned specialized metric/source, content-addressed document, resumable parser, and terminal-distribution review ledgers |
 | 2 - current universe | Implemented | Atomic 134-row loader, eight exact cohorts, normalized identifiers, policy-derived calibration groups, validation reports |
 | 2B - deactivated candidate intake | Implemented as a review queue | 72 candidates across all eight cohorts; checksummed manifest; 71 provider assets; 16 event URLs; all promotion/calibration flags remain 0 |
 | 2B - historical reconciliation pilot | Implemented and calibration-blocked | 20 effective-dated historical memberships; four aliases; 22 security events; 20 terminal terms; all eight cohorts represented |
-| 3 - adjusted prices and terminal returns | Implemented; engineering gate passed | Clean candidate build has 158 assets/162 roles; 492,653 bars; 5,388 actions; XLB/SPY; 134 feature rows; 16 resolved and four pending terminal events |
+| 3 - adjusted prices and terminal returns | Implemented; F0.2 terminal gate passed | Clean candidate build has 158 assets/162 roles; 492,653 bars; 5,388 actions; XLB/SPY; 134 feature rows; 20 resolved terminal events, including four reviewed zero recoveries |
 | 4A - financial contract and reporting profiles | Implemented; checkpointed | Commit `4b6bce4`; immutable policy/manifest/concept map; 154 SEC-backed profiles; 22 metrics; 66 mappings |
 | 4B - SEC facts, FX, and one-cutoff common features | Implemented; engineering gate passed | Exact acceptance-time history; 5,754 filings; 310,109 raw facts; 239,747 canonical facts; 22,851 FX rows; 134 current feature/coverage rows |
 | 4C - OGC and listed-security-unit remediation | Implemented and independently validated; live promotion pending | OGC audited HTML route; 47 effective-dated ratios; five exact ADS conversions; schema v7; zero validation errors/warnings; deterministic cache-only replay |
-| 4D - historical PIT feasibility preflight | Implemented; feasibility passed; PIT write blocked | 93 monthly last-session dates from 2019-01-31 through 2026-09-04; three fixed chronological blocks; deterministic input seals; database unchanged; seven explicit blockers |
-| 5A - specialized metric, applicability, and all-source census | Structurally implemented; F0.1 workbench operational; review/source seal open | 64 metrics, 16 operand links, exact 9,856-row identity-metric matrix, 5,640-row eight-family source census; query-only queues for 52 candidate, 4 distribution, 134 membership, and 980 applicability reviews; 5,163 source rows de-duplicated to 4,244 acquisition units |
+| 4D - historical PIT feasibility preflight | Implemented; feasibility passed; PIT write blocked | 93 monthly last-session dates from 2019-01-31 through 2026-09-04; three fixed chronological blocks; deterministic input seals; database unchanged; six explicit blockers |
+| 5A - specialized metric, applicability, and all-source census | Structurally implemented; F0.2 terminal queue closed; other review/source seals open | 64 metrics, 16 operand links, exact 9,856-row identity-metric matrix, 5,640-row eight-family source census; query-only queues now show 52 candidate, 0 distribution, 134 membership, and 980 applicability reviews; 5,163 source rows de-duplicated to 4,244 acquisition units |
 | 6B - one-pass specialized capture and coverage closure | F1A parser contract/fixture gate implemented; production capture not started | Four adapters cover all 32 table families; 8/8 synthetic guards pass; one full plus one changed-evidence residual is the maximum per contract version; production execution, accepted observations, and coverage remain closed |
 | 6C - unified historical point-in-time panel | Blocked by Stage 6B coverage | Materialize common, cycle, positioning, and specialized features together once from 2019-01-01 |
 | 7+ - diagnostics, calibration, scoring, ranking | Not started | No calibrated score, published rank, or portfolio output exists |
@@ -123,15 +125,14 @@ at least 99.89% in each fixed block. Role-eligible common-financial feasibility
 is 71.18% in 2019-2020, 70.67% in 2021-2022, and 75.79% from 2023 forward.
 These ratios are feasibility diagnostics, not permission to build the panel.
 
-Historical PIT materialization remains blocked by exactly:
+After F0.2, historical PIT materialization remains blocked by exactly:
 
 1. 52 unresolved deactivated-candidate decisions;
-2. four unresolved terminal distributions;
-3. historical membership reconstruction for all 134 current-snapshot names;
-4. 980 issuer-selective applicability reviews;
-5. 5,163 source rows requiring discovery or content hydration;
-6. the not-yet-executed all-document parser work ledger; and
-7. specialized coverage, which cannot be measured until accepted observations
+2. historical membership reconstruction for all 134 current-snapshot names;
+3. 980 issuer-selective applicability reviews;
+4. 5,163 source rows requiring discovery or content hydration;
+5. the not-yet-executed all-document parser work ledger; and
+6. specialized coverage, which cannot be measured until accepted observations
    exist.
 
 The full evidence packs are under
@@ -166,6 +167,44 @@ there are zero accepted specialized observations. The applicable-pair current
 breadth and 2019-forward historical-depth ratios can be calculated only after
 F0 seals, source hydration, document compilation, and F2 extraction.
 
+## F0.2 terminal-distribution closure
+
+F0.2 is implemented in the isolated candidate at
+`output/basic_materials/verification_f02_20260907/basic_materials.sqlite`.
+The source F0 database was copied only after its SHA-256 matched
+`494d906ac1b968f6c50ff5248998db387ae199d7ad45d3e101b99934a8fa0605`.
+The new candidate migrated append-only to schema v9 and has SHA-256
+`98eb3facaf2efb96263821147db668411a100cd064b92e61d90009ea4eb9a25e`.
+The installed live database remains schema v6 and was not mutated.
+
+The additive overlay preserves the immutable Stage 3 20-rule CSV and records
+four separate review rows plus five exact SEC source payloads:
+
+- ANV: the confirmed plan states that existing equity receives no recovery;
+- MCP: the confirmed/effective plan cancels common equity with no
+  distributions;
+- BIOA: the court-appointed Monitor states that liquidation leaves no residual
+  value for equity investors; and
+- GMO: the issuer's confirmation release cancels existing equity, corroborated
+  by the filed restructuring term sheet's cancellation of common shares.
+
+`basic_materials_terminal_distribution_policy_v1` and manifest SHA-256
+`8edf81724a052a93ee890844772b6f53645dd9d8b44a8014b4f5128dee4549d4`
+bind event/ticker scope, source URLs, document dates, cache paths, byte sizes,
+payload hashes, evidence locators, short evidence phrases, review dates, and
+the exact Stage 3 base-contract hashes. The loader refuses changed source
+bytes, absent phrases, stale base hashes, non-bankruptcy rules, partial source
+linkage, conflicting prior reviews, or an unapproved live-database target.
+
+The cache-only apply and independent read-only replay both passed. Terminal
+reconciliation now reports 20/20 resolved events: nine fixed cash, six stock
+conversion, one mixed prorated, and four bankruptcy distributions at terminal
+value 0. Overlay-aware Stage 3 validation passes with zero errors and a 100%
+current-market gate. The query-only F0 rerun reports four blockers and zero
+open terminal distributions; Stage 4D reports six blockers and leaves PIT
+materialization false. Integrity and foreign-key checks pass, and all
+calibration, score, rank, and portfolio flags remain closed.
+
 ## Controlled limitations and next gates
 
 - ARIS and MTA now have governed direct-share ratios but remain non-rank-ready
@@ -173,8 +212,9 @@ F0 seals, source hydration, document compilation, and F2 extraction.
   to stale observations. AUGO and TII remain rank-ready. All five are active.
 - RMIX is an active domestic interim filer and correctly uses direct issuer
   shares; it is not part of the 47 foreign-ratio contract.
-- ANV, MCP, GMO, and BIOA retain null terminal values pending verified
-  old-equity bankruptcy/liquidation distributions.
+- ANV, MCP, GMO, and BIOA now have evidence-backed terminal distribution and
+  terminal value 0 in the isolated F0.2 candidate. This closes only the
+  terminal-event gate; it does not make any membership calibration-eligible.
 - Only 20 of the 72 deactivated candidates are in the governed historical
   pilot; the remaining 52 require separate promotion evidence.
 - The formal specialized registry, complete applicability matrix, source
@@ -187,8 +227,9 @@ F0 seals, source hydration, document compilation, and F2 extraction.
 
 ## Quality, recovery, and deployment state
 
-- The full package suite passes 45 tests and Ruff is clean.
-- The independence validator passes across 65 Python files.
+- The full package suite passes 49 tests and Ruff is clean.
+- The independence validator passes across 70 Python files and reports source
+  registry v6 with 27 sources.
 - The fresh Stage 0-4C build and cache-only replay reproduce snapshot
   `basic_materials_sec:2026-09-05:2cf5219d8855588066ba`; Stage 4C validation
   reports zero errors and zero warnings.
@@ -204,16 +245,20 @@ F0 seals, source hydration, document compilation, and F2 extraction.
   `output/basic_materials/verification_f0_20260906/basic_materials.sqlite`
   with SHA-256
   `494d906ac1b968f6c50ff5248998db387ae199d7ad45d3e101b99934a8fa0605`.
+- The F0.2 terminal-closure candidate is at
+  `output/basic_materials/verification_f02_20260907/basic_materials.sqlite`
+  with SHA-256
+  `98eb3facaf2efb96263821147db668411a100cd064b92e61d90009ea4eb9a25e`.
 - Live replacement was not performed because it requires explicit deployment
   authorization. No Stage 4C claim in this document implies that the current
   live file has already been replaced.
 
-The next bounded execution slice is evidence-backed F0 closure, not a
+The next bounded execution slice is evidence-backed F0.3 closure, not a
 historical build or scoring. Use the generated queues to resolve/reject the 52
-historical candidates and four terminal distributions first; reconstruct
-effective-dated history for the 134 current names; complete the 980
-applicability reviews; then approve and hydrate the de-duplicated source plan.
-After those inputs are hash-sealed, F1B compiles each unique content hash once
-and expands reviewed golden fixtures. F2 then performs one resumable
-all-metric pass, parse-free review, and at most one changed-evidence residual
-pass. Only Stage 6C may build the unified historical PIT panel.
+historical candidates, reconstruct effective-dated history for the 134 current
+names, and complete the 980 applicability reviews; then approve and hydrate
+the de-duplicated source plan. After those inputs are hash-sealed, F1B compiles
+each unique content hash once and expands reviewed golden fixtures. F2 then
+performs one resumable all-metric pass, parse-free review, and at most one
+changed-evidence residual pass. Only Stage 6C may build the unified historical
+PIT panel.

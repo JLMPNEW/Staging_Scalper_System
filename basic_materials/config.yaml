@@ -30,6 +30,9 @@ paths:
   market_data_manifest: data/basic_materials_market_data_manifest.yaml
   market_instruments_csv: system_csvs/basic_materials_market_instruments.csv
   terminal_return_rules_csv: system_csvs/basic_materials_terminal_return_rules.csv
+  terminal_distribution_policy: data/basic_materials_terminal_distribution_policy.yaml
+  terminal_distribution_manifest: data/basic_materials_terminal_distribution_manifest.yaml
+  terminal_distribution_reviews_csv: system_csvs/basic_materials_terminal_distribution_reviews.csv
   financial_data_policy: data/basic_materials_financial_data_policy.yaml
   financial_data_manifest: data/basic_materials_financial_data_manifest.yaml
   financial_concept_map: data/basic_materials_financial_concept_map.yaml

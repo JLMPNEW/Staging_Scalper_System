@@ -1,4 +1,4 @@
-registry_version: basic_materials_source_registry_v5
+registry_version: basic_materials_source_registry_v6
 sources:
   - source_id: basic_materials_current_universe
     stage: universe
@@ -55,6 +55,13 @@ sources:
     category: terminal_return_rules
     description: Reviewed terminal-return outcome classes, allocation weights, and unresolved-distribution dispositions.
     point_in_time_role: effective_dated_terminal_return_rule
+    active: true
+  - source_id: basic_materials_terminal_distribution_review
+    stage: f0_2_terminal_distribution_closure
+    provider: sec_edgar
+    category: terminal_distribution_evidence
+    description: Hash-sealed primary-source evidence and reviewed old-equity bankruptcy distributions.
+    point_in_time_role: reviewed_terminal_distribution_overlay
     active: true
   - source_id: norgate_us_equities_total_return
     stage: stage_3_adjusted_market_data

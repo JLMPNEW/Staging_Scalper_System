@@ -10,8 +10,8 @@ output/cache paths under `output/basic_materials`, a database named
 ## Stage 1 - database and source contract
 
 Pass requires an empty or correctly identified Basic Materials database,
-matching append-only migration checksums through schema v8, the package-owned
-26-source registry, and byte-for-byte authoritative manifests before mutation.
+matching append-only migration checksums through schema v9, the package-owned
+27-source registry, and byte-for-byte authoritative manifests before mutation.
 An unidentified non-empty database is rejected. An older owned database may
 advance only through every missing migration in ascending order; a migration
 name or checksum mismatch fails before mutation.
@@ -85,8 +85,40 @@ Feature pass requires one row per current security, adjusted-return inputs,
 raw close/volume for liquidity, governed benchmarks, on-or-before-as-of data,
 and explicit quality. The clean 2026-09-05 Stage 4C acceptance build passes at
 136/136 gate roles with 492,653 bars, 5,388 actions, 4,446 sessions, 134 feature
-rows, 16 resolved terminal events, and four pending distributions. Calibration
-and portfolio flags remain false.
+rows, 16 initially calculable terminal events, and four explicitly pending
+distributions. F0.2 subsequently closes those four from primary evidence;
+calibration and portfolio flags remain false.
+
+## F0.2 - terminal-distribution evidence overlay
+
+Pass requires an additive contract bound to the exact Stage 3 policy,
+manifest, and 20-rule CSV hashes. The base Stage 3 CSV remains immutable.
+Exactly ANV, MCP, GMO, and BIOA may be reviewed, every loaded base rule must be
+a pending `bankruptcy_distribution` with zero cash/stock weights, and event
+ticker identity must match.
+
+Every conclusion requires a package-owned review row, an exact HTTPS SEC URL,
+document date, content-addressed cache path, byte size, SHA-256, evidence
+locator, short evidence phrase present in the sealed bytes, review date,
+source-registry lineage, and row-level contract hash. Zero recovery is valid
+only when the reviewed status explicitly authorizes value 0. Missing, changed,
+partial, conflicting, or noncash evidence remains unresolved; it is never
+coerced to zero.
+
+Application pass requires schema v9, atomic insertion of four review rows and
+five source payloads, idempotent replay, preservation across a Stage 3 base
+contract reload, and recalculation of all 20 terminal events. Read-only replay
+must reproduce four `resolved_bankruptcy_distribution` rows with distribution
+component and terminal value 0, no future-price use, zero unresolved terminal
+events, valid foreign keys, and all downstream gates closed. The configured
+live database is rejected by default.
+
+Implementation evidence (2026-09-07): policy v1 and manifest SHA-256
+`8edf81724a052a93ee890844772b6f53645dd9d8b44a8014b4f5128dee4549d4`
+pass cache-only apply and independent read-only replay. The isolated schema-v9
+candidate resolves 20/20 terminal events and overlay-aware Stage 3 validation
+passes with zero errors and a 100% current-market gate. The live schema-v6
+database was not mutated.
 
 ## Stage 4A - financial contract and reporting-profile census
 
@@ -184,12 +216,13 @@ source gap must be classified and included in the eventual Stage 6C partition
 plan. Pass requires deterministic counts and input hashes, zero streamed
 future-availability violations, and a matching cache-only preflight.
 
-Implementation evidence (2026-09-06): the isolated F0 candidate froze 93 dates
+Implementation evidence (2026-09-07): the isolated F0.2 candidate froze 93 dates
 from 2019-01-31 through 2026-09-04 across three chronological blocks. Source
 history feasibility passed and the database remained unchanged. Historical PIT
-materialization did not pass: 52 candidate decisions, four terminal
-distributions, 134 current-name membership histories, and downstream Stage
-5A/6B gates remain open. A feasibility pass is not a panel-write authorization.
+materialization did not pass: 52 candidate decisions, 134 current-name
+membership histories, and downstream Stage 5A/6B gates remain open. Terminal
+distributions are 0 open. A feasibility pass is not a panel-write
+authorization.
 
 ## Stage 5A and Stage 6B - specialized source and coverage closure
 
@@ -197,7 +230,7 @@ Stage 5A identifies and freezes the full specialized discovery set, supporting
 operands, formulas, definition variants, table families, exact current-plus-
 historical ticker-by-metric applicability, source birthdates, and the complete
 declared SEC/IR/local-exchange/technical-report source census. The remaining
-deactivated-candidate and terminal-event scope must be closed before the final
+deactivated-candidate and membership scope must be closed before the final
 parser universe seal.
 
 Stage 6B hydrates the sealed source manifest into Basic Materials-owned
@@ -217,7 +250,7 @@ issuer-period coverage from 2019 forward and 60% in each fixed chronological
 block, explicit evidence states for all gaps, and zero unresolved accepted-
 store conflicts. Every specialized score weight remains zero.
 
-Implementation evidence (2026-09-06): schema v8 and source-registry v5 are
+Implementation evidence (2026-09-07): schema v9 and source-registry v6 are
 implemented. The Stage 5A candidate has 64 metric definitions, 16 operand
 links, all 9,856 required identity-metric rows, and all 1,232 required
 identity-source-family accounting pairs. Structural validation has zero errors.
@@ -235,6 +268,12 @@ fixtures. The maximum is one full plus one changed-evidence residual physical
 pass per parser-contract version. This passes the control-plane fixture gate
 only; production execution is false and zero accepted observations means
 breadth/depth coverage is not yet measurable.
+
+F0.2 implementation evidence (2026-09-07): the terminal queue is closed from
+five hash-sealed SEC documents. The query-only F0 rerun has four blockers and
+`terminal_distributions_open=0`. The Stage 4D rerun has six blockers and
+`unresolved_terminal_distributions=0`. Parser work and accepted specialized
+observations remain empty, so PIT materialization remains false.
 
 ## Stage 6C - single unified historical PIT panel
 

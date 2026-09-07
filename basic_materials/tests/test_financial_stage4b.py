@@ -137,7 +137,7 @@ def test_stage4b_policy_has_exact_exception_and_pilot_contract() -> None:
     }
 
 
-def test_schema_v5_migrates_to_v8_with_remediation_and_extraction_contract(tmp_path: Path) -> None:
+def test_schema_v5_migrates_to_v9_with_remediation_and_review_contract(tmp_path: Path) -> None:
     conn = connect(tmp_path / "basic_materials.sqlite")
     try:
         migrations = (
@@ -166,8 +166,8 @@ def test_schema_v5_migrates_to_v8_with_remediation_and_extraction_contract(tmp_p
         )
         conn.commit()
         result = init_db(conn)
-        assert result["schema_version"] == 8
-        assert result["migrations_applied"] == [6, 7, 8]
+        assert result["schema_version"] == 9
+        assert result["migrations_applied"] == [6, 7, 8, 9]
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
             "AND name='dim_financial_profile_resolution'"
