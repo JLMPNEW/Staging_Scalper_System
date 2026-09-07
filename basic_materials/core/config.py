@@ -61,6 +61,9 @@ class PathConfig:
     security_share_ratios_csv: Path
     reporting_profiles_csv: Path
     reporting_overrides_csv: Path
+    specialized_metric_registry: Path
+    specialized_source_policy: Path
+    historical_pit_preflight_policy: Path
 
 
 @dataclass(frozen=True)
@@ -238,6 +241,9 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
             "security_share_ratios_csv",
             "reporting_profiles_csv",
             "reporting_overrides_csv",
+            "specialized_metric_registry",
+            "specialized_source_policy",
+            "historical_pit_preflight_policy",
         },
         "paths",
     )
@@ -310,6 +316,17 @@ def load_config(path: str | Path | None = None) -> BasicMaterialsConfig:
         ),
         reporting_overrides_csv=_resolve_path(
             paths_raw["reporting_overrides_csv"], base, "paths.reporting_overrides_csv"
+        ),
+        specialized_metric_registry=_resolve_path(
+            paths_raw["specialized_metric_registry"], base, "paths.specialized_metric_registry"
+        ),
+        specialized_source_policy=_resolve_path(
+            paths_raw["specialized_source_policy"], base, "paths.specialized_source_policy"
+        ),
+        historical_pit_preflight_policy=_resolve_path(
+            paths_raw["historical_pit_preflight_policy"],
+            base,
+            "paths.historical_pit_preflight_policy",
         ),
     )
 
@@ -481,6 +498,9 @@ def validate_config_contract(config: BasicMaterialsConfig) -> None:
         ("financial_concept_map", config.paths.financial_concept_map),
         ("financial_ingestion_policy", config.paths.financial_ingestion_policy),
         ("security_ratio_policy", config.paths.security_ratio_policy),
+        ("specialized_metric_registry", config.paths.specialized_metric_registry),
+        ("specialized_source_policy", config.paths.specialized_source_policy),
+        ("historical_pit_preflight_policy", config.paths.historical_pit_preflight_policy),
     ):
         if not _is_within(path, expected_data_root):
             raise ConfigError(f"paths.{label} must be owned by basic_materials/data")

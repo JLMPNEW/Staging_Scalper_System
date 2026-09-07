@@ -10,8 +10,8 @@ output/cache paths under `output/basic_materials`, a database named
 ## Stage 1 - database and source contract
 
 Pass requires an empty or correctly identified Basic Materials database,
-matching append-only migration checksums through schema v7, the package-owned
-18-source registry, and byte-for-byte authoritative manifests before mutation.
+matching append-only migration checksums through schema v8, the package-owned
+26-source registry, and byte-for-byte authoritative manifests before mutation.
 An unidentified non-empty database is rejected. An older owned database may
 advance only through every missing migration in ascending order; a migration
 name or checksum mismatch fails before mutation.
@@ -166,14 +166,14 @@ The isolated 2026-09-05 acceptance build passes with 5,754 filings, 310,109 raw
 facts, 239,747 canonical facts, 22,851 FX rows, 47 ratios, and 134 current
 feature/coverage rows. Quality is 95 full, 29 partial, 9 insufficient, and 1
 stale; 50 rows are rank-ready and 87 valuation-ready. Validation has zero
-errors and zero warnings, the cache-only replay is deterministic, 38 tests
-pass, and Ruff/independence checks pass. Live file replacement is a separate
+errors and zero warnings, the cache-only replay is deterministic, and the
+current 41-test suite plus Ruff/independence checks pass. Live file replacement is a separate
 authorization boundary.
 
 ## Stage 4D - 2019-forward historical feasibility preflight
 
 Source-history presence is not panel completion. Stage 4D freezes the candidate
-monthly or 21-session dates beginning no earlier than 2019-01-01 and performs
+monthly last-XNYS-session dates beginning no earlier than 2019-01-01 and performs
 read-only membership, filing-availability, amendment, FX, market, security-
 ratio, and terminal-event feasibility checks. It retains earlier source
 history for warm-up and TTM calculations.
@@ -183,6 +183,13 @@ Current 2025/2026 ratio evidence cannot be backfilled to 2019. Every historical
 source gap must be classified and included in the eventual Stage 6C partition
 plan. Pass requires deterministic counts and input hashes, zero streamed
 future-availability violations, and a matching cache-only preflight.
+
+Implementation evidence (2026-09-06): the isolated F0 candidate froze 93 dates
+from 2019-01-31 through 2026-09-04 across three chronological blocks. Source
+history feasibility passed and the database remained unchanged. Historical PIT
+materialization did not pass: 52 candidate decisions, four terminal
+distributions, 134 current-name membership histories, and downstream Stage
+5A/6B gates remain open. A feasibility pass is not a panel-write authorization.
 
 ## Stage 5A and Stage 6B - specialized source and coverage closure
 
@@ -205,6 +212,15 @@ core applicable-pair coverage in every cohort, at least 70% core historical
 issuer-period coverage from 2019 forward and 60% in each fixed chronological
 block, explicit evidence states for all gaps, and zero unresolved accepted-
 store conflicts. Every specialized score weight remains zero.
+
+Implementation evidence (2026-09-06): schema v8 and source-registry v5 are
+implemented. The Stage 5A candidate has 64 metric definitions, 16 operand
+links, all 9,856 required identity-metric rows, and all 1,232 required
+identity-source-family accounting pairs. Structural validation has zero errors.
+The gate is not sealed because 980 applicability rows require issuer review and
+5,163 applicable source rows remain unhydrated or undiscovered. Parser work and
+accepted observation ledgers remain empty by design. These are hard blockers,
+not warnings and not permission to reduce coverage denominators.
 
 ## Stage 6C - single unified historical PIT panel
 

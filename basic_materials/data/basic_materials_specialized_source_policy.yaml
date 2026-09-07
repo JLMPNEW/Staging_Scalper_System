@@ -1,0 +1,51 @@
+policy_version: basic_materials_specialized_source_policy_v1
+contract_as_of_date: '2026-09-06'
+model_family: basic_materials
+sector: Basic Materials
+state: stage5a_source_census_open_scoring_blocked
+target_history_start_date: '2019-01-01'
+source_census_start_date: '2017-01-01'
+allowed_sec_forms: [10-K, 10-K/A, 10-KT, 10-KT/A, 10-Q, 10-Q/A, 20-F, 20-F/A, 40-F, 40-F/A, 6-K, 6-K/A]
+source_family_priority: [sec_filing, issuer_ir, local_exchange, technical_report, reserve_resource, archived_issuer, commodity_market, positioning_market]
+source_families:
+  sec_filing: {source_id: sec_inline_xbrl_fallback, document_role: regulatory_filing, availability_field: accepted_at, applicability_rule: all_issuers}
+  issuer_ir: {source_id: issuer_ir_specialized_disclosures, document_role: issuer_supplement, availability_field: issuer_publication_timestamp, applicability_rule: all_issuers}
+  local_exchange: {source_id: local_exchange_specialized_disclosures, document_role: home_exchange_filing, availability_field: exchange_publication_timestamp, applicability_rule: foreign_private_issuers}
+  archived_issuer: {source_id: archived_issuer_specialized_disclosures, document_role: archived_original, availability_field: original_publication_timestamp, applicability_rule: historical_issuers}
+  technical_report: {source_id: technical_report_specialized_disclosures, document_role: technical_report, availability_field: filing_or_publication_timestamp, applicability_rule: mining_cohorts}
+  reserve_resource: {source_id: technical_report_specialized_disclosures, document_role: reserve_resource_statement, availability_field: filing_or_publication_timestamp, applicability_rule: reserve_resource_cohorts}
+  commodity_market: {source_id: commodity_market_pit, document_role: commodity_observation, availability_field: source_release_timestamp, applicability_rule: cohort_driver_contract}
+  positioning_market: {source_id: positioning_market_pit, document_role: positioning_observation, availability_field: report_publication_timestamp, applicability_rule: cohort_driver_contract}
+mining_cohorts: [mining_royalty_streaming, precious_metals_producers, industrial_metals_mining]
+reserve_resource_cohorts: [mining_royalty_streaming, precious_metals_producers, industrial_metals_mining, building_materials]
+commodity_drivers:
+  steel_producers_processors: [hot_rolled_coil_steel, ferrous_scrap, iron_ore, metallurgical_coal]
+  specialty_chemicals_materials: [crude_oil, natural_gas, industrial_production]
+  mining_royalty_streaming: [gold, silver, copper]
+  precious_metals_producers: [gold, silver, copper, diesel_fuel]
+  industrial_metals_mining: [copper, aluminum, lithium, uranium, iron_ore, manganese, silicon_metal]
+  commodity_chemicals: [crude_oil, natural_gas, ethylene, propylene, methanol, titanium_dioxide_feedstock]
+  building_materials: [diesel_fuel, natural_gas, construction_spending, housing_starts]
+  agricultural_inputs_crop_science: [natural_gas, ammonia, urea, potash, phosphate, corn, soybeans, wheat]
+positioning_drivers: [gold, silver, copper, aluminum, crude_oil, natural_gas, corn, soybeans, wheat]
+census_controls:
+  enumerate_all_sec_filings_before_hydration: true
+  enumerate_ir_and_home_exchange_before_hydration: true
+  enumerate_technical_and_reserve_sources_before_hydration: true
+  retain_amendments: true
+  preserve_source_metadata_hash_separately_from_content_hash: true
+  no_document_hash_from_metadata_payload: true
+  require_terminal_reason_when_unavailable: true
+  require_explicit_not_applicable_rows: true
+hydration_controls:
+  content_address_algorithm: sha256
+  compile_unique_content_once: true
+  parser_execution_during_stage5a: false
+  maximum_full_parse_attempts_per_content_hash: 1
+  maximum_residual_parse_attempts_per_content_hash: 1
+  policy_only_review_requires_zero_source_calls: true
+required_flags:
+  scoring_eligible: false
+  calibration_eligible: false
+  historical_feature_materialization_allowed: false
+  portfolio_candidate_gate: false

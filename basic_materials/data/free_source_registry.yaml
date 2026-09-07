@@ -1,4 +1,4 @@
-registry_version: basic_materials_source_registry_v4
+registry_version: basic_materials_source_registry_v5
 sources:
   - source_id: basic_materials_current_universe
     stage: universe
@@ -111,6 +111,62 @@ sources:
     category: listed_security_unit_conversion
     description: Reviewed effective-dated issuer-share per traded-security ratios supported by SEC filing evidence.
     point_in_time_role: effective_dated_security_unit_conversion
+    active: true
+  - source_id: basic_materials_specialized_metric_policy
+    stage: stage_5a_specialized_contract
+    provider: basic_materials_package
+    category: specialized_metric_policy
+    description: Versioned direct, operand, derived, variant, unit, period, and applicability contract.
+    point_in_time_role: versioned_specialized_definition_contract
+    active: true
+  - source_id: basic_materials_specialized_source_census
+    stage: stage_5a_specialized_contract
+    provider: basic_materials_package
+    category: specialized_source_scope
+    description: Complete declared source universe and availability-timestamp contract for one-pass extraction.
+    point_in_time_role: source_scope_and_terminal_disposition_ledger
+    active: true
+  - source_id: issuer_ir_specialized_disclosures
+    stage: stage_6b_specialized_capture
+    provider: issuer_investor_relations
+    category: issuer_specialized_disclosure
+    description: Issuer earnings releases, presentations, operating tables, and supplemental data.
+    point_in_time_role: issuer_publication_timestamp_bounded_disclosure
+    active: true
+  - source_id: local_exchange_specialized_disclosures
+    stage: stage_6b_specialized_capture
+    provider: issuer_home_exchange
+    category: home_market_disclosure
+    description: Foreign-issuer home-exchange financial and operating disclosures.
+    point_in_time_role: home_exchange_publication_timestamp_bounded_disclosure
+    active: true
+  - source_id: archived_issuer_specialized_disclosures
+    stage: stage_6b_specialized_capture
+    provider: reviewed_public_archive
+    category: archived_issuer_disclosure
+    description: Hash-sealed archived issuer material used only when the original source is unavailable.
+    point_in_time_role: original_publication_timestamp_with_archive_retrieval_lineage
+    active: true
+  - source_id: technical_report_specialized_disclosures
+    stage: stage_6b_specialized_capture
+    provider: issuer_or_regulatory_repository
+    category: reserve_resource_and_technical_report
+    description: Filed or issuer-published reserve, resource, mine-plan, and technical reports.
+    point_in_time_role: filed_or_publication_timestamp_bounded_technical_disclosure
+    active: true
+  - source_id: commodity_market_pit
+    stage: stage_5a_cycle_contract
+    provider: reviewed_public_commodity_source
+    category: commodity_market_history
+    description: Reserved point-in-time commodity price and curve observations with release/source timestamps.
+    point_in_time_role: effective_dated_commodity_market_observation
+    active: true
+  - source_id: positioning_market_pit
+    stage: stage_5a_cycle_contract
+    provider: reviewed_public_positioning_source
+    category: commodity_positioning_history
+    description: Reserved point-in-time positioning observations with report and publication timestamps.
+    point_in_time_role: publication_bounded_positioning_observation
     active: true
   - source_id: yahoo_fx_rates
     stage: stage_4_financial_data

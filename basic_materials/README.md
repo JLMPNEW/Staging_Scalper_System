@@ -5,7 +5,7 @@ and ranking package. It owns its configuration, policies, source registry,
 SQLite schema, caches, reports, commands, and tests. It neither imports another
 sector implementation nor writes to another sector's database or output tree.
 
-## Implemented Stage 4C acceptance candidate
+## Implemented Stage 4C and F0 extraction-contract candidates
 
 The package currently provides:
 
@@ -17,8 +17,10 @@ The package currently provides:
 - a v2 market contract over 158 Norgate assets and 162 roles, with 492,653
   adjusted bars, 5,388 actions, XLB/SPY, 4,446 calendar sessions, and 134
   technical feature rows in the clean acceptance build;
-- schema v7 and an 18-source registry in the dedicated
-  `basic_materials.sqlite` database design;
+- schema v8 and a 26-source registry in the dedicated
+  `basic_materials.sqlite` database design, including package-owned
+  specialized metric, source census, content-addressed document, and parser
+  work/evidence ledgers;
 - an immutable 154-profile SEC reporting census, 22 canonical financial
   metrics, and 66 reviewed US-GAAP/IFRS concept mappings;
 - immutable SEC filing/package, audited-HTML, security-ratio, and FX caches
@@ -33,8 +35,10 @@ The package currently provides:
 - an OGC audited IFRS fallback with 42 tied-out 2024/2025 observations;
 - 134 current common financial feature rows and 134 coverage/readiness rows;
   and
+- a 64-metric Stage 5A registry, 16 explicit operand links, an exact 9,856-row
+  identity-metric applicability matrix, and a 5,640-row all-source census; and
 - atomic loaders, independent validators, machine-readable evidence reports,
-  38 regression tests, and a clean static check.
+  41 regression tests, and a clean static check.
 
 The validated acceptance snapshot is
 `basic_materials_sec:2026-09-05:2cf5219d8855588066ba`. Stage 4C resolves all
@@ -53,10 +57,11 @@ ratios (issuer shares represented by one traded ADS) are BHP 2, ELVR 10, PKX
 The source layers contain financial, market, and FX observations before
 2019-01-01, but the model-ready financial feature table currently has only one
 as-of date, 2026-09-05. A 2019-forward longitudinal point-in-time feature panel
-is therefore not yet implemented. Stage 4D now performs only a no-write
-historical feasibility preflight. Specialized, commodity, positioning, and
-remaining historical-identity data must reach the frozen coverage gates before
-Stage 6C writes the first unified historical panel.
+is therefore not yet implemented. Stage 4D has frozen and audited 93 monthly
+last-session dates from 2019-01-31 through 2026-09-04 without writing feature
+history. Source history is feasible, but specialized, commodity, positioning,
+membership, and terminal-event data must reach the frozen coverage gates
+before Stage 6C writes the first unified historical panel.
 
 No company score, calibrated ranking, or portfolio candidate is produced yet.
 All memberships remain `calibration_eligible=0`, and both
@@ -66,6 +71,8 @@ The installed live database remains on the previous Stage 4B file until an
 explicit live-replacement authorization is given. The fully validated Stage 4C
 candidate is at
 `output/basic_materials/verification_stage4c_20260906/basic_materials.sqlite`.
+The schema-v8 F0 candidate and its Stage 4D/5A evidence packs are under
+`output/basic_materials/verification_f0_20260906`.
 
 ## Standard run order
 
@@ -87,6 +94,9 @@ python basic_materials/scripts/06_validate_basic_materials_financial_contract.py
 python basic_materials/scripts/08a_load_basic_materials_security_ratios.py
 python basic_materials/scripts/11_run_basic_materials_stage4.py
 python basic_materials/scripts/10_validate_basic_materials_financial_stage.py
+python basic_materials/scripts/12_load_basic_materials_specialized_contract.py --db <isolated-basic_materials.sqlite>
+python basic_materials/scripts/12a_validate_basic_materials_specialized_contract.py --db <isolated-basic_materials.sqlite> --allow-open
+python basic_materials/scripts/11a_preflight_basic_materials_historical_pit.py --db <isolated-basic_materials.sqlite> --allow-blocked
 python basic_materials/scripts/02_validate_basic_materials_universe.py
 python basic_materials/scripts/02c_validate_basic_materials_historical_membership.py
 python -m pytest basic_materials/tests -q
@@ -115,6 +125,11 @@ python basic_materials/scripts/10_validate_basic_materials_financial_stage.py
 ```
 
 Do not use `--allow-partial` for an acceptance run.
+`--allow-open` and `--allow-blocked` only permit diagnostic commands to return
+zero after writing an evidence pack; they do not seal Stage 5A, authorize a
+historical feature write, or change any model-control flag. Omit those switches
+when testing the hard gate itself; the commands then return exit code 2 while
+open blockers remain.
 
 `02d_build_basic_materials_market_instrument_review.py` and
 `04a_build_basic_materials_reporting_profiles.py` are deliberate contract-build
@@ -150,12 +165,18 @@ commands that enforce the filename boundary.
   4A contract evidence pack.
 - `output/basic_materials/stage4c_financial_remediation/<as-of>` is the normal
   Stage 4C SEC, ratio, FX, normalization, feature, and validation evidence root.
+- `output/basic_materials/verification_f0_20260906/stage5a_contract` contains
+  the complete registry, applicability matrix/review queue, source census/gap
+  queue, summary, and artifact hashes.
+- `output/basic_materials/verification_f0_20260906/stage4d_preflight` contains
+  the frozen 93-date schedule, date and chronological-block feasibility,
+  blocker ledger, input seals, no-write result, and artifact hashes.
 
-Next: run the Stage 4D no-write 2019-forward feasibility preflight and freeze
-Stage 5A metric/supporting-operand definitions, variants, applicability, and
-the complete declared source census. Stage 6B then hydrates all selected
-sources into content-addressed storage, compiles each unique document once,
-executes one resumable all-metric parse, and closes high-coverage evidence
-through parse-free review. Stage 6C materializes the common, cycle,
-positioning, and specialized PIT panel once. Every specialized score weight
-remains zero until separate promotion evidence exists.
+Next: close F0 in dependency order—52 deactivated-candidate decisions, four
+terminal distributions, effective-dated history for 134 current-snapshot
+names, 980 issuer-selective applicability reviews, and 5,163 open source rows.
+F1 then hydrates approved sources into content-addressed storage and compiles
+each unique document once. F2 executes one resumable all-metric parse and
+closes high-coverage evidence through parse-free review. Stage 6C materializes
+the common, cycle, positioning, and specialized PIT panel once. Every
+specialized score weight remains zero until separate promotion evidence exists.

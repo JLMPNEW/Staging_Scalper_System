@@ -32,6 +32,7 @@ Implementation ledger:
 | 2026-09-06 | Stage 4B point-in-time fundamentals, FX, and common features | Stage 4A checkpoint commit `4b6bce4`; immutable Stage 4B policy/cache seals; schema v5 fact/resolution/audit extensions and schema v6 performance indexes; 5,754 filings; 310,067 raw facts; 239,705 canonical facts; 22,852 FX rows; 134 feature/coverage rows; governed 14-profile exception resolution; scratch and live idempotency runs | Exact acceptance-time lineage; future-fact exclusion; deterministic source precedence, amendment supersession, TTM and sign rules; zero canonical conflicts and zero missing FX conversions; all Stage 0–4B validators; 36 passing tests | OGC remains explicitly blocked; 48 foreign securities remain valuation-gated pending share/ADR ratios; specialized metrics, survivorship-correct calibration, scoring, ranking, and portfolio gates remain closed |
 | 2026-09-06 | Stage 4C OGC and listed-security-unit remediation | Financial policy v2; schema v7; deterministic audited-HTML parser; exact 47-row SEC-evidenced ratio contract; 42 direct-share and five ADS rows; ratio-aware market-cap lineage; hard OGC/ratio/formula gates; fresh Stage 0-4C acceptance build and cache-only replay | OGC has 42 usable raw and canonical facts and a full current row; zero unresolved ratio-required foreign listings; exact ADS ratios; zero Stage 4C validation errors/warnings; 38 tests and independence/Ruff pass | Live database replacement requires explicit authorization; longitudinal 2019-forward feature panel, specialized metrics, calibration, scoring, ranking, and portfolio gates remain closed |
 | 2026-09-06 | Extraction-first parser and PIT sequence revision | Cross-repository review of the shared parser, Transportation, Consumer Defensive, Technology, Medical Devices, and Biotech; high-coverage gates; all-source census; content-addressed semantic cache; one resumable all-metric run; parse-free review; one unified PIT build | The former common-PIT-before-specialized plan is retired; historical materialization is blocked until specialized source and coverage closure | Stage 5A/6B code and data are not yet implemented; Stage 6C PIT and all calibration/promotion gates remain closed |
+| 2026-09-06 | Stage 4D/5A F0 extraction-contract candidate | Schema v8; source registry v5; 64 specialized metrics; 16 operand links; 9,856-row exact identity-metric accounting matrix; 5,640-row SEC/IR/local-exchange/archive/technical/reserve/commodity/positioning census; content-addressed document and resumable parser ledgers; 93-date read-only PIT feasibility audit | Registry and source policies strict-load; Stage 5A has zero structural errors; every identity is accounted for across all 64 metrics and eight source families; Stage 4D feasibility passed with deterministic hashes and no database mutation; 41 tests, Ruff, and independence pass | Stage 5A is not sealed: 52 historical decisions, four terminal distributions, 134 current-name histories, 980 applicability reviews, 5,163 source rows, parser execution, and specialized coverage remain open; live database and all scoring/calibration/portfolio gates unchanged |
 
 ### Reusable sector-repository build sequence
 
@@ -545,11 +546,17 @@ This bridge is essential. A generic copper or gold signal must not be applied to
 Required tables:
 
 - dim_specialized_metric
-- dim_metric_applicability
+- bridge_specialized_metric_cohort
+- bridge_specialized_metric_operand
+- bridge_specialized_metric_applicability
+- fact_specialized_source_census
+- fact_specialized_document
+- bridge_specialized_source_document
+- fact_specialized_parser_work
 - fact_specialized_metric_candidate
 - fact_specialized_metric_observation
-- feature_specialized_metric
-- fact_metric_adjudication
+- feature_specialized_metric (Stage 6C, not yet created)
+- fact_metric_adjudication (Stage 6B, not yet created)
 
 Each accepted observation must preserve definition variant, unit, scale, period, publication/acceptance timestamp, accession or document ID, document hash, evidence text locator, extraction channel, confidence, review decision, and calibration eligibility.
 
@@ -1891,7 +1898,8 @@ Fresh isolated acceptance and cache-only replay reproduce snapshot
 | Rank-ready / valuation-ready | 50 / 87 |
 | Validation errors / warnings | 0 / 0 |
 
-The package passes 38 tests, Ruff, and the 54-file independence scan. The
+The Stage 4C checkpoint passed 38 tests; the current package passes 41 tests,
+Ruff, and the 60-file independence scan. The
 verified database remains at
 `output/basic_materials/verification_stage4c_20260906/basic_materials.sqlite`.
 Replacing the installed live database is an explicit deployment action and was
@@ -1901,7 +1909,7 @@ Stage 4C passes as a current engineering acceptance candidate. It does not
 authorize historical ratio backfill, calibration, specialized weights,
 score/rank publication, or portfolio use.
 
-### Stage 4D next - historical PIT feasibility preflight only
+### Stage 4D implemented - historical PIT feasibility preflight only
 
 Stage 4B/4C loaded long source histories, but published only one current
 financial-feature date:
@@ -1915,15 +1923,15 @@ financial-feature date:
 | Common financial features | 134 rows at one as-of date: 2026-09-05 |
 
 The historical model-ready time series is therefore not yet aligned with the
-other repositories. Stage 4D must not write a common-only historical feature
-panel that would later be rebuilt after specialized extraction. It performs a
+other repositories. Stage 4D did not write a common-only historical feature
+panel that would later be rebuilt after specialized extraction. It performed a
 read-only feasibility and partition preflight while retaining pre-2019 source
 history for TTM construction and market warm-up.
 
 Build:
 
-- an immutable candidate monthly or 21-session date calendar beginning
-  2019-01-01;
+- an immutable 93-date monthly last-session calendar from 2019-01-31 through
+  2026-09-04;
 - a read-only effective-membership, lifecycle, filing-availability, amendment,
   FX, price, ratio, and terminal-event feasibility matrix;
 - explicit missing historical ratio, filing, currency, market, membership, and
@@ -2762,7 +2770,7 @@ Slice E3 exit condition result: passed as an engineering acceptance candidate.
 The installed live database remains unchanged until explicit replacement
 authorization is provided.
 
-Next slice F0 - Stage 5A metric, universe, and source contract:
+Implemented F0 foundation and remaining closure order - Stage 4D/5A:
 
 1. Resolve or reject the remaining 52 deactivated candidates and finish the
    four pending terminal-distribution treatments so the historical parser
@@ -2780,6 +2788,46 @@ Next slice F0 - Stage 5A metric, universe, and source contract:
    availability timestamps and source-gap dispositions.
 6. Freeze commodity/positioning sources and effective-dated issuer exposure
    contracts.
+
+F0 implementation result on 2026-09-06:
+
+- `core/specialized_contract.py` strict-loads, validates, and atomically loads
+  the metric registry, operand graph, complete identity-metric accounting, and
+  all-source census. It refuses contract replacement after parser evidence
+  exists.
+- `core/historical_pit_preflight.py` opens SQLite query-only, freezes monthly
+  last-XNYS-session dates, evaluates contemporaneous market/common-financial
+  feasibility, hashes membership and source snapshots, and proves database
+  size, timestamp, data version, and every table count remain unchanged.
+- `scripts/12_load_basic_materials_specialized_contract.py`,
+  `12a_validate_basic_materials_specialized_contract.py`, and
+  `11a_preflight_basic_materials_historical_pit.py` provide independent load,
+  read-only validation, and fail-closed preflight entry points.
+- Schema v8 creates the exact specialized metric/cohort/operand/applicability
+  tables, the source census, content-addressed document bridge, resumable work
+  ledger with a two-attempt hard ceiling, candidate evidence store, and
+  zero-weight accepted-observation store.
+- The metric contract contains 64 definitions and 16 operand links. The exact
+  matrix contains 9,856 rows for 154 identities by 64 metrics; 980
+  issuer-selective pairs remain explicitly review-required.
+- The declared source census contains 5,640 rows: 3,874 identified SEC filings,
+  1,289 discovery-required rows, and 477 explicit not-applicable rows. A total
+  of 5,163 applicable rows still require content hydration or discovery.
+- The no-write schedule contains 93 dates in three blocks. Market history is
+  at least 99.89% role-feasible per block and common-financial feasibility is
+  71.18%, 70.67%, and 75.79% by chronological block. Feasibility passed; panel
+  materialization did not.
+- All 41 tests, Ruff, SQLite integrity/foreign-key checks, and the independence
+  gate pass. The isolated database is
+  `output/basic_materials/verification_f0_20260906/basic_materials.sqlite`;
+  the installed live database was not changed.
+
+F0 is not complete. Close its dependencies in this order before F1 production
+hydration: (1) resolve/reject 52 historical candidates, (2) resolve four
+terminal distributions, (3) reconstruct effective-dated history for the 134
+current-snapshot names, (4) adjudicate 980 issuer-selective applicability
+pairs, and (5) discover/freeze every non-SEC, commodity, and positioning source
+plus issuer exposure contract. Re-run Stage 4D after each input seal changes.
 
 Following slice F1 - adapter fixtures, sealed hydration, and document compiler:
 

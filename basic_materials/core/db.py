@@ -14,7 +14,7 @@ from basic_materials import MODEL_FAMILY, SECTOR
 
 
 SCHEMA_OWNER = MODEL_FAMILY
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class DatabaseIdentityError(RuntimeError):
@@ -1175,6 +1175,273 @@ CREATE INDEX IF NOT EXISTS idx_security_share_ratio_ticker
 """
 
 
+SPECIALIZED_METRIC_SQL = r"""
+CREATE TABLE IF NOT EXISTS dim_specialized_metric (
+    metric_id TEXT PRIMARY KEY,
+    metric_role TEXT NOT NULL CHECK (metric_role IN ('direct', 'operand', 'derived')),
+    unit_family TEXT NOT NULL,
+    period_type TEXT NOT NULL CHECK (period_type IN ('duration', 'instant', 'event')),
+    dimension_family TEXT NOT NULL,
+    direction_hint TEXT NOT NULL CHECK (
+        direction_hint IN ('positive', 'negative', 'context_dependent', 'diagnostic')
+    ),
+    definition TEXT NOT NULL,
+    formula TEXT NOT NULL DEFAULT '',
+    definition_variants_json TEXT NOT NULL DEFAULT '[]',
+    plausibility_json TEXT NOT NULL DEFAULT '{}',
+    production_weight REAL NOT NULL CHECK (production_weight = 0),
+    scoring_eligible INTEGER NOT NULL CHECK (scoring_eligible = 0),
+    calibration_eligible INTEGER NOT NULL CHECK (calibration_eligible = 0),
+    source_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id)
+);
+"""
+
+
+SPECIALIZED_SOURCE_CENSUS_SQL = r"""
+CREATE TABLE IF NOT EXISTS bridge_specialized_metric_cohort (
+    metric_id TEXT NOT NULL,
+    cohort_id TEXT NOT NULL,
+    applicability_mode TEXT NOT NULL CHECK (
+        applicability_mode IN ('all_cohort_issuers', 'issuer_selective_review')
+    ),
+    coverage_tier TEXT NOT NULL CHECK (coverage_tier IN ('core', 'supporting', 'optional')),
+    minimum_current_coverage REAL NOT NULL CHECK (
+        minimum_current_coverage >= 0 AND minimum_current_coverage <= 1
+    ),
+    minimum_historical_coverage REAL NOT NULL CHECK (
+        minimum_historical_coverage >= 0 AND minimum_historical_coverage <= 1
+    ),
+    source_families_json TEXT NOT NULL,
+    table_families_json TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY (metric_id, cohort_id),
+    FOREIGN KEY (metric_id) REFERENCES dim_specialized_metric(metric_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS bridge_specialized_metric_operand (
+    derived_metric_id TEXT NOT NULL,
+    operand_metric_id TEXT NOT NULL,
+    operand_role TEXT NOT NULL,
+    required INTEGER NOT NULL CHECK (required IN (0, 1)),
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    PRIMARY KEY (derived_metric_id, operand_metric_id, operand_role),
+    FOREIGN KEY (derived_metric_id) REFERENCES dim_specialized_metric(metric_id) ON DELETE CASCADE,
+    FOREIGN KEY (operand_metric_id) REFERENCES dim_specialized_metric(metric_id),
+    CHECK (derived_metric_id <> operand_metric_id)
+);
+
+CREATE TABLE IF NOT EXISTS bridge_specialized_metric_applicability (
+    security_id INTEGER NOT NULL,
+    metric_id TEXT NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    cohort_id TEXT NOT NULL,
+    applicability_status TEXT NOT NULL CHECK (
+        applicability_status IN ('applicable', 'not_applicable', 'review_required')
+    ),
+    applicability_basis TEXT NOT NULL,
+    reviewed INTEGER NOT NULL CHECK (reviewed IN (0, 1)),
+    review_source_id TEXT NOT NULL,
+    row_sha256 TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY (security_id, metric_id),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (metric_id) REFERENCES dim_specialized_metric(metric_id) ON DELETE CASCADE,
+    FOREIGN KEY (review_source_id) REFERENCES source_registry(source_id),
+    CHECK ((applicability_status = 'review_required' AND reviewed = 0)
+           OR (applicability_status <> 'review_required' AND reviewed = 1))
+);
+
+CREATE TABLE IF NOT EXISTS fact_specialized_source_census (
+    census_key TEXT PRIMARY KEY,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    cohort_id TEXT NOT NULL,
+    source_family TEXT NOT NULL CHECK (
+        source_family IN (
+            'sec_filing', 'issuer_ir', 'local_exchange', 'archived_issuer',
+            'technical_report', 'reserve_resource', 'commodity_market',
+            'positioning_market'
+        )
+    ),
+    source_record_key TEXT NOT NULL,
+    document_role TEXT NOT NULL,
+    accession_number TEXT NOT NULL DEFAULT '',
+    form_type TEXT NOT NULL DEFAULT '',
+    period_end TEXT NOT NULL DEFAULT '',
+    availability_timestamp TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL,
+    discovery_status TEXT NOT NULL CHECK (
+        discovery_status IN (
+            'identified_unhydrated', 'cached_hashed', 'discovery_required',
+            'terminal_unavailable', 'not_applicable'
+        )
+    ),
+    source_metadata_sha256 TEXT NOT NULL DEFAULT '',
+    content_sha256 TEXT NOT NULL DEFAULT '',
+    terminal_reason TEXT NOT NULL DEFAULT '',
+    requested_metric_ids_json TEXT NOT NULL,
+    census_version TEXT NOT NULL,
+    census_sha256 TEXT NOT NULL,
+    production_eligible INTEGER NOT NULL CHECK (production_eligible = 0),
+    calibration_eligible INTEGER NOT NULL CHECK (calibration_eligible = 0),
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    UNIQUE (security_id, source_family, source_record_key),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (source_id) REFERENCES source_registry(source_id),
+    CHECK ((discovery_status = 'cached_hashed' AND length(content_sha256) = 64)
+           OR discovery_status <> 'cached_hashed'),
+    CHECK ((discovery_status = 'terminal_unavailable' AND terminal_reason <> '')
+           OR discovery_status <> 'terminal_unavailable')
+);
+
+CREATE INDEX IF NOT EXISTS idx_specialized_metric_cohort
+    ON bridge_specialized_metric_cohort(cohort_id, coverage_tier, metric_id);
+CREATE INDEX IF NOT EXISTS idx_specialized_applicability_status
+    ON bridge_specialized_metric_applicability(cohort_id, applicability_status, metric_id, ticker);
+CREATE INDEX IF NOT EXISTS idx_specialized_source_status
+    ON fact_specialized_source_census(source_family, discovery_status, cohort_id, ticker);
+CREATE INDEX IF NOT EXISTS idx_specialized_source_availability
+    ON fact_specialized_source_census(ticker, availability_timestamp, source_family);
+"""
+
+
+SPECIALIZED_PARSER_LEDGER_SQL = r"""
+CREATE TABLE IF NOT EXISTS fact_specialized_document (
+    content_sha256 TEXT PRIMARY KEY CHECK (length(content_sha256) = 64),
+    storage_path TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+    media_type TEXT NOT NULL,
+    source_timestamp TEXT NOT NULL,
+    hydration_status TEXT NOT NULL CHECK (
+        hydration_status IN ('cached_hashed', 'compiled', 'terminal_unavailable')
+    ),
+    compiled_text_sha256 TEXT NOT NULL DEFAULT '',
+    decoder_version TEXT NOT NULL DEFAULT '',
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    CHECK ((hydration_status = 'compiled' AND length(compiled_text_sha256) = 64)
+           OR hydration_status <> 'compiled')
+);
+
+CREATE TABLE IF NOT EXISTS bridge_specialized_source_document (
+    census_key TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    relationship TEXT NOT NULL CHECK (relationship IN ('primary', 'exhibit', 'attachment', 'mirror')),
+    created_at_utc TEXT NOT NULL,
+    PRIMARY KEY (census_key, content_sha256),
+    FOREIGN KEY (census_key) REFERENCES fact_specialized_source_census(census_key) ON DELETE CASCADE,
+    FOREIGN KEY (content_sha256) REFERENCES fact_specialized_document(content_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS fact_specialized_parser_work (
+    work_key TEXT PRIMARY KEY,
+    content_sha256 TEXT NOT NULL,
+    adapter_id TEXT NOT NULL,
+    requested_metric_ids_json TEXT NOT NULL,
+    requested_metric_set_sha256 TEXT NOT NULL,
+    work_status TEXT NOT NULL CHECK (
+        work_status IN ('planned', 'running', 'completed', 'failed', 'skipped_terminal')
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0 AND attempt_count <= 2),
+    resume_parent_work_key TEXT,
+    started_at_utc TEXT,
+    completed_at_utc TEXT,
+    error_message TEXT NOT NULL DEFAULT '',
+    run_id TEXT,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (content_sha256) REFERENCES fact_specialized_document(content_sha256),
+    FOREIGN KEY (resume_parent_work_key) REFERENCES fact_specialized_parser_work(work_key),
+    FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS fact_specialized_metric_candidate (
+    candidate_key TEXT PRIMARY KEY,
+    work_key TEXT NOT NULL,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    metric_id TEXT NOT NULL,
+    reported_value_text TEXT NOT NULL,
+    numeric_value REAL,
+    unit TEXT NOT NULL,
+    period_start TEXT NOT NULL DEFAULT '',
+    period_end TEXT NOT NULL,
+    availability_timestamp TEXT NOT NULL,
+    dimension_json TEXT NOT NULL DEFAULT '{}',
+    definition_variant TEXT NOT NULL,
+    evidence_locator_json TEXT NOT NULL,
+    evidence_sha256 TEXT NOT NULL,
+    candidate_status TEXT NOT NULL CHECK (
+        candidate_status IN ('extracted', 'review_required', 'rejected')
+    ),
+    rejection_reason TEXT NOT NULL DEFAULT '',
+    created_at_utc TEXT NOT NULL,
+    FOREIGN KEY (work_key) REFERENCES fact_specialized_parser_work(work_key),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (metric_id) REFERENCES dim_specialized_metric(metric_id),
+    CHECK (availability_timestamp >= period_end)
+);
+
+CREATE TABLE IF NOT EXISTS fact_specialized_metric_observation (
+    observation_key TEXT PRIMARY KEY,
+    candidate_key TEXT NOT NULL,
+    security_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL COLLATE NOCASE,
+    metric_id TEXT NOT NULL,
+    numeric_value REAL NOT NULL,
+    unit TEXT NOT NULL,
+    period_start TEXT NOT NULL DEFAULT '',
+    period_end TEXT NOT NULL,
+    availability_timestamp TEXT NOT NULL,
+    dimension_json TEXT NOT NULL DEFAULT '{}',
+    definition_variant TEXT NOT NULL,
+    observation_status TEXT NOT NULL CHECK (
+        observation_status IN ('accepted', 'conflicted', 'superseded', 'rejected')
+    ),
+    production_weight REAL NOT NULL CHECK (production_weight = 0),
+    scoring_eligible INTEGER NOT NULL CHECK (scoring_eligible = 0),
+    calibration_eligible INTEGER NOT NULL CHECK (calibration_eligible = 0),
+    policy_version TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY (candidate_key) REFERENCES fact_specialized_metric_candidate(candidate_key),
+    FOREIGN KEY (security_id) REFERENCES dim_security(security_id),
+    FOREIGN KEY (metric_id) REFERENCES dim_specialized_metric(metric_id),
+    CHECK (availability_timestamp >= period_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_specialized_work_status
+    ON fact_specialized_parser_work(work_status, content_sha256);
+CREATE INDEX IF NOT EXISTS idx_specialized_candidate_lookup
+    ON fact_specialized_metric_candidate(metric_id, ticker, period_end, availability_timestamp);
+CREATE INDEX IF NOT EXISTS idx_specialized_observation_lookup
+    ON fact_specialized_metric_observation(metric_id, ticker, period_end, availability_timestamp);
+"""
+
+
+SPECIALIZED_EXTRACTION_CONTRACT_SQL = (
+    SPECIALIZED_METRIC_SQL
+    + SPECIALIZED_SOURCE_CENSUS_SQL
+    + SPECIALIZED_PARSER_LEDGER_SQL
+)
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "basic_materials_foundation", FOUNDATION_SQL),
     (2, "basic_materials_historical_reconciliation", HISTORICAL_RECONCILIATION_SQL),
@@ -1183,6 +1450,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (5, "basic_materials_financial_ingestion", FINANCIAL_INGESTION_SQL),
     (6, "basic_materials_financial_performance_indexes", FINANCIAL_PERFORMANCE_SQL),
     (7, "basic_materials_financial_source_and_security_ratio_remediation", FINANCIAL_REMEDIATION_SQL),
+    (8, "basic_materials_specialized_extraction_contract", SPECIALIZED_EXTRACTION_CONTRACT_SQL),
 )
 
 
@@ -1473,5 +1741,15 @@ def database_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "fact_financial_data_coverage",
         "fact_financial_normalization_issue",
         "dim_security_share_ratio",
+        "dim_specialized_metric",
+        "bridge_specialized_metric_cohort",
+        "bridge_specialized_metric_operand",
+        "bridge_specialized_metric_applicability",
+        "fact_specialized_source_census",
+        "fact_specialized_document",
+        "bridge_specialized_source_document",
+        "fact_specialized_parser_work",
+        "fact_specialized_metric_candidate",
+        "fact_specialized_metric_observation",
     )
     return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in tables}

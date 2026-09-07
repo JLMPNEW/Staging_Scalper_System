@@ -38,6 +38,9 @@ paths:
   security_share_ratios_csv: system_csvs/basic_materials_security_share_ratios.csv
   reporting_profiles_csv: system_csvs/basic_materials_reporting_profiles.csv
   reporting_overrides_csv: system_csvs/basic_materials_reporting_overrides.csv
+  specialized_metric_registry: data/basic_materials_specialized_metric_registry.yaml
+  specialized_source_policy: data/basic_materials_specialized_source_policy.yaml
+  historical_pit_preflight_policy: data/basic_materials_historical_pit_preflight_policy.yaml
 
 sec_fundamentals:
   submissions_url_template: 'https://data.sec.gov/submissions/CIK{cik}.json'

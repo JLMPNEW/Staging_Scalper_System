@@ -49,7 +49,7 @@ def load_source_registry(path: str | Path) -> SourceRegistry:
     if set(root) != {"registry_version", "sources"}:
         raise SourceRegistryError("Source registry must contain only registry_version and sources")
     version = str(root["registry_version"])
-    if version != "basic_materials_source_registry_v4":
+    if version != "basic_materials_source_registry_v5":
         raise SourceRegistryError(f"Unsupported source registry version: {version}")
     raw_sources = root["sources"]
     if not isinstance(raw_sources, list) or not raw_sources:

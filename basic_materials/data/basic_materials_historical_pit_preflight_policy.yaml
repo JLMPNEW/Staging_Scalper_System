@@ -1,0 +1,44 @@
+policy_version: basic_materials_historical_pit_preflight_policy_v1
+contract_as_of_date: '2026-09-06'
+model_family: basic_materials
+sector: Basic Materials
+state: stage4d_read_only_feasibility
+target_history_start_date: '2019-01-01'
+schedule:
+  calendar_code: XNYS_PROXY_SPY
+  cadence: monthly_last_session
+  approximate_sessions_per_period: 21
+  end_date_rule: last_available_calendar_session_on_or_before_contract_asof
+chronological_blocks:
+  - {block_id: block_2019_2020, start_date: '2019-01-01', end_date: '2020-12-31'}
+  - {block_id: block_2021_2022, start_date: '2021-01-01', end_date: '2022-12-31'}
+  - {block_id: block_2023_forward, start_date: '2023-01-01', end_date: '2026-09-06'}
+financial_feasibility:
+  minimum_distinct_canonical_metrics: 12
+  maximum_latest_period_age_days: 550
+  accepted_at_is_earliest_availability: true
+  period_end_must_not_exceed_asof: true
+market_feasibility:
+  require_bar_on_scheduled_session: true
+membership_gate:
+  require_effective_dated_membership_for_every_materialized_row: true
+  prohibit_current_snapshot_backfill: true
+  open_candidate_decisions_must_equal: 0
+  unresolved_terminal_distributions_must_equal: 0
+specialized_gate:
+  applicability_accounting_ratio: 1.0
+  source_terminal_or_cached_ratio: 1.0
+  parser_work_terminal_ratio: 1.0
+  current_core_coverage_ratio: 0.80
+  historical_core_coverage_ratio: 0.70
+  chronological_block_floor: 0.60
+  calibration_min_comparable_issuers: 8
+  calibration_min_dates: 36
+no_write_contract:
+  prohibit_database_mutation: true
+  prohibited_table_prefixes: [feature_, score_, rank_, outcome_]
+  historical_feature_materialization_allowed: false
+required_flags:
+  scoring_eligible: false
+  calibration_eligible: false
+  portfolio_candidate_gate: false
